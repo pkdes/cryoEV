@@ -12,3 +12,5 @@ seaborn
 pandas
 tqdm
 Pillow
+napari
+PyQt5

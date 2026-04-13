@@ -3,9 +3,11 @@ YOLO Instance Segmentation Training Script for Cryo-EM Vesicles
 Fixed version with consistent prediction handling and optimized thresholds.
 """
 
+import csv
 import os
 import yaml
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 from tqdm import tqdm
@@ -482,17 +484,22 @@ def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int =
 
 
 def validate_yolo_model(model_path: str, data_yaml: str, imgsz: int = 1024, batch_size: int = 16,
-                       device: str = '0', split: str = 'val'):
+                       device: str = '0', split: str = 'val', project: str = None,
+                       name: str = 'val'):
     """Validate YOLO model"""
     from ultralytics import YOLO
     
     model = YOLO(model_path)
-    results = model.val(data=data_yaml, split=split, imgsz=imgsz, batch=batch_size,
-                       device=device, verbose=False)
+    val_kwargs = dict(data=data_yaml, split=split, imgsz=imgsz, batch=batch_size,
+                      device=device, verbose=False)
+    if project is not None:
+        val_kwargs['project'] = project
+        val_kwargs['name'] = name
+    results = model.val(**val_kwargs)
     
     if results.seg:
         print(f"✓ Validation Metrics:")
-        print(f"  Box mAP@0.5: {results.seg.map50:.4f}")
+        print(f"  Box mAP@0.5: {results.box.map50:.4f}")
         print(f"  Box mAP@0.5:0.95: {results.box.map:.4f}")
         print(f"  Mask mAP@0.5: {results.seg.map50:.4f}")
         print(f"  Mask mAP@0.5:0.95: {results.seg.map:.4f}")
@@ -555,6 +562,164 @@ def load_gt_masks_from_labels(label_path: str, img_width: int, img_height: int) 
             gt_masks.append(mask)
     
     return gt_masks
+
+
+def load_predictions_with_classes_from_model(model_path: str, img_path: str, imgsz: int,
+                                             conf: float, iou: float, device: str) -> Tuple[List[np.ndarray], List[float], List[int]]:
+    """Load predicted masks, confidences, and class IDs from model output."""
+    from ultralytics import YOLO
+    import cv2
+
+    model = YOLO(model_path)
+    result = model.predict(source=str(img_path), imgsz=imgsz, conf=conf, iou=iou,
+                          device=device, verbose=False, retina_masks=True)[0]
+
+    img = Image.open(img_path)
+    w, h = img.size
+
+    pred_masks = []
+    confidences = []
+    class_ids = []
+
+    if result.masks is not None and result.boxes is not None:
+        for mask, box in zip(result.masks.data, result.boxes):
+            mask_2d = mask.cpu().numpy().squeeze()
+            mask_np = cv2.resize(mask_2d, (w, h), interpolation=cv2.INTER_LINEAR)
+            pred_masks.append(mask_np > 0.5)
+            confidences.append(float(box.conf.cpu().numpy()[0]))
+            class_ids.append(int(box.cls.cpu().numpy()[0]))
+
+    return pred_masks, confidences, class_ids
+
+
+def load_gt_masks_and_classes_from_labels(label_path: str, img_width: int, img_height: int) -> Tuple[List[np.ndarray], List[int]]:
+    """Load ground-truth masks and their class IDs from YOLO polygon labels."""
+    import cv2
+
+    gt_masks = []
+    gt_classes = []
+
+    if not label_path.exists():
+        return gt_masks, gt_classes
+
+    with open(label_path) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            parts = line.strip().split()
+            class_id = int(parts[0])
+            coords = [float(x) for x in parts[1:]]
+            polygon = np.array([(int(coords[i] * img_width), int(coords[i + 1] * img_height))
+                               for i in range(0, len(coords), 2)], dtype=np.int32)
+
+            mask_uint8 = np.zeros((img_height, img_width), dtype=np.uint8)
+            cv2.fillPoly(mask_uint8, [polygon], 1)
+            gt_masks.append(mask_uint8 > 0)
+            gt_classes.append(class_id)
+
+    return gt_masks, gt_classes
+
+
+def calculate_per_class_segmentation_metrics(model_path: str, img_dir: str, label_dir: str,
+                                             imgsz: int, conf: float, iou: float, device: str,
+                                             class_names: List[str], match_threshold: float = 0.5) -> Dict[str, Dict]:
+    """Calculate object-level metrics separately for each class using class-aware matching."""
+    img_paths = sorted(Path(img_dir).glob('*'))
+    img_paths = [p for p in img_paths if p.suffix.lower() in ['.png', '.jpg', '.jpeg', '.tif', '.tiff']]
+
+    class_stats = {
+        idx: {
+            'class_name': class_name,
+            'tp': 0,
+            'fp': 0,
+            'fn': 0,
+            'n_gt': 0,
+            'n_pred': 0,
+            'matched_iou_sum': 0.0,
+        }
+        for idx, class_name in enumerate(class_names)
+    }
+
+    for img_path in tqdm(img_paths, desc="Computing per-class metrics"):
+        img = Image.open(img_path)
+        w, h = img.size
+
+        pred_masks, _, pred_classes = load_predictions_with_classes_from_model(
+            model_path, str(img_path), imgsz, conf, iou, device
+        )
+
+        label_path = Path(label_dir) / f"{img_path.stem}.txt"
+        gt_masks, gt_classes = load_gt_masks_and_classes_from_labels(label_path, w, h)
+
+        for class_id in class_stats:
+            pred_masks_cls = [m for m, c in zip(pred_masks, pred_classes) if c == class_id]
+            gt_masks_cls = [m for m, c in zip(gt_masks, gt_classes) if c == class_id]
+
+            matches, unmatched_preds, unmatched_gts = match_objects_hungarian(
+                pred_masks_cls, gt_masks_cls, iou_threshold=match_threshold
+            )
+
+            stats = class_stats[class_id]
+            stats['tp'] += len(matches)
+            stats['fp'] += len(unmatched_preds)
+            stats['fn'] += len(unmatched_gts)
+            stats['n_pred'] += len(pred_masks_cls)
+            stats['n_gt'] += len(gt_masks_cls)
+
+            for pred_idx, gt_idx in matches:
+                pred_mask = pred_masks_cls[pred_idx]
+                gt_mask = gt_masks_cls[gt_idx]
+                intersection = (pred_mask & gt_mask).sum()
+                union = (pred_mask | gt_mask).sum()
+                if union > 0:
+                    stats['matched_iou_sum'] += intersection / union
+
+    results = {}
+    for class_id, stats in class_stats.items():
+        tp, fp, fn = stats['tp'], stats['fp'], stats['fn']
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        avg_iou = stats['matched_iou_sum'] / tp if tp > 0 else 0.0
+        results[stats['class_name']] = {
+            'class_id': class_id,
+            'tp': tp,
+            'fp': fp,
+            'fn': fn,
+            'n_gt': stats['n_gt'],
+            'n_pred': stats['n_pred'],
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'avg_iou_matched': avg_iou,
+        }
+
+    return results
+
+
+def save_per_class_metrics(per_class_metrics: Dict[str, Dict], output_path: Path, split_name: str) -> None:
+    """Save per-class metrics to a readable text file and CSV companion."""
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write("=" * 60 + "\n")
+        f.write(f"PER-CLASS SEGMENTATION METRICS - {split_name.upper()}\n")
+        f.write("=" * 60 + "\n\n")
+        for class_name, metrics in per_class_metrics.items():
+            f.write(f"Class: {class_name} (id={metrics['class_id']})\n")
+            f.write(f"  GT Objects:     {metrics['n_gt']}\n")
+            f.write(f"  Pred Objects:   {metrics['n_pred']}\n")
+            f.write(f"  TP / FP / FN:   {metrics['tp']} / {metrics['fp']} / {metrics['fn']}\n")
+            f.write(f"  Precision:      {metrics['precision']:.4f}\n")
+            f.write(f"  Recall:         {metrics['recall']:.4f}\n")
+            f.write(f"  F1 Score:       {metrics['f1']:.4f}\n")
+            f.write(f"  IoU (matched):  {metrics['avg_iou_matched']:.4f}\n\n")
+
+    csv_path = output_path.with_suffix('.csv')
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+        fieldnames = ['class_name', 'class_id', 'n_gt', 'n_pred', 'tp', 'fp', 'fn', 'precision', 'recall', 'f1', 'avg_iou_matched']
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for class_name, metrics in per_class_metrics.items():
+            writer.writerow({'class_name': class_name, **metrics})
 
 
 def match_objects_hungarian(pred_masks: List[np.ndarray], gt_masks: List[np.ndarray], 
@@ -949,6 +1114,99 @@ def print_metrics_summary(metrics: Dict, split_name: str, params: Dict):
     print(f"{'='*60}\n")
 
 
+def save_run_manifest(output_path: Path, config: Dict, dataset_yaml: Path,
+                      split_stats: Dict[str, Dict[str, int]], best_model_path: str = None,
+                      validation_summary: Dict = None):
+    """Save a compact manifest tying a training run to dataset sources and settings."""
+    manifest = {
+        'created_at': datetime.now().isoformat(timespec='seconds'),
+        'experiment_name': config['experiment_name'],
+        'dataset_id': config.get('dataset_id', 'unspecified_dataset'),
+        'run_notes': config.get('run_notes', ''),
+        'class_names': config['class_names'],
+        'source_data': {
+            'train_dir': config['train_dir'],
+            'val_dir': config['val_dir'],
+            'test_dir': config['test_dir'],
+            'prepared_dataset_yaml': str(dataset_yaml),
+        },
+        'training_params': {
+            'model_size': config['model_size'],
+            'use_yolov11': config['USE_YOLOV11'],
+            'epochs': config['epochs'],
+            'imgsz': config['imgsz'],
+            'batch_size': config['batch_size'],
+            'patience': config['patience'],
+            'device': config['device'],
+            'conf_threshold': config['conf_threshold'],
+            'iou_threshold': config['iou_threshold'],
+            'match_threshold': config['match_threshold'],
+        },
+        'split_stats': split_stats,
+        'best_model_path': best_model_path,
+        'validation_summary': validation_summary or {},
+    }
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        yaml.safe_dump(manifest, f, sort_keys=False)
+
+
+def append_run_summary_logs(output_root: Path, config: Dict,
+                            split_stats: Dict[str, Dict[str, int]],
+                            best_model_path: str = None,
+                            validation_summary: Dict = None):
+    """Append a one-line summary for this run to CSV and Markdown logs."""
+    validation_summary = validation_summary or {}
+    model_tag = f"y11{config['model_size']}-seg" if config['USE_YOLOV11'] else f"y8{config['model_size']}-seg"
+    timestamp = datetime.now().isoformat(timespec='seconds')
+
+    row = {
+        'timestamp': timestamp,
+        'experiment_name': config['experiment_name'],
+        'dataset_id': config.get('dataset_id', ''),
+        'model': model_tag,
+        'classes': '|'.join(config['class_names']),
+        'epochs': config['epochs'],
+        'imgsz': config['imgsz'],
+        'batch_size': config['batch_size'],
+        'patience': config['patience'],
+        'train_images': split_stats.get('train', {}).get('n_images', ''),
+        'train_instances': split_stats.get('train', {}).get('n_instances', ''),
+        'val_images': split_stats.get('val', {}).get('n_images', ''),
+        'val_instances': split_stats.get('val', {}).get('n_instances', ''),
+        'test_images': split_stats.get('test', {}).get('n_images', ''),
+        'test_instances': split_stats.get('test', {}).get('n_instances', ''),
+        'box_map50': f"{validation_summary['box_map50']:.4f}" if 'box_map50' in validation_summary else '',
+        'box_map50_95': f"{validation_summary['box_map50_95']:.4f}" if 'box_map50_95' in validation_summary else '',
+        'mask_map50': f"{validation_summary['mask_map50']:.4f}" if 'mask_map50' in validation_summary else '',
+        'mask_map50_95': f"{validation_summary['mask_map50_95']:.4f}" if 'mask_map50_95' in validation_summary else '',
+        'best_model_path': best_model_path or '',
+        'run_notes': config.get('run_notes', ''),
+    }
+
+    csv_path = output_root / 'EXPERIMENT_LOG.csv'
+    fieldnames = list(row.keys())
+    file_exists = csv_path.exists()
+    with open(csv_path, 'a', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+    md_path = output_root / 'EXPERIMENT_LOG.md'
+    if not md_path.exists():
+        with open(md_path, 'w', encoding='utf-8') as f:
+            f.write('# Experiment Log\n\n')
+            f.write('| timestamp | experiment | dataset | model | epochs | imgsz | box mAP50 | mask mAP50 | notes |\n')
+            f.write('|---|---|---|---|---:|---:|---:|---:|---|\n')
+    with open(md_path, 'a', encoding='utf-8') as f:
+        f.write(
+            f"| {row['timestamp']} | {row['experiment_name']} | {row['dataset_id']} | {row['model']} | "
+            f"{row['epochs']} | {row['imgsz']} | {row['box_map50'] or '-'} | {row['mask_map50'] or '-'} | {row['run_notes']} |\n"
+        )
+
+
 def main():
     """
     Main training and evaluation pipeline.
@@ -965,19 +1223,22 @@ def main():
     # CONFIGURATION
     # =====================================================================
     CONFIG = {
-        # Data paths - MODIFY THESE for your data
-        'train_dir': r'C:\Users\Yifei\Documents\cryo\revised_annotation\split_cleaned\train',
-        'val_dir': r'C:\Users\Yifei\Documents\cryo\revised_annotation\split_cleaned\val',
-        'test_dir': r'C:\Users\Yifei\Documents\cryo\revised_annotation\split_cleaned\test',  # Optional
-        'output_root': r'C:\Users\Yifei\Documents\cryo\revised_annotation\yolo_results',
+        # Data paths - collapsed 2-class dataset (under experiments/)
+        'train_dir': r'C:\Users\ML-2619\Desktop\Pujan Cryo\cryo-ev pipeline\data\experiments\CryoAI.v4i.yolov8\collapsed_2class\train',
+        'val_dir':   r'C:\Users\ML-2619\Desktop\Pujan Cryo\cryo-ev pipeline\data\experiments\CryoAI.v4i.yolov8\collapsed_2class\valid',
+        'test_dir':  r'C:\Users\ML-2619\Desktop\Pujan Cryo\cryo-ev pipeline\data\experiments\CryoAI.v4i.yolov8\collapsed_2class\test',
+        'output_root': r'C:\Users\ML-2619\Desktop\Pujan Cryo\cryo-ev pipeline\data\experiments\CryoAI.v4i.yolov8\collapsed_2class',
+        'dataset_id': 'CryoAI.v4i.yolov8_collapsed_2class',
+        'run_notes': 'YOLO11n-seg 300-epoch 1024px run on collapsed 2-class EV dataset with Multilayer included (conf=0.35, iou=0.5, match=0.30)',
+        'run_label': 'multilayer_ep300_cfg035_05_03',
         
         # Model configuration
-        'class_names': ['vesicle'],
+        'class_names': ['Spherical', 'Multilayer'],
         'model_size': 'n',  # Options: 'n', 's', 'm', 'l', 'x'
-        'experiment_name': 'vesicle_instance_seg_v3',
+        'experiment_name': None,  # Auto-generated below as YYYY-MM-DD_HHMMSS_y11n_2class_1024_ep300_...
         'USE_YOLOV11': True,  # Set True for YOLOv11, False for YOLOv8
         
-        # Training parameters
+        # Training parameters (requested long run)
         'epochs': 300,
         'imgsz': 1024,
         'batch_size': 16,
@@ -985,20 +1246,32 @@ def main():
         'device': '0',
         
         # Inference parameters
-        'conf_threshold': 0.25,   # Confidence threshold for predictions
-        'iou_threshold': 0.7,     # NMS IoU threshold
-        'match_threshold': 0.5,   # Evaluation matching threshold
+        'conf_threshold': 0.35,   # Confidence threshold for predictions
+        'iou_threshold': 0.5,     # NMS IoU threshold
+        'match_threshold': 0.30,  # Evaluation matching threshold
         
         # Workflow control
-        'DO_TRAINING': True,           # Set True to train a new model
-        'DO_THRESHOLD_OPTIMIZATION': False,  # Set True to optimize thresholds on val set
-        'DO_INFERENCE': True,           # Set True to run inference
-        'VISUALIZE_AUGMENTATION': False,  # Set True to visualize augmented training samples
-        'INFERENCE_SPLITS': ['train', 'val', 'test'],  # Which splits to run inference on
+        'DO_TRAINING': True,            # Train a new model
+        'DO_THRESHOLD_OPTIMIZATION': False,
+        'DO_INFERENCE': True,           # Then evaluate on val/test
+        'VISUALIZE_AUGMENTATION': False,
+        'INFERENCE_SPLITS': ['val', 'test'],    # Used only if DO_INFERENCE=True
         
-        # If not training, specify path to existing model
-        'pretrained_model_path': r'yolo_results\vesicle_instance_seg_v3\weights\best.pt',
+        # If not training, specify path to existing model (leave None to auto-fill)
+        'pretrained_model_path': None,
     }
+
+    if not CONFIG.get('experiment_name'):
+        timestamp_tag = datetime.now().strftime('%Y-%m-%d_%H%M%S')
+        model_tag = f"y11{CONFIG['model_size']}" if CONFIG['USE_YOLOV11'] else f"y8{CONFIG['model_size']}"
+        class_tag = f"{len(CONFIG['class_names'])}class"
+        label_tag = f"_{CONFIG['run_label']}" if CONFIG.get('run_label') else ''
+        CONFIG['experiment_name'] = f"{timestamp_tag}_{model_tag}_{class_tag}_{CONFIG['imgsz']}_ep{CONFIG['epochs']}{label_tag}"
+
+    if not CONFIG.get('pretrained_model_path'):
+        CONFIG['pretrained_model_path'] = str(
+            Path(CONFIG['output_root']) / 'runs' / CONFIG['experiment_name'] / 'weights' / 'best.pt'
+        )
     
     print("\n" + "="*80)
     print(" "*20 + "YOLO INSTANCE SEGMENTATION PIPELINE")
@@ -1010,12 +1283,11 @@ def main():
     # =====================================================================
     output_root = Path(CONFIG['output_root'])
     yolo_dataset_root = output_root / 'dataset'
-    training_output = output_root / 'training' / CONFIG['experiment_name']
-    inference_output = output_root / 'inference'
+    runs_root = output_root / 'runs'
     
     # Create directories
     yolo_dataset_root.mkdir(parents=True, exist_ok=True)
-    inference_output.mkdir(parents=True, exist_ok=True)
+    runs_root.mkdir(parents=True, exist_ok=True)
     
     # =====================================================================
     # STEP 1: PREPARE DATASETS
@@ -1045,6 +1317,12 @@ def main():
     # Create YOLO config file
     yaml_path = yolo_dataset_root / 'dataset.yaml'
     create_yolo_yaml(str(yolo_dataset_root), str(yaml_path), CONFIG['class_names'])
+
+    split_stats = {
+        'train': train_stats,
+        'val': val_stats,
+        'test': test_stats if 'test_stats' in locals() else {},
+    }
     
     # =====================================================================
     # OPTIONAL: VISUALIZE AUGMENTATIONS
@@ -1070,6 +1348,20 @@ def main():
         print("\n" + "="*80)
         print("STEP 2: MODEL TRAINING")
         print("="*80 + "\n")
+
+        # Publish the intended run path immediately so the live monitor can
+        # follow the current run instead of the previously completed one.
+        experiment_log_root = output_root.parent.parent
+        expected_training_output = runs_root / CONFIG['experiment_name']
+        (experiment_log_root / 'LATEST_RUN.txt').write_text(
+            f"experiment_name: {CONFIG['experiment_name']}\n"
+            f"training_dir: {expected_training_output}\n"
+            f"best_model_path: {expected_training_output / 'weights' / 'best.pt'}\n"
+            f"dataset_yaml: {yaml_path}\n"
+            f"experiment_log_csv: {experiment_log_root / 'EXPERIMENT_LOG.csv'}\n"
+            f"experiment_log_md: {experiment_log_root / 'EXPERIMENT_LOG.md'}\n",
+            encoding='utf-8'
+        )
         
         results = train_yolo_segmentation(
             data_yaml=str(yaml_path),
@@ -1078,13 +1370,15 @@ def main():
             imgsz=CONFIG['imgsz'],
             batch_size=CONFIG['batch_size'],
             device=CONFIG['device'],
-            project=str(output_root / 'training'),
+            project=str(runs_root),
             name=CONFIG['experiment_name'],
             patience=CONFIG['patience'],
             use_v11=CONFIG['USE_YOLOV11'],
         )
         
-        # Model is saved in training_output / 'weights' / 'best.pt'
+        # Use the actual Ultralytics save directory in case the run name is adjusted.
+        training_output = Path(results.save_dir)
+        CONFIG['experiment_name'] = training_output.name
         best_model_path = training_output / 'weights' / 'best.pt'
         print(f"\n✓ Training complete!")
         print(f"✓ Best model saved to: {best_model_path}")
@@ -1093,12 +1387,45 @@ def main():
         print("\n" + "="*80)
         print("VALIDATION ON VAL SET")
         print("="*80 + "\n")
-        validate_yolo_model(
+        val_results = validate_yolo_model(
             str(best_model_path), 
             str(yaml_path), 
             imgsz=CONFIG['imgsz'],
             batch_size=CONFIG['batch_size'], 
-            device=CONFIG['device']
+            device=CONFIG['device'],
+            project=str(training_output),
+            name='validation'
+        )
+        validation_summary = {
+            'box_map50': float(val_results.box.map50),
+            'box_map50_95': float(val_results.box.map),
+            'mask_map50': float(val_results.seg.map50),
+            'mask_map50_95': float(val_results.seg.map),
+        }
+        save_run_manifest(
+            training_output / 'run_manifest.yaml',
+            CONFIG,
+            yaml_path,
+            split_stats,
+            best_model_path=str(best_model_path),
+            validation_summary=validation_summary,
+        )
+        experiment_log_root = output_root.parent.parent
+        append_run_summary_logs(
+            experiment_log_root,
+            CONFIG,
+            split_stats,
+            best_model_path=str(best_model_path),
+            validation_summary=validation_summary,
+        )
+        (experiment_log_root / 'LATEST_RUN.txt').write_text(
+            f"experiment_name: {CONFIG['experiment_name']}\n"
+            f"training_dir: {training_output}\n"
+            f"best_model_path: {best_model_path}\n"
+            f"dataset_yaml: {yaml_path}\n"
+            f"experiment_log_csv: {experiment_log_root / 'EXPERIMENT_LOG.csv'}\n"
+            f"experiment_log_md: {experiment_log_root / 'EXPERIMENT_LOG.md'}\n",
+            encoding='utf-8'
         )
     else:
         print("\n" + "="*80)
@@ -1113,6 +1440,8 @@ def main():
             print(f"   Or update 'pretrained_model_path' in CONFIG")
             return
         
+        training_output = best_model_path.parent.parent  # runs/<exp>/weights/best.pt → runs/<exp>/
+        CONFIG['experiment_name'] = training_output.name
         print(f"✓ Loaded model: {best_model_path}")
     
     # =====================================================================
@@ -1142,7 +1471,7 @@ def main():
         print(f"✓ Updated CONFIG with optimized thresholds")
         
         # Save optimization results
-        opt_results_file = inference_output / 'threshold_optimization_results.txt'
+        opt_results_file = training_output / 'threshold_optimization_results.txt'
         with open(opt_results_file, 'w') as f:
             f.write("Threshold Optimization Results\n")
             f.write("="*60 + "\n\n")
@@ -1159,12 +1488,11 @@ def main():
     # =====================================================================
     # STEP 4: RUN INFERENCE ON ALL SPLITS
     # =====================================================================
+    all_metrics = {}
     if CONFIG['DO_INFERENCE']:
         print("\n" + "="*80)
         print("STEP 4: INFERENCE ON ALL SPLITS")
         print("="*80 + "\n")
-        
-        all_metrics = {}
         
         for split in CONFIG['INFERENCE_SPLITS']:
             print(f"\n{'='*80}")
@@ -1173,7 +1501,7 @@ def main():
             
             split_images_dir = yolo_dataset_root / 'images' / split
             split_labels_dir = yolo_dataset_root / 'labels' / split
-            split_output_dir = inference_output / split
+            split_output_dir = training_output / 'inference' / split
             split_output_dir.mkdir(parents=True, exist_ok=True)
             
             if not split_images_dir.exists():
@@ -1212,6 +1540,30 @@ def main():
             # Save metrics to file
             metrics_file = split_output_dir / f'metrics_{split}.txt'
             save_metrics_to_file(metrics, metrics_file, split, CONFIG)
+
+            # Calculate and save per-class metrics when class labels are available
+            per_class_metrics = calculate_per_class_segmentation_metrics(
+                model_path=str(best_model_path),
+                img_dir=str(split_images_dir),
+                label_dir=str(split_labels_dir),
+                imgsz=CONFIG['imgsz'],
+                conf=CONFIG['conf_threshold'],
+                iou=CONFIG['iou_threshold'],
+                device=CONFIG['device'],
+                class_names=CONFIG['class_names'],
+                match_threshold=CONFIG['match_threshold']
+            )
+            save_per_class_metrics(per_class_metrics, split_output_dir / f'metrics_per_class_{split}.txt', split)
+
+            if len(CONFIG['class_names']) > 1:
+                print(f"Per-class results for {split}:")
+                for class_name, class_metrics in per_class_metrics.items():
+                    print(
+                        f"  {class_name:<12} TP={class_metrics['tp']:<4} FP={class_metrics['fp']:<4} "
+                        f"FN={class_metrics['fn']:<4} P={class_metrics['precision']:.4f} "
+                        f"R={class_metrics['recall']:.4f} F1={class_metrics['f1']:.4f}"
+                    )
+                print("")
             
             # Print summary
             print_metrics_summary(metrics, split, CONFIG)
@@ -1253,19 +1605,20 @@ def main():
     print(f"│   │   ├── val/")
     print(f"│   │   └── test/")
     print(f"│   └── dataset.yaml")
-    if CONFIG['DO_TRAINING']:
-        print(f"├── training/")
-        print(f"│   └── {CONFIG['experiment_name']}/")
-        print(f"│       ├── weights/")
-        print(f"│       │   ├── best.pt")
-        print(f"│       │   └── last.pt")
-        print(f"│       └── [training plots & logs]")
-    print(f"└── inference/")
-    for split in CONFIG['INFERENCE_SPLITS']:
-        if split in all_metrics:
-            print(f"    ├── {split}/")
-            print(f"    │   ├── visualizations/")
-            print(f"    │   └── metrics_{split}.txt")
+    print(f"└── runs/")
+    print(f"    └── {CONFIG['experiment_name']}/")
+    print(f"        ├── weights/  (best.pt, last.pt)")
+    print(f"        ├── results.csv")
+    print(f"        ├── run_manifest.yaml")
+    if CONFIG['DO_INFERENCE'] and all_metrics:
+        print(f"        └── inference/")
+        for split in CONFIG['INFERENCE_SPLITS']:
+            if split in all_metrics:
+                print(f"            ├── {split}/")
+                print(f"            │   ├── visualizations/")
+                print(f"            │   └── metrics_{split}.txt")
+    else:
+        print(f"        └── inference/  [set DO_INFERENCE=True to generate]")
     print(f"{'='*80}\n")
     
     print(f"✓ All results saved to: {output_root}")

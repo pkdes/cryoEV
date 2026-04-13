@@ -155,3 +155,59 @@ masks, confidences, decisions, morphology, exited = predict_with_review(
 | `analyze_instances()` | `analysis.morphology` | Compute morphology descriptors for a list of masks |
 | `fit_ellipse()` | `analysis.morphology` | Fit an ellipse to a single instance mask |
 | `plot_morphology_distributions()` | `analysis.morphology` | Plot histograms of size/shape metrics |
+
+## Human-In-The-Loop Polygon Annotation
+
+Use model predictions as first-pass labels, then edit polygons manually in a rich UI.
+
+### Launch annotator
+
+```bash
+python -m annotation.hitl_annotator \
+    --input-images "path/to/new_images" \
+    --output-dir "path/to/hitl_output" \
+    --model-path "C:/Users/ML-2619/Desktop/Pujan Cryo/cryo-ev pipeline/Model Training by Yifei/round_2/results_yolov8_heavy_augmentation/training/vesicle_instance_seg_v2/weights/best.pt" \
+    --device cuda \
+    --save-auto-labels
+```
+
+Or open folder/file pickers for the paths:
+
+```bash
+python -m annotation.hitl_annotator --gui --device cuda --save-auto-labels
+```
+
+### Editor controls
+
+By default, the annotator now opens a **simple side-by-side reviewer**:
+
+- **Left panel**: image with polygon overlay
+- **Right panel**: raw image only
+- zoom and pan stay **synchronized** across both panels
+- click a polygon to select it
+- use buttons for **Add**, **Replace**, **Delete**, **Save & Next**, **Skip**, and **Quit**
+
+Keyboard shortcuts still work:
+- `S` = save corrected labels and continue
+- `K` = skip current image
+- `Q` = quit the session
+
+If wanted, the older Napari editor can still be launched explicitly with:
+
+```bash
+python -m annotation.hitl_annotator --ui napari --gui --device cuda --save-auto-labels
+```
+
+### Outputs
+
+- Reviewed dataset for future training:
+    - `reviewed/images/*.png|jpg|tif`
+    - `reviewed/labels/*.txt` (YOLO polygon format)
+- Optional first-pass model labels:
+    - `auto/labels/*.txt`
+- Session + quality metrics:
+    - `stats/annotation_session.csv`
+    - `stats/model_vs_review_metrics.csv`
+    - `stats/morphology_reviewed_all.csv`
+
+`model_vs_review_metrics.csv` reports object-level precision/recall/F1, matched IoU, and count error using IoU-based Hungarian matching between model predictions and reviewed labels.

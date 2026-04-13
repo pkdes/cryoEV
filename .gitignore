@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# YOLO / Ultralytics training outputs
+runs/
+yolo_results/
+
+# Model weights (large binary files – download separately)
+*.pt
+*.pth
+
+# Data and experiment outputs (stored outside repo)
+data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
