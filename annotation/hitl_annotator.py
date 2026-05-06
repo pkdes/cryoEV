@@ -1,8 +1,12 @@
 import argparse
 import csv
+import hashlib
 import importlib
+import tempfile
+import time
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import cv2
 import matplotlib.pyplot as plt
@@ -25,6 +29,7 @@ from annotation.io import (
     write_yolo_box_labels,
     write_yolo_polygon_labels,
 )
+from inference.perf_log import PerformanceLogger
 from training.train_yolo import load_predictions_from_model
 
 
@@ -88,23 +93,27 @@ def _pick_paths_with_dialogs(
     return Path(selected_input), Path(selected_output), selected_model
 
 
-def _resolve_runtime_paths(args: argparse.Namespace) -> tuple[Path, Path, Path]:
-    input_images = args.input_images
-    output_dir = args.output_dir or _default_output_dir_for(args.input_images)
+def _resolve_runtime_paths(args: argparse.Namespace) -> tuple[List[Path], Path, Path]:
+    # args.input_images is now a list[Path] or None
+    input_images: List[Path] | None = args.input_images
+    first = input_images[0] if input_images else None
+    output_dir = args.output_dir or _default_output_dir_for(first)
     model_path_raw = args.model_path
 
-    if args.gui or input_images is None or args.output_dir is None:
-        input_images, output_dir, model_path_raw = _pick_paths_with_dialogs(
-            input_images=input_images,
+    if args.gui or not input_images or args.output_dir is None:
+        single, output_dir, model_path_raw = _pick_paths_with_dialogs(
+            input_images=first,
             output_dir=args.output_dir,
             model_path=model_path_raw,
         )
+        if not input_images:
+            input_images = [single]
 
-    if input_images is None:
+    if not input_images:
         raise SystemExit("Provide --input-images or use --gui.")
 
     model_path = _resolve_model_path(model_path_raw)
-    return Path(input_images), Path(output_dir), model_path
+    return [Path(p) for p in input_images], Path(output_dir), model_path
 
 
 def _resolve_model_path(model_path: str) -> Path:
@@ -125,6 +134,17 @@ def _collect_images(input_path: Path) -> List[Path]:
         p for p in input_path.rglob("*")
         if p.is_file() and p.suffix.lower() in exts
     )
+
+
+def _collect_images_multi(input_paths: List[Path]) -> List[Path]:
+    seen: set = set()
+    result: List[Path] = []
+    for p in input_paths:
+        for img in _collect_images(p):
+            if img not in seen:
+                seen.add(img)
+                result.append(img)
+    return result
 
 
 def _draw_polygons(image: np.ndarray, polygons: Iterable[np.ndarray], color: Tuple[int, int, int], thickness: int = 2) -> np.ndarray:
@@ -164,6 +184,86 @@ def _clean_polygon(polygon: np.ndarray) -> np.ndarray | None:
         return None
 
     return poly
+
+
+# ---------------------------------------------------------------------------
+# Image resolution helpers
+# ---------------------------------------------------------------------------
+
+# Images wider/taller than this multiple of imgsz trigger the resize prompt.
+_RESCALE_THRESHOLD = 1.5
+
+
+def _prompt_rescale(image_path: Path, orig_w: int, orig_h: int, target: int) -> bool:
+    """Ask the user whether to downscale a high-resolution image before inference.
+
+    Returns True if the user agrees to rescale, False to keep the original.
+    """
+    msg = (
+        f"High-resolution image detected:\n"
+        f"  {image_path.name}  ({orig_w} × {orig_h} px)\n\n"
+        f"The model was trained on ~{target} px images.  Running inference on the\n"
+        f"full-resolution image may produce poor detections because the vesicles\n"
+        f"appear larger in pixel units than the model expects.\n\n"
+        f"Downscale to {target} px before inference?\n"
+        f"(Annotations and saved images will also use the downscaled size.)"
+    )
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        answer = messagebox.askyesno("Resolution mismatch", msg, default="yes")
+        root.destroy()
+        return bool(answer)
+    except Exception:
+        # Fallback to terminal prompt if Tkinter is unavailable.
+        print(f"\n[WARNING] {msg}")
+        resp = input("Downscale? [Y/n]: ").strip().lower()
+        return resp in ("", "y", "yes")
+
+
+def _rescale_image_for_inference(
+    image: np.ndarray,
+    image_path: Path,
+    imgsz: int,
+    _rescale_cache: dict,
+) -> tuple[np.ndarray, Path, float]:
+    """Return (image, path_for_inference, scale_factor).
+
+    If the image exceeds _RESCALE_THRESHOLD * imgsz on either axis, the user is
+    prompted once per unique image path.  On agreement the image is downscaled
+    and written to a temp file; scale_factor < 1 means coordinates output by
+    inference must be multiplied by 1/scale_factor to map back to original size.
+    On refusal scale_factor == 1.0 and the original image + path are returned.
+    _rescale_cache maps (str(image_path), imgsz) -> bool so the dialog only
+    appears once per path across repeated calls.
+    """
+    h, w = image.shape[:2]
+    max_dim = max(h, w)
+    threshold = int(_RESCALE_THRESHOLD * imgsz)
+    if max_dim <= threshold:
+        return image, image_path, 1.0
+
+    cache_key = (str(image_path), imgsz)
+    if cache_key not in _rescale_cache:
+        _rescale_cache[cache_key] = _prompt_rescale(image_path, w, h, imgsz)
+    if not _rescale_cache[cache_key]:
+        return image, image_path, 1.0
+
+    scale = imgsz / max_dim
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+    suffix = image_path.suffix or ".png"
+    tmp_fd, tmp_name = tempfile.mkstemp(suffix=suffix, prefix="cryo_rescale_")
+    import os
+    os.close(tmp_fd)
+    cv2.imwrite(tmp_name, resized)
+    print(f"  [rescale] {w}×{h} → {new_w}×{new_h} (scale={scale:.3f}). Temp file: {tmp_name}")
+    return resized, Path(tmp_name), scale
 
 
 def _polygon_to_box(polygon: np.ndarray) -> np.ndarray:
@@ -272,6 +372,15 @@ class SimplePolygonEditor:
         self.dragging_vertex: tuple[int, int] | None = None
         self.pan_start: tuple | None = None  # (x_disp, y_disp, xlim, ylim)
 
+        # --- Custom polygon drawing state (replaces PolygonSelector) ---
+        self._poly_drawing: bool = False
+        self._poly_pts: List[tuple] = []
+        self._poly_is_freehand: bool = False
+        self._poly_drag_active: bool = False
+        self._poly_drag_start: Tuple[float, float] = (0.0, 0.0)
+        self._poly_last_pt: Tuple[float, float] = (0.0, 0.0)
+        self._poly_preview_artists: List[object] = []
+
         self.fig = None
         self.ax_overlay = None
         self.ax_raw = None
@@ -370,8 +479,9 @@ class SimplePolygonEditor:
         edit_add_label = "Add Polygon" if self.review_mode == "polygon" else "Add Box"
         edit_adjust_label = "Redraw Polygon" if self.review_mode == "polygon" else "Adjust Box"
         button_defs = [
-            ("Prev Region", self._prev_region),
-            ("Next Region", self._next_region),
+            ("\u25c4 Prev", self._prev_region),
+            ("Next \u25ba", self._next_region),
+            ("Full View [f]", self._full_image_view),
             (edit_add_label, self._start_add),
             (edit_adjust_label, self._start_replace),
             ("Keep", self._keep_selected),
@@ -382,8 +492,9 @@ class SimplePolygonEditor:
             ("Quit", self._quit),
         ]
         x = 0.02
-        width = 0.086
-        gap = 0.008
+        n_btns = len(button_defs)
+        gap = 0.006
+        width = (0.978 - x - gap * (n_btns - 1)) / n_btns
         for label, callback in button_defs:
             ax_btn = self.fig.add_axes([x, 0.08, width, 0.06])
             btn = Button(ax_btn, label)
@@ -395,9 +506,17 @@ class SimplePolygonEditor:
         if self.status_text is not None:
             self.status_text.set_text(message)
         if self.region_text is not None and self.region_bounds:
-            self.region_text.set_text(
-                f"Region {self.region_index + 1}/{len(self.region_bounds)} ({self.region_cols}x{self.region_rows})"
-            )
+            n = len(self.region_bounds)
+            if n >= 3 and self.region_index == 0:
+                label = "Overview (start)"
+            elif n >= 3 and self.region_index == n - 1:
+                label = "Overview (end)"
+            else:
+                # sub-region number within the non-overview entries
+                sub = self.region_index if n < 3 else self.region_index
+                n_sub = n if n < 3 else n - 2
+                label = f"Region {sub}/{n_sub}  ({self.region_cols}\u00d7{self.region_rows})"
+            self.region_text.set_text(label)
         if self.fig is not None:
             self.fig.canvas.draw_idle()
 
@@ -587,6 +706,25 @@ class SimplePolygonEditor:
         self.fig.canvas.draw_idle()
 
     def _on_press(self, event) -> None:
+        # --- Custom polygon drawing (add / replace mode) ---------------
+        if (
+            self.mode in ("add", "replace")
+            and self.review_mode == "polygon"
+            and event.inaxes == self.ax_overlay
+            and event.button == 1
+            and event.xdata is not None
+            and event.ydata is not None
+        ):
+            if event.dblclick and not self._poly_is_freehand:
+                # Double-click finalises the click-by-click polygon
+                self._finish_custom_polygon()
+            else:
+                # Record press start; vertex/freehand decided on motion/release
+                self._poly_drag_active = True
+                self._poly_drag_start = (float(event.xdata), float(event.ydata))
+                self._poly_last_pt = (float(event.xdata), float(event.ydata))
+            return
+
         if event.inaxes == self.ax_list and event.button == 1 and event.ydata is not None:
             row_idx = int(round(event.ydata)) - 1
             if 0 <= row_idx < len(self.objects):
@@ -622,6 +760,37 @@ class SimplePolygonEditor:
         self._select_object(idx, center=False)
 
     def _on_motion(self, event) -> None:
+        # --- Freehand polygon drag detection ---------------------------
+        if self._poly_drag_active and self.mode in ("add", "replace") and self.review_mode == "polygon":
+            if event.inaxes == self.ax_overlay and event.xdata is not None and event.ydata is not None:
+                x, y = float(event.xdata), float(event.ydata)
+                if not self._poly_is_freehand:
+                    # Measure drag distance in screen pixels
+                    ax = self.ax_overlay
+                    x0, x1 = ax.get_xlim()
+                    y0, y1 = ax.get_ylim()
+                    fig_w_px, fig_h_px = self.fig.get_size_inches() * self.fig.dpi
+                    ax_bbox = ax.get_position()
+                    scale_x = (ax_bbox.width * fig_w_px) / max(abs(x1 - x0), 1)
+                    scale_y = (ax_bbox.height * fig_h_px) / max(abs(y1 - y0), 1)
+                    sx, sy = self._poly_drag_start
+                    dist_px = ((x - sx) * scale_x) ** 2 + ((y - sy) * scale_y) ** 2
+                    if dist_px > 64:  # > 8-pixel threshold
+                        self._poly_is_freehand = True
+                        if not self._poly_drawing:
+                            self._poly_drawing = True
+                            self._poly_pts = [self._poly_drag_start]
+                        self._set_status(
+                            "Freehand mode: hold and drag to draw polygon outline. Release to finish.  ESC to cancel."
+                        )
+                if self._poly_is_freehand:
+                    lx, ly = self._poly_last_pt
+                    if (x - lx) ** 2 + (y - ly) ** 2 > 4:
+                        self._poly_pts.append((x, y))
+                        self._poly_last_pt = (x, y)
+                        self._update_poly_preview()
+            return
+
         # Middle-mouse pan
         if self.pan_start is not None:
             px, py, (x0, x1), (y0, y1) = self.pan_start
@@ -657,6 +826,29 @@ class SimplePolygonEditor:
             self._refresh_overlay()
 
     def _on_release(self, event) -> None:
+        # --- Polygon drawing release -----------------------------------
+        if self._poly_drag_active and event.button == 1:
+            self._poly_drag_active = False
+            if self._poly_is_freehand:
+                # Freehand complete: close and save
+                if event.xdata is not None and event.ydata is not None and event.inaxes == self.ax_overlay:
+                    self._poly_pts.append((float(event.xdata), float(event.ydata)))
+                self._finish_custom_polygon()
+            else:
+                # Plain click: add one vertex, wait for double-click to finish
+                if event.xdata is not None and event.ydata is not None and event.inaxes == self.ax_overlay:
+                    x, y = float(event.xdata), float(event.ydata)
+                    if not self._poly_drawing:
+                        self._poly_drawing = True
+                        self._poly_pts = []
+                    self._poly_pts.append((x, y))
+                    self._update_poly_preview()
+                    self._set_status(
+                        f"{len(self._poly_pts)} vertex/vertices placed. "
+                        "Click to add more, double-click to finish, ESC to cancel."
+                    )
+            return
+
         if event.button == 2:
             self.pan_start = None
             return
@@ -665,6 +857,7 @@ class SimplePolygonEditor:
         obj_idx, _vertex_idx = self.dragging_vertex
         self.dragging_vertex = None
         self._set_status(f"Updated polygon for object #{self.objects[obj_idx]['object_id']}.")
+        self._refresh_overlay()
 
     def _on_scroll(self, event) -> None:
         if event.inaxes not in (self.ax_overlay, self.ax_raw):
@@ -707,6 +900,11 @@ class SimplePolygonEditor:
             self._next_region(None)
         elif event.key in ("left", "["):
             self._prev_region(None)
+        elif event.key == "f":
+            self._full_image_view(None)
+        elif event.key == "escape":
+            if self.mode in ("add", "replace") and self.review_mode == "polygon":
+                self._cancel_poly_draw()
 
     def _build_regions(self) -> None:
         h, w = self.image.shape[:2]
@@ -714,7 +912,8 @@ class SimplePolygonEditor:
         y_edges = np.linspace(0, h, self.region_rows + 1)
         overlap_x = 0.06 * w / self.region_cols
         overlap_y = 0.06 * h / self.region_rows
-        self.region_bounds = []
+        # Full-image overview at start
+        self.region_bounds = [(0.0, float(w), 0.0, float(h))]
         for row in range(self.region_rows):
             for col in range(self.region_cols):
                 x0 = max(0.0, x_edges[col] - overlap_x)
@@ -722,6 +921,8 @@ class SimplePolygonEditor:
                 y0 = max(0.0, y_edges[row] - overlap_y)
                 y1 = min(float(h), y_edges[row + 1] + overlap_y)
                 self.region_bounds.append((x0, x1, y0, y1))
+        # Full-image overview at end
+        self.region_bounds.append((0.0, float(w), 0.0, float(h)))
 
     def _set_region_view(self, index: int) -> None:
         if not self.region_bounds:
@@ -732,14 +933,40 @@ class SimplePolygonEditor:
         self.ax_overlay.set_ylim(y1, y0)
         self.ax_raw.set_xlim(x0, x1)
         self.ax_raw.set_ylim(y1, y0)
-        self._set_status(self.status_text.get_text() if self.status_text is not None else "")
+        n = len(self.region_bounds)
+        if n >= 3 and self.region_index == 0:
+            self._set_status(
+                "Full image overview (start) \u2014 scan for any obvious issues, then press Next [\u2192] to step through sub-regions.  "
+                "[f] = full view at any time."
+            )
+        elif n >= 3 and self.region_index == n - 1:
+            self._set_status(
+                "Full image overview (end) \u2014 review all annotations, then Save & Next [s] to proceed.  "
+                "Press Next [\u2192] to auto-save."
+            )
+        else:
+            self._set_status(self.status_text.get_text() if self.status_text is not None else "")
+
+    def _full_image_view(self, _event=None) -> None:
+        if self.ax_overlay is None:
+            return
+        h, w = self.image.shape[:2]
+        self.ax_overlay.set_xlim(0, w)
+        self.ax_overlay.set_ylim(h, 0)
+        self.ax_raw.set_xlim(0, w)
+        self.ax_raw.set_ylim(h, 0)
+        self._set_status(
+            "Full image view.  Use Prev/Next [\u2190 \u2192] to return to sub-regions,  [f] to come back here."
+        )
+        if self.fig is not None:
+            self.fig.canvas.draw_idle()
 
     def _prev_region(self, _event) -> None:
         self._set_region_view(self.region_index - 1)
 
     def _next_region(self, _event) -> None:
         if self.region_bounds and self.region_index >= len(self.region_bounds) - 1:
-            self._set_status("Last region reached. Saving this image and moving to the next one.")
+            # Already at end overview — auto-save and move on
             self._save_and_next(None)
             return
         self._set_region_view(self.region_index + 1)
@@ -787,8 +1014,13 @@ class SimplePolygonEditor:
         self.pending_replace_idx = None
         self.mode = "add"
         if self.review_mode == "polygon":
-            self._start_polygon_selector(
-                "Add Polygon mode: click points around the EV on the left image, then double-click to finish."
+            self._poly_drawing = False
+            self._poly_pts = []
+            self._poly_is_freehand = False
+            self._poly_drag_active = False
+            self._set_status(
+                "Add Polygon: click to place vertices one by one \u2192 double-click to finish.  "
+                "OR click-and-drag for freehand drawing.  ESC to cancel."
             )
         else:
             self._start_box_selector(
@@ -806,13 +1038,109 @@ class SimplePolygonEditor:
         self.pending_replace_idx = self.selected_idx
         self.mode = "replace"
         if self.review_mode == "polygon":
-            self._start_polygon_selector(
-                "Redraw Polygon mode: click a new outline for the selected object, then double-click to finish."
+            self._poly_drawing = False
+            self._poly_pts = []
+            self._poly_is_freehand = False
+            self._poly_drag_active = False
+            self._set_status(
+                "Redraw Polygon: click to place vertices \u2192 double-click to finish.  "
+                "OR click-and-drag for freehand.  ESC to cancel."
             )
         else:
             self._start_box_selector(
                 "Adjust Box mode: click-drag the new box for the selected object on the left image."
             )
+
+    # ------------------------------------------------------------------
+    # Custom polygon drawing (click-to-add vertices + freehand drag)
+    # ------------------------------------------------------------------
+
+    def _update_poly_preview(self) -> None:
+        for a in self._poly_preview_artists:
+            try:
+                a.remove()
+            except Exception:
+                pass
+        self._poly_preview_artists = []
+        if not self._poly_pts or self.ax_overlay is None:
+            if self.fig is not None:
+                self.fig.canvas.draw_idle()
+            return
+        pts = np.asarray(self._poly_pts, dtype=np.float32)
+        if len(pts) >= 2:
+            line, = self.ax_overlay.plot(
+                pts[:, 0], pts[:, 1], color="yellow", linewidth=1.5, alpha=0.85, linestyle="-", zorder=6
+            )
+            self._poly_preview_artists.append(line)
+        if len(pts) >= 3:
+            close, = self.ax_overlay.plot(
+                [pts[-1, 0], pts[0, 0]], [pts[-1, 1], pts[0, 1]],
+                color="yellow", linewidth=1.0, alpha=0.5, linestyle="--", zorder=6,
+            )
+            self._poly_preview_artists.append(close)
+        sc = self.ax_overlay.scatter(pts[:, 0], pts[:, 1], s=18, c="yellow", zorder=7, edgecolors="none")
+        self._poly_preview_artists.append(sc)
+        if self.fig is not None:
+            self.fig.canvas.draw_idle()
+
+    def _clear_poly_preview(self) -> None:
+        for a in self._poly_preview_artists:
+            try:
+                a.remove()
+            except Exception:
+                pass
+        self._poly_preview_artists = []
+        if self.fig is not None:
+            self.fig.canvas.draw_idle()
+
+    def _cancel_poly_draw(self) -> None:
+        self._poly_drawing = False
+        self._poly_is_freehand = False
+        self._poly_drag_active = False
+        self._poly_pts = []
+        self.pending_replace_idx = None
+        self._clear_poly_preview()
+        self.mode = "navigate"
+        self._set_status("Drawing cancelled.")
+
+    def _finish_custom_polygon(self) -> None:
+        pts = self._poly_pts[:]
+        replace_idx = self.pending_replace_idx
+        self._poly_drawing = False
+        self._poly_is_freehand = False
+        self._poly_drag_active = False
+        self._poly_pts = []
+        self._clear_poly_preview()
+        self.mode = "navigate"
+        self.pending_replace_idx = None
+
+        polygon = _clean_polygon(np.asarray(pts, dtype=np.float32)) if len(pts) >= 3 else None
+        if polygon is None:
+            self._set_status("Polygon too small or too few points — no change saved.")
+            self._refresh_overlay()
+            return
+
+        box = _polygon_to_box(polygon)
+        if replace_idx is not None and 0 <= replace_idx < len(self.objects):
+            self.objects[replace_idx]["polygon"] = polygon
+            self.objects[replace_idx]["box"] = box
+            self.objects[replace_idx]["kept"] = True
+            self.selected_idx = replace_idx
+            self._set_status(f"Redrew polygon for object #{self.objects[replace_idx]['object_id']}.")
+        else:
+            self.objects.append({
+                "object_id": self.next_object_id,
+                "polygon": polygon,
+                "box": box,
+                "kept": True,
+                "class_id": 0,
+                "confidence": None,
+                "source": "manual-polygon",
+            })
+            self.next_object_id += 1
+            self.selected_idx = len(self.objects) - 1
+            self._set_status(f"Added polygon for object #{self.objects[self.selected_idx]['object_id']}.")
+        self._refresh_overlay()
 
     def _finish_polygon(self, verts: List[Tuple[float, float]]) -> None:
         polygon = _clean_polygon(np.asarray(verts, dtype=np.float32))
@@ -1090,15 +1418,165 @@ def _save_csv(records: List[Dict], output_path: Path) -> None:
     if not records:
         return
 
+    fieldnames: List[str] = []
+    seen = set()
+    for record in records:
+        for key in record.keys():
+            if key not in seen:
+                seen.add(key)
+                fieldnames.append(key)
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(records[0].keys()))
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(records)
 
 
+def _image_key(image_path: Path) -> str:
+    try:
+        return image_path.resolve().as_posix().lower()
+    except OSError:
+        return image_path.absolute().as_posix().lower()
+
+
+def _image_fingerprint(image_path: Path) -> str:
+    hasher = hashlib.sha1()
+    try:
+        with image_path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except OSError:
+        return hashlib.sha1(_image_key(image_path).encode("utf-8")).hexdigest()
+
+
+def _output_name_for(image_path: Path) -> str:
+    safe_stem = "".join(
+        ch if ch.isalnum() or ch in ("-", "_") else "_"
+        for ch in image_path.stem
+    ).strip("_")
+    safe_stem = safe_stem or "image"
+    return f"{safe_stem}__{_image_fingerprint(image_path)[:12]}"
+
+
+def _load_progress_index(progress_csv: Path) -> Dict[str, Dict[str, str]]:
+    progress_index: Dict[str, Dict[str, str]] = {}
+    if not progress_csv.exists():
+        return progress_index
+
+    try:
+        with progress_csv.open("r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                key = (row.get("image_key") or row.get("source_path") or "").strip().lower()
+                if key:
+                    progress_index[key] = row
+    except Exception as exc:
+        print(f"Warning: could not read progress log {progress_csv}: {exc}")
+
+    return progress_index
+
+
+def _append_progress_record(progress_csv: Path, record: Dict) -> None:
+    fieldnames = [
+        "timestamp",
+        "run_name",
+        "image",
+        "image_name",
+        "image_key",
+        "image_fingerprint",
+        "output_name",
+        "source_path",
+        "status",
+        "action",
+        "n_auto",
+        "n_reviewed",
+        "n_boxes",
+    ]
+    progress_csv.parent.mkdir(parents=True, exist_ok=True)
+    file_exists = progress_csv.exists()
+    with progress_csv.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow({name: record.get(name, "") for name in fieldnames})
+
+
+def _find_previously_annotated(image_paths: List[Path], output_dir: Path) -> List[Path]:
+    progress_index = _load_progress_index(output_dir / "annotation_progress.csv")
+    saved_rows = [
+        row for row in progress_index.values()
+        if (row.get("status") or "").strip().lower() == "saved"
+    ]
+    saved_keys = {
+        (row.get("image_key") or "").strip().lower()
+        for row in saved_rows
+        if (row.get("image_key") or "").strip()
+    }
+    saved_fingerprints = {
+        (row.get("image_fingerprint") or "").strip().lower()
+        for row in saved_rows
+        if (row.get("image_fingerprint") or "").strip()
+    }
+
+    completed: List[Path] = []
+    for image_path in image_paths:
+        image_key = _image_key(image_path)
+        image_fingerprint = _image_fingerprint(image_path).lower()
+        if image_key in saved_keys or image_fingerprint in saved_fingerprints:
+            completed.append(image_path)
+    return completed
+
+
+def _prompt_for_resume_mode(already_annotated: List[Path], total_images: int, resume_mode: str) -> str:
+    if not already_annotated:
+        return "reannotate"
+    if resume_mode != "ask":
+        return resume_mode
+
+    preview = "\n".join(f"• {path.name}" for path in already_annotated[:12])
+    more = ""
+    if len(already_annotated) > 12:
+        more = f"\n… and {len(already_annotated) - 12} more."
+
+    message = (
+        f"Found {len(already_annotated)} previously annotated image(s) out of {total_images}.\n\n"
+        "Yes = skip those completed images and continue where you left off.\n"
+        "No = reannotate all images from the folder(s).\n"
+        "Cancel = abort this run.\n\n"
+        "Already annotated examples:\n"
+        f"{preview}{more}"
+    )
+
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        choice = messagebox.askyesnocancel("Resume annotation session?", message)
+        root.destroy()
+
+        if choice is None:
+            raise SystemExit("Annotation session cancelled by user.")
+        return "skip" if choice else "reannotate"
+    except Exception:
+        print(message)
+        while True:
+            response = input("Enter [s]kip completed / [r]eannotate all / [c]ancel: ").strip().lower()
+            if response in {"s", "skip"}:
+                return "skip"
+            if response in {"r", "reannotate", "redo"}:
+                return "reannotate"
+            if response in {"c", "cancel", "q", "quit"}:
+                raise SystemExit("Annotation session cancelled by user.")
+            print("Please enter s, r, or c.")
+
+
 def run_annotation_session(
-    input_images: Path,
+    input_images: List[Path] | Path,
     output_dir: Path,
     model_path: Path,
     imgsz: int,
@@ -1113,21 +1591,61 @@ def run_annotation_session(
     region_rows: int = 2,
     region_cols: int = 4,
     review_mode: str = "polygon",
+    resume_mode: str = "ask",
 ) -> None:
-    image_paths = _collect_images(input_images)
+    if isinstance(input_images, Path):
+        input_images = [input_images]
+    image_paths = _collect_images_multi(input_images)
     if not image_paths:
         raise FileNotFoundError(f"No images found under: {input_images}")
 
-    reviewed_images_dir = output_dir / "reviewed" / "images"
-    reviewed_labels_dir = output_dir / "reviewed" / "labels"
-    reviewed_detect_labels_dir = output_dir / "reviewed_detect" / "labels"
-    auto_labels_dir = output_dir / "auto" / "labels"
-    overlays_dir = output_dir / "reviewed" / "overlays"
-    stats_dir = output_dir / "stats"
+    already_annotated = _find_previously_annotated(image_paths, output_dir)
+    selected_resume_mode = _prompt_for_resume_mode(already_annotated, len(image_paths), resume_mode)
+    if already_annotated and selected_resume_mode == "skip":
+        completed_keys = {_image_key(path) for path in already_annotated}
+        image_paths = [path for path in image_paths if _image_key(path) not in completed_keys]
+        print(
+            f"Skipping {len(already_annotated)} previously annotated image(s). "
+            f"{len(image_paths)} image(s) remaining in this session."
+        )
+        if not image_paths:
+            print("All selected images are already annotated. Nothing to do.")
+            return
+    elif already_annotated:
+        print(
+            f"Reannotating all {len(image_paths)} image(s), including "
+            f"{len(already_annotated)} previously completed item(s)."
+        )
+
+    run_name = datetime.now().strftime("session_%Y%m%d_%H%M%S")
+    run_dir = output_dir / run_name
+    progress_csv = output_dir / "annotation_progress.csv"
+
+    reviewed_images_dir = run_dir / "reviewed" / "images"
+    reviewed_labels_dir = run_dir / "reviewed" / "labels"
+    reviewed_detect_labels_dir = run_dir / "reviewed_detect" / "labels"
+    reviewed_detect_overlays_dir = run_dir / "reviewed_detect" / "overlays"
+    auto_labels_dir = run_dir / "auto" / "labels"
+    overlays_dir = run_dir / "reviewed" / "overlays"
+    stats_dir = run_dir / "stats"
+
+    _rescale_cache: dict = {}
 
     session_records: List[Dict] = []
     eval_records: List[Dict] = []
     morphology_records_all: List[Dict] = []
+
+    perf = PerformanceLogger(output_dir=output_dir, session_id=run_name)
+    perf.log_session_start(
+        model_path=model_path,
+        n_images=len(image_paths),
+        device=device,
+        imgsz=imgsz,
+        conf=conf,
+        iou=iou,
+    )
+    session_t0 = time.perf_counter()
+    n_processed = 0
 
     print(f"Loaded {len(image_paths)} images for HITL annotation.")
     print(f"Using model: {model_path}\n")
@@ -1138,19 +1656,49 @@ def run_annotation_session(
         image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
         if image is None:
             print("  Skipped: cannot read image")
-            session_records.append(
-                {"image": image_path.name, "status": "read_error", "action": "skip", "n_auto": 0, "n_reviewed": 0}
+            error_record = {
+                "image": image_path.name,
+                "source_path": str(image_path),
+                "status": "read_error",
+                "action": "skip",
+                "n_auto": 0,
+                "n_reviewed": 0,
+            }
+            session_records.append(error_record)
+            _append_progress_record(
+                progress_csv,
+                {
+                    **error_record,
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "run_name": run_name,
+                    "image_name": image_path.name,
+                    "image_key": _image_key(image_path),
+                    "image_fingerprint": _image_fingerprint(image_path),
+                    "output_name": "",
+                    "n_boxes": 0,
+                },
             )
             continue
 
+        image, inf_path, inf_scale = _rescale_image_for_inference(
+            image, image_path, imgsz, _rescale_cache
+        )
+        _t_inf0 = time.perf_counter()
         pred_masks, confidences = load_predictions_from_model(
             model_path=str(model_path),
-            img_path=str(image_path),
+            img_path=str(inf_path),
             imgsz=imgsz,
             conf=conf,
             iou=iou,
             device=device,
         )
+        _inference_time_s = time.perf_counter() - _t_inf0
+        # Clean up temp file created by rescaling.
+        if inf_path != image_path and inf_path.exists():
+            try:
+                inf_path.unlink()
+            except OSError:
+                pass
 
         auto_polygons_xy: List[np.ndarray] = []
         auto_confidences: List[float] = []
@@ -1187,26 +1735,48 @@ def run_annotation_session(
                 review_mode=review_mode,
             )
 
+        perf.log_image(
+            image_path=image_path,
+            n_raw_detections=len(pred_masks),
+            inference_time_s=_inference_time_s,
+            image=image,
+        )
+        n_processed += 1
+
         if action == "quit":
             print("  Session ended by user.")
             break
 
         if action == "skip":
             print("  Skipped without saving.")
-            session_records.append(
+            skipped_record = {
+                "image": image_path.name,
+                "source_path": str(image_path),
+                "status": "skipped",
+                "action": action,
+                "n_auto": len(auto_polygons_xy),
+                "n_reviewed": len(reviewed_polygons_xy),
+                "n_boxes": len(reviewed_polygons_xy),
+            }
+            session_records.append(skipped_record)
+            _append_progress_record(
+                progress_csv,
                 {
-                    "image": image_path.name,
-                    "status": "skipped",
-                    "action": action,
-                    "n_auto": len(auto_polygons_xy),
-                    "n_reviewed": len(reviewed_polygons_xy),
-                }
+                    **skipped_record,
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "run_name": run_name,
+                    "image_name": image_path.name,
+                    "image_key": _image_key(image_path),
+                    "image_fingerprint": _image_fingerprint(image_path),
+                    "output_name": _output_name_for(image_path),
+                },
             )
             continue
 
-        reviewed_label_path = reviewed_labels_dir / f"{image_path.stem}.txt"
-        reviewed_detect_label_path = reviewed_detect_labels_dir / f"{image_path.stem}.txt"
-        reviewed_image_path = reviewed_images_dir / image_path.name
+        output_name = _output_name_for(image_path)
+        reviewed_label_path = reviewed_labels_dir / f"{output_name}.txt"
+        reviewed_detect_label_path = reviewed_detect_labels_dir / f"{output_name}.txt"
+        reviewed_image_path = reviewed_images_dir / f"{output_name}{image_path.suffix}"
 
         refined_polygons_xy: List[np.ndarray] = []
         reviewed_boxes_xy: List[np.ndarray] = []
@@ -1253,29 +1823,47 @@ def run_annotation_session(
             rec["image"] = image_path.name
         morphology_records_all.extend(morph_records)
 
+        # Model-detection overlay (auto predictions only, yellow).
         overlay_auto = _draw_polygons(image, auto_polygons_xy, color=(255, 255, 0), thickness=1)
+        reviewed_detect_overlays_dir.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(reviewed_detect_overlays_dir / f"{output_name}_overlay.png"), overlay_auto)
+
+        # Reviewed overlay: auto (yellow) + user-corrected (white) on top.
         overlay_reviewed = _draw_polygons(overlay_auto, refined_polygons_xy, color=(255, 255, 255), thickness=2)
         overlays_dir.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(overlays_dir / f"{image_path.stem}_overlay.png"), overlay_reviewed)
+        cv2.imwrite(str(overlays_dir / f"{output_name}_overlay.png"), overlay_reviewed)
 
         # Ellipse overlay — fitted ellipses drawn on top of the reviewed polygon overlay
         ellipse_vis = draw_ellipses_on_image(
             image, reviewed_masks, morph_records, color=(0, 255, 255), thickness=2
         )
         cv2.imwrite(
-            str(overlays_dir / f"{image_path.stem}_ellipses.png"),
+            str(overlays_dir / f"{output_name}_ellipses.png"),
             cv2.cvtColor(ellipse_vis, cv2.COLOR_RGB2BGR)
         )
 
-        session_records.append(
+        saved_record = {
+            "image": image_path.name,
+            "image_id": _image_fingerprint(image_path)[:12],
+            "output_name": output_name,
+            "source_path": str(image_path),
+            "status": "saved",
+            "action": action,
+            "n_auto": len(auto_polygons_xy),
+            "n_reviewed": len(refined_polygons_xy),
+            "n_boxes": len(reviewed_boxes_xy),
+        }
+        session_records.append(saved_record)
+        _append_progress_record(
+            progress_csv,
             {
-                "image": image_path.name,
-                "status": "saved",
-                "action": action,
-                "n_auto": len(auto_polygons_xy),
-                "n_reviewed": len(refined_polygons_xy),
-                "n_boxes": len(reviewed_boxes_xy),
-            }
+                **saved_record,
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "run_name": run_name,
+                "image_name": image_path.name,
+                "image_key": _image_key(image_path),
+                "image_fingerprint": _image_fingerprint(image_path),
+            },
         )
 
         save_label = "Saved hand-corrected polygons + detect boxes" if review_mode == "polygon" else "Saved refined masks + detect boxes"
@@ -1284,6 +1872,11 @@ def run_annotation_session(
             f"auto={len(auto_polygons_xy)} reviewed={len(refined_polygons_xy)} boxes={len(reviewed_boxes_xy)} "
             f"F1={eval_metrics['f1']:.3f} meanIoU={eval_metrics['mean_matched_iou']:.3f}"
         )
+
+    perf.log_session_end(
+        total_time_s=time.perf_counter() - session_t0,
+        n_processed=n_processed,
+    )
 
     _save_csv(session_records, stats_dir / "annotation_session.csv")
     _save_csv(eval_records, stats_dir / "model_vs_review_metrics.csv")
@@ -1297,14 +1890,15 @@ def run_annotation_session(
         )
 
     print("\nAnnotation session complete.")
-    print(f"Reviewed dataset: {reviewed_images_dir.parent}")
+    print(f"Run folder: {run_dir}")
     print(f"Session log: {stats_dir / 'annotation_session.csv'}")
     print(f"Metrics: {stats_dir / 'model_vs_review_metrics.csv'}")
+    print(f"Perf log:  {output_dir / 'performance_log.csv'}")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Rich human-in-the-loop polygon annotation for cryoEV")
-    parser.add_argument("--input-images", type=Path, help="Image file or folder of new images")
+    parser.add_argument("--input-images", type=Path, nargs="+", help="One or more image files or folders to annotate (combined into a single session)")
     parser.add_argument("--output-dir", type=Path, help="Output folder for reviewed dataset and stats")
     parser.add_argument("--model-path", type=str, default=DEFAULT_MODEL_PATH, help="Path to YOLO weights file or folder containing best.pt")
     parser.add_argument("--gui", action="store_true", help="Open folder/file picker dialogs for input, output, and model paths")
@@ -1320,14 +1914,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epsilon-ratio", type=float, default=0.005, help="Polygon simplification ratio for predicted masks")
     parser.add_argument("--pixel-size", type=float, default=None, help="Physical size per pixel (e.g., nm/px)")
     parser.add_argument("--save-auto-labels", action="store_true", help="Also save raw model predictions as YOLO labels")
+    parser.add_argument(
+        "--resume-mode",
+        choices=["ask", "skip", "reannotate"],
+        default="ask",
+        help="If prior annotations exist in the output folder: ask, skip completed images, or reannotate all",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    input_images, output_dir, model_path = _resolve_runtime_paths(args)
+    input_images_list, output_dir, model_path = _resolve_runtime_paths(args)
     run_annotation_session(
-        input_images=input_images,
+        input_images=input_images_list,
         output_dir=output_dir,
         model_path=model_path,
         imgsz=args.imgsz,
@@ -1342,6 +1942,7 @@ def main() -> None:
         region_rows=args.region_rows,
         region_cols=args.region_cols,
         review_mode=args.review_mode,
+        resume_mode=args.resume_mode,
     )
 
 

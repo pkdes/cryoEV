@@ -12,6 +12,8 @@ Features:
 import os
 import sys
 import csv
+import time
+from datetime import datetime
 
 # Ensure project root is on the path so sibling-package imports work
 # regardless of the working directory.
@@ -23,6 +25,8 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+from inference.perf_log import PerformanceLogger
 
 from analysis.morphology import (
     analyze_instances, save_morphology_csv,
@@ -41,7 +45,7 @@ def extract_instances_yolo(
     conf: float = 0.25,
     iou: float = 0.7,
     device: str = 'cpu'
-) -> Tuple[List[np.ndarray], List[float], List[Dict]]:
+) -> Tuple[List[np.ndarray], List[float], List[Dict], List[Optional[np.ndarray]]]:
     """
     Extract individual object instances from a YOLO segmentation model.
 
@@ -57,40 +61,55 @@ def extract_instances_yolo(
         instance_masks: List of boolean masks
         confidences: List of confidence scores
         bbox_info: List of dicts with bbox coordinates
+        polygon_points: List of Nx2 polygon arrays in image coordinates
     """
-    from training.train_yolo import load_predictions_from_model
+    from ultralytics import YOLO
 
-    pred_masks, pred_confidences = load_predictions_from_model(
-        model_path, img_path, imgsz, conf, iou, device
-    )
+    model = YOLO(model_path)
+    result = model.predict(source=str(img_path), imgsz=imgsz, conf=conf, iou=iou,
+                           device=device, verbose=False, retina_masks=True)[0]
 
     instance_masks: List[np.ndarray] = []
     confidences: List[float] = []
     bbox_info: List[Dict] = []
+    polygon_points: List[Optional[np.ndarray]] = []
 
-    for raw_mask, confidence in zip(pred_masks, pred_confidences):
-        # Normalise to a clean 2-D boolean mask regardless of what
-        # the predictor returns (could be (H,W), (1,H,W), (H,W,1), uint8, etc.)
-        mask = np.asarray(raw_mask).squeeze()
-        if mask.ndim != 2:
-            continue
-        mask = mask.astype(bool)
-        coords = np.argwhere(mask)
-        if len(coords) == 0:
-            continue
+    if result.masks is not None and result.boxes is not None:
+        if hasattr(result.masks, 'xy') and result.masks.xy is not None:
+            polygons_xy = result.masks.xy
+        else:
+            polygons_xy = [None] * len(result.boxes)
 
-        y_min, x_min = coords.min(axis=0)
-        y_max, x_max = coords.max(axis=0)
+        for raw_mask, box, poly in zip(result.masks.data, result.boxes, polygons_xy):
+            # Normalise to a clean 2-D boolean mask regardless of what
+            # the predictor returns (could be (H,W), (1,H,W), (H,W,1), uint8, etc.)
+            mask = np.asarray(raw_mask).squeeze()
+            if mask.ndim != 2:
+                continue
+            mask = mask.astype(bool)
+            coords = np.argwhere(mask)
+            if len(coords) == 0:
+                continue
 
-        instance_masks.append(mask)
-        confidences.append(confidence)
-        bbox_info.append({
-            'x_min': int(x_min), 'y_min': int(y_min),
-            'x_max': int(x_max), 'y_max': int(y_max),
-            'area': int(mask.sum()),
-        })
+            y_min, x_min = coords.min(axis=0)
+            y_max, x_max = coords.max(axis=0)
 
-    return instance_masks, confidences, bbox_info
+            poly_points = None
+            if poly is not None:
+                p = np.asarray(poly, dtype=np.float32)
+                if p.ndim == 2 and p.shape[1] == 2 and len(p) >= 5:
+                    poly_points = p
+
+            instance_masks.append(mask)
+            confidences.append(float(box.conf.cpu().numpy()[0]))
+            polygon_points.append(poly_points)
+            bbox_info.append({
+                'x_min': int(x_min), 'y_min': int(y_min),
+                'x_max': int(x_max), 'y_max': int(y_max),
+                'area': int(mask.sum()),
+            })
+
+    return instance_masks, confidences, bbox_info, polygon_points
 
 
 # ============================================================================
@@ -316,9 +335,23 @@ def predict_with_review(
         raise FileNotFoundError(f"Could not read image: {image_path}")
     image = image.squeeze()  # ensure (H, W), not (H, W, 1)
 
-    # --- Extract instances ---
-    instance_masks, confidences, bbox_info = extract_instances_yolo(
+    # --- Extract instances (timed) ---
+    _t0 = time.perf_counter()
+    instance_masks, confidences, bbox_info, instance_polygons = extract_instances_yolo(
         yolo_model_path, image_path, imgsz, yolo_conf, yolo_iou, device
+    )
+    _inference_time_s = time.perf_counter() - _t0
+
+    # --- Perf record (written to output_dir/performance_log.csv) ---
+    _session_id = f"single_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    _perf = PerformanceLogger(output_dir=output_dir, session_id=_session_id)
+    _perf.log_session_start(
+        model_path=yolo_model_path, n_images=1,
+        device=device, imgsz=imgsz, conf=yolo_conf, iou=yolo_iou,
+    )
+    _perf.log_image(
+        image_path=image_path, n_raw_detections=len(instance_masks),
+        inference_time_s=_inference_time_s, image=image,
     )
 
     print(f"Detected {len(instance_masks)} objects")
@@ -337,9 +370,18 @@ def predict_with_review(
     n_rejected = sum(1 for d in decisions if d['decision'] == 'rejected')
     print(f"Accepted: {n_accepted}, Rejected: {n_rejected}")
 
+    accepted_indices = [d['object_index'] for d in decisions if d['decision'] == 'accepted']
+    filtered_polygons = [
+        instance_polygons[i] if i < len(instance_polygons) else None
+        for i in accepted_indices
+    ]
+
     # --- Morphology analysis ---
     morph_records = analyze_instances(
-        filtered_masks, confidences=filtered_confs, pixel_size=pixel_size
+        filtered_masks,
+        confidences=filtered_confs,
+        pixel_size=pixel_size,
+        polygon_points_list=filtered_polygons,
     )
 
     # --- Save outputs ---
@@ -373,6 +415,8 @@ def predict_with_review(
             morph_records, pixel_size=pixel_size,
             save_path=str(output_path / f"{base_name}_morphology_distributions.png")
         )
+
+    _perf.log_session_end(total_time_s=time.perf_counter() - _t0, n_processed=1)
 
     return filtered_masks, filtered_confs, decisions, morph_records, False
 
@@ -438,8 +482,26 @@ if __name__ == '__main__':
 
     all_morph_records = []
 
+    _batch_session_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    _batch_perf = PerformanceLogger(
+        output_dir=CONFIG['output_dir'],
+        session_id=_batch_session_id,
+        log_name="performance_log.csv",
+    )
+    _batch_perf.log_session_start(
+        model_path=CONFIG['yolo_model_path'],
+        n_images=len(image_paths),
+        device=device,
+        imgsz=CONFIG['image_size'],
+        conf=CONFIG['yolo_conf'],
+        iou=CONFIG['yolo_iou'],
+    )
+    _batch_t0 = time.perf_counter()
+    _batch_processed = 0
+
     for img_path in image_paths:
         print(f"Processing: {os.path.basename(img_path)}")
+        _img_t0 = time.perf_counter()
         _, _, _, morph_records, exited = predict_with_review(
             image_path=img_path,
             output_dir=CONFIG['output_dir'],
@@ -456,9 +518,22 @@ if __name__ == '__main__':
         for rec in morph_records:
             rec['image'] = os.path.basename(img_path)
         all_morph_records.extend(morph_records)
+        _img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+        _batch_perf.log_image(
+            image_path=img_path,
+            n_raw_detections=sum(1 for d in _ if True) if _ is not None else 0,
+            inference_time_s=time.perf_counter() - _img_t0,
+            image=_img,
+        )
+        _batch_processed += 1
         print()
         if exited:
             break
+
+    _batch_perf.log_session_end(
+        total_time_s=time.perf_counter() - _batch_t0,
+        n_processed=_batch_processed,
+    )
 
     # Save combined morphology CSV for all images
     if all_morph_records:

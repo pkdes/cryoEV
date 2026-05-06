@@ -62,6 +62,36 @@ def fit_ellipse(mask: np.ndarray) -> Optional[Dict]:
     }
 
 
+def fit_ellipse_from_polygon(polygon_points: np.ndarray) -> Optional[Dict]:
+    """
+    Fit an ellipse directly from polygon vertices.
+
+    This avoids rasterization artifacts that can appear when fitting from
+    thresholded mask contours.
+    """
+    if polygon_points is None:
+        return None
+
+    pts = np.asarray(polygon_points, dtype=np.float32)
+    if pts.ndim != 2 or pts.shape[1] != 2 or len(pts) < 5:
+        return None
+
+    contour = pts.reshape(-1, 1, 2)
+    (cx, cy), (axis_minor, axis_major), angle = cv2.fitEllipse(contour)
+
+    if axis_minor > axis_major:
+        axis_minor, axis_major = axis_major, axis_minor
+        angle = (angle + 90) % 180
+
+    return {
+        'center_x': cx,
+        'center_y': cy,
+        'major_axis': axis_major,
+        'minor_axis': axis_minor,
+        'angle': angle,
+    }
+
+
 # ============================================================================
 # Morphology Metrics
 # ============================================================================
@@ -69,6 +99,7 @@ def fit_ellipse(mask: np.ndarray) -> Optional[Dict]:
 def compute_morphology(
     mask: np.ndarray,
     pixel_size: Optional[float] = None,
+    polygon_points: Optional[np.ndarray] = None,
 ) -> Optional[Dict]:
     """
     Compute morphology descriptors for a single instance mask.
@@ -119,8 +150,10 @@ def compute_morphology(
     hull_area = cv2.contourArea(hull)
     solidity = area_px / hull_area if hull_area > 0 else 0.0
 
-    # Ellipse fit
-    ellipse = fit_ellipse(mask)
+    # Prefer fitting from polygon vertices when available; fallback to mask contour.
+    ellipse = fit_ellipse_from_polygon(polygon_points)
+    if ellipse is None:
+        ellipse = fit_ellipse(mask)
 
     scale = pixel_size if pixel_size is not None else 1.0
     unit = '' if pixel_size is None else '_phys'
@@ -164,6 +197,7 @@ def analyze_instances(
     instance_masks: List[np.ndarray],
     confidences: Optional[List[float]] = None,
     pixel_size: Optional[float] = None,
+    polygon_points_list: Optional[List[Optional[np.ndarray]]] = None,
 ) -> List[Dict]:
     """
     Compute morphology descriptors for a list of instance masks.
@@ -181,7 +215,11 @@ def analyze_instances(
     results: List[Dict] = []
 
     for idx, mask in enumerate(instance_masks):
-        morph = compute_morphology(mask, pixel_size=pixel_size)
+        polygon_points = None
+        if polygon_points_list is not None and idx < len(polygon_points_list):
+            polygon_points = polygon_points_list[idx]
+
+        morph = compute_morphology(mask, pixel_size=pixel_size, polygon_points=polygon_points)
         if morph is None:
             continue
 
