@@ -83,7 +83,9 @@ def extract_instances_yolo(
         for raw_mask, box, poly in zip(result.masks.data, result.boxes, polygons_xy):
             # Normalise to a clean 2-D boolean mask regardless of what
             # the predictor returns (could be (H,W), (1,H,W), (H,W,1), uint8, etc.)
-            mask = np.asarray(raw_mask).squeeze()
+            mask_tensor = raw_mask.detach() if hasattr(raw_mask, 'detach') else raw_mask
+            mask_tensor = mask_tensor.cpu() if hasattr(mask_tensor, 'cpu') else mask_tensor
+            mask = np.asarray(mask_tensor).squeeze()
             if mask.ndim != 2:
                 continue
             mask = mask.astype(bool)

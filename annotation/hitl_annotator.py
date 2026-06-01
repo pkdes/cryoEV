@@ -316,6 +316,12 @@ def _prepare_display_image(image: np.ndarray) -> np.ndarray:
     return np.clip((gray - lo) / (hi - lo), 0.0, 1.0)
 
 
+def _prepare_display_u8(image: np.ndarray) -> np.ndarray:
+    """Prepare an 8-bit contrast-enhanced grayscale image for saved overlays."""
+    disp = _prepare_display_image(image)
+    return np.clip(disp * 255.0, 0, 255).astype(np.uint8)
+
+
 def _safe_shapes_data_to_polygons(data: Iterable[np.ndarray]) -> List[np.ndarray]:
     polygons: List[np.ndarray] = []
     for shape in data:
@@ -421,7 +427,7 @@ class SimplePolygonEditor:
             pass
 
         self.ax_overlay.imshow(self.display_image, cmap="gray", vmin=0, vmax=1, origin="upper", interpolation="nearest")
-        self.ax_raw.imshow(self.display_image, cmap="gray", vmin=0, vmax=1, origin="upper", interpolation="nearest")
+        self.ax_raw.imshow(self.image, cmap="gray", origin="upper", interpolation="nearest")
 
         self.ax_overlay.set_title("Polygon review" if self.review_mode == "polygon" else "Box review")
         self.ax_raw.set_title("Raw image")
@@ -434,7 +440,7 @@ class SimplePolygonEditor:
             ax.set_facecolor("black")
 
         status_message = (
-            "Click an object or list entry to select it. Drag highlighted polygon vertices to refine the shape."
+            "Click object/list to select. Drag vertices to refine. Alt+Click edge adds point, Shift+Click vertex deletes point, Ctrl+Click rejects."
             if self.review_mode == "polygon"
             else "Click an object or list entry to select it. Use Prev/Next Region to move across the image."
         )
@@ -461,6 +467,8 @@ class SimplePolygonEditor:
         if self.review_mode == "polygon":
             print("  - Left: image with bold polygon overlay")
             print("  - Drag the highlighted polygon vertices to refine the contour")
+            print("  - Alt+Click near an edge inserts a point; Shift+Click near a vertex deletes a point")
+            print("  - Ctrl+Click an object to reject in one click; X rejects selected object and jumps to next")
             print("  - Use Add Polygon or Redraw Polygon for larger changes")
             print("  - Buttons: Prev Region, Next Region, Add Polygon, Redraw Polygon, Keep, Reject, Delete, Save & Next, Skip, Quit")
         else:
@@ -672,6 +680,95 @@ class SimplePolygonEditor:
             return idx
         return None
 
+    @staticmethod
+    def _event_has_modifier(event, modifier: str) -> bool:
+        key = str(getattr(event, "key", "") or "").lower().replace("-", "+")
+        parts = [p.strip() for p in key.split("+") if p.strip()]
+        aliases = {
+            "ctrl": {"ctrl", "control"},
+            "shift": {"shift"},
+            "alt": {"alt", "altgr"},
+        }
+        target = aliases.get(modifier.lower(), {modifier.lower()})
+        return any(p in target for p in parts)
+
+    @staticmethod
+    def _point_to_segment_distance(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+        abx = bx - ax
+        aby = by - ay
+        apx = px - ax
+        apy = py - ay
+        ab2 = abx * abx + aby * aby
+        if ab2 <= 1e-9:
+            return float(np.hypot(px - ax, py - ay))
+        t = max(0.0, min(1.0, (apx * abx + apy * aby) / ab2))
+        cx = ax + t * abx
+        cy = ay + t * aby
+        return float(np.hypot(px - cx, py - cy))
+
+    def _add_vertex_to_selected(self, x: float, y: float) -> bool:
+        if self.selected_idx is None or self.review_mode != "polygon":
+            return False
+        polygon = np.asarray(self.objects[self.selected_idx]["polygon"], dtype=np.float32)
+        if polygon.shape[0] < 3:
+            return False
+
+        x0, x1 = self.ax_overlay.get_xlim()
+        y0, y1 = self.ax_overlay.get_ylim()
+        threshold = max(8.0, 0.015 * max(abs(x1 - x0), abs(y1 - y0)))
+        best_i = -1
+        best_d = 1e12
+        n = polygon.shape[0]
+        for i in range(n):
+            a = polygon[i]
+            b = polygon[(i + 1) % n]
+            d = self._point_to_segment_distance(x, y, float(a[0]), float(a[1]), float(b[0]), float(b[1]))
+            if d < best_d:
+                best_d = d
+                best_i = i
+        if best_i < 0 or best_d > threshold:
+            self._set_status("Alt+Click near an edge to add a polygon point.")
+            return False
+
+        new_poly = np.insert(polygon, best_i + 1, np.asarray([x, y], dtype=np.float32), axis=0)
+        cleaned = _clean_polygon(new_poly)
+        if cleaned is None:
+            self._set_status("Could not add point (invalid polygon).")
+            return False
+        self.objects[self.selected_idx]["polygon"] = cleaned
+        self.objects[self.selected_idx]["box"] = _polygon_to_box(cleaned)
+        self._set_status(f"Added point to object #{self.objects[self.selected_idx]['object_id']} (Alt+Click).")
+        self._refresh_overlay()
+        return True
+
+    def _delete_vertex_from_selected(self, x: float, y: float) -> bool:
+        if self.selected_idx is None or self.review_mode != "polygon":
+            return False
+        polygon = np.asarray(self.objects[self.selected_idx]["polygon"], dtype=np.float32)
+        if polygon.shape[0] <= 3:
+            self._set_status("Polygon needs at least 3 points; cannot delete more.")
+            return False
+
+        dists = np.linalg.norm(polygon - np.asarray([x, y], dtype=np.float32), axis=1)
+        idx = int(np.argmin(dists))
+        x0, x1 = self.ax_overlay.get_xlim()
+        y0, y1 = self.ax_overlay.get_ylim()
+        threshold = max(6.0, 0.02 * max(abs(x1 - x0), abs(y1 - y0)))
+        if float(dists[idx]) > threshold:
+            self._set_status("Shift+Click near a vertex to delete that point.")
+            return False
+
+        new_poly = np.delete(polygon, idx, axis=0)
+        cleaned = _clean_polygon(new_poly)
+        if cleaned is None:
+            self._set_status("Could not delete point (invalid polygon).")
+            return False
+        self.objects[self.selected_idx]["polygon"] = cleaned
+        self.objects[self.selected_idx]["box"] = _polygon_to_box(cleaned)
+        self._set_status(f"Deleted point from object #{self.objects[self.selected_idx]['object_id']} (Shift+Click).")
+        self._refresh_overlay()
+        return True
+
     def _select_object(self, idx: int | None, center: bool = False) -> None:
         self.selected_idx = idx
         if idx is None:
@@ -687,6 +784,21 @@ class SimplePolygonEditor:
             )
             if center:
                 self._center_on_object(idx)
+        self._refresh_overlay()
+
+    def _reject_selected_and_advance(self) -> None:
+        if self.selected_idx is None:
+            self._set_status("Select an object first, then press X to quickly reject.")
+            return
+        idx = self.selected_idx
+        obj_id = self.objects[idx]["object_id"]
+        self.objects[idx]["kept"] = False
+        if idx < len(self.objects) - 1:
+            self.selected_idx = idx + 1
+            next_id = self.objects[self.selected_idx]["object_id"]
+            self._set_status(f"Rejected #{obj_id}. Moved to next object #{next_id}.")
+        else:
+            self._set_status(f"Rejected #{obj_id}. (Last object)")
         self._refresh_overlay()
 
     def _center_on_object(self, idx: int) -> None:
@@ -728,6 +840,10 @@ class SimplePolygonEditor:
         if event.inaxes == self.ax_list and event.button == 1 and event.ydata is not None:
             row_idx = int(round(event.ydata)) - 1
             if 0 <= row_idx < len(self.objects):
+                if self._event_has_modifier(event, "ctrl"):
+                    self._select_object(row_idx, center=True)
+                    self._reject_selected(None)
+                    return
                 self._select_object(row_idx, center=True)
             return
 
@@ -748,6 +864,12 @@ class SimplePolygonEditor:
             return
 
         if self.review_mode == "polygon" and event.inaxes == self.ax_overlay and self.selected_idx is not None:
+            if self._event_has_modifier(event, "shift"):
+                if self._delete_vertex_from_selected(float(event.xdata), float(event.ydata)):
+                    return
+            if self._event_has_modifier(event, "alt"):
+                if self._add_vertex_to_selected(float(event.xdata), float(event.ydata)):
+                    return
             vertex_idx = self._find_vertex_at(float(event.xdata), float(event.ydata))
             if vertex_idx is not None:
                 self.dragging_vertex = (self.selected_idx, vertex_idx)
@@ -757,6 +879,10 @@ class SimplePolygonEditor:
                 return
 
         idx = self._find_object_at(float(event.xdata), float(event.ydata))
+        if idx is not None and self._event_has_modifier(event, "ctrl"):
+            self._select_object(idx, center=False)
+            self._reject_selected(None)
+            return
         self._select_object(idx, center=False)
 
     def _on_motion(self, event) -> None:
@@ -894,6 +1020,8 @@ class SimplePolygonEditor:
             self._quit(None)
         elif event.key == "r":
             self._reject_selected(None)
+        elif event.key == "x":
+            self._reject_selected_and_advance()
         elif event.key == "a":
             self._keep_selected(None)
         elif event.key in ("right", "]"):
@@ -1823,15 +1951,39 @@ def run_annotation_session(
             rec["image"] = image_path.name
         morphology_records_all.extend(morph_records)
 
-        # Model-detection overlay (auto predictions only, yellow).
+        # Model-detection overlay (auto predictions only, yellow) on raw image.
         overlay_auto = _draw_polygons(image, auto_polygons_xy, color=(255, 255, 0), thickness=1)
         reviewed_detect_overlays_dir.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(reviewed_detect_overlays_dir / f"{output_name}_overlay.png"), overlay_auto)
 
-        # Reviewed overlay: auto (yellow) + user-corrected (white) on top.
+        # Model-detection overlay on contrast-enhanced display image.
+        overlay_auto_display = _draw_polygons(
+            _prepare_display_u8(image),
+            auto_polygons_xy,
+            color=(255, 255, 0),
+            thickness=1,
+        )
+        cv2.imwrite(
+            str(reviewed_detect_overlays_dir / f"{output_name}_overlay_display.png"),
+            overlay_auto_display,
+        )
+
+        # Reviewed overlay: auto (yellow) + user-corrected (white) on top (raw image).
         overlay_reviewed = _draw_polygons(overlay_auto, refined_polygons_xy, color=(255, 255, 255), thickness=2)
         overlays_dir.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(overlays_dir / f"{output_name}_overlay.png"), overlay_reviewed)
+
+        # Reviewed overlay on contrast-enhanced display image.
+        overlay_reviewed_display = _draw_polygons(
+            overlay_auto_display,
+            refined_polygons_xy,
+            color=(255, 255, 255),
+            thickness=2,
+        )
+        cv2.imwrite(
+            str(overlays_dir / f"{output_name}_overlay_display.png"),
+            overlay_reviewed_display,
+        )
 
         # Ellipse overlay — fitted ellipses drawn on top of the reviewed polygon overlay
         ellipse_vis = draw_ellipses_on_image(

@@ -10,7 +10,9 @@ scikit-learn
 matplotlib
 seaborn
 pandas
+openpyxl
 tqdm
 Pillow
 napari
 PyQt5
+scikit-image

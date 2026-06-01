@@ -48,6 +48,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import numpy as np
+import pandas as pd
 
 from analysis.morphology import analyze_instances
 from inference.inference import extract_instances_yolo
@@ -119,6 +120,24 @@ def parse_args() -> argparse.Namespace:
         help="Optional labels in sorted dataset ID order (must match dataset count).",
     )
     parser.add_argument(
+        "--label-map-xlsx",
+        default=None,
+        help=(
+            "Optional Excel file with grid to label mapping. "
+            "When provided, labels are auto-resolved from spreadsheet values."
+        ),
+    )
+    parser.add_argument(
+        "--label-map-grid-column",
+        default="Grid#",
+        help="Grid column name in label map workbook (default: Grid#).",
+    )
+    parser.add_argument(
+        "--label-map-label-column",
+        default="description",
+        help="Label/description column name in label map workbook (default: description).",
+    )
+    parser.add_argument(
         "--gui-labels",
         action="store_true",
         help="Prompt for dataset labels with a small Tkinter GUI dialog.",
@@ -164,6 +183,82 @@ def _grid_id_from_name(name: str, regex: str = DEFAULT_GRID_REGEX) -> Optional[i
 def _safe_id(text: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9_.-]+", "_", text.strip())
     return cleaned.strip("_") or "dataset"
+
+
+def _resolve_column(df: pd.DataFrame, requested: str, alternates: List[str]) -> Optional[str]:
+    available = {str(c).strip().lower(): str(c) for c in df.columns}
+    candidates = [requested] + alternates
+    for cand in candidates:
+        key = str(cand).strip().lower()
+        if key in available:
+            return available[key]
+    return None
+
+
+def _dataset_to_grid_number(dataset_id: str) -> Optional[int]:
+    # Accept IDs such as "grid4", "4", or other suffix-based tokens.
+    gid = _grid_id_from_name(dataset_id, r"grid(\d+)$")
+    if gid is not None:
+        return gid
+
+    m = re.search(r"(\d+)$", dataset_id)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
+def load_labels_from_xlsx(
+    xlsx_path: Path,
+    grid_column_name: str,
+    label_column_name: str,
+) -> Dict[int, str]:
+    if not xlsx_path.exists():
+        raise FileNotFoundError(f"Label map workbook not found: {xlsx_path}")
+
+    workbook = pd.ExcelFile(xlsx_path)
+    if not workbook.sheet_names:
+        raise ValueError(f"No sheets found in workbook: {xlsx_path}")
+
+    df = workbook.parse(workbook.sheet_names[0])
+    if df.empty:
+        raise ValueError(f"Label map workbook has no rows: {xlsx_path}")
+
+    grid_col = _resolve_column(df, grid_column_name, ["grid", "grid#", "grid id", "grid_id"])
+    label_col = _resolve_column(
+        df,
+        label_column_name,
+        ["description", "label", "condition", "group", "name"],
+    )
+
+    if grid_col is None:
+        raise ValueError(
+            f"Could not find grid column '{grid_column_name}' in workbook columns: {list(df.columns)}"
+        )
+    if label_col is None:
+        raise ValueError(
+            f"Could not find label column '{label_column_name}' in workbook columns: {list(df.columns)}"
+        )
+
+    label_map: Dict[int, str] = {}
+    for _, row in df.iterrows():
+        grid_val = row.get(grid_col)
+        label_val = row.get(label_col)
+        if pd.isna(grid_val):
+            continue
+        try:
+            grid_num = int(str(grid_val).strip())
+        except ValueError:
+            continue
+
+        label_text = "" if pd.isna(label_val) else str(label_val).strip()
+        if not label_text:
+            continue
+        label_map[grid_num] = label_text
+
+    return label_map
 
 
 def infer_dataset_id(path: Path, root: Path, mode: str, regex: str) -> str:
@@ -214,6 +309,9 @@ def resolve_dataset_labels(
     dataset_ids: List[str],
     cli_labels: Optional[List[str]],
     gui_labels: bool,
+    xlsx_path: Optional[Path] = None,
+    xlsx_grid_column: str = "Grid#",
+    xlsx_label_column: str = "description",
 ) -> Dict[str, str]:
     if cli_labels is not None:
         if len(cli_labels) != len(dataset_ids):
@@ -231,7 +329,18 @@ def resolve_dataset_labels(
             defaults[did] = did
 
     if not gui_labels:
-        return defaults
+        if xlsx_path is None:
+            return defaults
+
+        xlsx_map = load_labels_from_xlsx(xlsx_path, xlsx_grid_column, xlsx_label_column)
+        resolved = dict(defaults)
+        for did in dataset_ids:
+            grid_num = _dataset_to_grid_number(did)
+            if grid_num is None:
+                continue
+            if grid_num in xlsx_map:
+                resolved[did] = xlsx_map[grid_num]
+        return resolved
 
     try:
         import tkinter as tk
@@ -687,7 +796,15 @@ def main() -> None:
         sys.exit("ERROR: no images found after filtering; check input folders and rejects layout.")
 
     dataset_ids = sorted(dataset_images.keys())
-    dataset_labels = resolve_dataset_labels(dataset_ids, args.dataset_labels, args.gui_labels)
+    label_map_path = Path(args.label_map_xlsx) if args.label_map_xlsx else None
+    dataset_labels = resolve_dataset_labels(
+        dataset_ids,
+        args.dataset_labels,
+        args.gui_labels,
+        xlsx_path=label_map_path,
+        xlsx_grid_column=args.label_map_grid_column,
+        xlsx_label_column=args.label_map_label_column,
+    )
 
     print("Datasets found:")
     for did in dataset_ids:
