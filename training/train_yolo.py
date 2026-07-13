@@ -102,7 +102,7 @@ def visualize_augmented_samples(data_yaml: str, model_size: str = 'n', imgsz: in
     print("VISUALIZING AUGMENTED TRAINING SAMPLES")
     print("="*80 + "\n")
     
-    print("⚠️  IMPORTANT NOTE:")
+    print("[!]  IMPORTANT NOTE:")
     print("This visualization shows augmentations applied to IMAGES ONLY.")
     print("Masks shown are from original positions (not transformed).")
     print("During actual training, YOLO correctly transforms both images AND masks together.")
@@ -126,15 +126,15 @@ def visualize_augmented_samples(data_yaml: str, model_size: str = 'n', imgsz: in
     
     # Get the training augmentation pipeline
     print("Augmentation Pipeline (Artifact-Free Strategy):")
-    print("  Correct Order: Flip → Crop → Color")
+    print("  Correct Order: Flip -> Crop -> Color")
     print("  1. Random flips (horizontal & vertical, 50% each)")
     print("  2. Random crops (85-95% of flipped image, then resize back)")
-    print("  3. HSV color jitter (hue ±2%, saturation 0.4-1.6x, brightness 0.6-1.4x)")
+    print("  3. HSV color jitter (hue +/-2%, saturation 0.4-1.6x, brightness 0.6-1.4x)")
     print("  + Mosaic (combines 4 images)")
     print("  + Copy-Paste (0.3 probability)")
     print("  + MixUp (0.15 probability)")
-    print("  ✗ NO rotation (disabled to avoid black border artifacts)")
-    print("  ✗ NO shear/perspective (disabled to avoid artifacts)")
+    print("  [x] NO rotation (disabled to avoid black border artifacts)")
+    print("  [x] NO shear/perspective (disabled to avoid artifacts)")
     print("")
     
     # Load raw dataset
@@ -205,7 +205,7 @@ def visualize_augmented_samples(data_yaml: str, model_size: str = 'n', imgsz: in
                                        for i in range(0, len(coords), 2)], dtype=np.float32)
                     masks.append(polygon)
         
-        # Apply augmentation - CORRECT ORDER: flip → crop → color
+        # Apply augmentation - CORRECT ORDER: flip -> crop -> color
         aug_img = img.copy()
         h, w = img.shape[:2]
         
@@ -260,7 +260,7 @@ def visualize_augmented_samples(data_yaml: str, model_size: str = 'n', imgsz: in
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
     
-    print(f"✓ Augmentation samples saved to: {output_path}")
+    print(f"[OK] Augmentation samples saved to: {output_path}")
     
     # Also create individual samples with more detailed info
     print(f"\nGenerating detailed individual samples...")
@@ -295,24 +295,24 @@ def visualize_augmented_samples(data_yaml: str, model_size: str = 'n', imgsz: in
         plt.savefig(detail_dir / f'sample_{i+1}_comparison.png', dpi=150, bbox_inches='tight')
         plt.close()
     
-    print(f"✓ Detailed samples saved to: {detail_dir}")
+    print(f"[OK] Detailed samples saved to: {detail_dir}")
     print(f"\n{'='*80}")
     print("AUGMENTATION QUALITY CHECK:")
-    print("  ✓ Are vesicle boundaries still visible?")
-    print("  ✓ Are objects still recognizable after transformations?")
-    print("  ✓ Is the augmentation diversity sufficient?")
-    print("  ✓ No black artifacts or weird borders?")
-    print("\n⚠️  Note: Masks shown are NOT transformed (visualization only).")
+    print("  [OK] Are vesicle boundaries still visible?")
+    print("  [OK] Are objects still recognizable after transformations?")
+    print("  [OK] Is the augmentation diversity sufficient?")
+    print("  [OK] No black artifacts or weird borders?")
+    print("\n[!]  Note: Masks shown are NOT transformed (visualization only).")
     print("During training, YOLO transforms both images AND masks correctly.")
     print("To see actual augmented batches with transformed masks:")
-    print(f"  → Check: {Path(data_yaml).parent.parent / 'training' / '*' / 'train_batch*.jpg'}")
+    print(f"  -> Check: {Path(data_yaml).parent.parent / 'training' / '*' / 'train_batch*.jpg'}")
     print("="*80 + "\n")
 
 
 def apply_random_augmentation(img: np.ndarray, img_path: Path, labels_dir: Path) -> np.ndarray:
     """
     Apply random augmentation to an image for visualization.
-    Order matters: flip → crop → color jitter
+    Order matters: flip -> crop -> color jitter
     """
     import cv2
     
@@ -374,19 +374,24 @@ def create_yolo_yaml(dataset_root: str, output_path: str, class_names: List[str]
     with open(output_path, 'w') as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
     
-    print(f"✓ Created config: {output_path}")
+    print(f"[OK] Created config: {output_path}")
 
 
 def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int = 300, imgsz: int = 1024,
                            batch_size: int = 16, device: str = '0', project: str = 'yolo_results',
-                           name: str = 'vesicle_seg', patience: int = 50, overlap_mask: bool = True, 
-                           use_v11: bool = True, **kwargs):
+                           name: str = 'vesicle_seg', patience: int = 50, overlap_mask: bool = True,
+                           use_v11: bool = True, workers: int = 8, optimizer: str = 'AdamW',
+                           lr0: float = 0.002, lrf: float = 0.001,
+                           hsv_h: float = 0.015, hsv_s: float = 0.7, hsv_v: float = 0.4,
+                           degrees: float = 45.0, fliplr: float = 0.5, flipud: float = 0.5,
+                           mosaic: float = 1.0, mixup: float = 0.15, copy_paste: float = 0.3,
+                           **kwargs):
     """
     Train YOLO instance segmentation model with optimized hyperparameters for cryo-EM vesicles.
     
     Augmentation strategy optimized to avoid artifacts:
     - Primary: Flips, crops, color jitter (no artifacts)
-    - Secondary: Moderate rotation (±45° instead of ±90°)
+    - Secondary: Moderate rotation (+/-45 deg instead of +/-90 deg)
     - Advanced: Mosaic, copy-paste, mixup for instance learning
     
     Args:
@@ -407,79 +412,114 @@ def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int =
     print("Primary augmentations: color jitter, random crops, flips\n")
     
     model = YOLO(model_name)
-    
-    # Optimized training parameters - reduced rotation to avoid artifacts
+
+    import time, torch
+    torch.cuda.reset_peak_memory_stats()
+    t_start = time.time()
+
     results = model.train(
-        data=data_yaml, 
-        epochs=epochs, 
-        imgsz=imgsz, 
-        batch=batch_size, 
+        data=data_yaml,
+        epochs=epochs,
+        imgsz=imgsz,
+        batch=batch_size,
         device=device,
-        project=project, 
-        name=name, 
-        patience=patience, 
+        project=project,
+        name=name,
+        patience=patience,
         overlap_mask=overlap_mask,
-        
+
         # Mask generation
-        mask_ratio=4,  # Higher resolution masks
-        
-        # Data augmentation - ARTIFACT-FREE STRATEGY
-        # Color augmentations (safe, no artifacts)
-        hsv_h=0.015,       # Hue variation (reduced from 0.02)
-        hsv_s=0.7,         # Saturation variation (reduced from 0.8)
-        hsv_v=0.4,         # Brightness variation (reduced from 0.5)
-        
-        # Geometric augmentations
-        degrees=45.0,      # Rotation ±45° only (reduced from 90° to minimize artifacts)
-        translate=0.1,     # Translation (reduced from 0.15)
-        scale=0.5,         # Scaling 0.5x-1.5x (reduced from 0.7 = 0.3x-1.7x)
-        shear=0.0,         # No shear (disabled to avoid artifacts)
-        perspective=0.0,   # No perspective (disabled to avoid artifacts)
-        
-        # Flips (completely safe, no artifacts)
-        flipud=0.5,        # Vertical flip 50%
-        fliplr=0.5,        # Horizontal flip 50%
-        
-        # Advanced augmentations for instance segmentation
-        mosaic=1.0,        # Mosaic augmentation
-        mixup=0.15,        # MixUp for boundary learning
-        copy_paste=0.3,    # Copy-paste for instance segmentation
-        
-        # Optimizer settings
-        optimizer='AdamW', 
-        lr0=0.002,         # Initial learning rate
-        lrf=0.001,         # Final learning rate
+        mask_ratio=4,
+
+        # Data augmentation
+        hsv_h=hsv_h,
+        hsv_s=hsv_s,
+        hsv_v=hsv_v,
+        degrees=degrees,
+        translate=0.1,
+        scale=0.5,
+        shear=0.0,
+        perspective=0.0,
+        flipud=flipud,
+        fliplr=fliplr,
+        mosaic=mosaic,
+        mixup=mixup,
+        copy_paste=copy_paste,
+
+        # Optimizer
+        optimizer=optimizer,
+        lr0=lr0,
+        lrf=lrf,
         momentum=0.937,
-        weight_decay=0.0005, 
-        warmup_epochs=5.0, 
-        warmup_momentum=0.8, 
+        weight_decay=0.0005,
+        warmup_epochs=5.0,
+        warmup_momentum=0.8,
         warmup_bias_lr=0.1,
-        
+
         # Loss weights
         box=7.5, cls=0.5, dfl=1.5,
-        
+
         # Training settings
-        amp=True,          # Automatic mixed precision
-        fraction=1.0,      # Use all training data
+        amp=True,
+        fraction=1.0,
         profile=False,
-        close_mosaic=10,   # Disable mosaic in last 10 epochs
-        
+        close_mosaic=10,
+
         # System
-        workers=8,
+        workers=workers,
         seed=42,
         deterministic=False,
-        
+
         # Output
-        verbose=True, 
-        plots=True, 
-        save=True, 
-        save_period=50, 
+        verbose=True,
+        plots=True,
+        save=True,
+        save_period=50,
         exist_ok=False,
-        
+
         **kwargs
     )
-    
-    print(f"✓ Training complete: {results.save_dir}")
+
+    wall_secs = time.time() - t_start
+    h, rem = divmod(int(wall_secs), 3600)
+    m, s   = divmod(rem, 60)
+    peak_gb = torch.cuda.max_memory_allocated() / 1e9
+    total_gb = torch.cuda.get_device_properties(0).total_memory / 1e9 if torch.cuda.is_available() else 0
+
+    # Read best epoch from results.csv
+    import csv as _csv
+    results_csv = Path(results.save_dir) / 'results.csv'
+    best_ep, best_map50b, best_map50m = 0, 0.0, 0.0
+    if results_csv.exists():
+        with open(results_csv, newline='', encoding='utf-8') as _f:
+            rows = list(_csv.DictReader(_f))
+        rows = [{k.strip(): v for k, v in r.items()} for r in rows]
+        for i, r in enumerate(rows):
+            v = float(r.get('metrics/mAP50(M)', 0) or 0)
+            if v > best_map50m:
+                best_map50m = v
+                best_map50b = float(r.get('metrics/mAP50(B)', 0) or 0)
+                best_ep = i + 1
+
+    summary_lines = [
+        "=" * 60,
+        "TRAINING RUN SUMMARY",
+        "=" * 60,
+        f"Wall time:        {h:02d}:{m:02d}:{s:02d}",
+        f"Peak GPU memory:  {peak_gb:.2f} GB  (of {total_gb:.1f} GB)",
+        f"Epochs completed: {len(rows) if results_csv.exists() else '?'} / {epochs}",
+        f"Best epoch:       {best_ep}",
+        f"Best mAP50(B):    {best_map50b:.4f}",
+        f"Best mAP50(M):    {best_map50m:.4f}",
+        f"Hyperparams:      model=yolo{'11' if use_v11 else 'v8'}{model_size}-seg  "
+        f"optimizer={optimizer}  lr0={lr0}  lrf={lrf}  imgsz={imgsz}  batch={batch_size}",
+        "=" * 60,
+    ]
+    summary = "\n".join(summary_lines)
+    print("\n" + summary)
+    (Path(results.save_dir) / 'run_summary.txt').write_text(summary + "\n", encoding='utf-8')
+
+    print(f"[OK] Training complete: {results.save_dir}")
     return results
 
 
@@ -498,7 +538,7 @@ def validate_yolo_model(model_path: str, data_yaml: str, imgsz: int = 1024, batc
     results = model.val(**val_kwargs)
     
     if results.seg:
-        print(f"✓ Validation Metrics:")
+        print(f"[OK] Validation Metrics:")
         print(f"  Box mAP@0.5: {results.box.map50:.4f}")
         print(f"  Box mAP@0.5:0.95: {results.box.map:.4f}")
         print(f"  Mask mAP@0.5: {results.seg.map50:.4f}")
@@ -759,103 +799,113 @@ def match_objects_hungarian(pred_masks: List[np.ndarray], gt_masks: List[np.ndar
     
     return matches, unmatched_preds, unmatched_gts
 
-def visualize_predictions_with_matching(model_path: str, source_dir: str, label_dir: str, output_dir: str, 
-                                       imgsz: int = 1024, conf: float = 0.25, iou: float = 0.7, 
-                                       device: str = '0', match_threshold: float = 0.5):
+def visualize_predictions_with_matching(model_path: str, source_dir: str, label_dir: str, output_dir: str,
+                                       imgsz: int = 1024, conf: float = 0.25, iou: float = 0.7,
+                                       device: str = '0', match_threshold: float = 0.5,
+                                       class_names: List[str] = None):
     """
-    Visualize predictions with color coding:
-    - Green: Correctly matched predictions (TP)
-    - Yellow: False positives (predicted but not matching any GT)
-    - Red: False negatives (GT objects not detected)
+    Visualize predictions broken out per class.
+    Layout: [Original] [Class 0 overlay] [Class 1 overlay] ...
+
+    Each class panel uses the same color scheme:
+      Green  = TP (correct detection of this class)
+      Yellow = FP (predicted this class but no matching GT)
+      Red    = FN (GT was this class but missed)
     """
     import matplotlib.pyplot as plt
     from matplotlib.patches import Patch
-    
+
+    if class_names is None:
+        class_names = ['EV', 'multilayer EV']
+
+    COLOR = {'tp': np.array([0, 220, 0]), 'fp': np.array([255, 220, 0]), 'fn': np.array([255, 40, 40])}
+    ALPHA = 0.6
+
+    legend_elements = [
+        Patch(facecolor=COLOR['tp']/255, alpha=0.8, label='TP – correct'),
+        Patch(facecolor=COLOR['fp']/255, alpha=0.8, label='FP – hallucination'),
+        Patch(facecolor=COLOR['fn']/255, alpha=0.8, label='FN – missed'),
+    ]
+
     output_vis_dir = Path(output_dir) / 'visualizations'
     output_vis_dir.mkdir(parents=True, exist_ok=True)
-    
+
     img_paths = sorted(Path(source_dir).glob('*'))
     print(f"Found {len(img_paths)} images in {source_dir}")
-    
+
     for img_path in tqdm(img_paths, desc="Visualizing with matching"):
         if img_path.suffix.lower() not in ['.png', '.jpg', '.jpeg', '.tif', '.tiff']:
             continue
-        
-        # Load image
+
         img = np.array(Image.open(img_path).convert('RGB'))
         h, w = img.shape[:2]
-        
-        # Load predictions using the SAME method as metrics
-        pred_masks, confidences = load_predictions_from_model(
+
+        pred_masks, confidences, pred_classes = load_predictions_with_classes_from_model(
             model_path, str(img_path), imgsz, conf, iou, device
         )
-        
-        # Load ground truth
         label_path = Path(label_dir) / f"{img_path.stem}.txt"
-        gt_masks = load_gt_masks_from_labels(label_path, w, h)
-        
-        # Match objects
+        gt_masks, gt_classes = load_gt_masks_and_classes_from_labels(label_path, w, h)
+
         matches, unmatched_preds, unmatched_gts = match_objects_hungarian(
             pred_masks, gt_masks, iou_threshold=match_threshold
         )
-        
-        # Create visualization
-        overlay = img.copy().astype(float)
-        
-        # Green: True positives (matched predictions)
-        for pred_idx, gt_idx in matches:
-            mask = pred_masks[pred_idx]
-            overlay[mask] = overlay[mask] * 0.4 + np.array([0, 255, 0]) * 0.6
-        
-        # Yellow: False positives (unmatched predictions)
-        for pred_idx in unmatched_preds:
-            mask = pred_masks[pred_idx]
-            overlay[mask] = overlay[mask] * 0.4 + np.array([255, 255, 0]) * 0.6
-        
-        # Red: False negatives (unmatched ground truth)
-        for gt_idx in unmatched_gts:
-            mask = gt_masks[gt_idx]
-            overlay[mask] = overlay[mask] * 0.4 + np.array([255, 0, 0]) * 0.6
-        
-        overlay = overlay.astype(np.uint8)
-        
-        # Calculate metrics for this image
-        tp = len(matches)
-        fp = len(unmatched_preds)
-        fn = len(unmatched_gts)
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-        
-        # Plot with two subplots: original image and overlay
-        fig, axes = plt.subplots(1, 2, figsize=(20, 10))
-        
-        # Left: overlay with predictions
-        axes[0].imshow(overlay)
-        title = (f'Pred={len(pred_masks)}, GT={len(gt_masks)} | '
-            f'TP={tp}, FP={fp}, FN={fn}\n'
-            f'Precision: {precision:.3f}, Recall: {recall:.3f} | '
-            f'Conf≥{conf:.2f}, NMS_IoU≥{iou:.2f}, Match_IoU≥{match_threshold:.2f}')
-        axes[0].set_title(title, fontsize=12, fontweight='bold')
+
+        n_cols = 1 + len(class_names)
+        fig, axes = plt.subplots(1, n_cols, figsize=(11 * n_cols, 10))
+
+        # Column 0: original
+        axes[0].imshow(img)
+        axes[0].set_title('Original', fontsize=12, fontweight='bold')
         axes[0].axis('off')
-        
-        # Add legend to left subplot
-        legend_elements = [
-            Patch(facecolor='green', alpha=0.6, label=f'True Positives (TP): {tp}'),
-            Patch(facecolor='yellow', alpha=0.6, label=f'False Positives (FP): {fp}'),
-            Patch(facecolor='red', alpha=0.6, label=f'False Negatives (FN): {fn}')
-        ]
-        axes[0].legend(handles=legend_elements, loc='upper right', fontsize=10)
-        
-        # Right: original image
-        axes[1].imshow(img)
-        axes[1].set_title('Original Image', fontsize=12, fontweight='bold')
-        axes[1].axis('off')
-        
+
+        # One column per class
+        for cid, cname in enumerate(class_names):
+            overlay = img.copy().astype(float)
+            tp_c, fp_c, fn_c = 0, 0, 0
+
+            for pred_idx, gt_idx in matches:
+                if pred_classes[pred_idx] == cid and gt_classes[gt_idx] == cid:
+                    overlay[pred_masks[pred_idx]] = overlay[pred_masks[pred_idx]] * (1-ALPHA) + COLOR['tp'] * ALPHA
+                    tp_c += 1
+                elif pred_classes[pred_idx] == cid:
+                    overlay[pred_masks[pred_idx]] = overlay[pred_masks[pred_idx]] * (1-ALPHA) + COLOR['fp'] * ALPHA
+                    fp_c += 1
+                elif gt_classes[gt_idx] == cid:
+                    overlay[gt_masks[gt_idx]] = overlay[gt_masks[gt_idx]] * (1-ALPHA) + COLOR['fn'] * ALPHA
+                    fn_c += 1
+
+            for pred_idx in unmatched_preds:
+                if (pred_idx < len(pred_classes)) and pred_classes[pred_idx] == cid:
+                    overlay[pred_masks[pred_idx]] = (
+                        overlay[pred_masks[pred_idx]] * (1-ALPHA) + COLOR['fp'] * ALPHA)
+                    fp_c += 1
+
+            for gt_idx in unmatched_gts:
+                if (gt_idx < len(gt_classes)) and gt_classes[gt_idx] == cid:
+                    overlay[gt_masks[gt_idx]] = (
+                        overlay[gt_masks[gt_idx]] * (1-ALPHA) + COLOR['fn'] * ALPHA)
+                    fn_c += 1
+
+            prec = tp_c / (tp_c + fp_c) if (tp_c + fp_c) > 0 else 0.0
+            rec  = tp_c / (tp_c + fn_c) if (tp_c + fn_c) > 0 else 0.0
+            ax = axes[cid + 1]
+            ax.imshow(overlay.astype(np.uint8))
+            ax.set_title(f'{cname}\nTP={tp_c}  FP={fp_c}  FN={fn_c}'
+                         f'   P={prec:.3f}  R={rec:.3f}', fontsize=11, fontweight='bold')
+            ax.axis('off')
+            ax.legend(handles=legend_elements, loc='upper right', fontsize=9, framealpha=0.7)
+
+        all_tp, all_fp, all_fn = len(matches), len(unmatched_preds), len(unmatched_gts)
+        fig.suptitle(
+            f'{img_path.name}  —  Overall: TP={all_tp} FP={all_fp} FN={all_fn}'
+            f'   conf≥{conf:.2f}  match_iou≥{match_threshold:.2f}',
+            fontsize=11, y=1.01
+        )
         plt.tight_layout()
         plt.savefig(output_vis_dir / f"{img_path.stem}_matched.png", dpi=150, bbox_inches='tight')
         plt.close()
-    
-    print(f"✓ Visualizations saved to {output_vis_dir}")
+
+    print(f"[OK] Visualizations saved to {output_vis_dir}")
 
 
 def calculate_segmentation_metrics(model_path: str, img_dir: str, label_dir: str,
@@ -1010,7 +1060,7 @@ def optimize_thresholds(model_path: str, img_dir: str, label_dir: str,
     best_params = None
     results = []
     
-    print(f"\nTesting {len(conf_values)} × {len(iou_values)} × {len(match_values)} = "
+    print(f"\nTesting {len(conf_values)} x {len(iou_values)} x {len(match_values)} = "
           f"{len(conf_values) * len(iou_values) * len(match_values)} combinations...\n")
     
     total_tests = len(conf_values) * len(iou_values) * len(match_values)
@@ -1059,7 +1109,7 @@ def optimize_thresholds(model_path: str, img_dir: str, label_dir: str,
     print(f"\nTop 5 Configurations:")
     sorted_results = sorted(results, key=lambda x: x['f1'], reverse=True)
     for i, r in enumerate(sorted_results[:5], 1):
-        print(f"  {i}. conf={r['conf']:.2f}, iou={r['iou']:.2f}, match={r['match']:.2f} → "
+        print(f"  {i}. conf={r['conf']:.2f}, iou={r['iou']:.2f}, match={r['match']:.2f} -> "
               f"F1={r['f1']:.3f}, P={r['precision']:.3f}, R={r['recall']:.3f}")
     
     print("="*60 + "\n")
@@ -1098,7 +1148,7 @@ def save_metrics_to_file(metrics: Dict, output_path: Path, split_name: str, para
         f.write(f"  Semantic IoU:         {metrics['semantic_iou']:.4f}\n")
         f.write(f"="*60 + "\n")
     
-    print(f"✓ Metrics saved to {output_path}")
+    print(f"[OK] Metrics saved to {output_path}")
 
 
 def print_metrics_summary(metrics: Dict, split_name: str, params: Dict):
@@ -1223,26 +1273,26 @@ def main():
     # CONFIGURATION
     # =====================================================================
     CONFIG = {
-        # Data paths - collapsed 2-class dataset (under experiments/)
-        'train_dir': r'C:\Users\ML-2619\Desktop\Pujan Cryo\cryo-ev pipeline\data\experiments\CryoAI.v4i.yolov8\collapsed_2class\train',
-        'val_dir':   r'C:\Users\ML-2619\Desktop\Pujan Cryo\cryo-ev pipeline\data\experiments\CryoAI.v4i.yolov8\collapsed_2class\valid',
-        'test_dir':  r'C:\Users\ML-2619\Desktop\Pujan Cryo\cryo-ev pipeline\data\experiments\CryoAI.v4i.yolov8\collapsed_2class\test',
-        'output_root': r'C:\Users\ML-2619\Desktop\Pujan Cryo\cryo-ev pipeline\data\experiments\CryoAI.v4i.yolov8\collapsed_2class',
-        'dataset_id': 'CryoAI.v4i.yolov8_collapsed_2class',
-        'run_notes': 'YOLO11n-seg 300-epoch 1024px run on collapsed 2-class EV dataset with Multilayer included (conf=0.35, iou=0.5, match=0.30)',
-        'run_label': 'multilayer_ep300_cfg035_05_03',
-        
+        # Data paths - stratified EV/multilayer-EV dataset
+        'train_dir': r'C:\Users\pujan\Desktop\cryoEV\Carney CryoEV\training outputs\roboflow20260604_stratified\images\train',
+        'val_dir':   r'C:\Users\pujan\Desktop\cryoEV\Carney CryoEV\training outputs\roboflow20260604_stratified\images\val',
+        'test_dir':  r'C:\Users\pujan\Desktop\cryoEV\Carney CryoEV\training outputs\roboflow20260604_stratified\images\test',
+        'output_root': r'C:\Users\pujan\Desktop\cryoEV\Carney CryoEV\training outputs\roboflow20260604_stratified',
+        'dataset_id': 'roboflow20260604_stratified',
+        'run_notes': 'yolov8s-seg, SGD lr0=0.01, imgsz=768, batch=2, 300ep, patience=75 — improved over AdamW nano baseline',
+        'run_label': 'SGD_s_768_Run1',
+
         # Model configuration
-        'class_names': ['Spherical', 'Multilayer'],
-        'model_size': 'n',  # Options: 'n', 's', 'm', 'l', 'x'
-        'experiment_name': None,  # Auto-generated below as YYYY-MM-DD_HHMMSS_y11n_2class_1024_ep300_...
-        'USE_YOLOV11': True,  # Set True for YOLOv11, False for YOLOv8
-        
-        # Training parameters (requested long run)
+        'class_names': ['EV', 'multilayer EV'],
+        'model_size': 's',       # was 'n' — small model for better capacity
+        'experiment_name': None,  # Auto-generated below
+        'USE_YOLOV11': False,     # YOLOv8
+
+        # Training parameters
         'epochs': 300,
-        'imgsz': 1024,
-        'batch_size': 16,
-        'patience': 50,
+        'imgsz': 768,
+        'batch_size': 2,
+        'patience': 75,           # was 50
         'device': '0',
         
         # Inference parameters
@@ -1259,6 +1309,10 @@ def main():
         
         # If not training, specify path to existing model (leave None to auto-fill)
         'pretrained_model_path': None,
+
+        # Set to an existing dataset.yaml path to skip the prepare step entirely.
+        # Leave None to run prepare_yolo_dataset() as normal.
+        'dataset_yaml_override': r'C:\Users\pujan\Desktop\cryoEV\Carney CryoEV\training outputs\roboflow20260604_stratified\dataset.yaml',
     }
 
     if not CONFIG.get('experiment_name'):
@@ -1295,34 +1349,39 @@ def main():
     print("="*80)
     print("STEP 1: DATASET PREPARATION")
     print("="*80 + "\n")
-    
-    # Prepare train split
-    train_stats = prepare_yolo_dataset(CONFIG['train_dir'], str(yolo_dataset_root), 'train')
-    print(f"✓ Train: {train_stats['n_images']} images, {train_stats['n_instances']} instances")
-    
-    # Prepare val split
-    val_stats = prepare_yolo_dataset(CONFIG['val_dir'], str(yolo_dataset_root), 'val')
-    print(f"✓ Val:   {val_stats['n_images']} images, {val_stats['n_instances']} instances")
-    
-    # Prepare test split (if exists)
-    test_dir = Path(CONFIG['test_dir'])
-    if test_dir.exists() and 'test' in CONFIG['INFERENCE_SPLITS']:
-        test_stats = prepare_yolo_dataset(CONFIG['test_dir'], str(yolo_dataset_root), 'test')
-        print(f"✓ Test:  {test_stats['n_images']} images, {test_stats['n_instances']} instances")
-    else:
-        if 'test' in CONFIG['INFERENCE_SPLITS']:
-            print(f"⚠ Test directory not found: {test_dir}")
-            CONFIG['INFERENCE_SPLITS'].remove('test')
-    
-    # Create YOLO config file
-    yaml_path = yolo_dataset_root / 'dataset.yaml'
-    create_yolo_yaml(str(yolo_dataset_root), str(yaml_path), CONFIG['class_names'])
 
-    split_stats = {
-        'train': train_stats,
-        'val': val_stats,
-        'test': test_stats if 'test_stats' in locals() else {},
-    }
+    if CONFIG.get('dataset_yaml_override'):
+        yaml_path = Path(CONFIG['dataset_yaml_override'])
+        print(f"[OK] Using existing dataset yaml: {yaml_path}")
+        split_stats = {'train': {}, 'val': {}, 'test': {}}
+    else:
+        # Prepare train split
+        train_stats = prepare_yolo_dataset(CONFIG['train_dir'], str(yolo_dataset_root), 'train')
+        print(f"[OK] Train: {train_stats['n_images']} images, {train_stats['n_instances']} instances")
+
+        # Prepare val split
+        val_stats = prepare_yolo_dataset(CONFIG['val_dir'], str(yolo_dataset_root), 'val')
+        print(f"[OK] Val:   {val_stats['n_images']} images, {val_stats['n_instances']} instances")
+
+        # Prepare test split (if exists)
+        test_dir = Path(CONFIG['test_dir'])
+        if test_dir.exists() and 'test' in CONFIG['INFERENCE_SPLITS']:
+            test_stats = prepare_yolo_dataset(CONFIG['test_dir'], str(yolo_dataset_root), 'test')
+            print(f"[OK] Test:  {test_stats['n_images']} images, {test_stats['n_instances']} instances")
+        else:
+            if 'test' in CONFIG['INFERENCE_SPLITS']:
+                print(f"[!] Test directory not found: {test_dir}")
+                CONFIG['INFERENCE_SPLITS'].remove('test')
+
+        # Create YOLO config file
+        yaml_path = yolo_dataset_root / 'dataset.yaml'
+        create_yolo_yaml(str(yolo_dataset_root), str(yaml_path), CONFIG['class_names'])
+
+        split_stats = {
+            'train': train_stats,
+            'val': val_stats,
+            'test': test_stats if 'test_stats' in locals() else {},
+        }
     
     # =====================================================================
     # OPTIONAL: VISUALIZE AUGMENTATIONS
@@ -1374,14 +1433,20 @@ def main():
             name=CONFIG['experiment_name'],
             patience=CONFIG['patience'],
             use_v11=CONFIG['USE_YOLOV11'],
+            optimizer='SGD',
+            lr0=0.01,
+            lrf=0.001,
+            copy_paste=0.3,
+            mosaic=0.8,
+            workers=0,
         )
         
         # Use the actual Ultralytics save directory in case the run name is adjusted.
         training_output = Path(results.save_dir)
         CONFIG['experiment_name'] = training_output.name
         best_model_path = training_output / 'weights' / 'best.pt'
-        print(f"\n✓ Training complete!")
-        print(f"✓ Best model saved to: {best_model_path}")
+        print(f"\n[OK] Training complete!")
+        print(f"[OK] Best model saved to: {best_model_path}")
         
         # Validate on validation set
         print("\n" + "="*80)
@@ -1435,14 +1500,14 @@ def main():
         best_model_path = Path(CONFIG['pretrained_model_path'])
         
         if not best_model_path.exists():
-            print(f"❌ Error: Model not found at {best_model_path}")
+            print(f"[ERR] Error: Model not found at {best_model_path}")
             print(f"   Please set DO_TRAINING=True to train a new model")
             print(f"   Or update 'pretrained_model_path' in CONFIG")
             return
         
-        training_output = best_model_path.parent.parent  # runs/<exp>/weights/best.pt → runs/<exp>/
+        training_output = best_model_path.parent.parent  # runs/<exp>/weights/best.pt -> runs/<exp>/
         CONFIG['experiment_name'] = training_output.name
-        print(f"✓ Loaded model: {best_model_path}")
+        print(f"[OK] Loaded model: {best_model_path}")
     
     # =====================================================================
     # STEP 3: OPTIMIZE THRESHOLDS (Optional)
@@ -1468,7 +1533,7 @@ def main():
         CONFIG['iou_threshold'] = best_params['iou']
         CONFIG['match_threshold'] = best_params['match']
         
-        print(f"✓ Updated CONFIG with optimized thresholds")
+        print(f"[OK] Updated CONFIG with optimized thresholds")
         
         # Save optimization results
         opt_results_file = training_output / 'threshold_optimization_results.txt'
@@ -1483,7 +1548,7 @@ def main():
             f.write(f"  F1 Score:  {best_metrics['object_f1']:.4f}\n")
             f.write(f"  Precision: {best_metrics['object_precision']:.4f}\n")
             f.write(f"  Recall:    {best_metrics['object_recall']:.4f}\n")
-        print(f"✓ Optimization results saved to {opt_results_file}")
+        print(f"[OK] Optimization results saved to {opt_results_file}")
     
     # =====================================================================
     # STEP 4: RUN INFERENCE ON ALL SPLITS
@@ -1505,7 +1570,7 @@ def main():
             split_output_dir.mkdir(parents=True, exist_ok=True)
             
             if not split_images_dir.exists():
-                print(f"⚠ Skipping {split}: directory not found")
+                print(f"[!] Skipping {split}: directory not found")
                 continue
             
             # Create visualizations
@@ -1595,33 +1660,33 @@ def main():
     print("Output Structure:")
     print(f"{'='*80}")
     print(f"{output_root}/")
-    print(f"├── dataset/")
-    print(f"│   ├── images/")
-    print(f"│   │   ├── train/")
-    print(f"│   │   ├── val/")
-    print(f"│   │   └── test/")
-    print(f"│   ├── labels/")
-    print(f"│   │   ├── train/")
-    print(f"│   │   ├── val/")
-    print(f"│   │   └── test/")
-    print(f"│   └── dataset.yaml")
-    print(f"└── runs/")
-    print(f"    └── {CONFIG['experiment_name']}/")
-    print(f"        ├── weights/  (best.pt, last.pt)")
-    print(f"        ├── results.csv")
-    print(f"        ├── run_manifest.yaml")
+    print(f"+-- dataset/")
+    print(f"|   +-- images/")
+    print(f"|   |   +-- train/")
+    print(f"|   |   +-- val/")
+    print(f"|   |   \-- test/")
+    print(f"|   +-- labels/")
+    print(f"|   |   +-- train/")
+    print(f"|   |   +-- val/")
+    print(f"|   |   \-- test/")
+    print(f"|   \-- dataset.yaml")
+    print(f"\-- runs/")
+    print(f"    \-- {CONFIG['experiment_name']}/")
+    print(f"        +-- weights/  (best.pt, last.pt)")
+    print(f"        +-- results.csv")
+    print(f"        +-- run_manifest.yaml")
     if CONFIG['DO_INFERENCE'] and all_metrics:
-        print(f"        └── inference/")
+        print(f"        \-- inference/")
         for split in CONFIG['INFERENCE_SPLITS']:
             if split in all_metrics:
-                print(f"            ├── {split}/")
-                print(f"            │   ├── visualizations/")
-                print(f"            │   └── metrics_{split}.txt")
+                print(f"            +-- {split}/")
+                print(f"            |   +-- visualizations/")
+                print(f"            |   \-- metrics_{split}.txt")
     else:
-        print(f"        └── inference/  [set DO_INFERENCE=True to generate]")
+        print(f"        \-- inference/  [set DO_INFERENCE=True to generate]")
     print(f"{'='*80}\n")
     
-    print(f"✓ All results saved to: {output_root}")
+    print(f"[OK] All results saved to: {output_root}")
     print(f"{'='*80}\n")
 
 

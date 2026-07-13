@@ -8,9 +8,32 @@ from datetime import datetime
 from pathlib import Path
 
 import yaml
+import subprocess
 
 
 DEFAULT_OUTPUT_ROOT = Path(r"C:\Users\ML-2619\Desktop\Pujan Cryo\cryo-ev pipeline\data\experiments")
+
+
+def get_gpu_info():
+    """Get GPU utilization and memory from nvidia-smi."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            parts = result.stdout.strip().split("\n")[0].split(", ")
+            if len(parts) >= 4:
+                return {
+                    "gpu_util": parts[0].strip() + "%",
+                    "mem_used": parts[1].strip() + "MB",
+                    "mem_total": parts[2].strip() + "MB",
+                    "temp": parts[3].strip() + "°C",
+                }
+    except Exception:
+        pass
+    return {"gpu_util": "N/A", "mem_used": "N/A", "mem_total": "N/A", "temp": "N/A"}
 
 
 def run_activity_time(run_dir: Path) -> float:
@@ -26,7 +49,7 @@ def run_activity_time(run_dir: Path) -> float:
 
 
 def find_run_dirs(output_root: Path) -> list[Path]:
-    """Find all run directories under the experiments tree."""
+    """Find all run directories under common output layouts."""
     run_dirs: list[Path] = []
 
     for runs_dir in output_root.glob("**/runs"):
@@ -38,7 +61,25 @@ def find_run_dirs(output_root: Path) -> list[Path]:
     if legacy_root.exists():
         run_dirs.extend([p for p in legacy_root.iterdir() if p.is_dir()])
 
-    return run_dirs
+    # Direct-output layout (e.g., Ultralytics project=<output_root>).
+    if output_root.exists() and output_root.is_dir():
+        for p in output_root.iterdir():
+            if not p.is_dir():
+                continue
+            if (p / "args.yaml").exists() or (p / "results.csv").exists() or (p / "weights").exists():
+                run_dirs.append(p)
+
+    # Deduplicate while preserving order.
+    deduped: list[Path] = []
+    seen = set()
+    for p in run_dirs:
+        rp = str(p.resolve())
+        if rp in seen:
+            continue
+        seen.add(rp)
+        deduped.append(p)
+
+    return deduped
 
 
 def parse_latest_run(output_root: Path) -> Path:
@@ -102,11 +143,13 @@ def clear_screen() -> None:
 
 def print_status(run_dir: Path, total_epochs: int, rows: list[dict], started_at: float) -> None:
     clear_screen()
+    gpu = get_gpu_info()
     print("=" * 72)
     print("YOLO TRAINING MONITOR")
     print("=" * 72)
     print(f"Run folder : {run_dir}")
     print(f"Updated    : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"GPU        : {gpu['gpu_util']} | Mem: {gpu['mem_used']}/{gpu['mem_total']} | {gpu['temp']}")
 
     if not rows:
         print("\nWaiting for `results.csv` to receive its first epoch...\n")
@@ -116,7 +159,9 @@ def print_status(run_dir: Path, total_epochs: int, rows: list[dict], started_at:
     completed_epochs = len(rows)
     progress = (completed_epochs / total_epochs * 100.0) if total_epochs else 0.0
 
-    elapsed = time.time() - started_at
+    elapsed = to_float(latest.get("time", "0"), default=0.0)
+    if elapsed <= 0:
+        elapsed = time.time() - started_at
     avg_epoch_time = elapsed / completed_epochs if completed_epochs else 0
     eta = avg_epoch_time * max(total_epochs - completed_epochs, 0)
 
@@ -141,18 +186,21 @@ def print_status(run_dir: Path, total_epochs: int, rows: list[dict], started_at:
     print("-" * 72)
 
 
-def monitor(output_root: Path, interval: int) -> None:
-    run_dir: Path | None = None
+def monitor(output_root: Path, interval: int, run_dir: Path | None = None) -> None:
+    target_run_dir = run_dir
+    active_run_dir: Path | None = None
     results_csv: Path | None = None
     total_epochs = 0
     started_at = time.time()
 
     while True:
-        latest_run = parse_latest_run(output_root)
-        if run_dir != latest_run:
-            run_dir = latest_run
-            args = read_args(run_dir)
-            results_csv = run_dir / "results.csv"
+        latest_run = target_run_dir if target_run_dir is not None else parse_latest_run(output_root)
+        if target_run_dir is not None and not latest_run.exists():
+            raise FileNotFoundError(f"Run directory not found: {latest_run}")
+        if active_run_dir != latest_run:
+            active_run_dir = latest_run
+            args = read_args(active_run_dir)
+            results_csv = active_run_dir / "results.csv"
             total_epochs = int(args.get("epochs", 0) or 0)
             started_at = results_csv.stat().st_mtime if results_csv.exists() else time.time()
 
@@ -160,14 +208,17 @@ def monitor(output_root: Path, interval: int) -> None:
         if rows and results_csv is not None and results_csv.exists():
             started_at = min(started_at, results_csv.stat().st_mtime)
 
-        print_status(run_dir, total_epochs, rows, started_at)
+        if active_run_dir is None:
+            raise FileNotFoundError("No run directory detected to monitor.")
 
-        newer_run_exists = parse_latest_run(output_root) != run_dir
+        print_status(active_run_dir, total_epochs, rows, started_at)
+
+        newer_run_exists = (parse_latest_run(output_root) != active_run_dir) if target_run_dir is None else False
         finished = (
             rows
             and total_epochs
             and len(rows) >= total_epochs
-            and (run_dir / "weights" / "best.pt").exists()
+            and (active_run_dir / "weights" / "best.pt").exists()
         )
         if finished and not newer_run_exists:
             print("\nTraining appears complete. Monitor exiting.\n")
@@ -179,6 +230,7 @@ def monitor(output_root: Path, interval: int) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Live monitor for the latest YOLO training run.")
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT, help="Training output root containing LATEST_RUN.txt")
+    parser.add_argument("--run-dir", type=Path, default=None, help="Optional explicit run directory to monitor")
     parser.add_argument("--interval", type=int, default=5, help="Refresh interval in seconds")
     args = parser.parse_args()
-    monitor(args.output_root, args.interval)
+    monitor(args.output_root, args.interval, args.run_dir)

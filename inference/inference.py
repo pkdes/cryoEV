@@ -30,7 +30,7 @@ from inference.perf_log import PerformanceLogger
 
 from analysis.morphology import (
     analyze_instances, save_morphology_csv,
-    draw_ellipses_on_image, plot_morphology_distributions,
+    draw_ellipses_on_image, draw_polygons_on_image, plot_morphology_distributions,
 )
 
 
@@ -83,6 +83,7 @@ def extract_instances_yolo(
         for raw_mask, box, poly in zip(result.masks.data, result.boxes, polygons_xy):
             # Normalise to a clean 2-D boolean mask regardless of what
             # the predictor returns (could be (H,W), (1,H,W), (H,W,1), uint8, etc.)
+            raw_mask = raw_mask.detach().cpu().numpy() if hasattr(raw_mask, 'cpu') else raw_mask
             mask = np.asarray(raw_mask).squeeze()
             if mask.ndim != 2:
                 continue
@@ -407,6 +408,13 @@ def predict_with_review(
     cv2.imwrite(
         str(output_path / f"{base_name}_ellipses.png"),
         cv2.cvtColor(ellipse_vis, cv2.COLOR_RGB2BGR)
+    )
+
+    # Save polygon (true boundary) + ellipse overlay, for comparing fit quality
+    overlay_vis = draw_polygons_on_image(image, filtered_polygons, morph_records)
+    cv2.imwrite(
+        str(output_path / f"{base_name}_overlay.png"),
+        cv2.cvtColor(overlay_vis, cv2.COLOR_RGB2BGR)
     )
 
     # Save morphology distribution plot

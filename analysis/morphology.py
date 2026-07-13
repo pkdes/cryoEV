@@ -302,6 +302,52 @@ def draw_ellipses_on_image(
     return vis
 
 
+def draw_polygons_on_image(
+    image: np.ndarray,
+    polygon_points_list: List[Optional[np.ndarray]],
+    records: Optional[List[Dict]] = None,
+    polygon_color: Tuple[int, int, int] = (0, 255, 0),
+    ellipse_color: Tuple[int, int, int] = (255, 0, 0),
+    thickness: int = 2,
+) -> np.ndarray:
+    """
+    Draw raw segmentation polygon outlines (the true detected boundary) on
+    the image. If `records` is given, also draws each object's fitted
+    ellipse in a second color so the two can be compared directly.
+
+    Args:
+        image: Grayscale or RGB image.
+        polygon_points_list: List of Nx2 polygon vertex arrays (one per
+            object), as returned by extract_instances_yolo(). Entries may
+            be None (skipped).
+        records: Optional morphology records from analyze_instances(), used
+            to overlay the fitted ellipse for comparison.
+        polygon_color: Polygon outline color (RGB).
+        ellipse_color: Ellipse outline color (RGB).
+        thickness: Line thickness.
+
+    Returns:
+        RGB image with polygon outlines (and optionally ellipses) drawn.
+    """
+    if len(image.shape) == 2:
+        vis = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+    else:
+        vis = image.copy()
+
+    if records:
+        vis = draw_ellipses_on_image(vis, [], records, color=ellipse_color, thickness=thickness)
+
+    for poly in polygon_points_list:
+        if poly is None:
+            continue
+        pts = np.asarray(poly, dtype=np.float32)
+        if pts.ndim != 2 or pts.shape[1] != 2 or len(pts) < 3:
+            continue
+        cv2.polylines(vis, [pts.astype(np.int32)], isClosed=True, color=polygon_color, thickness=thickness)
+
+    return vis
+
+
 def plot_morphology_distributions(
     records: List[Dict],
     pixel_size: Optional[float] = None,
