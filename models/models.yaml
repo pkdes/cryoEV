@@ -1,0 +1,35 @@
+# Registry of exported EV segmentation models, read by inference/predict_models.py.
+# weights paths are relative to the repo root. imgsz is the model's own inference size -- keep it.
+# val_mask_map50_95 is each model's OWN val set (different sets, different sizes): not comparable across models.
+
+models:
+  v3_run1_20260824:
+    weights: models/v3_run1_20260824/best.pt
+    imgsz: 1440
+    class_name: EV
+    annotation: all membrane layers as separate polygons (multilayer recoverable via containment)
+    arch: yolov8n-seg, rect, overlap_mask=False, ultralytics 8.4.94
+    train_data: roboflow - 20260824 cryoai v3 (51 train / 20 val / 99 test images)
+    val_mask_map50_95: 0.666   # 20 val images
+    test_detection: P=0.810 R=0.862 F1=0.835   # 99 test images
+    note: Current best. Known issues - over-detects holey-carbon texture, sparse hallucinations on blank ice, misses small/faint EVs.
+
+  allLayer_run14_20260713:
+    weights: models/allLayer_run14_20260713/best.pt
+    imgsz: 1440
+    class_name: EV
+    annotation: all membrane layers as separate polygons
+    arch: yolov8n-seg, rect, overlap_mask=False, ultralytics 8.4.94
+    train_data: roboflow - 20260713 all layer label (26 train / 5 val images)
+    val_mask_map50_95: 0.691   # only 5 val images -- noisy
+    note: First all-layer model; same config as v3 with half the training data. Baseline for the value of added data.
+
+  yifei_202512:
+    weights: models/yifei_202512/best.pt
+    imgsz: 1024
+    class_name: vesicle
+    annotation: whole EVs only (outer boundary) -- no inner layers, so layer counting does not apply
+    arch: yolov8n-seg, overlap_mask=True, ultralytics 8.3.36
+    train_data: Yifei revised_annotation dataset, Dec 2025 (>100 images)
+    val_mask_map50_95: 0.667   # Yifei's own val set
+    note: Legacy EV-only detector. Its training images may overlap with the v3 dataset.

@@ -185,13 +185,30 @@ def print_status(run_dir: Path, total_epochs: int, rows: list[dict], started_at:
     print(f"mAP50-95(M) : {to_float(latest.get('metrics/mAP50-95(M)')):.4f}")
     print("-" * 72)
 
+    print("\nLatest losses (train / val)")
+    print("-" * 72)
+    for label, train_key, val_key in [
+        ("box_loss", "train/box_loss", "val/box_loss"),
+        ("seg_loss", "train/seg_loss", "val/seg_loss"),
+        ("cls_loss", "train/cls_loss", "val/cls_loss"),
+        ("dfl_loss", "train/dfl_loss", "val/dfl_loss"),
+        ("sem_loss", "train/sem_loss", "val/sem_loss"),
+    ]:
+        train_val = latest.get(train_key)
+        val_val = latest.get(val_key)
+        if train_val is None and val_val is None:
+            continue
+        print(f"{label:<9s}   : {to_float(train_val):.4f} / {to_float(val_val):.4f}")
+    print("-" * 72)
 
-def monitor(output_root: Path, interval: int, run_dir: Path | None = None) -> None:
+
+def monitor(output_root: Path, interval: int, run_dir: Path | None = None, continuous: bool = True) -> None:
     target_run_dir = run_dir
     active_run_dir: Path | None = None
     results_csv: Path | None = None
     total_epochs = 0
     started_at = time.time()
+    waiting_for_next = False
 
     while True:
         latest_run = target_run_dir if target_run_dir is not None else parse_latest_run(output_root)
@@ -203,6 +220,7 @@ def monitor(output_root: Path, interval: int, run_dir: Path | None = None) -> No
             results_csv = active_run_dir / "results.csv"
             total_epochs = int(args.get("epochs", 0) or 0)
             started_at = results_csv.stat().st_mtime if results_csv.exists() else time.time()
+            waiting_for_next = False
 
         rows = read_results(results_csv) if results_csv is not None else []
         if rows and results_csv is not None and results_csv.exists():
@@ -221,16 +239,28 @@ def monitor(output_root: Path, interval: int, run_dir: Path | None = None) -> No
             and (active_run_dir / "weights" / "best.pt").exists()
         )
         if finished and not newer_run_exists:
-            print("\nTraining appears complete. Monitor exiting.\n")
-            return
+            if not continuous or target_run_dir is not None:
+                print("\nTraining appears complete. Monitor exiting.\n")
+                return
+            # Sweep mode: this run is done, but a next run may still be starting
+            # (per-class metrics / overlays / next training call take a few
+            # seconds). Keep polling instead of exiting so the whole campaign
+            # can be watched continuously; only Ctrl+C stops the monitor.
+            if not waiting_for_next:
+                print(f"\nRun '{active_run_dir.name}' complete. Waiting for the next run to start... (Ctrl+C to stop)\n")
+                waiting_for_next = True
 
         time.sleep(interval)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Live monitor for the latest YOLO training run.")
+    parser = argparse.ArgumentParser(description="Live monitor for YOLO training runs (follows an entire sweep by default).")
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT, help="Training output root containing LATEST_RUN.txt")
-    parser.add_argument("--run-dir", type=Path, default=None, help="Optional explicit run directory to monitor")
+    parser.add_argument("--run-dir", type=Path, default=None, help="Optional explicit run directory to monitor (implies --once)")
     parser.add_argument("--interval", type=int, default=5, help="Refresh interval in seconds")
+    parser.add_argument("--once", action="store_true", help="Exit when the current run finishes instead of waiting for the next run in a sweep")
     args = parser.parse_args()
-    monitor(args.output_root, args.interval, args.run_dir)
+    try:
+        monitor(args.output_root, args.interval, args.run_dir, continuous=not args.once)
+    except KeyboardInterrupt:
+        print("\nMonitor stopped.\n")

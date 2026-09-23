@@ -380,10 +380,13 @@ def create_yolo_yaml(dataset_root: str, output_path: str, class_names: List[str]
 def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int = 300, imgsz: int = 1024,
                            batch_size: int = 16, device: str = '0', project: str = 'yolo_results',
                            name: str = 'vesicle_seg', patience: int = 50, overlap_mask: bool = True,
+                           mask_ratio: int = 4, rect: bool = False,
                            use_v11: bool = True, workers: int = 8, optimizer: str = 'AdamW',
                            lr0: float = 0.002, lrf: float = 0.001,
                            hsv_h: float = 0.015, hsv_s: float = 0.7, hsv_v: float = 0.4,
-                           degrees: float = 45.0, fliplr: float = 0.5, flipud: float = 0.5,
+                           degrees: float = 45.0, translate: float = 0.1, scale: float = 0.5,
+                           shear: float = 0.0, perspective: float = 0.0,
+                           fliplr: float = 0.5, flipud: float = 0.5,
                            mosaic: float = 1.0, mixup: float = 0.15, copy_paste: float = 0.3,
                            **kwargs):
     """
@@ -413,72 +416,82 @@ def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int =
     
     model = YOLO(model_name)
 
-    import time, torch
+    import time, torch, gc
     torch.cuda.reset_peak_memory_stats()
     t_start = time.time()
 
-    results = model.train(
-        data=data_yaml,
-        epochs=epochs,
-        imgsz=imgsz,
-        batch=batch_size,
-        device=device,
-        project=project,
-        name=name,
-        patience=patience,
-        overlap_mask=overlap_mask,
+    try:
+        results = model.train(
+            data=data_yaml,
+            epochs=epochs,
+            imgsz=imgsz,
+            batch=batch_size,
+            device=device,
+            project=project,
+            name=name,
+            patience=patience,
+            overlap_mask=overlap_mask,
+            rect=rect,
 
-        # Mask generation
-        mask_ratio=4,
+            # Mask generation
+            mask_ratio=mask_ratio,
 
-        # Data augmentation
-        hsv_h=hsv_h,
-        hsv_s=hsv_s,
-        hsv_v=hsv_v,
-        degrees=degrees,
-        translate=0.1,
-        scale=0.5,
-        shear=0.0,
-        perspective=0.0,
-        flipud=flipud,
-        fliplr=fliplr,
-        mosaic=mosaic,
-        mixup=mixup,
-        copy_paste=copy_paste,
+            # Data augmentation
+            hsv_h=hsv_h,
+            hsv_s=hsv_s,
+            hsv_v=hsv_v,
+            degrees=degrees,
+            translate=translate,
+            scale=scale,
+            shear=shear,
+            perspective=perspective,
+            flipud=flipud,
+            fliplr=fliplr,
+            mosaic=mosaic,
+            mixup=mixup,
+            copy_paste=copy_paste,
 
-        # Optimizer
-        optimizer=optimizer,
-        lr0=lr0,
-        lrf=lrf,
-        momentum=0.937,
-        weight_decay=0.0005,
-        warmup_epochs=5.0,
-        warmup_momentum=0.8,
-        warmup_bias_lr=0.1,
+            # Optimizer
+            optimizer=optimizer,
+            lr0=lr0,
+            lrf=lrf,
+            momentum=0.937,
+            weight_decay=0.0005,
+            warmup_epochs=5.0,
+            warmup_momentum=0.8,
+            warmup_bias_lr=0.1,
 
-        # Loss weights
-        box=7.5, cls=0.5, dfl=1.5,
+            # Loss weights
+            box=7.5, cls=0.5, dfl=1.5,
 
-        # Training settings
-        amp=True,
-        fraction=1.0,
-        profile=False,
-        close_mosaic=10,
+            # Training settings
+            amp=True,
+            fraction=1.0,
+            profile=False,
+            close_mosaic=10,
 
-        # System
-        workers=workers,
-        seed=42,
-        deterministic=False,
+            # System
+            workers=workers,
+            seed=42,
+            deterministic=False,
 
-        # Output
-        verbose=True,
-        plots=True,
-        save=True,
-        save_period=50,
-        exist_ok=False,
+            # Output
+            verbose=True,
+            plots=True,
+            save=True,
+            save_period=50,
+            exist_ok=False,
 
-        **kwargs
-    )
+            **kwargs
+        )
+    finally:
+        # Always release the model + CUDA cache, success or failure. Without
+        # this, a crashed run (e.g. OOM) can leave GPU memory fragmented/held
+        # by the exception traceback, causing the NEXT run in a sweep to fail
+        # even if its own config would otherwise fit comfortably.
+        del model
+        gc.collect()
+        torch.cuda.empty_cache()
 
     wall_secs = time.time() - t_start
     h, rem = divmod(int(wall_secs), 3600)
@@ -630,6 +643,75 @@ def load_predictions_with_classes_from_model(model_path: str, img_path: str, img
             class_ids.append(int(box.cls.cpu().numpy()[0]))
 
     return pred_masks, confidences, class_ids
+
+
+def save_predictions_yolo_format(pred_masks: List[np.ndarray], confidences: List[float], class_ids: List[int],
+                                 img_width: int, img_height: int, output_path) -> None:
+    """
+    Persist predictions as polygon lines: 'class_id confidence x1 y1 x2 y2 ...' (normalized
+    coords) -- same format as the GT label files plus a confidence column. Lets downstream
+    analyses (multilayer containment, confidence sweeps, etc.) reuse predictions without
+    re-running inference. Each mask is reduced to its largest external contour, the same
+    single-polygon-per-instance precision already used for GT labels.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for mask, conf, cls_id in zip(pred_masks, confidences, class_ids):
+        mask_u8 = mask.astype(np.uint8) * 255
+        contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        polygon = max(contours, key=cv2.contourArea).reshape(-1, 2)
+        if len(polygon) < 3:
+            continue
+        coords = []
+        for x, y in polygon:
+            coords.append(f"{x / img_width:.6f}")
+            coords.append(f"{y / img_height:.6f}")
+        lines.append(f"{cls_id} {conf:.4f} " + " ".join(coords))
+    output_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding='utf-8')
+
+
+def load_predictions_yolo_format(label_path, img_width: int, img_height: int) -> Tuple[List[np.ndarray], List[float], List[int]]:
+    """Inverse of save_predictions_yolo_format(): rasterize cached prediction polygons back to masks."""
+    label_path = Path(label_path)
+    pred_masks, confidences, class_ids = [], [], []
+    if not label_path.exists():
+        return pred_masks, confidences, class_ids
+    with open(label_path) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            parts = line.strip().split()
+            class_id = int(parts[0])
+            conf = float(parts[1])
+            coords = [float(x) for x in parts[2:]]
+            polygon = np.array([(int(coords[i] * img_width), int(coords[i + 1] * img_height))
+                               for i in range(0, len(coords), 2)], dtype=np.int32)
+            mask_u8 = np.zeros((img_height, img_width), dtype=np.uint8)
+            cv2.fillPoly(mask_u8, [polygon], 1)
+            pred_masks.append(mask_u8 > 0)
+            confidences.append(conf)
+            class_ids.append(class_id)
+    return pred_masks, confidences, class_ids
+
+
+def export_predictions_for_split(model_path: str, img_dir: str, output_dir, imgsz: int, conf: float,
+                                 iou: float, device: str) -> None:
+    """Run inference once over every image in a split and cache the raw predicted polygons to disk."""
+    output_dir = Path(output_dir)
+    img_paths = sorted(Path(img_dir).glob('*'))
+    img_paths = [p for p in img_paths if p.suffix.lower() in ['.png', '.jpg', '.jpeg', '.tif', '.tiff']]
+
+    for img_path in tqdm(img_paths, desc=f"Caching predictions ({output_dir.name})"):
+        img = Image.open(img_path)
+        w, h = img.size
+        pred_masks, confidences, class_ids = load_predictions_with_classes_from_model(
+            model_path, str(img_path), imgsz, conf, iou, device
+        )
+        save_predictions_yolo_format(pred_masks, confidences, class_ids, w, h,
+                                     output_dir / f"{img_path.stem}.txt")
 
 
 def load_gt_masks_and_classes_from_labels(label_path: str, img_width: int, img_height: int) -> Tuple[List[np.ndarray], List[int]]:
@@ -819,7 +901,16 @@ def visualize_predictions_with_matching(model_path: str, source_dir: str, label_
         class_names = ['EV', 'multilayer EV']
 
     COLOR = {'tp': np.array([0, 220, 0]), 'fp': np.array([255, 220, 0]), 'fn': np.array([255, 40, 40])}
-    ALPHA = 0.6
+    ALPHA = 0.25  # light fill only -- outlines (below) carry the main signal so nested/overlapping
+                  # masks stay legible instead of blending into an indistinguishable smear
+    OUTLINE_THICKNESS = 3
+
+    def _draw_mask(overlay: np.ndarray, mask: np.ndarray, color: np.ndarray) -> None:
+        """Light alpha fill + a thick contour outline, so overlapping/nested masks stay legible."""
+        overlay[mask] = overlay[mask] * (1 - ALPHA) + color * ALPHA
+        mask_uint8 = mask.astype(np.uint8) * 255
+        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(overlay, contours, -1, color.tolist(), thickness=OUTLINE_THICKNESS)
 
     legend_elements = [
         Patch(facecolor=COLOR['tp']/255, alpha=0.8, label='TP – correct'),
@@ -865,25 +956,23 @@ def visualize_predictions_with_matching(model_path: str, source_dir: str, label_
 
             for pred_idx, gt_idx in matches:
                 if pred_classes[pred_idx] == cid and gt_classes[gt_idx] == cid:
-                    overlay[pred_masks[pred_idx]] = overlay[pred_masks[pred_idx]] * (1-ALPHA) + COLOR['tp'] * ALPHA
+                    _draw_mask(overlay, pred_masks[pred_idx], COLOR['tp'])
                     tp_c += 1
                 elif pred_classes[pred_idx] == cid:
-                    overlay[pred_masks[pred_idx]] = overlay[pred_masks[pred_idx]] * (1-ALPHA) + COLOR['fp'] * ALPHA
+                    _draw_mask(overlay, pred_masks[pred_idx], COLOR['fp'])
                     fp_c += 1
                 elif gt_classes[gt_idx] == cid:
-                    overlay[gt_masks[gt_idx]] = overlay[gt_masks[gt_idx]] * (1-ALPHA) + COLOR['fn'] * ALPHA
+                    _draw_mask(overlay, gt_masks[gt_idx], COLOR['fn'])
                     fn_c += 1
 
             for pred_idx in unmatched_preds:
                 if (pred_idx < len(pred_classes)) and pred_classes[pred_idx] == cid:
-                    overlay[pred_masks[pred_idx]] = (
-                        overlay[pred_masks[pred_idx]] * (1-ALPHA) + COLOR['fp'] * ALPHA)
+                    _draw_mask(overlay, pred_masks[pred_idx], COLOR['fp'])
                     fp_c += 1
 
             for gt_idx in unmatched_gts:
                 if (gt_idx < len(gt_classes)) and gt_classes[gt_idx] == cid:
-                    overlay[gt_masks[gt_idx]] = (
-                        overlay[gt_masks[gt_idx]] * (1-ALPHA) + COLOR['fn'] * ALPHA)
+                    _draw_mask(overlay, gt_masks[gt_idx], COLOR['fn'])
                     fn_c += 1
 
             prec = tp_c / (tp_c + fp_c) if (tp_c + fp_c) > 0 else 0.0

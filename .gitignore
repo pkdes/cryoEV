@@ -22,6 +22,7 @@ yolo_results/
 
 # Model weights (large binary files – download separately)
 *.pt
+!models/**/*.pt
 *.pth
 
 # Data and experiment outputs (stored outside repo)
