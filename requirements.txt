@@ -1,8 +1,6 @@
 torch
 torchvision
-segmentation-models-pytorch
 ultralytics
-albumentations
 opencv-python
 numpy
 scipy
@@ -10,7 +8,6 @@ scikit-learn
 matplotlib
 seaborn
 pandas
+pyyaml
 tqdm
 Pillow
-napari
-PyQt5

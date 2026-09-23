@@ -1,0 +1,4 @@
+# Optional: GUI dependencies for the human-in-the-loop annotation tool (annotation/)
+-r requirements.txt
+napari
+PyQt5
