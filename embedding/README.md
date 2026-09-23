@@ -117,6 +117,9 @@ Uses `CryoAI/.venv-new` — the same env as training. `transformers`, `umap-lear
 `pyarrow` were added; a dry-run confirmed nothing was downgraded (numba 0.67 is compatible
 with the existing numpy 2.3.5, and torch/ultralytics are untouched).
 
+These three are **not** in the repo's `requirements.txt`. On a fresh machine, install them on top of it:
+`pip install -r requirements.txt transformers umap-learn pyarrow`.
+
 ## Reused from the main pipeline
 
 - `classify_roles()`, `find_containment()`, `polygon_to_mask()` — `analysis/multilayer_containment.py`

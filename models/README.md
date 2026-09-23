@@ -16,6 +16,12 @@ python inference/predict_models.py --images <image_dir> --out <out_dir> --models
 ```
 Outputs go to `<out_dir>/<model_id>/predictions/*.txt` (the standard cache format, readable by `analysis/` scripts), `<out_dir>/<model_id>/overlays/*.png`, and `<out_dir>/summary.csv`.
 
+The prediction folder is the input for the downstream tools, none of which needs the model again:
+- Size and morphology profile: `python inference/batch_size_profile.py --input-dir <image_dir> --predictions-dir <out_dir>/<model_id>/predictions --output-dir <profile_out>`
+- Annotation seeded from predictions: `python -m annotation.hitl_annotator --input-images <image_dir> --output-dir <ann_out> --predictions-dir <out_dir>/<model_id>/predictions`
+
+See the main [README](../README.md) and [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
+
 ## Caveats when comparing
 - **Validation mAP numbers are not comparable across models.** Each model was scored on a different val set.
 - **Yifei's model outlines whole EVs only.** It does not segment inner membrane layers, so multilayer and layer-count analysis (`classify_roles()`) only applies to the two all-layer models. Raw detection counts can still be similar across models: on the 99 v3 test images the means were 25.1 per image (Yifei) and 24.5 (v3). The models disagree about *which* objects they find. Its masks are also blockier in crowded clusters.
