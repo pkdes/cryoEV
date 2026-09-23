@@ -1,213 +1,157 @@
 # cryoEV
 
-Instance segmentation of extracellular vesicles in cryo-EM micrographs.
+Automated analysis of **extracellular vesicles and particles (EVs/EPs) in cryo-EM micrographs**. Carney lab, Wang–Carney collaboration.
 
-Uses **YOLO instance segmentation** (via `ultralytics`) for direct per-object polygon masks, followed by **ellipse fitting and morphology analysis** to quantify vesicle size and shape.
+## Goal and motivation
 
-Includes a **confidence-based interactive review** system that lets you inspect and accept/reject low-confidence detections before saving final results.
+Characterizing EVs and EPs from cryo-EM today means counting, outlining and measuring objects by hand, one micrograph at a time. That is slow, hard to scale across samples and conditions, and subjective at the margins: faint vesicles, overlapping objects, multilayer membranes. This project aims to automate it: **find every EV/EP in a micrograph, then measure and classify it** (size, shape, membrane structure and more) reproducibly across large image sets.
 
-## Installation
+**Status: active R&D.** Several approaches are being explored in parallel, and some are more mature than others. This README will narrow as methods settle.
+
+### Approaches in use
+
+| Approach | What it gives | Where |
+|---|---|---|
+| **Instance segmentation (YOLOv8-seg)** | Per-object polygon masks with confidence scores. The current models are single-class detectors trained with *every membrane layer annotated as its own polygon* | `training/`, `models/`, `inference/predict_models.py` |
+| **Geometric post-hoc analysis** | Multilayer structure is recovered *after* detection: a polygon that contains other polygons is multilayer, and the number it contains is its layer count. Matches the annotators' own multilayer labels at F1 ≈ 0.996 on ground truth | `analysis/multilayer_*.py`, `analysis/layer_count_stats.py` |
+| **Size and morphology profiling** | Ellipse fits, equivalent diameter, aspect ratio, circularity, solidity, and size distributions compared across samples | `analysis/morphology.py`, `inference/batch_size_profile.py` |
+| **Human-in-the-loop annotation** | Model predictions used as first-pass labels, then corrected in a GUI, to grow the training set | `annotation/` |
+| **Self-supervised embeddings + clustering** | Frozen DINOv2/v3 embeddings of object crops, clustered without labels, to look for structure nobody annotated. Inference-only; a separate workflow | `embedding/` (own README) |
+
+**Tried earlier, kept for history:**
+- U-Net semantic segmentation.
+- A dedicated "multilayer EV" model class. It was abandoned because recall plateaued around 0.39 for lack of training examples, and the geometric approach above replaced it.
+
+## Repo vs. data
+
+This repo holds **code and a few exported model weights only**. Datasets, training runs, cached predictions and the experiment log live in a sibling `CryoAI/` directory, which is not in git:
+
+```
+<parent>/
+├── CryoEV Github/   <- this repo
+└── CryoAI/          <- data, training outputs, EXPERIMENT_LOG.csv, CLAUDE.md, MANIFEST.md
+```
+
+The pipeline scripts find the data directory at `Path(__file__).parent.parent.parent / "CryoAI"`. On a machine without `CryoAI/`, **only the inference path (`inference/predict_models.py`) works standalone**. Training and most `analysis/` scripts expect a `--dataset` folder under `CryoAI/training outputs/`. If `CryoAI/` is present, its `CLAUDE.md` and `MANIFEST.md` hold the full project history and directory map.
+
+## Quick start: run models on new images
 
 ```bash
 pip install -r requirements.txt
+python inference/predict_models.py --images <image_dir> --out <out_dir>                     # all registered models
+python inference/predict_models.py --images <image_dir> --out <out_dir> --models v3_run1_20260824 --device cpu
 ```
+Options: `--models all|id1,id2`, `--conf 0.25`, `--iou 0.7`, `--device cuda|cpu`.
 
-## Project Structure
-
-```
-cryoEV/
-├── README.md
-├── requirements.txt
-├── data_utils/
-│   ├── clean_filename.py        # Remove .rf.<hash> artifacts from filenames
-│   ├── clean_label.py           # Remap / filter YOLO class IDs
-│   └── split_dataset.py         # Random train/val/test split
-├── datasets/
-│   └── cryo_instance_dataset.py # PyTorch Dataset for YOLO-polygon labels
-├── transforms/
-│   └── cryo_transforms.py       # Albumentations pipelines (light/standard/heavy)
-├── training/
-│   ├── train_unet.py            # UNet/FPN/DeepLabV3+ training loop
-│   └── train_yolo.py            # YOLO training + evaluation
-├── inference/
-│   └── inference.py             # YOLO inference, review, and morphology analysis
-├── analysis/
-│   └── morphology.py            # Ellipse fitting and shape descriptors
-└── visualization/
-    └── training_curves.py       # Loss/IoU/F1 curve plotting
-```
-
-## Data Preparation
-
-### Expected folder layout
-
-```
-dataset/
-├── images/
-│   ├── sample_001.jpg
-│   └── ...
-└── labels/
-    ├── sample_001.txt    # YOLO polygon format
-    └── ...
-```
-
-Each label file uses **YOLO polygon format**: one line per object, `class_id x1 y1 x2 y2 ...` with normalised coordinates in [0, 1].
-
-### Cleaning and splitting
-
-```bash
-# Remove .rf.<hash> from filenames exported by Roboflow
-python -m data_utils.clean_filename
-
-# Remap all classes to 0 and remove unwanted classes
-python -m data_utils.clean_label
-
-# Split into train / val / test
-python -m data_utils.split_dataset
-```
-
-Edit the paths and config dicts inside each script before running.
-
-## Training
-
-```bash
-python -m training.train_yolo
-```
-
-See `training/train_yolo.py` for configuration options including YOLO model size, epochs, and evaluation thresholds.
-
-### Visualise training curves
-
-```bash
-python -m visualization.training_curves results/experiment_name
-```
-
-## Inference
-
-```bash
-python -m inference.inference
-```
-
-Edit the `CONFIG` dict in `inference/inference.py` to set your model path, test data directory, and output directory.
-
-### What it produces
-
-For each test image:
-
-| Output file | Description |
+Outputs:
+| Path | Contents |
 |---|---|
-| `<name>_mask.png` | Combined binary mask of accepted detections |
-| `<name>_decisions.csv` | Per-object accept/reject decisions with bounding boxes |
-| `<name>_morphology.csv` | Per-vesicle shape measurements (see below) |
-| `<name>_ellipses.png` | Image with fitted ellipses overlaid |
-| `<name>_morphology_distributions.png` | Histograms of size and shape descriptors |
+| `<out>/<model_id>/predictions/<image>.txt` | One detection per line, in the prediction file format below |
+| `<out>/<model_id>/overlays/<image>.png` | Predicted outlines drawn on the image, with the count |
+| `<out>/summary.csv` | image × model → `n_detections`, `mean_conf` |
 
-Plus combined outputs across all images: `morphology_all.csv` and `morphology_distributions_all.png`.
+### Registered models ([`models/`](models/README.md), [`models.yaml`](models/models.yaml))
+| model_id | Detects | imgsz | Notes |
+|---|---|---|---|
+| `v3_run1_20260824` | every membrane layer | 1440 | **Current best.** 51 training images; test P=0.81, R=0.86 |
+| `allLayer_run14_20260713` | every membrane layer | 1440 | Same recipe, 26 training images; a baseline for how much the extra data helped |
+| `yifei_202512` | whole EVs only | 1024 | Legacy detector, >100 training images, different annotation convention |
 
-### Morphology metrics
+To add a model, put `best.pt` in `models/<model_id>/` and add an entry to `models.yaml`. No code changes are needed.
 
-Each detected vesicle is measured by fitting an ellipse and computing:
+### Prediction file format
+`class_id confidence x1 y1 x2 y2 ...`, with coordinates normalized to [0, 1]. It's the YOLO polygon label format plus a confidence column. This is the **handoff format between inference and analysis**: run inference once, then point analysis scripts at the prediction files instead of rerunning the model. Read one with `training/train_yolo.py::load_predictions_yolo_format()`.
 
+## Gotchas for anyone picking this up
+
+- **Each model has its own `imgsz`**, stored in `models.yaml`. Running a model at the wrong size silently degrades its results.
+- **Inputs should be 8-bit images** (JPEG/PNG, 1440×1024 native), like the Roboflow exports the models were trained on. Convert raw 16-bit or MRC data first.
+- **The Yifei model's output can't be used for layer counting.** It outlines whole EVs only, so containment analysis doesn't apply to it. Its raw detection counts are nonetheless similar to v3's.
+- **Validation metrics in `models.yaml` can't be compared across models.** Each model was scored on a different validation set.
+- **`training/__init__.py` imports the old U-Net code**, so `segmentation-models-pytorch` must be installed even for inference. This is a known wart; see `CLEANUP_CANDIDATES.md`.
+- **`classify_roles()`** in `analysis/multilayer_containment.py` is deliberately ordered: "contained by something" is checked before "contains something". Don't reorder it.
+- **Settled training choices; don't re-test these:**
+  - `overlap_mask=False`: mask mAP 0.614 vs 0.511.
+  - `imgsz=1440` with `rect=True`: matches the native resolution.
+  - Augmentation on: turning it off causes severe overfitting.
+  - The main untried option is a larger model (y8s/y8m).
+- **Known v3 error patterns:**
+  - Over-detection on holey-carbon grid texture.
+  - Occasional false detections on blank ice.
+  - Missed small or faint vesicles.
+
+## Repo map
+
+**Active pipeline** (run in this order; each takes `--dataset` / `--source-name` / `--model-run-dir`. Several default to the older 20260713 campaign, so pass `--dataset` explicitly):
+| # | Script | Does |
+|:-:|---|---|
+| 1 | `data_utils/prepare_all_layer_singleclass.py` | Roboflow COCO export → YOLO labels, all layer categories collapsed to class "EV". Raises an error on unknown categories |
+| 2 | `training/run_experiments.py` | Training campaign; `--single-run` uses the known-best config. Writes metrics, overlays and the prediction files |
+| 3 | `analysis/multilayer_containment.py` | Validates the containment geometry on ground truth. Home of `classify_roles()` |
+| 4 | `analysis/multilayer_role_analysis.py` | Multilayer / inner-layer / standalone roles, predicted vs. ground truth |
+| 5 | `analysis/layer_count_stats.py` | Layer-count distributions, predicted vs. ground truth |
+
+**Support:**
+| Path | Does |
+|---|---|
+| `inference/predict_models.py` | Multi-model inference on any image folder (see Quick start) |
+| `training/train_yolo.py` | Core training, evaluation, Hungarian matching, and prediction file read/write functions |
+| `analysis/rank_predictions.py` | Ranks images by errors (FP + FN), to decide which overlays to look at |
+| `analysis/confidence_threshold_sweep.py` | Precision/recall/F1 vs. confidence threshold, computed from the prediction files (no GPU) |
+| `analysis/morphology.py` | Ellipse fitting and shape descriptors |
+| `training/monitor_run.py`, `notify.py` | Live training monitor, completion notifications |
+| `embedding/` | DINO embedding + clustering workflow; see `embedding/README.md`. Planned to move to its own fork |
+
+**Legacy and planned refactors:** see [`CLEANUP_CANDIDATES.md`](CLEANUP_CANDIDATES.md). In particular, size profiling and the annotation tool still run live inference; they are planned to read the prediction files instead.
+
+## Training (requires `CryoAI/`)
+
+```bash
+python data_utils/prepare_all_layer_singleclass.py \
+    --source-name "roboflow - 20260824 cryoai v3" --output-name roboflow_20260824_cryoai_v3_singleclass
+python training/run_experiments.py --dataset roboflow_20260824_cryoai_v3_singleclass --single-run
+python analysis/multilayer_role_analysis.py --dataset roboflow_20260824_cryoai_v3_singleclass \
+    --source-name "roboflow - 20260824 cryoai v3" --model-run-dir "<run folder name>"
+```
+Each run appends a row to `CryoAI/EXPERIMENT_LOG.csv`. Long runs should go in the background with output logged to a file.
+
+---
+
+## Reference: size and morphology profiling (legacy path, refactor planned)
+
+`inference/batch_size_profile.py` runs one model over a folder and measures each accepted object. It currently runs inference itself; it's planned to read the prediction files instead (see `CLEANUP_CANDIDATES.md`, R1).
+
+```bash
+python inference/batch_size_profile.py --input-dir <images> --output-dir <out> \
+    --model-path models/v3_run1_20260824/best.pt --imgsz 1440 [--pixel-size 3.5] [--review]
+```
+
+Morphology metrics per object:
 | Metric | Description |
 |---|---|
 | `equivalent_diameter` | Diameter of a circle with the same area |
 | `major_axis` / `minor_axis` | Fitted ellipse axes |
 | `aspect_ratio` | major / minor (1.0 = circular) |
-| `circularity` | 4*pi*area / perimeter^2 (1.0 = perfect circle) |
+| `circularity` | 4π·area / perimeter² (1.0 = perfect circle) |
 | `solidity` | area / convex hull area |
 
-Set `pixel_size` in the config (e.g., `3.5` for 3.5 nm/px) to report measurements in physical units instead of pixels.
+`--pixel-size` (nm/px) reports physical units instead of pixels.
 
-### Confidence threshold
+**Confidence review:** detections at or above the acceptance threshold (default 0.5) are accepted automatically. Below it they're rejected automatically, unless `--review` is passed. With `--review`, a matplotlib pop-up shows each object (circled in red) with **Accept / Reject / Exit** buttons.
 
-Objects with confidence >= `confidence_threshold` are automatically accepted. Objects below are either rejected automatically (`skip_review=True`) or presented for manual review (`skip_review=False`).
+## Reference: human-in-the-loop annotation (not in active use, refactor planned)
 
-### Interactive review
-
-Set `skip_review=False` to manually review below-threshold detections. A matplotlib popup will appear showing:
-
-- **Left panel**: original image (clean, no annotations).
-- **Right panel**: overlay with all detection masks — green for objects above the threshold, yellow for objects below — and a red circle highlighting the object under review.
-- **Buttons**: Accept / Reject / Exit. Exit stops the entire inference process immediately.
-
-### Python API
-
-```python
-from inference.inference import predict_with_review
-
-masks, confidences, decisions, morphology, exited = predict_with_review(
-    image_path='test_image.png',
-    output_dir='results/',
-    yolo_model_path='weights/best.pt',
-    pixel_size=3.5,          # nm/px, or None for pixel units
-    confidence_threshold=0.5,
-    skip_review=False,       # False = popup review, True = auto-reject below threshold
-)
-```
-
-### Key functions
-
-| Function | Module | Description |
-|---|---|---|
-| `extract_instances_yolo()` | `inference.inference` | YOLO mask extraction with per-object confidence |
-| `interactive_review_objects()` | `inference.inference` | Popup-based accept/reject for low-confidence objects |
-| `predict_with_review()` | `inference.inference` | End-to-end: predict, review, analyse, save |
-| `analyze_instances()` | `analysis.morphology` | Compute morphology descriptors for a list of masks |
-| `fit_ellipse()` | `analysis.morphology` | Fit an ellipse to a single instance mask |
-| `plot_morphology_distributions()` | `analysis.morphology` | Plot histograms of size/shape metrics |
-
-## Human-In-The-Loop Polygon Annotation
-
-Use model predictions as first-pass labels, then edit polygons manually in a rich UI.
-
-### Launch annotator
+Uses model predictions as first-pass polygons, then lets you correct them in a GUI. It currently runs inference for each image; it's planned to read the prediction files instead (R2).
 
 ```bash
-python -m annotation.hitl_annotator \
-    --input-images "path/to/new_images" \
-    --output-dir "path/to/hitl_output" \
-    --model-path "C:/Users/ML-2619/Desktop/Pujan Cryo/cryo-ev pipeline/Model Training by Yifei/round_2/results_yolov8_heavy_augmentation/training/vesicle_instance_seg_v2/weights/best.pt" \
-    --device cuda \
-    --save-auto-labels
+python -m annotation.hitl_annotator --input-images <images> --output-dir <out> \
+    --model-path models/v3_run1_20260824/best.pt --imgsz 1440 --device cuda --save-auto-labels
+python -m annotation.hitl_annotator --gui --imgsz 1440 --device cuda --save-auto-labels     # folder/file pickers
+python -m annotation.hitl_annotator --ui napari --gui --device cuda            # older Napari editor
 ```
+The default editor is a side-by-side reviewer with synchronized zoom and pan. It has buttons for **Add / Replace / Delete / Save & Next / Skip / Quit**, and keyboard shortcuts `S` (save), `K` (skip) and `Q` (quit).
 
-Or open folder/file pickers for the paths:
-
-```bash
-python -m annotation.hitl_annotator --gui --device cuda --save-auto-labels
-```
-
-### Editor controls
-
-By default, the annotator now opens a **simple side-by-side reviewer**:
-
-- **Left panel**: image with polygon overlay
-- **Right panel**: raw image only
-- zoom and pan stay **synchronized** across both panels
-- click a polygon to select it
-- use buttons for **Add**, **Replace**, **Delete**, **Save & Next**, **Skip**, and **Quit**
-
-Keyboard shortcuts still work:
-- `S` = save corrected labels and continue
-- `K` = skip current image
-- `Q` = quit the session
-
-If wanted, the older Napari editor can still be launched explicitly with:
-
-```bash
-python -m annotation.hitl_annotator --ui napari --gui --device cuda --save-auto-labels
-```
-
-### Outputs
-
-- Reviewed dataset for future training:
-    - `reviewed/images/*.png|jpg|tif`
-    - `reviewed/labels/*.txt` (YOLO polygon format)
-- Optional first-pass model labels:
-    - `auto/labels/*.txt`
-- Session + quality metrics:
-    - `stats/annotation_session.csv`
-    - `stats/model_vs_review_metrics.csv`
-    - `stats/morphology_reviewed_all.csv`
-
-`model_vs_review_metrics.csv` reports object-level precision/recall/F1, matched IoU, and count error using IoU-based Hungarian matching between model predictions and reviewed labels.
+Outputs:
+- `reviewed/images/` and `reviewed/labels/`: YOLO polygon labels for training.
+- `auto/labels/`: raw model predictions, written when `--save-auto-labels` is passed.
+- `stats/`: session log, model-vs-review precision/recall/F1 (Hungarian IoU matching), and morphology.

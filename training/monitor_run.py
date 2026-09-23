@@ -11,7 +11,7 @@ import yaml
 import subprocess
 
 
-DEFAULT_OUTPUT_ROOT = Path(r"C:\Users\ML-2619\Desktop\Pujan Cryo\cryo-ev pipeline\data\experiments")
+DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parent.parent.parent / "CryoAI" / "training outputs"
 
 
 def get_gpu_info():
