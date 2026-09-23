@@ -386,6 +386,7 @@ def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int =
                            shear: float = 0.0, perspective: float = 0.0,
                            fliplr: float = 0.5, flipud: float = 0.5,
                            mosaic: float = 1.0, mixup: float = 0.15, copy_paste: float = 0.3,
+                           mem_fraction: float = 0.85,
                            **kwargs):
     """
     Train YOLO instance segmentation model with optimized hyperparameters for cryo-EM vesicles.
@@ -397,6 +398,10 @@ def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int =
     
     Args:
         use_v11: If True, use YOLOv11 (default). If False, use YOLOv8.
+        mem_fraction: Hard cap on this process's share of GPU memory. On Windows the driver
+            otherwise spills past VRAM into system RAM (10-50x slowdown, no error); the cap
+            turns that into a real OOM. Note Ultralytics halves the batch on a first-epoch
+            OOM, so check results.actual_batch.
     """
     from ultralytics import YOLO
     
@@ -415,7 +420,10 @@ def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int =
     model = YOLO(model_name)
 
     import time, torch, gc
+    if torch.cuda.is_available() and mem_fraction:
+        torch.cuda.set_per_process_memory_fraction(mem_fraction)
     torch.cuda.reset_peak_memory_stats()
+    actual_batch = batch_size
     t_start = time.time()
 
     try:
@@ -483,6 +491,8 @@ def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int =
             **kwargs
         )
     finally:
+        trainer = getattr(model, 'trainer', None)
+        actual_batch = getattr(trainer, 'batch_size', batch_size) if trainer else batch_size
         # Always release the model + CUDA cache, success or failure. Without
         # this, a crashed run (e.g. OOM) can leave GPU memory fragmented/held
         # by the exception traceback, causing the NEXT run in a sweep to fail
@@ -495,6 +505,7 @@ def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int =
     h, rem = divmod(int(wall_secs), 3600)
     m, s   = divmod(rem, 60)
     peak_gb = torch.cuda.max_memory_allocated() / 1e9
+    peak_reserved_gb = torch.cuda.max_memory_reserved() / 1e9
     total_gb = torch.cuda.get_device_properties(0).total_memory / 1e9 if torch.cuda.is_available() else 0
 
     # Read best epoch from results.csv
@@ -517,19 +528,20 @@ def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int =
         "TRAINING RUN SUMMARY",
         "=" * 60,
         f"Wall time:        {h:02d}:{m:02d}:{s:02d}",
-        f"Peak GPU memory:  {peak_gb:.2f} GB  (of {total_gb:.1f} GB)",
+        f"Peak GPU memory:  {peak_gb:.2f} GB allocated, {peak_reserved_gb:.2f} GB reserved  (of {total_gb:.1f} GB)",
         f"Epochs completed: {len(rows) if results_csv.exists() else '?'} / {epochs}",
         f"Best epoch:       {best_ep}",
         f"Best mAP50(B):    {best_map50b:.4f}",
         f"Best mAP50(M):    {best_map50m:.4f}",
         f"Hyperparams:      model=yolo{'11' if use_v11 else 'v8'}{model_size}-seg  "
-        f"optimizer={optimizer}  lr0={lr0}  lrf={lrf}  imgsz={imgsz}  batch={batch_size}",
+        f"optimizer={optimizer}  lr0={lr0}  lrf={lrf}  imgsz={imgsz}  batch={actual_batch} (requested {batch_size})",
         "=" * 60,
     ]
     summary = "\n".join(summary_lines)
     print("\n" + summary)
     (Path(results.save_dir) / 'run_summary.txt').write_text(summary + "\n", encoding='utf-8')
 
+    results.peak_gpu_gb, results.peak_reserved_gb, results.actual_batch = peak_gb, peak_reserved_gb, actual_batch
     print(f"[OK] Training complete: {results.save_dir}")
     return results
 
