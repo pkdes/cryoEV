@@ -695,6 +695,21 @@ def load_predictions_yolo_format(label_path, img_width: int, img_height: int) ->
     return pred_masks, confidences, class_ids
 
 
+def load_prediction_polygons(label_path, img_width: int, img_height: int) -> Tuple[List[np.ndarray], List[float]]:
+    """Read a prediction cache file as float polygons in pixel coords (no rasterization) plus confidences.
+    Complements load_predictions_yolo_format() where the polygon itself is needed (drawing, ellipse fits)."""
+    label_path = Path(label_path)
+    polys, confs = [], []
+    if not label_path.exists():
+        return polys, confs
+    for line in label_path.read_text().splitlines():
+        parts = line.split()
+        if len(parts) < 8:
+            continue
+        confs.append(float(parts[1]))
+        polys.append(np.array(parts[2:], dtype=np.float32).reshape(-1, 2) * [img_width, img_height])
+    return polys, confs
+
 def export_predictions_for_split(model_path: str, img_dir: str, output_dir, imgsz: int, conf: float,
                                  iou: float, device: str) -> None:
     """Run inference once over every image in a split and cache the raw predicted polygons to disk."""

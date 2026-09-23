@@ -25,23 +25,11 @@ import cv2
 import numpy as np
 import yaml
 
-from training.train_yolo import export_predictions_for_split
+from training.train_yolo import export_predictions_for_split, load_prediction_polygons
 from analysis.morphology import draw_polygons_on_image
 
 REPO = Path(__file__).resolve().parent.parent
 REGISTRY = REPO / "models" / "models.yaml"
-
-
-def read_cache(txt_path: Path, w: int, h: int):
-    """Parse a prediction cache file into (polygons in pixel coords, confidences)."""
-    polys, confs = [], []
-    for line in txt_path.read_text().splitlines():
-        parts = line.split()
-        if len(parts) < 8:
-            continue
-        confs.append(float(parts[1]))
-        polys.append(np.array(parts[2:], dtype=np.float32).reshape(-1, 2) * [w, h])
-    return polys, confs
 
 
 def main():
@@ -74,7 +62,7 @@ def main():
         for img_path in images:
             img = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
             h, w = img.shape[:2]
-            polys, confs = read_cache(pred_dir / f"{img_path.stem}.txt", w, h)
+            polys, confs = load_prediction_polygons(pred_dir / f"{img_path.stem}.txt", w, h)
             vis = draw_polygons_on_image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), polys)
             cv2.putText(vis, f"{mid}: n={len(polys)}", (15, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 3)
             cv2.imwrite(str(ov_dir / f"{img_path.stem}.png"), cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))

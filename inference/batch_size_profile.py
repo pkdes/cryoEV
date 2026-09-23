@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Run YOLO segmentation on a folder of cryo-EM images and generate a first-pass size profile.
+"""Size and morphology profile of a folder of cryo-EM images, from cached model predictions.
+
+No model is loaded here. Run inference once first, then profile from its prediction files:
+
+    python inference/predict_models.py --images <dir> --out <pred_out> --models v3_run1_20260824
+    python inference/batch_size_profile.py --input-dir <dir>         --predictions-dir <pred_out>/v3_run1_20260824/predictions --output-dir <profile_out>
+
+Any `<stem>.txt` prediction folder works (e.g. a training run's predictions/test).
 
 Outputs
 -------
@@ -8,28 +15,36 @@ Outputs
 - `per_image_summary.csv` for image-level counts and diameter summaries
 - `summary.csv` with folder-level metrics
 - `morphology_distributions_all.png`
-
-Example
--------
-python -m inference.batch_size_profile \
-    --input-dir "C:\\path\\to\\images" \
-    --output-dir "C:\\path\\to\\outputs" \
-    --model-path "C:\\path\\to\\best.pt" \
-    --device cuda
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import os
+import sys
 from pathlib import Path
 from statistics import mean, median
 from typing import Dict, List
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+import cv2
+import numpy as np
+
 from analysis.morphology import plot_morphology_distributions, save_morphology_csv
-from inference.inference import predict_with_review
+from inference.inference import review_and_measure
+from training.train_yolo import load_prediction_polygons
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+
+
+def polygon_to_mask(polygon: np.ndarray, height: int, width: int) -> np.ndarray:
+    """Rasterize a float pixel-coord polygon. Rounds (not truncates) vertices: truncation roughens
+    the edge and biases circularity low (~0.87 vs 0.90 against live-inference masks)."""
+    mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.fillPoly(mask, [np.round(polygon).astype(np.int32)], 1)
+    return mask > 0
 
 
 def iter_images(input_dir: Path) -> List[Path]:
@@ -67,13 +82,10 @@ def write_csv(path: Path, rows: List[Dict]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input-dir", required=True, type=Path, help="Folder of images to test")
+    parser.add_argument("--input-dir", required=True, type=Path, help="Folder of images to profile")
+    parser.add_argument("--predictions-dir", required=True, type=Path,
+                        help="Folder of cached predictions (<stem>.txt), e.g. <out>/<model_id>/predictions from predict_models.py")
     parser.add_argument("--output-dir", required=True, type=Path, help="Folder to save outputs")
-    parser.add_argument("--model-path", required=True, type=Path, help="YOLO `.pt` weights")
-    parser.add_argument("--device", default="cuda", help="Device to use: `cuda` or `cpu`")
-    parser.add_argument("--imgsz", type=int, default=1024, help="Inference image size")
-    parser.add_argument("--yolo-conf", type=float, default=0.25, help="YOLO confidence threshold")
-    parser.add_argument("--yolo-iou", type=float, default=0.7, help="YOLO NMS IoU threshold")
     parser.add_argument("--confidence-threshold", type=float, default=0.5, help="Acceptance threshold after detection")
     parser.add_argument("--pixel-size", type=float, default=None, help="Optional physical pixel size, e.g. nm/px")
     parser.add_argument("--review", action="store_true", help="Enable manual review for below-threshold detections")
@@ -83,6 +95,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     input_dir = args.input_dir.resolve()
+    args.predictions_dir = args.predictions_dir.resolve()
+    if not args.predictions_dir.is_dir():
+        raise FileNotFoundError(f"Predictions folder not found: {args.predictions_dir}")
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -97,14 +112,21 @@ def main() -> None:
 
     for image_path in image_paths:
         print(f"\nProcessing: {image_path.name}")
-        _, _, decisions, morph_records, exited = predict_with_review(
-            image_path=str(image_path),
+        pred_path = args.predictions_dir / f"{image_path.stem}.txt"
+        if not pred_path.exists():
+            print(f"  No prediction file ({pred_path.name}); skipping.")
+            continue
+        image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+        h, w = image.shape[:2]
+        polygons, confidences = load_prediction_polygons(pred_path, w, h)
+        masks = [polygon_to_mask(poly, h, w) for poly in polygons]
+        _, _, decisions, morph_records, exited = review_and_measure(
+            image=image,
+            image_name=image_path.stem,
+            instance_masks=masks,
+            confidences=confidences,
+            instance_polygons=polygons,
             output_dir=str(output_dir / "per_image"),
-            yolo_model_path=str(args.model_path),
-            imgsz=args.imgsz,
-            yolo_conf=args.yolo_conf,
-            yolo_iou=args.yolo_iou,
-            device=args.device,
             confidence_threshold=args.confidence_threshold,
             skip_review=not args.review,
             pixel_size=args.pixel_size,

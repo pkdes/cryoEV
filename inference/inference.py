@@ -2,18 +2,15 @@
 Inference and Visualization Script for Cryo-EM Instance Segmentation
 
 Features:
-- Run YOLO instance segmentation inference on test images
-- Extract per-object confidence scores
+- extract_instances_yolo(): live YOLO inference (used by the one-off cross_grid_comparison.py;
+  new work should run inference/predict_models.py once and read the prediction files)
 - Interactive review of low-confidence detections
-- Morphology analysis (ellipse fitting, diameter, circularity)
-- Save prediction masks, review decisions, and morphology data
+- review_and_measure(): review -> morphology -> per-image outputs, from already-computed detections
 """
 
 import os
 import sys
 import csv
-import time
-from datetime import datetime
 
 # Ensure project root is on the path so sibling-package imports work
 # regardless of the working directory.
@@ -25,8 +22,6 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
-from inference.perf_log import PerformanceLogger
 
 from analysis.morphology import (
     analyze_instances, save_morphology_csv,
@@ -293,35 +288,29 @@ def save_review_decisions(
 
 
 # ============================================================================
-# High-Level Orchestrator
+# Review + Morphology (from cached predictions)
 # ============================================================================
 
-def predict_with_review(
-    image_path: str,
+def review_and_measure(
+    image: np.ndarray,
+    image_name: str,
+    instance_masks: List[np.ndarray],
+    confidences: List[float],
+    instance_polygons: List[Optional[np.ndarray]],
     output_dir: str,
-    # YOLO params
-    yolo_model_path: str,
-    imgsz: int = 1024,
-    yolo_conf: float = 0.25,
-    yolo_iou: float = 0.7,
-    device: str = 'cpu',
-    # Review params
     confidence_threshold: float = 0.5,
     skip_review: bool = True,
-    # Morphology params
     pixel_size: Optional[float] = None,
 ) -> Tuple[List[np.ndarray], List[float], List[Dict], List[Dict], bool]:
     """
-    End-to-end: predict -> extract instances -> review -> morphology -> save.
+    Review -> morphology -> save, for one image's detections (e.g. read from a
+    prediction cache by batch_size_profile.py). No model is loaded here.
 
     Args:
-        image_path: Path to input image
-        output_dir: Directory to save outputs (masks, decisions CSV)
-        yolo_model_path: Path to YOLO .pt weights
-        imgsz: Inference image size
-        yolo_conf: YOLO confidence threshold
-        yolo_iou: YOLO NMS IoU threshold
-        device: Device string ('cpu' or 'cuda')
+        image: Grayscale image (H, W)
+        image_name: Base name used for the per-image output files
+        instance_masks / confidences / instance_polygons: one entry per detection
+        output_dir: Directory to save outputs (masks, decisions CSV, morphology)
         confidence_threshold: Objects below this are rejected (skip_review=True)
             or shown for manual review (skip_review=False)
         skip_review: If True, auto-reject below-threshold objects without popups
@@ -331,30 +320,6 @@ def predict_with_review(
     Returns:
         (accepted_masks, accepted_confidences, decisions, morph_records, exited)
     """
-    image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    if image is None:
-        raise FileNotFoundError(f"Could not read image: {image_path}")
-    image = image.squeeze()  # ensure (H, W), not (H, W, 1)
-
-    # --- Extract instances (timed) ---
-    _t0 = time.perf_counter()
-    instance_masks, confidences, bbox_info, instance_polygons = extract_instances_yolo(
-        yolo_model_path, image_path, imgsz, yolo_conf, yolo_iou, device
-    )
-    _inference_time_s = time.perf_counter() - _t0
-
-    # --- Perf record (written to output_dir/performance_log.csv) ---
-    _session_id = f"single_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    _perf = PerformanceLogger(output_dir=output_dir, session_id=_session_id)
-    _perf.log_session_start(
-        model_path=yolo_model_path, n_images=1,
-        device=device, imgsz=imgsz, conf=yolo_conf, iou=yolo_iou,
-    )
-    _perf.log_image(
-        image_path=image_path, n_raw_detections=len(instance_masks),
-        inference_time_s=_inference_time_s, image=image,
-    )
-
     print(f"Detected {len(instance_masks)} objects")
 
     # --- Review ---
@@ -389,7 +354,7 @@ def predict_with_review(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    base_name = Path(image_path).stem
+    base_name = image_name
 
     # Save accepted binary mask
     combined_mask = np.zeros(image.shape[:2], dtype=np.uint8)
@@ -424,132 +389,4 @@ def predict_with_review(
             save_path=str(output_path / f"{base_name}_morphology_distributions.png")
         )
 
-    _perf.log_session_end(total_time_s=time.perf_counter() - _t0, n_processed=1)
-
     return filtered_masks, filtered_confs, decisions, morph_records, False
-
-
-# ============================================================================
-# Visualization Helpers
-# ============================================================================
-
-def create_overlay_image(
-    image: np.ndarray,
-    mask: np.ndarray,
-    color: Tuple[int, int, int] = (255, 0, 0),
-    alpha: float = 0.5
-) -> np.ndarray:
-    """Create overlay of mask on image. Returns RGB overlay image (H, W, 3)."""
-    if len(image.shape) == 2:
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-    else:
-        image_rgb = image.copy()
-
-    colored_mask = np.zeros_like(image_rgb)
-    colored_mask[mask > 0] = color
-
-    overlay = cv2.addWeighted(image_rgb, 1.0, colored_mask, alpha, 0)
-    return overlay
-
-
-# ============================================================================
-# Main Script
-# ============================================================================
-
-if __name__ == '__main__':
-    """
-    YOLO inference with morphology analysis on test images.
-    """
-    import glob as glob_module
-    import torch
-
-    CONFIG = {
-        'yolo_model_path': r'C:\Users\Yifei\Documents\cryo\revised_annotation\results_yolov8_heavy_augmentation\training\vesicle_instance_seg_v2\weights\best.pt',
-        'yolo_conf': 0.25,
-        'yolo_iou': 0.7,
-
-        'test_data_dir': r'C:\Users\Yifei\Documents\cryo\revised_annotation\split_cleaned\test',
-        'output_dir': r'C:\Users\Yifei\Documents\cryo\revised_annotation\results_yolov8_heavy_augmentation',
-        'image_size': 1024,
-        'confidence_threshold': 0.5,
-        'skip_review': False,  # Set to False to interactively review below-threshold detections
-        'pixel_size': None,  # Set to e.g. 3.5 for nm/px conversion
-    }
-
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Using device: {device}\n")
-
-    # Gather test images
-    img_dir = os.path.join(CONFIG['test_data_dir'], 'images')
-    image_paths = sorted(
-        glob_module.glob(os.path.join(img_dir, '*.jpg'))
-        + glob_module.glob(os.path.join(img_dir, '*.png'))
-        + glob_module.glob(os.path.join(img_dir, '*.tif'))
-    )
-    print(f"Found {len(image_paths)} test images in {img_dir}\n")
-
-    all_morph_records = []
-
-    _batch_session_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    _batch_perf = PerformanceLogger(
-        output_dir=CONFIG['output_dir'],
-        session_id=_batch_session_id,
-        log_name="performance_log.csv",
-    )
-    _batch_perf.log_session_start(
-        model_path=CONFIG['yolo_model_path'],
-        n_images=len(image_paths),
-        device=device,
-        imgsz=CONFIG['image_size'],
-        conf=CONFIG['yolo_conf'],
-        iou=CONFIG['yolo_iou'],
-    )
-    _batch_t0 = time.perf_counter()
-    _batch_processed = 0
-
-    for img_path in image_paths:
-        print(f"Processing: {os.path.basename(img_path)}")
-        _img_t0 = time.perf_counter()
-        _, _, _, morph_records, exited = predict_with_review(
-            image_path=img_path,
-            output_dir=CONFIG['output_dir'],
-            yolo_model_path=CONFIG['yolo_model_path'],
-            imgsz=CONFIG['image_size'],
-            yolo_conf=CONFIG['yolo_conf'],
-            yolo_iou=CONFIG['yolo_iou'],
-            device=device,
-            confidence_threshold=CONFIG['confidence_threshold'],
-            skip_review=CONFIG['skip_review'],
-            pixel_size=CONFIG['pixel_size'],
-        )
-        # Tag each record with its source image
-        for rec in morph_records:
-            rec['image'] = os.path.basename(img_path)
-        all_morph_records.extend(morph_records)
-        _img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-        _batch_perf.log_image(
-            image_path=img_path,
-            n_raw_detections=sum(1 for d in _ if True) if _ is not None else 0,
-            inference_time_s=time.perf_counter() - _img_t0,
-            image=_img,
-        )
-        _batch_processed += 1
-        print()
-        if exited:
-            break
-
-    _batch_perf.log_session_end(
-        total_time_s=time.perf_counter() - _batch_t0,
-        n_processed=_batch_processed,
-    )
-
-    # Save combined morphology CSV for all images
-    if all_morph_records:
-        combined_csv = os.path.join(CONFIG['output_dir'], 'morphology_all.csv')
-        save_morphology_csv(all_morph_records, combined_csv)
-        plot_morphology_distributions(
-            all_morph_records, pixel_size=CONFIG['pixel_size'],
-            save_path=os.path.join(CONFIG['output_dir'], 'morphology_distributions_all.png')
-        )
-
-    print(f"\nInference complete! {len(all_morph_records)} vesicles analyzed across {len(image_paths)} images.")
