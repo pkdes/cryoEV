@@ -16,11 +16,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 # Default model weights (change if moved)
-_DEFAULT_MODEL = (
-    r"C:\Users\ML-2619\Desktop\Pujan Cryo\cryo-ev pipeline\Model Training by Yifei"
-    r"\round_2\results_yolov8_heavy_augmentation\training\vesicle_instance_seg_v2\weights"
-    r"\best.pt"
-)
+_DEFAULT_MODEL = str(Path(__file__).resolve().parent.parent / "models" / "v3_run1_20260824" / "best.pt")
 
 # Repo root (parent of this file's package)
 _REPO_ROOT = Path(__file__).resolve().parent.parent

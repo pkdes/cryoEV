@@ -372,7 +372,8 @@ def plot_morphology_distributions(
     majors = [r['major_axis'] for r in records if r['major_axis'] is not None]
     minors = [r['minor_axis'] for r in records if r['minor_axis'] is not None]
     circularities = [r['circularity'] for r in records if r['circularity'] is not None]
-    aspect_ratios = [r['aspect_ratio'] for r in records if r['aspect_ratio'] is not None]
+    # Degenerate slivers (minor axis 0) give aspect_ratio = inf, which breaks hist(); plot finite values only.
+    aspect_ratios = [r['aspect_ratio'] for r in records if r['aspect_ratio'] is not None and np.isfinite(r['aspect_ratio'])]
 
     fig, axes = plt.subplots(2, 2, figsize=(10, 8))
 

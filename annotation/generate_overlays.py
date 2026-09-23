@@ -152,8 +152,8 @@ def main() -> None:
     parser.add_argument(
         "--root",
         type=Path,
-        default=Path(r"C:\Users\ML-2619\Desktop\Pujan Cryo\cryo-ev pipeline\annotation_outputs"),
-        help="Root folder containing session_* sub-folders.",
+        default=None,
+        help="Root folder containing session_* sub-folders (the annotator's --output-dir).",
     )
     parser.add_argument(
         "--session",
@@ -170,6 +170,8 @@ def main() -> None:
 
     if args.session:
         sessions = [args.session]
+    elif args.root is None:
+        parser.error("give --root (folder of session_* folders) or --session")
     else:
         # Include both session_YYYYMMDD_HHMMSS and legacy named folders.
         sessions = sorted(

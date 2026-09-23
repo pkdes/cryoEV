@@ -710,6 +710,14 @@ def load_prediction_polygons(label_path, img_width: int, img_height: int) -> Tup
         polys.append(np.array(parts[2:], dtype=np.float32).reshape(-1, 2) * [img_width, img_height])
     return polys, confs
 
+
+def polygon_to_mask(polygon: np.ndarray, height: int, width: int) -> np.ndarray:
+    """Rasterize a float pixel-coord polygon. Rounds (not truncates) vertices: truncation roughens
+    the edge and biases circularity low (~0.87 vs 0.90 against live-inference masks)."""
+    mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.fillPoly(mask, [np.round(polygon).astype(np.int32)], 1)
+    return mask > 0
+
 def export_predictions_for_split(model_path: str, img_dir: str, output_dir, imgsz: int, conf: float,
                                  iou: float, device: str) -> None:
     """Run inference once over every image in a split and cache the raw predicted polygons to disk."""

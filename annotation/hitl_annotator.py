@@ -30,14 +30,10 @@ from annotation.io import (
     write_yolo_polygon_labels,
 )
 from inference.perf_log import PerformanceLogger
-from training.train_yolo import load_predictions_from_model
+from training.train_yolo import load_prediction_polygons, load_predictions_from_model, polygon_to_mask
 
 
-DEFAULT_MODEL_PATH = (
-    r"C:\Users\ML-2619\Desktop\Pujan Cryo\cryo-ev pipeline\Model Training by Yifei"
-    r"\round_2\results_yolov8_heavy_augmentation\training\vesicle_instance_seg_v2\weights"
-    r"\best.pt"
-)
+DEFAULT_MODEL_PATH = str(Path(__file__).resolve().parent.parent / "models" / "v3_run1_20260824" / "best.pt")
 
 
 def _default_output_dir_for(input_images: Path | None) -> Path:
@@ -93,7 +89,7 @@ def _pick_paths_with_dialogs(
     return Path(selected_input), Path(selected_output), selected_model
 
 
-def _resolve_runtime_paths(args: argparse.Namespace) -> tuple[List[Path], Path, Path]:
+def _resolve_runtime_paths(args: argparse.Namespace) -> tuple[List[Path], Path, Path | None]:
     # args.input_images is now a list[Path] or None
     input_images: List[Path] | None = args.input_images
     first = input_images[0] if input_images else None
@@ -112,7 +108,15 @@ def _resolve_runtime_paths(args: argparse.Namespace) -> tuple[List[Path], Path, 
     if not input_images:
         raise SystemExit("Provide --input-images or use --gui.")
 
-    model_path = _resolve_model_path(model_path_raw)
+    if args.predictions_dir is not None:
+        # Model is only the fallback for images without a prediction file.
+        try:
+            model_path = _resolve_model_path(model_path_raw)
+        except FileNotFoundError:
+            print(f"Model weights not found ({model_path_raw}); images without a prediction file start empty.")
+            model_path = None
+    else:
+        model_path = _resolve_model_path(model_path_raw)
     return [Path(p) for p in input_images], Path(output_dir), model_path
 
 
@@ -1578,7 +1582,7 @@ def _prompt_for_resume_mode(already_annotated: List[Path], total_images: int, re
 def run_annotation_session(
     input_images: List[Path] | Path,
     output_dir: Path,
-    model_path: Path,
+    model_path: Path | None,
     imgsz: int,
     conf: float,
     iou: float,
@@ -1592,6 +1596,7 @@ def run_annotation_session(
     region_cols: int = 4,
     review_mode: str = "polygon",
     resume_mode: str = "ask",
+    predictions_dir: Path | None = None,
 ) -> None:
     if isinstance(input_images, Path):
         input_images = [input_images]
@@ -1648,7 +1653,11 @@ def run_annotation_session(
     n_processed = 0
 
     print(f"Loaded {len(image_paths)} images for HITL annotation.")
-    print(f"Using model: {model_path}\n")
+    if predictions_dir is not None:
+        print(f"Seeding from predictions: {predictions_dir}")
+        print(f"Fallback model (images without a prediction file): {model_path or 'none'}\n")
+    else:
+        print(f"Using model: {model_path}\n")
 
     for idx, image_path in enumerate(image_paths, start=1):
         print(f"[{idx}/{len(image_paths)}] {image_path.name}")
@@ -1680,25 +1689,39 @@ def run_annotation_session(
             )
             continue
 
-        image, inf_path, inf_scale = _rescale_image_for_inference(
-            image, image_path, imgsz, _rescale_cache
-        )
+        pred_file = predictions_dir / f"{image_path.stem}.txt" if predictions_dir is not None else None
         _t_inf0 = time.perf_counter()
-        pred_masks, confidences = load_predictions_from_model(
-            model_path=str(model_path),
-            img_path=str(inf_path),
-            imgsz=imgsz,
-            conf=conf,
-            iou=iou,
-            device=device,
-        )
+        if pred_file is not None and pred_file.exists():
+            # Cached predictions are already in original-image coordinates: no rescale, no model.
+            h, w = image.shape[:2]
+            cached_polys, cached_confs = load_prediction_polygons(pred_file, w, h)
+            kept = [(p, c) for p, c in zip(cached_polys, cached_confs) if c >= conf]
+            pred_masks = [polygon_to_mask(p, h, w) for p, _ in kept]
+            confidences = [c for _, c in kept]
+        elif model_path is None:
+            print("  No prediction file and no model: starting with no predictions")
+            pred_masks, confidences = [], []
+        else:
+            if pred_file is not None:
+                print(f"  No prediction file ({pred_file.name}); running the model")
+            image, inf_path, inf_scale = _rescale_image_for_inference(
+                image, image_path, imgsz, _rescale_cache
+            )
+            pred_masks, confidences = load_predictions_from_model(
+                model_path=str(model_path),
+                img_path=str(inf_path),
+                imgsz=imgsz,
+                conf=conf,
+                iou=iou,
+                device=device,
+            )
+            # Clean up temp file created by rescaling.
+            if inf_path != image_path and inf_path.exists():
+                try:
+                    inf_path.unlink()
+                except OSError:
+                    pass
         _inference_time_s = time.perf_counter() - _t_inf0
-        # Clean up temp file created by rescaling.
-        if inf_path != image_path and inf_path.exists():
-            try:
-                inf_path.unlink()
-            except OSError:
-                pass
 
         auto_polygons_xy: List[np.ndarray] = []
         auto_confidences: List[float] = []
@@ -1901,12 +1924,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-images", type=Path, nargs="+", help="One or more image files or folders to annotate (combined into a single session)")
     parser.add_argument("--output-dir", type=Path, help="Output folder for reviewed dataset and stats")
     parser.add_argument("--model-path", type=str, default=DEFAULT_MODEL_PATH, help="Path to YOLO weights file or folder containing best.pt")
+    parser.add_argument("--predictions-dir", type=Path, default=None,
+                        help="Seed polygons from cached predictions (<stem>.txt, e.g. <out>/<model_id>/predictions from "
+                             "inference/predict_models.py) instead of running the model. The model is only used as a "
+                             "fallback for images without a prediction file.")
     parser.add_argument("--gui", action="store_true", help="Open folder/file picker dialogs for input, output, and model paths")
     parser.add_argument("--ui", choices=["simple", "napari"], default="simple", help="Annotation interface to use (default: simple side-by-side reviewer)")
     parser.add_argument("--review-mode", choices=["polygon", "box"], default="polygon", help="Review geometry to edit (default: polygon for true hand-corrected masks)")
     parser.add_argument("--region-rows", type=int, default=2, help="Number of review rows for pane-based navigation (default: 2)")
     parser.add_argument("--region-cols", type=int, default=4, help="Number of review columns for pane-based navigation (default: 4)")
-    parser.add_argument("--imgsz", type=int, default=1024, help="YOLO inference image size")
+    parser.add_argument("--imgsz", type=int, default=1440, help="YOLO inference image size (1440 for the all-layer models; see models/models.yaml)")
     parser.add_argument("--conf", type=float, default=0.25, help="YOLO confidence threshold")
     parser.add_argument("--iou", type=float, default=0.7, help="YOLO NMS IoU threshold")
     parser.add_argument("--device", type=str, default="cpu", help="Inference device: cpu or cuda")
@@ -1943,6 +1970,7 @@ def main() -> None:
         region_cols=args.region_cols,
         review_mode=args.review_mode,
         resume_mode=args.resume_mode,
+        predictions_dir=args.predictions_dir,
     )
 
 

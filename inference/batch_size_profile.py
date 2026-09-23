@@ -30,21 +30,12 @@ from typing import Dict, List
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import cv2
-import numpy as np
 
 from analysis.morphology import plot_morphology_distributions, save_morphology_csv
 from inference.inference import review_and_measure
-from training.train_yolo import load_prediction_polygons
+from training.train_yolo import load_prediction_polygons, polygon_to_mask
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
-
-
-def polygon_to_mask(polygon: np.ndarray, height: int, width: int) -> np.ndarray:
-    """Rasterize a float pixel-coord polygon. Rounds (not truncates) vertices: truncation roughens
-    the edge and biases circularity low (~0.87 vs 0.90 against live-inference masks)."""
-    mask = np.zeros((height, width), dtype=np.uint8)
-    cv2.fillPoly(mask, [np.round(polygon).astype(np.int32)], 1)
-    return mask > 0
 
 
 def iter_images(input_dir: Path) -> List[Path]:
