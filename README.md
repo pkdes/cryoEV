@@ -18,7 +18,7 @@ Characterizing EVs and EPs from cryo-EM today means counting, outlining and meas
 | **Human-in-the-loop annotation** | Model predictions used as first-pass labels, then corrected in a GUI, to grow the training set | `annotation/` |
 | **Self-supervised embeddings + clustering** | Frozen DINOv2/v3 embeddings of object crops, clustered without labels, to look for structure nobody annotated. Inference-only; a separate workflow | `embedding/` (own README) |
 
-**Tried earlier, kept for history:**
+**Tried earlier (code removed; recoverable from git tag `pre-cleanup`):**
 - U-Net semantic segmentation.
 - A dedicated "multilayer EV" model class. It was abandoned because recall plateaued around 0.39 for lack of training examples, and the geometric approach above replaced it.
 
@@ -37,7 +37,7 @@ The pipeline scripts find the data directory at `Path(__file__).parent.parent.pa
 ## Quick start: run models on new images
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt            # add: -r requirements-annotation.txt for the annotation GUI
 python inference/predict_models.py --images <image_dir> --out <out_dir>                     # all registered models
 python inference/predict_models.py --images <image_dir> --out <out_dir> --models v3_run1_20260824 --device cpu
 ```
@@ -68,7 +68,6 @@ To add a model, put `best.pt` in `models/<model_id>/` and add an entry to `model
 - **Inputs should be 8-bit images** (JPEG/PNG, 1440×1024 native), like the Roboflow exports the models were trained on. Convert raw 16-bit or MRC data first.
 - **The Yifei model's output can't be used for layer counting.** It outlines whole EVs only, so containment analysis doesn't apply to it. Its raw detection counts are nonetheless similar to v3's.
 - **Validation metrics in `models.yaml` can't be compared across models.** Each model was scored on a different validation set.
-- **`training/__init__.py` imports the old U-Net code**, so `segmentation-models-pytorch` must be installed even for inference. This is a known wart; see `CLEANUP_CANDIDATES.md`.
 - **`classify_roles()`** in `analysis/multilayer_containment.py` is deliberately ordered: "contained by something" is checked before "contains something". Don't reorder it.
 - **Settled training choices; don't re-test these:**
   - `overlap_mask=False`: mask mAP 0.614 vs 0.511.
@@ -102,7 +101,7 @@ To add a model, put `best.pt` in `models/<model_id>/` and add an entry to `model
 | `training/monitor_run.py`, `notify.py` | Live training monitor, completion notifications |
 | `embedding/` | DINO embedding + clustering workflow; see `embedding/README.md`. Planned to move to its own fork |
 
-**Legacy and planned refactors:** see [`CLEANUP_CANDIDATES.md`](CLEANUP_CANDIDATES.md). In particular, size profiling and the annotation tool still run live inference; they are planned to read the prediction files instead.
+**How it fits together:** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) has a dependency diagram. **Cleanup history and remaining candidates:** [`CLEANUP_CANDIDATES.md`](CLEANUP_CANDIDATES.md).
 
 ## Training (requires `CryoAI/`)
 
@@ -117,14 +116,18 @@ Each run appends a row to `CryoAI/EXPERIMENT_LOG.csv`. Long runs should go in th
 
 ---
 
-## Reference: size and morphology profiling (legacy path, refactor planned)
+## Reference: size and morphology profiling
 
-`inference/batch_size_profile.py` runs one model over a folder and measures each accepted object. It currently runs inference itself; it's planned to read the prediction files instead (see `CLEANUP_CANDIDATES.md`, R1).
+`inference/batch_size_profile.py` measures every accepted object in a folder of images. It reads prediction files and doesn't load a model, so run inference first:
 
 ```bash
-python inference/batch_size_profile.py --input-dir <images> --output-dir <out> \
-    --model-path models/v3_run1_20260824/best.pt --imgsz 1440 [--pixel-size 3.5] [--review]
+python inference/predict_models.py --images <images> --out <pred_out> --models v3_run1_20260824
+python inference/batch_size_profile.py --input-dir <images> --output-dir <profile_out> \
+    --predictions-dir <pred_out>/v3_run1_20260824/predictions [--pixel-size 3.5] [--review]
+python -m analysis.aggregate_size_results --morphology-csv <profile_out>/morphology_all.csv \
+    --per-image-csv <profile_out>/per_image_summary.csv --output-dir <agg_out>      # per-sample plots
 ```
+Any folder of `<stem>.txt` prediction files works, for example a training run's `predictions/test`. To compare models, profile each model's prediction folder.
 
 Morphology metrics per object:
 | Metric | Description |
@@ -139,15 +142,19 @@ Morphology metrics per object:
 
 **Confidence review:** detections at or above the acceptance threshold (default 0.5) are accepted automatically. Below it they're rejected automatically, unless `--review` is passed. With `--review`, a matplotlib pop-up shows each object (circled in red) with **Accept / Reject / Exit** buttons.
 
-## Reference: human-in-the-loop annotation (not in active use, refactor planned)
+## Reference: human-in-the-loop annotation (not in active use)
 
-Uses model predictions as first-pass polygons, then lets you correct them in a GUI. It currently runs inference for each image; it's planned to read the prediction files instead (R2).
+Uses model predictions as first-pass polygons, then lets you correct them in a GUI. Requires `pip install -r requirements-annotation.txt`.
 
 ```bash
+# Recommended: seed from prediction files (no GPU; model only used for images without a prediction file)
 python -m annotation.hitl_annotator --input-images <images> --output-dir <out> \
-    --model-path models/v3_run1_20260824/best.pt --imgsz 1440 --device cuda --save-auto-labels
-python -m annotation.hitl_annotator --gui --imgsz 1440 --device cuda --save-auto-labels     # folder/file pickers
+    --predictions-dir <pred_out>/v3_run1_20260824/predictions --save-auto-labels
+# Live inference (default model: models/v3_run1_20260824, imgsz 1440)
+python -m annotation.hitl_annotator --input-images <images> --output-dir <out> --device cuda --save-auto-labels
+python -m annotation.hitl_annotator --gui --device cuda --save-auto-labels     # folder/file pickers
 python -m annotation.hitl_annotator --ui napari --gui --device cuda            # older Napari editor
+python -m annotation.hitl_launcher                                             # small GUI launcher (live inference)
 ```
 The default editor is a side-by-side reviewer with synchronized zoom and pan. It has buttons for **Add / Replace / Delete / Save & Next / Skip / Quit**, and keyboard shortcuts `S` (save), `K` (skip) and `Q` (quit).
 

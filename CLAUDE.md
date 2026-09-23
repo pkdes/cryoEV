@@ -7,7 +7,7 @@ Automated detection and characterization of extracellular vesicles and particles
 ## Before changing anything
 - **Code only.** Data, training runs and the experiment log live in a sibling `../CryoAI/` directory, which is not in git. If it exists, read `../CryoAI/CLAUDE.md` and `../CryoAI/MANIFEST.md` for full history. If it doesn't exist, only `inference/predict_models.py` works standalone.
 - **Exported models** are in `models/`. Each model's inference `imgsz` lives in `models/models.yaml`; always use it.
-- **`CLEANUP_CANDIDATES.md`** lists legacy code and the planned refactors. Check it before building on an older script.
+- **`docs/ARCHITECTURE.md`** has the dependency diagram. **`CLEANUP_CANDIDATES.md`** records what was cleaned up (pre-cleanup state is git tag `pre-cleanup`) and the remaining candidates. Check it before building on an older script.
 
 ## Conventions
 - **Parameterize existing scripts; don't duplicate them.** Add `--dataset`/`--model` style arguments instead of dataset-specific copies. No new hard-coded absolute paths; compute them relative to the repo (`Path(__file__)...`).
