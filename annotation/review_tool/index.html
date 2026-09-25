@@ -1,0 +1,1118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>EV Label Review</title>
+<style>
+:root{--bg:#f6f6f4;--panel:#fff;--ink:#1d1d1b;--mute:#6b6b66;--line:#dcdcd6;--acc:#2764c5;--warn:#c2410c;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#161615;--panel:#20201f;--ink:#ecece8;--mute:#9a9a94;--line:#353532;--acc:#6ea0f0;--warn:#fb923c;color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:13px/1.35 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;overflow:hidden}
+#app{display:grid;grid-template-columns:260px minmax(0,1fr) 250px;width:100%;grid-template-rows:auto 1fr;height:100%}
+header{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--panel)}
+header .sep{width:1px;height:22px;background:var(--line);margin:0 4px}
+button,select,input[type=file]::file-selector-button{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 9px;cursor:pointer}
+button:hover{border-color:var(--acc)}
+button.on{background:var(--acc);border-color:var(--acc);color:#fff}
+button:disabled{opacity:.45;cursor:default}
+select{padding:3px 6px}
+label.tg{display:inline-flex;gap:4px;align-items:center;cursor:pointer;user-select:none}
+#title{font-weight:600;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#list{overflow:auto;border-right:1px solid var(--line);background:var(--panel)}
+#list .ctl{position:sticky;top:0;background:var(--panel);padding:6px;border-bottom:1px solid var(--line);display:flex;gap:6px;flex-wrap:wrap}
+#list .it{display:flex;gap:6px;align-items:center;padding:5px 8px;border-bottom:1px solid var(--line);cursor:pointer}
+#list .it.cur{background:color-mix(in srgb,var(--acc) 18%,transparent)}
+#list .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.badge{font-size:11px;padding:0 5px;border-radius:8px;border:1px solid var(--line);color:var(--mute)}
+.fl{color:var(--warn);font-size:11px;min-width:30px;text-align:right}
+.ok{color:#16a34a;font-weight:700;width:12px}
+#stage{min-width:0;min-height:0;position:relative;overflow:hidden;background:#000;touch-action:none}
+canvas{display:block;width:100%;height:100%}
+#side{overflow:auto;border-left:1px solid var(--line);background:var(--panel);padding:10px}
+#side h3{margin:10px 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute)}
+#side .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0}
+#side kbd{font:11px ui-monospace,monospace;border:1px solid var(--line);border-radius:4px;padding:0 4px}
+.help li{margin:2px 0;color:var(--mute)}
+#banner{position:absolute;left:8px;top:8px;right:8px;background:var(--warn);color:#fff;padding:6px 10px;border-radius:6px;display:none}
+#hint{position:absolute;left:8px;bottom:8px;background:rgba(0,0,0,.6);color:#fff;padding:4px 8px;border-radius:6px;font-size:12px;pointer-events:none}
+.legend span{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+#menuBtn,#sideBtn{display:none}
+#tri{--hot:#fd267a;--hot2:#ff7854;position:fixed;top:0;left:0;width:100vw;height:100dvh;overflow:hidden;z-index:20;display:flex;flex-direction:column;background:var(--bg);padding:env(safe-area-inset-top,0px) 0 env(safe-area-inset-bottom,0px)}
+#tri .tbar{display:flex;align-items:center;gap:8px;padding:8px 12px 4px}
+#tri .logo{flex:1;text-align:center;line-height:1.05;cursor:pointer;user-select:none}
+#tri .logo b{font:900 32px/1.05 system-ui,sans-serif;letter-spacing:-.03em;background:linear-gradient(90deg,var(--hot),var(--hot2));-webkit-background-clip:text;background-clip:text;color:transparent}
+#tri .logo small{display:block;color:var(--ink);opacity:.85;font-size:13.5px;font-weight:600;margin-top:2px}
+#tri .tfil{display:flex;gap:6px;align-items:center;justify-content:center;flex-wrap:wrap;padding:0 10px 6px;font-size:12px;color:var(--mute)}
+#tri .tfil select{font-size:12px;padding:2px 4px}
+#triStage{flex:1;min-height:0;position:relative;padding:4px 10px}
+#card{position:relative;width:100%;height:100%;border-radius:16px;overflow:hidden;background:#000;box-shadow:0 6px 24px rgba(0,0,0,.35);will-change:transform}
+#card canvas{display:block;width:100%;height:100%;touch-action:none}
+#triStamp{position:absolute;top:18%;left:50%;transform:translate(-50%,-50%) rotate(-14deg);font:900 38px system-ui,sans-serif;padding:2px 14px;border:5px solid;border-radius:10px;opacity:0;pointer-events:none;letter-spacing:.06em}
+#triStamp.yes{color:#22c55e;border-color:#22c55e}#triStamp.nope{color:#ef4444;border-color:#ef4444}#triStamp.skip{color:#60a5fa;border-color:#60a5fa}
+#triZoom{position:absolute;right:10px;top:10px;background:rgba(0,0,0,.55);color:#fff;font-size:11px;padding:3px 8px;border-radius:10px;pointer-events:none}
+#triEye{position:absolute;left:10px;top:10px;border-radius:50%;width:38px;height:38px;padding:0;font-size:18px;background:rgba(0,0,0,.55);border:1px solid rgba(255,255,255,.3);color:#fff}
+#triEye.off{background:#fff;color:#000}
+#triAdj{position:absolute;left:56px;top:10px;border-radius:50%;width:38px;height:38px;padding:0;font-size:17px;background:rgba(0,0,0,.55);border:1px solid rgba(255,255,255,.3);color:#fff}
+#triAdj.off{background:#fff;border-color:#fff}
+#triAdjBar{display:flex;justify-content:center;gap:10px;padding:6px 10px 14px}
+#triAdjBar[hidden]{display:none}
+#triAdjBar button{min-height:50px;border-radius:25px;padding:0 18px;font-size:15px;font-weight:600}
+#adjSave{background:#16a34a;border-color:#16a34a;color:#fff}
+#adjRedraw.on{background:#2563eb;border-color:#2563eb;color:#fff}
+#triZoom{pointer-events:auto;cursor:pointer}
+#triBio{position:absolute;left:0;right:0;bottom:0;padding:40px 14px 12px;color:#fff;background:linear-gradient(transparent,rgba(0,0,0,.85) 45%);pointer-events:none;overflow-wrap:anywhere}
+#triBio h2{margin:0;font-size:22px}#triBio h2 span{font-weight:400}
+#triBio p{margin:4px 0;font-size:14px}#triBio small{opacity:.75;font-size:12px}
+#triMatch{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;z-index:3}
+#triMatch b{font:italic 900 34px/1.1 system-ui,sans-serif;text-align:center;padding:0 20px;background:linear-gradient(90deg,var(--hot),var(--hot2));-webkit-background-clip:text;background-clip:text;color:transparent;filter:drop-shadow(0 2px 6px rgba(0,0,0,.6))}
+#triMatch span{color:#fff;font-weight:600;text-shadow:0 1px 4px #000;margin-top:4px}
+#triMatch.pop{animation:pop .9s ease-out forwards}
+@keyframes pop{0%{opacity:0;transform:scale(.6)}20%{opacity:1;transform:scale(1.05)}75%{opacity:1;transform:scale(1)}100%{opacity:0;transform:scale(1)}}
+#triChips{display:flex;gap:6px;overflow-x:auto;padding:6px 10px;scrollbar-width:none}
+#triChips button{flex:none;border-radius:16px;padding:5px 12px;font-size:13px}
+#triActions{display:flex;justify-content:center;align-items:center;gap:22px;padding:4px 0 12px}
+.round{border-radius:50%;display:flex;align-items:center;justify-content:center;padding:0;background:var(--panel);box-shadow:0 3px 12px rgba(0,0,0,.18);border:1px solid var(--line)}
+.round:disabled{opacity:.35}
+#aNope,#aYes{width:64px;height:64px;font-size:30px}
+#aNope{color:#ef4444}#aYes{color:#22c55e}
+#aSkip{width:48px;height:48px;font-size:22px;color:#60a5fa}
+#triUndo{width:40px;height:40px;font-size:20px;color:#f59e0b}
+#triExit{border-radius:18px}
+@media (max-width:900px){
+  #app{grid-template-columns:minmax(0,1fr)}
+  header{min-width:0}
+  header input[type=range]{width:60px!important}
+  #list,#side{position:fixed;top:0;bottom:0;z-index:5;width:min(300px,85vw);display:none;box-shadow:0 0 20px rgba(0,0,0,.4)}
+  #list{left:0}#side{right:0}
+  #list.show,#side.show{display:block}
+  #menuBtn,#sideBtn{display:inline-block}
+  #title{max-width:150px}
+}
+</style>
+</head>
+<body>
+<div id="app">
+<header>
+  <button id="menuBtn" title="Image list">☰</button>
+  <button id="prev" title="Previous image (P)">◀</button>
+  <span id="title"></span>
+  <button id="next" title="Next image (N)">▶</button>
+  <span class="sep"></span>
+  <button id="toTri" title="One flagged object at a time, swipe to decide (phone friendly)">Cryonder</button>
+  <span class="sep"></span>
+  <button id="mSel" class="on" title="Select / edit (S)">Select</button>
+  <button id="mDraw" title="Draw a new polygon (D)">Draw</button>
+  <select id="newCat" title="Category for new polygons"></select>
+  <button id="undo" title="Undo (Z)">Undo</button>
+  <span class="sep"></span>
+  <label class="tg"><input type="checkbox" id="showGt" checked> Labels</label>
+  <label class="tg"><input type="checkbox" id="showPr" checked> Predictions ≥ <output id="confOut">0.45</output></label>
+  <input type="range" id="conf" min="0.25" max="0.95" step="0.05" value="0.45" style="width:90px">
+  <label class="tg"><input type="checkbox" id="showFlags" checked> Flags</label>
+  <span class="sep"></span>
+  <button id="reviewed" title="Mark reviewed and go to next (R)">✓ Reviewed</button>
+  <button id="export" title="Download all edits as JSON">Export</button>
+  <button id="importBtn" title="Load an edits JSON exported earlier">Import</button>
+  <input type="file" id="importFile" accept=".json,application/json" hidden>
+  <span id="sync" class="badge" title="Where your edits are saved">local only</span>
+  <button id="sideBtn" title="Details">ⓘ</button>
+</header>
+<nav id="list">
+  <div class="ctl">
+    <select id="fSplit"><option value="">All splits</option><option>train</option><option>valid</option><option>test</option></select>
+    <select id="fSort"><option value="flags">Most flags first</option><option value="name">By name</option></select>
+    <select id="fStat"><option value="">Any status</option><option value="todo">Not reviewed</option><option value="done">Reviewed</option></select>
+  </div>
+  <div id="items"></div>
+</nav>
+<main id="stage"><canvas id="cv"></canvas><div id="banner"></div><div id="hint"></div></main>
+<aside id="side">
+  <div id="progress"></div>
+  <h3>Selection</h3>
+  <div id="selBox" class="row" style="color:var(--mute)">Click a polygon to select it.</div>
+  <h3>Legend</h3>
+  <div class="legend" id="legend"></div>
+  <div class="legend" style="margin-top:6px">
+    <div><span style="background:#22d3ee"></span>prediction (dashed)</div>
+    <div><span style="background:#facc15"></span>prediction with no label (possible miss)</div>
+    <div><span style="background:#f0f"></span>label with no prediction (check it)</div>
+  </div>
+  <h3>Controls</h3>
+  <ul class="help" style="padding-left:16px;margin:0">
+    <li>Drag empty space to pan; wheel or pinch to zoom; <kbd>F</kbd> fit</li>
+    <li>Click a polygon to select (innermost wins)</li>
+    <li>Drag a white handle to move a vertex</li>
+    <li>Double-click a handle to delete it, an edge to add one</li>
+    <li><kbd>Del</kbd> delete label · <kbd>A</kbd> accept prediction as label</li>
+    <li><kbd>D</kbd> draw: click points, click the first point or press <kbd>Enter</kbd> to close, <kbd>Esc</kbd> cancel</li>
+    <li><kbd>1</kbd>–<kbd>7</kbd> set category of selected label</li>
+    <li><kbd>N</kbd>/<kbd>P</kbd> next/prev · <kbd>R</kbd> reviewed · <kbd>Z</kbd> undo · <kbd>T</kbd> toggle predictions · <kbd>H</kbd> hide/show all outlines</li>
+  </ul>
+  <h3>Saving</h3>
+  <div style="color:var(--mute)">Edits save in this browser automatically. Opened from the lab server, they also upload to the PC (badge at top right); offline edits upload when the connection returns. Opened from a zip, <b>Export</b> regularly and <b>Import</b> the JSON into the online page later.</div>
+</aside>
+</div>
+<section id="tri" hidden>
+  <div class="tbar">
+    <button id="triExit" title="Open this object in the full editor">Editor</button>
+    <div class="logo" id="logo" title="Tap to switch app"><b id="logoName">eVHarmony</b><small id="logoTag">Find your perfect membrane match</small></div>
+    <button id="triUndo" class="round" title="Rewind (Z)">↺</button>
+  </div>
+  <div class="tfil">
+    <span id="triProg"></span>
+    <select id="triConf" title="Only show predictions at or above this confidence">
+      <option value="0.25">conf &ge; 0.25</option><option value="0.35" selected>conf &ge; 0.35</option><option value="0.45">conf &ge; 0.45</option><option value="0.6">conf &ge; 0.6</option>
+    </select>
+    <select id="triSplit"><option value="">all splits</option><option>train</option><option>valid</option><option>test</option></select>
+    <span id="sync2" class="badge">local only</span>
+    <button id="triWho" class="badge" title="Change your reviewer name">👤</button>
+  </div>
+  <div id="triStage">
+    <div id="card">
+      <canvas id="tcv"></canvas>
+      <button id="triEye" title="Show / hide outlines (O)">👁</button>
+      <button id="triAdj" title="Adjust or redraw this outline (E)">✏️</button>
+      <div id="triZoom"></div>
+      <div id="triStamp"></div>
+      <div id="triBio"></div>
+    </div>
+    <div id="triMatch" hidden></div>
+  </div>
+  <div id="triChips"></div>
+  <div id="triAdjBar" hidden>
+    <button id="adjCancel" title="Stop editing, keep the original shape (Esc)">Cancel</button>
+    <button id="adjRedraw" title="Trace a new outline with one stroke (R)">✏️ Redraw</button>
+    <button id="adjSave" title="Save this shape (Enter)">✓ Save shape</button>
+  </div>
+  <div id="triActions">
+    <button id="aNope" class="round" title="Nope">✕</button>
+    <button id="aSkip" class="round" title="Maybe later">↑</button>
+    <button id="aYes" class="round" title="Match">♥</button>
+  </div>
+</section>
+<script src="data.js"></script>
+<script>
+(() => {
+"use strict";
+const D = window.REVIEW_DATA;
+if (!D) { document.body.innerHTML = '<p style="padding:20px">data.js is missing. Keep index.html, data.js and images/ together in one folder.</p>'; return; }
+const CATS = D.categories;
+const PALETTE = ["#4ade80","#fb923c","#a78bfa","#f87171","#60a5fa","#f472b6","#e5e7eb","#34d399"];
+const catColor = c => PALETTE[Math.max(0, CATS.indexOf(c)) % PALETTE.length];
+const $ = id => document.getElementById(id);
+const cv = $("cv"), ctx = cv.getContext("2d"), stage = $("stage");
+const KEY = "cryoev-review:" + D.id;
+
+// ---------- state ----------
+let edits = {};            // file -> {gt:[...], reviewed:bool, modified:bool}
+let cur = 0, order = [];   // cur = index into D.images
+let mode = "select", sel = null, draft = null;
+let img = new Image(), imgReady = false, W = 1, H = 1;
+let view = {s: 1, ox: 0, oy: 0};
+const undoStacks = {};
+let storageOk = true;
+
+let dirty = new Set();       // files with edits not yet on the server
+let server = false;          // true when served by annotation/review_server.py
+try {
+  const raw = localStorage.getItem(KEY); if (raw) edits = JSON.parse(raw) || {};
+  dirty = new Set(JSON.parse(localStorage.getItem(KEY + ":dirty") || "[]"));
+} catch (e) { storageOk = false; }
+if (!storageOk) banner("This browser blocks local storage, so edits are lost on reload. Export often.");
+
+function banner(msg) { const b = $("banner"); b.textContent = msg; b.style.display = msg ? "block" : "none"; }
+let saveTimer = null;
+function persist() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    try { localStorage.setItem(KEY, JSON.stringify(edits)); localStorage.setItem(KEY + ":dirty", JSON.stringify([...dirty])); }
+    catch (e) { storageOk = false; banner("Browser storage is full or blocked. Export now to keep your edits."); }
+  }, 250);
+}
+
+const curImg = () => D.images[cur];
+// Per-image edit record:
+//   dec  {key: {v, t, who}}  one triage decision per flagged object ("p<pred idx>" / "g<label id>"),
+//                            merged across reviewers per key, newest wins. v = "add:<cls>" | "no" |
+//                            "keep:<cls>" | "del" | null (undone).
+//   gt, gtT                  a full polygon list, only once someone edits polygons in the Editor; else the
+//                            original labels are the base. Decisions are re-applied on top (idempotent).
+//   reviewed, reviewedT, modified, t
+const me = () => { try { return localStorage.getItem("cryoev-review:who") || ""; } catch (e) { return ""; } };
+{ // a personal link (…&who=Name) sets the reviewer name without asking
+  const w = new URLSearchParams(location.search).get("who");
+  if (w && w.trim()) try { localStorage.setItem("cryoev-review:who", w.trim().slice(0, 40)); } catch (e) {}
+}
+function migrate(e) {
+  if (!e) return e;
+  e.dec = e.dec || {};
+  for (const [k, v] of Object.entries(e.dec)) if (typeof v === "string") e.dec[k] = {v, t: e.t || 0, who: ""};
+  if (e.gt && !e.gtT && e.modified) e.gtT = e.t || 1;
+  if (e.gt && !e.gtT) delete e.gt;
+  return e;
+}
+Object.values(edits).forEach(migrate);
+const decV = (e, key) => { const d = e && e.dec && e.dec[key]; return d ? d.v : null; };
+function effGt(im) {  // labels as they stand: base list + everyone's decisions (+ reshaped outlines)
+  const e = edits[im.file], base = e && e.gtT && e.gt ? e.gt : im.gt, out = [];
+  const decP = key => { const d = e && e.dec && e.dec[key]; return d && d.p && d.t > ((e && e.gtT) || 0) ? d.p : null; };
+  for (const g of base) {
+    const v = g.id != null ? decV(e, "g" + g.id) : null;
+    if (v === "del" || (g.src && decV(e, g.src) === "no")) continue;
+    const add = g.src ? decV(e, g.src) : null;
+    const cls = v && v.startsWith("keep:") ? v.slice(5) : add && add.startsWith("add:") ? add.slice(4) : g.c;
+    const np = (g.id != null && v && v.startsWith("keep:") && decP("g" + g.id)) || (g.src && decP(g.src)) || null;
+    out.push(cls !== g.c || np ? {...g, c: cls, p: np || g.p} : g);
+  }
+  for (const [key, d] of Object.entries((e && e.dec) || {})) {
+    if (key[0] !== "p" || !d.v || !d.v.startsWith("add:") || out.some(g => g.src === key)) continue;
+    const pr = im.pr[+key.slice(1)];
+    if (pr) out.push({id: null, c: d.v.slice(4), p: JSON.parse(JSON.stringify(d.p || pr.p)), src: key});
+  }
+  return out;
+}
+function gtOf(im) { return effGt(im); }
+function ensureEdit(im) { return edits[im.file] = migrate(edits[im.file] || {reviewed: false, modified: false, dec: {}}); }
+function setDec(e, key, v, p) { e.dec[key] = p ? {v, t: Date.now(), who: me(), p} : {v, t: Date.now(), who: me()}; }
+function materialize(im) {  // the Editor edits a concrete list: freeze the current labels into e.gt
+  const e = ensureEdit(im); e.gt = JSON.parse(JSON.stringify(effGt(im))); e.gtT = Date.now(); return e;
+}
+const snapOf = e => JSON.stringify({gt: e.gt, gtT: e.gtT, dec: e.dec});
+function restoreSnap(im, snap) {  // undo; changed keys get a fresh timestamp so the undo also wins on merge
+  const s = JSON.parse(snap), e = ensureEdit(im), now = Date.now();
+  for (const k of new Set([...Object.keys(e.dec), ...Object.keys(s.dec || {})])) {
+    const was = s.dec && s.dec[k] ? s.dec[k].v : null;
+    const wasP = s.dec && s.dec[k] && s.dec[k].p, cur = e.dec[k] || {};
+    if (decV(e, k) !== was || JSON.stringify(cur.p || null) !== JSON.stringify(wasP || null))
+      e.dec[k] = wasP ? {v: was, t: now, who: me(), p: wasP} : {v: was, t: now, who: me()};
+  }
+  if (s.gt && s.gtT !== e.gtT) { e.gt = s.gt; e.gtT = now; }
+}
+function mergeEdit(a, b) {
+  if (!a) return migrate(b); if (!b) return migrate(a);
+  migrate(a); migrate(b);
+  const out = {dec: {}, t: Math.max(a.t || 0, b.t || 0), modified: !!(a.modified || b.modified)};
+  for (const k of new Set([...Object.keys(a.dec), ...Object.keys(b.dec)])) {
+    const x = a.dec[k], y = b.dec[k]; out.dec[k] = !x ? y : !y ? x : (y.t > x.t ? y : x);
+  }
+  if (a.gtT || b.gtT) { const s = (b.gtT || 0) > (a.gtT || 0) ? b : a; out.gt = s.gt; out.gtT = s.gtT; }
+  const ra = a.reviewedT || 0, rb = b.reviewedT || 0;
+  out.reviewed = rb > ra ? !!b.reviewed : !!a.reviewed; out.reviewedT = Math.max(ra, rb);
+  return out;
+}
+function newerThan(l, s) {  // does local hold anything the server copy lacks?
+  if (!l) return false; if (!s) return true;
+  if ((l.gtT || 0) > (s.gtT || 0) || (l.reviewedT || 0) > (s.reviewedT || 0)) return true;
+  return Object.entries(l.dec || {}).some(([k, d]) => !(s.dec || {})[k] || d.t > s.dec[k].t);
+}
+function pushUndo() {
+  const im = curImg(); const e = materialize(im);
+  (undoStacks[im.file] = undoStacks[im.file] || []).push(snapOf(e));
+  if (undoStacks[im.file].length > 100) undoStacks[im.file].shift();
+}
+function touch(file) { edits[file].t = Date.now(); dirty.add(file); persist(); scheduleSync(); }
+function changed() { const e = ensureEdit(curImg()); e.modified = true; touch(curImg().file); renderList(); renderSide(); draw(); }
+function undo() {
+  const im = curImg(), st = undoStacks[im.file];
+  if (!st || !st.length) return;
+  restoreSnap(im, st.pop()); sel = null; changed();
+}
+
+// ---------- geometry ----------
+function pip(x, y, r) { // point in polygon, flat normalized ring
+  let inside = false;
+  for (let i = 0, j = r.length - 2; i < r.length; j = i, i += 2) {
+    const xi = r[i], yi = r[i+1], xj = r[j], yj = r[j+1];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+function area(r) { let a = 0; for (let i = 0, j = r.length - 2; i < r.length; j = i, i += 2) a += (r[j] + r[i]) * (r[j+1] - r[i+1]); return Math.abs(a / 2); }
+const toScr = (x, y) => [x * W * view.s + view.ox, y * H * view.s + view.oy];
+const toImg = (sx, sy) => [(sx - view.ox) / view.s / W, (sy - view.oy) / view.s / H];
+function segDist(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, L = dx*dx + dy*dy;
+  let t = L ? ((px - ax) * dx + (py - ay) * dy) / L : 0; t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - ax - t*dx, py - ay - t*dy);
+}
+
+// ---------- rendering ----------
+function resize() {
+  const r = stage.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  cv.width = Math.max(1, r.width * dpr); cv.height = Math.max(1, r.height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); draw();
+}
+function fit() {
+  const r = stage.getBoundingClientRect();
+  view.s = Math.min(r.width / W, r.height / H); view.ox = (r.width - W * view.s) / 2; view.oy = (r.height - H * view.s) / 2; draw();
+}
+function path(ring) {
+  ctx.beginPath();
+  for (let i = 0; i < ring.length; i += 2) { const [x, y] = toScr(ring[i], ring[i+1]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+  ctx.closePath();
+}
+const conf = () => parseFloat($("conf").value);
+function draw() {
+  const r = stage.getBoundingClientRect();
+  ctx.clearRect(0, 0, r.width, r.height);
+  if (!imgReady) return;
+  ctx.imageSmoothingEnabled = view.s < 2;
+  ctx.drawImage(img, view.ox, view.oy, W * view.s, H * view.s);
+  const im = curImg(), flags = $("showFlags").checked;
+  if ($("showPr").checked) {
+    ctx.setLineDash([5, 4]);
+    im.pr.forEach((p, k) => {
+      if (p.s < conf()) return;
+      const miss = flags && p.u;
+      ctx.lineWidth = miss ? 2.5 : 1.3; ctx.strokeStyle = miss ? "#facc15" : "#22d3ee";
+      p.p.forEach(rg => { path(rg); ctx.stroke(); });
+      if (sel && sel.kind === "pr" && sel.i === k) { ctx.fillStyle = "rgba(250,204,21,.25)"; p.p.forEach(rg => { path(rg); ctx.fill(); }); }
+    });
+    ctx.setLineDash([]);
+  }
+  if ($("showGt").checked) {
+    gtOf(im).forEach((g, k) => {
+      if (flags && g.u) { ctx.lineWidth = 6; ctx.strokeStyle = "rgba(255,0,255,.55)"; g.p.forEach(rg => { path(rg); ctx.stroke(); }); }
+      ctx.lineWidth = 1.6; ctx.strokeStyle = catColor(g.c);
+      g.p.forEach(rg => { path(rg); ctx.stroke(); });
+    });
+  }
+  if (sel && sel.kind === "gt") {
+    const g = gtOf(im)[sel.i];
+    if (g) {
+      ctx.fillStyle = "rgba(39,100,197,.28)"; g.p.forEach(rg => { path(rg); ctx.fill(); });
+      ctx.lineWidth = 2.2; ctx.strokeStyle = "#fff"; g.p.forEach(rg => { path(rg); ctx.stroke(); });
+      ctx.fillStyle = "#fff"; ctx.strokeStyle = "#000"; ctx.lineWidth = 1;
+      g.p.forEach(rg => { for (let i = 0; i < rg.length; i += 2) { const [x, y] = toScr(rg[i], rg[i+1]); ctx.beginPath(); ctx.arc(x, y, 3.5, 0, 7); ctx.fill(); ctx.stroke(); } });
+    }
+  }
+  if (draft && draft.length) {
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.8; ctx.beginPath();
+    for (let i = 0; i < draft.length; i += 2) { const [x, y] = toScr(draft[i], draft[i+1]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+    if (hover) ctx.lineTo(hover[0], hover[1]);
+    ctx.stroke();
+    ctx.fillStyle = "#facc15";
+    for (let i = 0; i < draft.length; i += 2) { const [x, y] = toScr(draft[i], draft[i+1]); ctx.beginPath(); ctx.arc(x, y, i ? 3 : 6, 0, 7); ctx.fill(); }
+  }
+}
+let hover = null;
+
+// ---------- list / side panels ----------
+function renderList() {
+  const fs = $("fSplit").value, st = $("fStat").value, byName = $("fSort").value === "name";
+  order = D.images.map((_, i) => i).filter(i => {
+    const im = D.images[i], rv = !!(edits[im.file] && edits[im.file].reviewed);
+    return (!fs || im.split === fs) && (!st || (st === "done") === rv);
+  });
+  if (byName) order.sort((a, b) => D.images[a].file.localeCompare(D.images[b].file));
+  const box = $("items"); box.innerHTML = "";
+  const frag = document.createDocumentFragment();
+  for (const i of order) {
+    const im = D.images[i], e = edits[im.file];
+    const d = document.createElement("div"); d.className = "it" + (i === cur ? " cur" : "");
+    d.innerHTML = `<span class="ok">${e && e.reviewed ? "✓" : (e && e.modified ? "•" : "")}</span>` +
+      `<span class="nm" title="${im.file}">${im.file.replace(/_(jpg|png)\.rf\..*$/, "")}</span>` +
+      `<span class="badge">${im.split}</span><span class="fl" title="unmatched labels + unmatched predictions">${im.fg + im.fp ? "⚑" + (im.fg + im.fp) : ""}</span>`;
+    d.onclick = () => { go(i); $("list").classList.remove("show"); };
+    frag.appendChild(d);
+  }
+  box.appendChild(frag);
+  const done = D.images.filter(im => edits[im.file] && edits[im.file].reviewed).length;
+  const mod = D.images.filter(im => edits[im.file] && edits[im.file].modified).length;
+  $("progress").innerHTML = `<b>${done}</b> / ${D.images.length} reviewed · ${mod} edited<br><span style="color:var(--mute)">Predictions: ${D.run}</span>`;
+}
+function renderSide() {
+  const im = curImg(), box = $("selBox");
+  const g = gtOf(im);
+  $("title").textContent = `${im.file.replace(/_(jpg|png)\.rf\..*$/, "")}  (${im.split})`;
+  $("title").title = `${im.file} · ${g.length} labels · ${im.pr.length} predictions · flags: ${im.fg} labels, ${im.fp} predictions`;
+  const e = edits[im.file]; $("reviewed").classList.toggle("on", !!(e && e.reviewed));
+  $("undo").disabled = !(undoStacks[im.file] && undoStacks[im.file].length);
+  if (!sel) { box.innerHTML = `${g.length} labels, ${im.pr.filter(p => p.s >= conf()).length} predictions shown.<br>Click a polygon to select it.`; return; }
+  if (sel.kind === "gt") {
+    const a = g[sel.i]; if (!a) { sel = null; return renderSide(); }
+    box.innerHTML = `<div>Label${a.u ? ' <span style="color:#f0f">(no matching prediction)</span>' : ""}</div>`;
+    const s = document.createElement("select"); CATS.forEach((c, k) => { const o = new Option(`${k+1}. ${c}`, c); o.selected = c === a.c; s.add(o); });
+    s.onchange = () => setCat(s.value);
+    const del = document.createElement("button"); del.textContent = "Delete label"; del.onclick = deleteSel;
+    const rd = document.createElement("button"); rd.textContent = "Redraw outline"; rd.title = "Trace a new outline for this label (keeps its class)";
+    rd.onclick = () => { const i = sel.i; setMode("draw"); redrawIdx = i; hint(); };
+    box.append(s, del, rd);
+  } else {
+    const p = im.pr[sel.i];
+    box.innerHTML = `<div>Prediction, confidence ${p.s.toFixed(2)}${p.u ? ' <span style="color:#facc15">(no matching label)</span>' : ""}</div>`;
+    const acc = document.createElement("button"); acc.textContent = `Accept as ${$("newCat").value}`; acc.onclick = acceptPred;
+    box.append(acc);
+  }
+}
+function legend() { $("legend").innerHTML = CATS.map(c => `<div><span style="background:${catColor(c)}"></span>${c}</div>`).join(""); }
+
+// ---------- actions ----------
+function go(i) {
+  if (i < 0 || i >= D.images.length) return;
+  cur = i; sel = null; draft = null; imgReady = false;
+  const im = curImg();
+  img = new Image(); img.onload = () => { W = img.naturalWidth; H = img.naturalHeight; imgReady = true; fit(); };
+  img.onerror = () => banner(`Could not load ${im.src}. Keep the images/ folder next to index.html.`);
+  img.src = im.src;
+  const nx = order[order.indexOf(i) + 1]; if (nx !== undefined) (new Image()).src = D.images[nx].src; // preload
+  renderList(); renderSide(); draw();
+  const el = $("items").querySelector(".it.cur"); if (el) el.scrollIntoView({block: "nearest"});
+}
+function step(d) { const k = order.indexOf(cur); const n = order[(k < 0 ? 0 : k + d)]; if (n !== undefined) go(n); }
+let redrawIdx = null;  // Editor: index of the label being redrawn
+function setMode(m) { mode = m; draft = null; redrawIdx = null; $("mSel").classList.toggle("on", m === "select"); $("mDraw").classList.toggle("on", m === "draw"); hint(); draw(); }
+function hint() { $("hint").textContent = mode === "draw" ? (redrawIdx != null ? "Redraw: click points around the object · click first point or Enter to finish · Esc cancels" : "Draw: click points · click first point or Enter to close · Esc cancels") : ""; $("hint").style.display = mode === "draw" ? "block" : "none"; }
+function setCat(c) {
+  if (!sel || sel.kind !== "gt") return; pushUndo();
+  const e = ensureEdit(curImg()), g = e.gt[sel.i]; g.c = c;
+  if (g.src) setDec(e, g.src, "add:" + c); else if (g.id != null && e.dec["g" + g.id]) setDec(e, "g" + g.id, "keep:" + c);
+  changed();
+}
+function deleteSel() {
+  if (!sel || sel.kind !== "gt") return; pushUndo();
+  const e = ensureEdit(curImg()), g = e.gt.splice(sel.i, 1)[0];
+  if (g.src) setDec(e, g.src, "no"); else if (g.id != null) setDec(e, "g" + g.id, "del");
+  sel = null; changed();
+}
+function acceptPred() {
+  if (!sel || sel.kind !== "pr") return;
+  const p = curImg().pr[sel.i]; pushUndo();
+  const e = ensureEdit(curImg()), gt = e.gt; gt.push({id: null, c: $("newCat").value, p: JSON.parse(JSON.stringify(p.p)), src: "p" + sel.i});
+  setDec(e, "p" + sel.i, "add:" + $("newCat").value);
+  sel = {kind: "gt", i: gt.length - 1}; changed();
+}
+function finishDraft() {
+  if (!draft || draft.length < 6) { draft = null; draw(); return; }
+  if (redrawIdx != null) {  // replace the selected label's outline, keep its class
+    const i = redrawIdx; pushUndo(); const g = ensureEdit(curImg()).gt[i];
+    if (g) g.p = [draft.map(v => Math.round(v * 1e5) / 1e5)];
+    setMode("select"); sel = g ? {kind: "gt", i} : null; changed(); return;
+  }
+  pushUndo(); const gt = ensureEdit(curImg()).gt;
+  gt.push({id: null, c: $("newCat").value, p: [draft.map(v => Math.round(v * 1e5) / 1e5)]});
+  draft = null; sel = {kind: "gt", i: gt.length - 1}; changed();
+}
+function markReviewed() {
+  const e = ensureEdit(curImg()); e.reviewed = !e.reviewed; e.reviewedT = Date.now(); touch(curImg().file); renderList(); renderSide();
+  if (e.reviewed) step(1);
+}
+function hitTest(sx, sy) {
+  const [x, y] = toImg(sx, sy), im = curImg(); let best = null, ba = Infinity;
+  if ($("showGt").checked) gtOf(im).forEach((g, k) => g.p.forEach(rg => { if (pip(x, y, rg)) { const a = area(rg); if (a < ba) { ba = a; best = {kind: "gt", i: k}; } } }));
+  if ($("showPr").checked) im.pr.forEach((p, k) => { if (p.s < conf()) return; p.p.forEach(rg => { if (pip(x, y, rg)) { const a = area(rg) * 1.001; if (a < ba) { ba = a; best = {kind: "pr", i: k}; } } }); });
+  return best;
+}
+function nearVertex(sx, sy) {
+  if (!sel || sel.kind !== "gt") return null; const g = gtOf(curImg())[sel.i]; if (!g) return null;
+  let best = null, bd = 9;
+  g.p.forEach((rg, r) => { for (let i = 0; i < rg.length; i += 2) { const [x, y] = toScr(rg[i], rg[i+1]); const d = Math.hypot(sx - x, sy - y); if (d < bd) { bd = d; best = {r, i}; } } });
+  return best;
+}
+function nearEdge(sx, sy) {
+  if (!sel || sel.kind !== "gt") return null; const g = gtOf(curImg())[sel.i]; if (!g) return null;
+  let best = null, bd = 8;
+  g.p.forEach((rg, r) => { for (let i = 0; i < rg.length; i += 2) { const j = (i + 2) % rg.length; const [ax, ay] = toScr(rg[i], rg[i+1]), [bx, by] = toScr(rg[j], rg[j+1]); const d = segDist(sx, sy, ax, ay, bx, by); if (d < bd) { bd = d; best = {r, i: j}; } } });
+  return best;
+}
+
+// ---------- pointer input ----------
+const ptrs = new Map(); let drag = null, pinch = null;
+const pos = ev => { const r = cv.getBoundingClientRect(); return [ev.clientX - r.left, ev.clientY - r.top]; };
+cv.addEventListener("pointerdown", ev => {
+  cv.setPointerCapture(ev.pointerId); const [x, y] = pos(ev); ptrs.set(ev.pointerId, [x, y]);
+  if (ptrs.size === 2) { const [a, b] = [...ptrs.values()]; pinch = {d: Math.hypot(a[0]-b[0], a[1]-b[1]), mx: (a[0]+b[0])/2, my: (a[1]+b[1])/2, s: view.s, ox: view.ox, oy: view.oy}; drag = null; return; }
+  if (ev.button === 2) return;
+  const v = mode === "select" ? nearVertex(x, y) : null;
+  if (v) { pushUndo(); drag = {type: "vertex", v, moved: false}; return; }
+  drag = {type: "pan", x0: x, y0: y, ox: view.ox, oy: view.oy, moved: false};
+});
+cv.addEventListener("pointermove", ev => {
+  const [x, y] = pos(ev);
+  if (ptrs.has(ev.pointerId)) ptrs.set(ev.pointerId, [x, y]);
+  if (pinch && ptrs.size === 2) {
+    const [a, b] = [...ptrs.values()], d = Math.hypot(a[0]-b[0], a[1]-b[1]), mx = (a[0]+b[0])/2, my = (a[1]+b[1])/2;
+    const s = Math.max(0.05, Math.min(40, pinch.s * d / pinch.d));
+    view.s = s; view.ox = mx - (pinch.mx - pinch.ox) * s / pinch.s; view.oy = my - (pinch.my - pinch.oy) * s / pinch.s; draw(); return;
+  }
+  if (mode === "draw") { hover = [x, y]; if (!drag) { draw(); return; } }
+  if (!drag) return;
+  if (drag.type === "vertex") {
+    const [ix, iy] = toImg(x, y), rg = ensureEdit(curImg()).gt[sel.i].p[drag.v.r];
+    rg[drag.v.i] = Math.min(1, Math.max(0, ix)); rg[drag.v.i+1] = Math.min(1, Math.max(0, iy)); drag.moved = true; draw();
+  } else if (drag.type === "pan") {
+    if (Math.hypot(x - drag.x0, y - drag.y0) > 4) drag.moved = true;
+    if (drag.moved) { view.ox = drag.ox + x - drag.x0; view.oy = drag.oy + y - drag.y0; draw(); }
+  }
+});
+function endPtr(ev) {
+  ptrs.delete(ev.pointerId);
+  if (pinch) { if (ptrs.size < 2) pinch = null; drag = null; return; }
+  if (!drag) return;
+  const [x, y] = pos(ev), d = drag; drag = null;
+  if (d.type === "vertex") { if (d.moved) changed(); else undoStacks[curImg().file].pop(); return; }
+  if (d.moved) return;
+  if (mode === "draw") {
+    const [ix, iy] = toImg(x, y);
+    if (draft && draft.length >= 6) { const [fx, fy] = toScr(draft[0], draft[1]); if (Math.hypot(x - fx, y - fy) < 10) return finishDraft(); }
+    (draft = draft || []).push(Math.min(1, Math.max(0, ix)), Math.min(1, Math.max(0, iy))); draw(); return;
+  }
+  if (nearEdge(x, y)) return; // clicking the selected outline keeps it selected (double-click adds a vertex)
+  sel = hitTest(x, y); renderSide(); draw();
+}
+cv.addEventListener("pointerup", endPtr);
+cv.addEventListener("pointercancel", endPtr);
+cv.addEventListener("pointerleave", () => { hover = null; if (mode === "draw") draw(); });
+cv.addEventListener("dblclick", ev => {
+  if (mode !== "select" || !sel || sel.kind !== "gt") return;
+  const [x, y] = pos(ev), v = nearVertex(x, y);
+  if (v) { const rg = gtOf(curImg())[sel.i].p[v.r]; if (rg.length > 6) { pushUndo(); ensureEdit(curImg()).gt[sel.i].p[v.r].splice(v.i, 2); changed(); } return; }
+  const e = nearEdge(x, y);
+  if (e) { const [ix, iy] = toImg(x, y); pushUndo(); ensureEdit(curImg()).gt[sel.i].p[e.r].splice(e.i, 0, ix, iy); changed(); }
+});
+cv.addEventListener("wheel", ev => {
+  ev.preventDefault(); const [x, y] = pos(ev), f = Math.exp(-ev.deltaY * 0.0015), s = Math.max(0.05, Math.min(40, view.s * f));
+  view.ox = x - (x - view.ox) * s / view.s; view.oy = y - (y - view.oy) * s / view.s; view.s = s; draw();
+}, {passive: false});
+cv.addEventListener("contextmenu", ev => ev.preventDefault());
+
+// ---------- keyboard / buttons ----------
+document.addEventListener("keydown", ev => {
+  if (!$("tri").hidden) return triKey(ev);
+  if (ev.target.tagName === "SELECT" || ev.target.tagName === "INPUT" && ev.target.type !== "checkbox" && ev.target.type !== "range") return;
+  const k = ev.key;
+  if (k === "Escape") { draft = null; if (mode === "draw") setMode("select"); else { sel = null; renderSide(); draw(); } }
+  else if (k === "Enter" && mode === "draw") finishDraft();
+  else if ((k === "Delete" || k === "Backspace") && mode === "select") { ev.preventDefault(); deleteSel(); }
+  else if (k === "n" || k === "N" || k === "ArrowRight") step(1);
+  else if (k === "p" || k === "P" || k === "ArrowLeft") step(-1);
+  else if (k === "d" || k === "D") setMode(mode === "draw" ? "select" : "draw");
+  else if (k === "s" || k === "S") setMode("select");
+  else if (k === "a" || k === "A") acceptPred();
+  else if (k === "r" || k === "R") markReviewed();
+  else if (k === "f" || k === "F") fit();
+  else if (k === "t" || k === "T") { $("showPr").checked = !$("showPr").checked; draw(); }
+  else if (k === "h" || k === "H") { const on = !($("showGt").checked || $("showPr").checked); $("showGt").checked = on; $("showPr").checked = on; draw(); }
+  else if ((k === "z" || k === "Z") && !ev.shiftKey) { if (mode === "draw" && draft && draft.length) { draft.splice(-2, 2); draw(); } else undo(); }
+  else if (/^[1-9]$/.test(k) && CATS[+k - 1]) setCat(CATS[+k - 1]);
+});
+$("prev").onclick = () => step(-1); $("next").onclick = () => step(1);
+$("mSel").onclick = () => setMode("select"); $("mDraw").onclick = () => setMode("draw");
+$("undo").onclick = undo; $("reviewed").onclick = markReviewed;
+["showGt", "showPr", "showFlags"].forEach(id => $(id).onchange = draw);
+$("conf").oninput = () => { $("confOut").textContent = conf().toFixed(2); if (sel && sel.kind === "pr") sel = null; renderSide(); draw(); };
+["fSplit", "fSort", "fStat"].forEach(id => $(id).onchange = renderList);
+$("menuBtn").onclick = () => $("list").classList.toggle("show");
+$("sideBtn").onclick = () => $("side").classList.toggle("show");
+CATS.forEach(c => $("newCat").add(new Option(c, c)));
+$("newCat").value = CATS.includes("EV") ? "EV" : CATS[0];
+$("newCat").onchange = renderSide;
+
+$("export").onclick = () => {
+  const out = {format: "cryoev-review-edits-v1", package: D.id, source: D.source, exported: new Date().toISOString(), images: {}};
+  for (const im of D.images) {
+    const e = edits[im.file]; if (!e || !(e.modified || e.reviewed || Object.keys(e.dec || {}).length)) continue;
+    out.images[im.file] = {split: im.split, reviewed: !!e.reviewed, modified: !!e.modified, t: e.t || 0, gtT: e.gtT || 0,
+      decisions: e.dec || {}, annotations: effGt(im).map(g => ({id: g.id, category: g.c, segmentation: g.p, src: g.src}))};
+  }
+  const n = Object.keys(out.images).length;
+  const blob = new Blob([JSON.stringify(out)], {type: "application/json"});
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+  a.download = `review_edits_${D.id}_${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.json`;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  banner(""); $("hint").style.display = "block"; $("hint").textContent = `Exported ${n} images`; setTimeout(hint, 2500);
+};
+$("importBtn").onclick = () => $("importFile").click();
+$("importFile").onchange = async ev => {
+  const f = ev.target.files[0]; if (!f) return;
+  try {
+    const j = JSON.parse(await f.text()); let n = 0;
+    for (const [file, v] of Object.entries(j.images || {})) {
+      if (!D.images.some(im => im.file === file)) continue;
+      const rec = {dec: v.decisions || {}, reviewed: !!v.reviewed, reviewedT: v.reviewed ? (v.t || Date.now()) : 0, modified: !!v.modified, t: v.t || Date.now()};
+      if (v.modified && (v.gtT || !v.decisions)) {  // polygon edits (or an old export): take the list as the base
+        rec.gt = v.annotations.map(a => ({id: a.id, c: a.category, p: a.segmentation, src: a.src})); rec.gtT = v.gtT || v.t || Date.now();
+      }
+      edits[file] = mergeEdit(edits[file], rec); dirty.add(file); n++;
+    }
+    persist(); scheduleSync(); go(cur); $("hint").style.display = "block"; $("hint").textContent = `Imported ${n} images`; setTimeout(hint, 2500);
+  } catch (e) { banner("Could not read that file: " + e.message); }
+  ev.target.value = "";
+};
+
+// ---------- triage ("Cryonder"): one flagged object at a time, swipe to decide ----------
+// Cases: predictions with no matching label (possible missed label) and labels with no matching
+// prediction (check the label). Decisions are stored per image in edits[file].dec, keyed
+// "p<pred index>" / "g<label id>", and applied to edits[file].gt like any other edit.
+const TRI_CLASSES = ["EV", "Low conf EV", "MV", "inner", "Incomplete", "Overlapping"].filter(c => CATS.includes(c));
+const tcv = $("tcv"), tctx = tcv.getContext("2d"), card = $("card");
+const tri = {queue: [], pos: 0, zoom: 0, undo: [], img: null, imgI: -1, ready: false, hideOutline: false, held: false};
+const ZOOMS = [3, 7, 0];  // crop = object size x this; 0 = whole image
+// Bios are assembled from an opener + a closer (+ sometimes a line about the object itself),
+// chosen by a hash of the image and object, so each card is stable but repeats are rare.
+const BIO = {
+  predOpen: [
+    "New in town.", "Recently budded, emotionally available.", "Freshly vitrified and ready to mingle.",
+    "The model rates me {conf}. My mom says I'm a 10.", "The algorithm thinks I'm cute ({conf}).",
+    "Unlabeled, but not unloved.", "Low-key a vesicle. High-key waiting for a label.", "First time on here, be gentle.",
+    "I'm more than just a contour.", "Lipid bilayer, zero drama.", "Spherical and proud.",
+    "Survived plunge freezing. I can survive anything.", "My annotator walked right past me.",
+    "Seen at {conf} confidence. Seen by no human.", "Hydrophobic inside, hydrophilic outside, well adjusted overall.",
+    "I've got cargo, but it's the good kind.", "Just out of the {sample} session.", "Model-verified ({conf}), human-pending.",
+    "They say I'm hard to see. I say I'm mysterious.", "Round-ish. Honest about it.", "Not a smudge, I promise.",
+    "Swipe right if you like round things.", "I contain multitudes (probably cytosol).", "Ice to meet you.",
+  ],
+  predClose: [
+    "Looking for a class.", "Looking for something stable.", "Into cargo transport, lipid rafts and long walks through vitreous ice.",
+    "Swipe right if you see a membrane.", "Hoping for EV, open to Low conf EV.", "Not looking for anything overlapping.",
+    "Must love cryo.", "Dealbreaker: carbon edges.", "Seeking someone who appreciates a good bilayer.",
+    "Let's fuse. Or at least co-localize.", "Looking for my forever label.", "No ice queens, please.",
+    "Let's make it official in the COCO file.", "Could be the one. Could be ice contamination.",
+    "Here for a good time, not a long exposure.", "Swipe left if you're into defocus.", "Will you be my first annotation?",
+    "I promise I'm not a gold fiducial.", "Tell me I'm not just background.", "I just want to be counted.",
+    "Ask me about my zeta potential.", "Let's see where this goes, one polygon at a time.",
+  ],
+  gtOpen: [
+    "An annotator liked me as “{cls}”, but the model ghosted me 👻", "Labeled “{cls}”. The model left me on read.",
+    "Human-approved “{cls}”. Algorithm-rejected.", "My label says “{cls}”. The model says who?",
+    "Someone drew a polygon around me once. It meant everything.", "The model swiped left on me.",
+    "Annotated with love, detected with none.", "Am I a real “{cls}” or just a smudge?",
+    "I've been a “{cls}” since this {split} set was made.", "The model says I'm background. Rude.",
+    "Human eyes saw me. Machine eyes didn't.", "Former “{cls}”, current mystery.",
+    "Certified “{cls}” by a human with a mouse.", "The model and I are in a situationship.",
+    "My polygon is still warm.", "I was annotated at 2 a.m. and I have questions.",
+  ],
+  gtClose: [
+    "Your call.", "Keep me or delete me, I can take it.", "It's complicated.", "Looking for validation.",
+    "Swipe right to keep this relationship alive.", "I just want someone to see me.",
+    "Was this label real or a late-night annotation?", "Help me prove the model wrong.",
+    "Honestly, same question.", "Tell me I'm more than a false positive.", "Be honest. I can handle it.",
+    "Swipe left and I'll quietly leave the COCO file.",
+  ],
+  small: ["Petite (~{d} px), but it's what's inside that counts.", "Small (~{d} px) and easy to overlook. Story of my life."],
+  large: ["Big (~{d} px) and not afraid to show it.", "Plenty of me to love (~{d} px across)."],
+  nested: ["I come with baggage: {n} layer(s) inside.", "Multilayered, like any good personality ({n} inside).", "Emotionally nested ({n} inside)."],
+};
+function makeBio(im, c, ctx) {
+  const h = hash(im.file + c.key), pick = (arr, k) => arr[Math.floor(h / Math.pow(7, k)) % arr.length];
+  const fill = s => s.replace(/\{conf\}/g, ctx.conf).replace(/\{cls\}/g, ctx.cls).replace(/\{split\}/g, im.split)
+    .replace(/\{sample\}/g, ctx.sample).replace(/\{d\}/g, ctx.diam).replace(/\{n\}/g, ctx.nested);
+  const nS = s => (fill(s).match(/[.!?](\s|$)/g) || [1]).length, len = a => fill(a.join(" ")).length;
+  const opens = c.kind === "p" ? BIO.predOpen : BIO.gtOpen, closes = c.kind === "p" ? BIO.predClose : BIO.gtClose;
+  const open = pick(opens, 0);
+  let close = pick(closes, 1);  // keep it punchy: at most 3 sentences and ~140 characters
+  for (let k = 0; k < closes.length && (nS(open) + nS(close) > 3 || len([open, close]) > 140); k++) close = closes[(closes.indexOf(close) + 1) % closes.length];
+  const parts = [open, close];
+  const extra = ctx.nested > 0 ? BIO.nested : ctx.frac < 0.025 ? BIO.small : ctx.frac > 0.09 ? BIO.large : null;
+  if (extra && h % 3 !== 0) {
+    const x = pick(extra, 2);
+    if (nS(open) + nS(close) + nS(x) <= 3 && len([open, x, close]) <= 140) parts.splice(1, 0, x);
+    else if (nS(open) + nS(x) <= 3 && len([open, x]) <= 140) parts[1] = x;
+  }
+  return fill(parts.join(" "));
+}
+function nestedCount(im, c, ring, th) {  // objects whose centre sits inside this one: a rough layer count
+  const inside = rg => {
+    let x = 0, y = 0; for (let k = 0; k < rg.length; k += 2) { x += rg[k]; y += rg[k+1]; }
+    const n = rg.length / 2; return pip(x / n, y / n, ring) && area(rg) < area(ring) * 0.9;
+  };
+  const pool = c.kind === "p" ? im.pr.filter((p, k) => k !== c.k && p.s >= th).map(p => p.p[0])
+                              : gtOf(im).filter(g => g.id !== c.id).map(g => g.p[0]);
+  return pool.filter(inside).length;
+}
+
+// Swipe-app skins: tap the logo to cycle. Only the name, colours and copy change.
+const BRANDS = [
+  {name: "eVHarmony", tag: "Find your perfect membrane match", hot: "#0f766e", hot2: "#b45309", hotD: "#2dd4bf", hotD2: "#fbbf24", match: "It's Compatible! 💚", keep: "Still compatible 💞", empty: "No more compatible vesicles nearby 💔"},
+  {name: "Gridr", tag: "Who's on your grid tonight?", hot: "#a16207", hot2: "#c2410c", hotD: "#facc15", hotD2: "#fb923c", match: "Same grid, same vibe 😉", keep: "Still on your grid 😘", empty: "Nobody else on this grid 💔"},
+  {name: "cryonder", tag: "swipe right on your perfect bilayer", hot: "#be123c", hot2: "#c2410c", hotD: "#fb7185", hotD2: "#fdba74", match: "It's a Membrane Match! 💚", keep: "Still a match 💞", empty: "You've seen everyone nearby 💔"},
+];
+let brandI = 0; try { brandI = +(localStorage.getItem("cryoev-review:brand") || 0) % BRANDS.length; } catch (e) {}
+const brand = () => BRANDS[brandI];
+function applyBrand() {
+  const b = brand(); $("logoName").textContent = b.name; $("logoTag").textContent = b.tag;
+  const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  $("tri").style.setProperty("--hot", dark ? b.hotD : b.hot); $("tri").style.setProperty("--hot2", dark ? b.hotD2 : b.hot2);
+  $("toTri").textContent = b.name; document.title = $("tri").hidden ? "EV Label Review" : b.name;
+}
+$("logo").onclick = () => { brandI = (brandI + 1) % BRANDS.length; try { localStorage.setItem("cryoev-review:brand", brandI); } catch (e) {} applyBrand(); triRender(); };
+function resolved(c) {
+  const im = D.images[c.i];
+  if (decV(edits[im.file], c.key)) return true;
+  return c.kind === "g" && !effGt(im).some(g => g.id === c.id);
+}
+function buildQueue() {
+  const th = parseFloat($("triConf").value), fs = $("triSplit").value, q = [];
+  D.images.forEach((im, i) => {
+    if (fs && im.split !== fs) return;
+    im.pr.map((p, k) => [p, k]).filter(([p]) => p.u && p.s >= th).sort((a, b) => b[0].s - a[0].s)
+      .forEach(([p, k]) => q.push({i, kind: "p", k, key: "p" + k}));
+    im.gt.forEach(g => { if (g.u && g.id != null) q.push({i, kind: "g", id: g.id, key: "g" + g.id}); });
+  });
+  tri.queue = q;
+}
+// Claims: the server reserves the card on each reviewer's screen for 90 s; other queues skip it.
+let claims = {};  // "<file>|<key>" -> reviewer name
+const caseId = c => D.images[c.i].file + "|" + c.key;
+const takenByOther = c => { const w = claims[caseId(c)]; return !!w && w !== (me() || "anonymous"); };
+async function claim(c) {
+  if (!server || !c) return;
+  try {
+    const r = await fetch("api/claim?c=" + encodeURIComponent(caseId(c)) + "&who=" + encodeURIComponent(me() || "anonymous"), {method: "POST"});
+    if (r.ok) claims = (await r.json()).claims || {};
+  } catch (e) {}
+}
+async function pullClaims() {
+  if (!server) return;
+  try { const r = await fetch("api/claims", {cache: "no-store"}); if (r.ok) claims = (await r.json()).claims || {}; } catch (e) {}
+}
+function nextOpen(from) { for (let n = from; n < tri.queue.length; n++) if (!resolved(tri.queue[n]) && !takenByOther(tri.queue[n])) return n; return -1; }
+function advance() {
+  if (tri.adj) { tri.adj = null; updAdjBar(); }
+  let n = nextOpen(tri.pos + 1); if (n < 0) n = nextOpen(0);
+  tri.pos = n < 0 ? tri.queue.length : n; tri.zoom = 0; triRender();
+}
+function caseRing(c) {
+  const im = D.images[c.i];
+  if (c.kind === "p") return im.pr[c.k].p[0];
+  const g = gtOf(im).find(g => g.id === c.id) || im.gt.find(g => g.id === c.id); return g.p[0];
+}
+function ringBox(r) {
+  let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+  for (let k = 0; k < r.length; k += 2) { x0 = Math.min(x0, r[k]); x1 = Math.max(x1, r[k]); y0 = Math.min(y0, r[k+1]); y1 = Math.max(y1, r[k+1]); }
+  return [x0, y0, x1, y1];
+}
+const hash = s => { let h = 0; for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) | 0; return Math.abs(h); };
+function askName(force) {
+  let who = me();
+  if (!who || force) {
+    const got = window.prompt("Your name (so the lab knows who swiped what):", who || "");
+    if (got && got.trim()) { who = got.trim().slice(0, 40); try { localStorage.setItem("cryoev-review:who", who); } catch (e) {} }
+  }
+  $("triWho").textContent = "👤 " + (who || "anonymous");
+}
+function openTri() {
+  askName(false);
+  // each reviewer starts at a different point in the queue, so people working at once rarely collide
+  buildQueue(); const off = me() ? hash(me()) % Math.max(1, tri.queue.length) : 0;
+  let n = nextOpen(off); if (n < 0) n = nextOpen(0); tri.pos = n < 0 ? tri.queue.length : n; tri.zoom = 0;
+  $("tri").hidden = false; try { localStorage.setItem("cryoev-review:mode", "tri"); } catch (e) {}
+  applyBrand();
+  triRender();
+}
+function closeTri() {
+  $("tri").hidden = true; try { localStorage.setItem("cryoev-review:mode", "editor"); } catch (e) {}
+  document.title = "EV Label Review";
+  const c = tri.queue[tri.pos];
+  if (!c) { resize(); return; }
+  go(c.i);
+  const focus = () => {
+    const [x0, y0, x1, y1] = ringBox(caseRing(c));
+    const b = stage.getBoundingClientRect(), span = Math.max((x1 - x0) * W, (y1 - y0) * H, 40) * 4;
+    view.s = Math.min(b.width, b.height) / span;
+    view.ox = b.width / 2 - (x0 + x1) / 2 * W * view.s; view.oy = b.height / 2 - (y0 + y1) / 2 * H * view.s;
+    sel = c.kind === "g" ? {kind: "gt", i: gtOf(curImg()).findIndex(g => g.id === c.id)} : {kind: "pr", i: c.k};
+    if (sel.i < 0) sel = null;
+    renderSide(); draw();
+  };
+  if (imgReady) focus(); else img.addEventListener("load", () => setTimeout(focus, 0), {once: true});
+}
+function triRender() {
+  const left = tri.queue.filter(c => !resolved(c)).length, c = tri.queue[tri.pos];
+  const others = new Set(Object.values(claims).filter(w => w !== (me() || "anonymous"))).size;
+  $("triProg").textContent = `${left} of ${tri.queue.length} singles left` + (others ? ` · ${others} other swiper${others > 1 ? "s" : ""} online` : "");
+  $("triUndo").disabled = !tri.undo.length;
+  const bio = $("triBio"), chips = $("triChips"); chips.innerHTML = "";
+  ["aNope", "aSkip", "aYes"].forEach(id => $(id).disabled = !c);
+  if (!c) {
+    bio.innerHTML = `<h2>${brand().empty}</h2>` + "<p>Lower the confidence filter to meet more vesicles, or open the Editor.</p>";
+    tri.imgI = -1; triDraw(); return;
+  }
+  const im = D.images[c.i];
+  if (tri.claimed !== caseId(c)) { tri.claimed = caseId(c); claim(c); }
+  if (tri.imgI !== c.i) {
+    tri.imgI = c.i; tri.ready = false; tri.img = new Image();
+    tri.img.onload = () => { tri.ready = true; triDraw(); };
+    tri.img.src = im.src;
+    const nx = tri.queue.slice(tri.pos + 1).find(q => q.i !== c.i); if (nx) (new Image()).src = D.images[nx.i].src;
+  }
+  const [x0, y0, x1, y1] = ringBox(caseRing(c));
+  const diam = Math.round(Math.max((x1 - x0) * im.w, (y1 - y0) * im.h)), frac = Math.max(x1 - x0, y1 - y0);
+  const sample = im.file.replace(/_(jpg|png)\.rf\..*$/, "").split(/__|_square|_grid/)[0];
+  const chip = (label, cls, fn) => { const b = document.createElement("button"); b.textContent = label; if (cls) b.className = cls; b.onclick = fn; chips.appendChild(b); };
+  if (c.kind === "p") {
+    const conf = im.pr[c.k].s.toFixed(2);
+    bio.innerHTML = `<h2>Vesicle?, <span>${conf}</span></h2><p>${makeBio(im, c, {conf, cls: "EV", sample, diam, frac, nested: nestedCount(im, c, caseRing(c), parseFloat($("triConf").value))})}</p>` +
+      `<small>⌀ ~${diam} px · ${sample} · ${im.split} set</small>`;
+    $("aYes").title = "Swipe right: add as EV"; $("aNope").title = "Swipe left: not a vesicle";
+    TRI_CLASSES.filter(cl => cl !== "EV").forEach(cl => chip(cl, "", () => tri.adj ? saveAdjust(cl) : react("yes", () => decide("add", cl), `added as ${cl}`)));
+  } else {
+    const g = gtOf(im).find(g => g.id === c.id);
+    bio.innerHTML = `<h2>${g.c}, <span>labeled</span></h2><p>${makeBio(im, c, {conf: "", cls: g.c, sample, diam, frac, nested: nestedCount(im, c, caseRing(c), 0)})}</p>` +
+      `<small>⌀ ~${diam} px · ${sample} · ${im.split} set</small>`;
+    $("aYes").title = `Swipe right: keep as ${g.c}`; $("aNope").title = "Swipe left: delete label";
+    TRI_CLASSES.filter(cl => cl !== g.c).forEach(cl => chip(`→ ${cl}`, "", () => tri.adj ? saveAdjust(cl) : react("yes", () => decide("keep", cl), `now ${cl}`)));
+  }
+  triDraw();
+}
+function decide(act, cls, poly) {
+  const c = tri.queue[tri.pos]; if (!c) return;
+  const im = D.images[c.i], e = ensureEdit(im);
+  tri.undo.push({i: c.i, snap: snapOf(e), pos: tri.pos});
+  if (c.kind === "p") {
+    if (act === "add") { setDec(e, c.key, "add:" + cls, poly); e.modified = true; } else setDec(e, c.key, "no");
+  } else if (act === "del") { setDec(e, c.key, "del"); e.modified = true; }
+  else { const g = im.gt.find(g => g.id === c.id); setDec(e, c.key, "keep:" + cls, poly); if ((g && g.c !== cls) || poly) e.modified = true; }
+  touch(im.file); renderList(); advance();
+}
+function swipeYes() { const c = tri.queue[tri.pos]; if (!c) return; if (c.kind === "p") decide("add", "EV"); else decide("keep", (gtOf(D.images[c.i]).find(g => g.id === c.id) || {}).c); }
+function swipeNo() { const c = tri.queue[tri.pos]; if (c) decide(c.kind === "p" ? "no" : "del"); }
+function triUndo() {
+  const u = tri.undo.pop(); if (!u) return;
+  restoreSnap(D.images[u.i], u.snap); touch(D.images[u.i].file); renderList();
+  tri.pos = u.pos; tri.zoom = 0; triRender();
+}
+function triDraw() {
+  const box = card.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  tcv.width = Math.max(1, box.width * dpr); tcv.height = Math.max(1, box.height * dpr);
+  tctx.setTransform(dpr, 0, 0, dpr, 0, 0); tctx.fillStyle = "#000"; tctx.fillRect(0, 0, box.width, box.height);
+  const c = tri.queue[tri.pos];
+  $("triZoom").textContent = !c ? "" : tri.adj ? (tri.adj.redraw ? "trace around the object in one stroke" : "drag the dots · tap here to zoom") : ["close-up", "wider", "whole image"][tri.zoom] + " · tap to zoom";
+  $("triEye").classList.toggle("off", tri.hideOutline);
+  if (!c || !tri.ready) return;
+  const im = D.images[c.i], Wi = tri.img.naturalWidth, Hi = tri.img.naturalHeight, r = caseRing(c);
+  const [x0, y0, x1, y1] = ringBox(r);
+  const z = ZOOMS[tri.zoom], size = Math.max((x1 - x0) * Wi, (y1 - y0) * Hi);
+  const vh = box.height * 0.72;  // keep the object above the bio overlay
+  let s, cx, cy;
+  if (z) { s = Math.min(box.width, vh) / Math.max(size * z, z === 3 ? 240 : 520); cx = (x0 + x1) / 2 * Wi; cy = (y0 + y1) / 2 * Hi; }
+  else { s = Math.min(box.width / Wi, box.height / Hi); cx = Wi / 2; cy = Hi / 2; }
+  const ox = box.width / 2 - cx * s, oy = (z ? vh / 2 + 8 : box.height / 2) - cy * s;
+  tctx.imageSmoothingEnabled = s < 2;
+  tctx.drawImage(tri.img, ox, oy, Wi * s, Hi * s);
+  const ring = rg => { tctx.beginPath(); for (let k = 0; k < rg.length; k += 2) { const X = rg[k] * Wi * s + ox, Y = rg[k+1] * Hi * s + oy; k ? tctx.lineTo(X, Y) : tctx.moveTo(X, Y); } tctx.closePath(); };
+  const col = c.kind === "p" ? "#facc15" : "#e879f9", pad = 12, L = 10;
+  const bx0 = x0 * Wi * s + ox - pad, by0 = y0 * Hi * s + oy - pad, bx1 = x1 * Wi * s + ox + pad, by1 = y1 * Hi * s + oy + pad;
+  tctx.strokeStyle = col; tctx.lineWidth = 2.5; tctx.beginPath();  // corner brackets stay even with outlines hidden
+  [[bx0, by0, 1, 1], [bx1, by0, -1, 1], [bx0, by1, 1, -1], [bx1, by1, -1, -1]].forEach(([X, Y, dx, dy]) => { tctx.moveTo(X + dx * L, Y); tctx.lineTo(X, Y); tctx.lineTo(X, Y + dy * L); });
+  tctx.stroke();
+  tri.xf = {s, ox, oy, Wi, Hi};
+  if (tri.hideOutline) { if (tri.adj) drawAdjust(); return; }
+  const th = parseFloat($("triConf").value);
+  tctx.globalAlpha = 0.6; tctx.lineWidth = 1.2;
+  gtOf(im).forEach(g => { if (c.kind === "g" && g.id === c.id) return; tctx.strokeStyle = catColor(g.c); g.p.forEach(rg => { ring(rg); tctx.stroke(); }); });
+  tctx.setLineDash([4, 4]); tctx.strokeStyle = "#22d3ee";
+  im.pr.forEach((p, k) => { if (p.s < th || (c.kind === "p" && k === c.k)) return; p.p.forEach(rg => { ring(rg); tctx.stroke(); }); });
+  tctx.setLineDash([]); tctx.globalAlpha = 1;
+  if (tri.adj) drawAdjust(); else { tctx.strokeStyle = col; tctx.lineWidth = 2; ring(r); tctx.stroke(); }
+}
+// ---- shape editing on the card: drag the dots, or Redraw to trace a new outline ----
+const clamp01 = v => Math.min(1, Math.max(0, v));
+function resample(r, maxN) {  // thin a flat ring to at most maxN vertices, evenly by index
+  const n = r.length / 2; if (n <= maxN) return r.slice();
+  const out = []; for (let k = 0; k < maxN; k++) { const i = Math.floor(k * n / maxN) * 2; out.push(r[i], r[i + 1]); } return out;
+}
+function drawAdjust() {
+  const a = tri.adj, {s, ox, oy, Wi, Hi} = tri.xf, X = v => v * Wi * s + ox, Y = v => v * Hi * s + oy;
+  const poly = (r, close) => { tctx.beginPath(); for (let k = 0; k < r.length; k += 2) k ? tctx.lineTo(X(r[k]), Y(r[k+1])) : tctx.moveTo(X(r[k]), Y(r[k+1])); if (close) tctx.closePath(); };
+  if (a.path.length) { tctx.strokeStyle = "#60a5fa"; tctx.lineWidth = 3; poly(a.path, false); tctx.stroke(); return; }
+  tctx.fillStyle = "rgba(96,165,250,.15)"; tctx.strokeStyle = "#60a5fa"; tctx.lineWidth = 2.2; poly(a.ring, true); tctx.fill(); tctx.stroke();
+  if (a.redraw) return;
+  for (let k = 0; k < a.ring.length; k += 2) {
+    tctx.beginPath(); tctx.arc(X(a.ring[k]), Y(a.ring[k+1]), k === a.drag ? 8 : 5.5, 0, 7);
+    tctx.fillStyle = k === a.drag ? "#facc15" : "#fff"; tctx.fill(); tctx.strokeStyle = "#1e3a8a"; tctx.lineWidth = 1.5; tctx.stroke();
+  }
+}
+function adjPtr(ev, phase) {
+  const a = tri.adj, xf = tri.xf; if (!a || !xf) return;
+  const b = tcv.getBoundingClientRect(), x = ev.clientX - b.left, y = ev.clientY - b.top;
+  const nx = clamp01((x - xf.ox) / xf.s / xf.Wi), ny = clamp01((y - xf.oy) / xf.s / xf.Hi);
+  if (phase === 0) {
+    if (a.redraw) { a.path = [nx, ny]; a.drawing = true; return; }
+    let best = -1, bd = 26;
+    for (let k = 0; k < a.ring.length; k += 2) { const d = Math.hypot(a.ring[k] * xf.Wi * xf.s + xf.ox - x, a.ring[k+1] * xf.Hi * xf.s + xf.oy - y); if (d < bd) { bd = d; best = k; } }
+    a.drag = best; triDraw();
+  } else if (phase === 1) {
+    if (a.drawing) {
+      const L = a.path.length, lx = a.path[L-2] * xf.Wi * xf.s + xf.ox, ly = a.path[L-1] * xf.Hi * xf.s + xf.oy;
+      if (Math.hypot(x - lx, y - ly) >= 3) { a.path.push(nx, ny); triDraw(); }
+    } else if (a.drag >= 0) { a.ring[a.drag] = nx; a.ring[a.drag + 1] = ny; triDraw(); }
+  } else {
+    if (a.drawing) {
+      a.drawing = false;
+      if (a.path.length >= 16) { a.ring = resample(a.path, 60); a.redraw = false; updAdjBar(); }
+      a.path = [];
+    }
+    a.drag = -1; triDraw();
+  }
+}
+function startAdjust() {
+  const c = tri.queue[tri.pos]; if (!c) return;
+  tri.adj = {ring: resample(caseRing(c), 40), redraw: false, path: [], drag: -1, drawing: false};
+  if (ZOOMS[tri.zoom] === 0) tri.zoom = 0;
+  updAdjBar(); triDraw();
+}
+function endAdjust() { tri.adj = null; updAdjBar(); triDraw(); }
+function saveAdjust(cls) {
+  const c = tri.queue[tri.pos], a = tri.adj; if (!c || !a) return;
+  const poly = [a.ring.map(v => Math.round(v * 1e5) / 1e5)];
+  const cl = cls || (c.kind === "p" ? "EV" : (effGt(D.images[c.i]).find(g => g.id === c.id) || {}).c);
+  tri.adj = null; updAdjBar();
+  react("yes", () => decide(c.kind === "p" ? "add" : "keep", cl, poly), c.kind === "p" ? `added as ${cl}, reshaped` : `${cl}, reshaped`);
+}
+function updAdjBar() {
+  const on = !!tri.adj;
+  $("triActions").hidden = on; $("triAdjBar").hidden = !on; $("triAdj").classList.toggle("off", on);
+  $("adjRedraw").classList.toggle("on", on && tri.adj.redraw);
+  $("adjRedraw").textContent = on && tri.adj.redraw ? "Trace it now…" : "✏️ Redraw";
+}
+$("triAdj").onclick = () => tri.adj ? endAdjust() : startAdjust();
+$("adjCancel").onclick = endAdjust;
+$("adjSave").onclick = () => saveAdjust();
+$("adjRedraw").onclick = () => { if (!tri.adj) return; tri.adj.redraw = !tri.adj.redraw; updAdjBar(); triDraw(); };
+$("triZoom").onclick = () => { tri.zoom = (tri.zoom + 1) % ZOOMS.length; triDraw(); };
+// ---- swipe animation + feedback ----
+const stamp = $("triStamp");
+function setStamp(kind, c) {
+  const txt = {yes: c && c.kind === "g" ? "KEEP" : "MATCH", nope: c && c.kind === "g" ? "DELETE" : "NOPE", skip: "LATER"}[kind];
+  stamp.textContent = txt; stamp.className = kind;
+}
+function cardReset(animate) { card.style.transition = animate ? "transform .2s" : ""; card.style.transform = ""; stamp.style.opacity = 0; }
+function flyOff(dx, dy, then) {
+  card.style.transition = "transform .24s ease-in";
+  card.style.transform = `translate(${dx}px, ${dy}px) rotate(${dx / 25}deg)`;
+  setTimeout(() => { cardReset(false); then(); }, 240);
+}
+let toastT = null;
+function toast(title, sub) {
+  const m = $("triMatch"); m.innerHTML = `<b>${title}</b><span>${sub}</span>`; m.hidden = false;
+  m.classList.remove("pop"); void m.offsetWidth; m.classList.add("pop");
+  clearTimeout(toastT); toastT = setTimeout(() => { m.hidden = true; }, 900);
+}
+function react(kind, act, sub) {
+  const c = tri.queue[tri.pos]; if (!c) return;
+  setStamp(kind, c); stamp.style.opacity = 1;
+  const w = card.getBoundingClientRect().width;
+  if (kind === "yes") { flyOff(w * 1.5, 0, act); toast(c.kind === "g" ? brand().keep : brand().match, sub || (c.kind === "g" ? "label kept" : "added as EV")); }
+  else if (kind === "nope") flyOff(-w * 1.5, 0, act);
+  else flyOff(0, -1200, act);
+}
+$("aYes").onclick = () => react("yes", swipeYes);
+$("aNope").onclick = () => react("nope", swipeNo);
+$("aSkip").onclick = () => react("skip", advance);
+// Gestures on the card: swipe right/left/up; tap = next zoom level; press and hold = peek without outlines.
+let g0 = null, pressT = null;
+tcv.addEventListener("pointerdown", ev => {
+  try { tcv.setPointerCapture(ev.pointerId); } catch (e) {}
+  if (tri.adj) return adjPtr(ev, 0); g0 = {x: ev.clientX, y: ev.clientY, drag: false}; tri.held = false;
+  pressT = setTimeout(() => { if (g0 && !g0.drag) { tri.held = true; tri.peekPrev = tri.hideOutline; tri.hideOutline = true; triDraw(); } }, 350);
+});
+tcv.addEventListener("pointermove", ev => {
+  if (tri.adj) return adjPtr(ev, 1);
+  if (!g0) return;
+  const dx = ev.clientX - g0.x, dy = ev.clientY - g0.y;
+  if (!g0.drag && Math.hypot(dx, dy) > 12 && !tri.held) { g0.drag = true; clearTimeout(pressT); }
+  if (!g0.drag) return;
+  card.style.transition = ""; card.style.transform = `translate(${dx}px, ${dy}px) rotate(${dx / 25}deg)`;
+  const c = tri.queue[tri.pos];
+  setStamp(dy < -60 && Math.abs(dy) > Math.abs(dx) ? "skip" : dx > 0 ? "yes" : "nope", c);
+  stamp.style.opacity = Math.min(1, Math.max(Math.abs(dx), -dy) / 100);
+});
+tcv.addEventListener("pointerup", ev => {
+  if (tri.adj) return adjPtr(ev, 2);
+  clearTimeout(pressT); if (!g0) return;
+  const dx = ev.clientX - g0.x, dy = ev.clientY - g0.y, wasDrag = g0.drag; g0 = null;
+  if (tri.held) { tri.held = false; tri.hideOutline = tri.peekPrev; triDraw(); return; }
+  if (!wasDrag) { tri.zoom = (tri.zoom + 1) % ZOOMS.length; triDraw(); return; }
+  if (dy < -90 && Math.abs(dy) > Math.abs(dx)) flyOff(dx, -1200, advance);
+  else if (dx > 90) { const c = tri.queue[tri.pos]; flyOff(card.getBoundingClientRect().width * 1.5, dy, swipeYes); if (c) toast(c.kind === "g" ? brand().keep : brand().match, c.kind === "g" ? "label kept" : "added as EV"); }
+  else if (dx < -90) flyOff(-card.getBoundingClientRect().width * 1.5, dy, swipeNo);
+  else cardReset(true);
+});
+tcv.addEventListener("pointercancel", () => { clearTimeout(pressT); g0 = null; if (tri.held) { tri.held = false; tri.hideOutline = tri.peekPrev; triDraw(); } cardReset(true); });
+tcv.addEventListener("contextmenu", ev => ev.preventDefault());
+function toggleOutlines() { tri.hideOutline = !tri.hideOutline; triDraw(); }
+$("triEye").onclick = toggleOutlines;
+function triKey(ev) {
+  if (ev.target.tagName === "SELECT") return;
+  if (tri.adj) {
+    if (ev.key === "Enter") saveAdjust(); else if (ev.key === "Escape") endAdjust();
+    else if (ev.key === "r" || ev.key === "R") $("adjRedraw").onclick();
+    else if (ev.key === "e" || ev.key === "E") endAdjust();
+    return;
+  }
+  if (ev.key === "e" || ev.key === "E") return startAdjust();
+  const k = ev.key, c = tri.queue[tri.pos];
+  if (/^[1-9]$/.test(k) && TRI_CLASSES[+k - 1] && c) {
+    const cl = TRI_CLASSES[+k - 1];
+    react("yes", () => decide(c.kind === "p" ? "add" : "keep", cl), c.kind === "p" ? `added as ${cl}` : `now ${cl}`);
+  }
+  else if (k === "ArrowRight" || k === "Enter") react("yes", swipeYes);
+  else if (k === "ArrowLeft" || k === "x" || k === "X" || k === "Delete") react("nope", swipeNo);
+  else if (k === "ArrowUp" || k === "s" || k === "S") react("skip", advance);
+  else if (k === "z" || k === "Z") triUndo();
+  else if (k === " ") { ev.preventDefault(); tri.zoom = (tri.zoom + 1) % ZOOMS.length; triDraw(); }
+  else if (k === "o" || k === "O" || k === "h" || k === "H") toggleOutlines();
+  else if (k === "Escape") closeTri();
+}
+$("toTri").onclick = openTri; applyBrand();
+$("triWho").onclick = () => askName(true); $("triExit").onclick = closeTri; $("triUndo").onclick = triUndo;
+$("triConf").onchange = openTri; $("triSplit").onchange = openTri;
+window.addEventListener("resize", () => { if (!$("tri").hidden) triDraw(); });
+
+// ---------- server sync (only when served by review_server.py) ----------
+let syncTimer = null, syncing = false;
+function syncBadge(err) {
+  const b = $("sync");
+  if (!server) { b.textContent = "local only"; b.style.color = ""; $("sync2").textContent = b.textContent; return; }
+  b.textContent = err ? `offline · ${dirty.size} pending` : dirty.size ? `saving ${dirty.size}…` : "saved to lab PC";
+  b.style.color = err ? "var(--warn)" : dirty.size ? "" : "#16a34a";
+  $("sync2").textContent = b.textContent; $("sync2").style.color = b.style.color;
+}
+function scheduleSync(ms = 800) { if (!server) return; clearTimeout(syncTimer); syncTimer = setTimeout(sync, ms); syncBadge(); }
+async function sync() {
+  if (!server || syncing) return; syncing = true; let err = false;
+  for (const file of [...dirty]) {
+    try {
+      const r = await fetch("api/edits?f=" + encodeURIComponent(file), {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(edits[file])});
+      if (!r.ok) { err = true; break; }
+      const merged = (await r.json()).edit;  // server merged our record with everyone else's
+      const local = edits[file]; edits[file] = mergeEdit(merged, local);
+      if (!newerThan(local, merged)) dirty.delete(file);
+    } catch (e) { err = true; break; }
+  }
+  syncing = false; persist(); syncBadge(err); renderList();
+  if (err) scheduleSync(15000);
+}
+async function pull() {  // bring in other reviewers' decisions (and who is looking at what)
+  await pullClaims();
+  const r = await fetch("api/edits", {cache: "no-store"}); if (!r.ok) throw new Error(r.status);
+  const remote = await r.json();
+  for (const [file, s] of Object.entries(remote)) {
+    const l = edits[file]; edits[file] = mergeEdit(l, s);
+    if (newerThan(l, s)) dirty.add(file);
+  }
+  for (const [file, l] of Object.entries(edits))
+    if (!(file in remote) && (l.modified || l.reviewed || Object.keys(l.dec || {}).length)) dirty.add(file);
+  persist();
+  if (!$("tri").hidden && !g0) { const c = tri.queue[tri.pos]; if (c && (resolved(c) || takenByOther(c))) advance(); else triRender(); }
+  else if ($("tri").hidden) { renderList(); draw(); }
+}
+async function connect() {
+  if (!location.protocol.startsWith("http")) return;
+  try { await pull(); server = true; go(cur); syncBadge(); sync(); if (!$("tri").hidden) { tri.claimed = null; triRender(); } }
+  catch (e) { syncBadge(); }
+}
+setInterval(() => { if (server && !$("tri").hidden) pullClaims(); }, 5000);
+setInterval(() => { if (server) pull().then(() => { if (dirty.size) sync(); }).catch(() => syncBadge(true)); }, 20000);
+window.addEventListener("online", () => scheduleSync(100));
+
+window.addEventListener("resize", resize);
+legend(); renderList(); resize(); go(order.length ? order[0] : 0); hint(); connect();
+let startMode = null; try { startMode = localStorage.getItem("cryoev-review:mode"); } catch (e) {}
+if (startMode === "tri" || (!startMode && window.matchMedia("(max-width: 700px)").matches)) openTri();
+})();
+</script>
+</body>
+</html>

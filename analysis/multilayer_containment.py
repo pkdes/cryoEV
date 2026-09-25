@@ -65,36 +65,61 @@ def load_image_annotations(coco_path: Path):
         yield img, entries
 
 
-def find_containment(entries, containment_threshold: float = CONTAINMENT_THRESHOLD, max_size_ratio: float = None):
+def pairwise_overlaps(masks):
+    """Mask areas and pairwise intersection pixel counts -- the only mask work
+    find_containment() needs, so it can be computed once and reused across
+    threshold/ratio settings.
+
+    Only pairs whose bounding boxes overlap are intersected, and only inside
+    the shared box; every other pair has intersection 0, which can never pass
+    a containment_threshold > 0. Returns (areas, inter) with inter a dict
+    {(i, j): pixels} holding both orderings of each overlapping pair.
+    """
+    n = len(masks)
+    areas = np.array([int(m.sum()) for m in masks], dtype=np.int64)
+    boxes = np.zeros((n, 4), dtype=np.int64)  # y0, y1, x0, x1 (exclusive ends)
+    for k, m in enumerate(masks):
+        if areas[k]:
+            rows, cols = np.flatnonzero(m.any(axis=1)), np.flatnonzero(m.any(axis=0))
+            boxes[k] = (rows[0], rows[-1] + 1, cols[0], cols[-1] + 1)
+    y0 = np.maximum(boxes[:, None, 0], boxes[None, :, 0])
+    y1 = np.minimum(boxes[:, None, 1], boxes[None, :, 1])
+    x0 = np.maximum(boxes[:, None, 2], boxes[None, :, 2])
+    x1 = np.minimum(boxes[:, None, 3], boxes[None, :, 3])
+    nonzero = areas > 0
+    overlap = (y1 > y0) & (x1 > x0) & nonzero[:, None] & nonzero[None, :]
+    inter = {}
+    for i, j in zip(*np.nonzero(np.triu(overlap, k=1))):
+        sl = (slice(y0[i, j], y1[i, j]), slice(x0[i, j], x1[i, j]))
+        v = int(np.logical_and(masks[i][sl], masks[j][sl]).sum())
+        inter[(i, j)] = inter[(j, i)] = v
+    return areas, inter
+
+
+def find_containment(entries, containment_threshold: float = CONTAINMENT_THRESHOLD, max_size_ratio: float = None,
+                     overlaps=None):
     """For each polygon, find the set of ann_ids it directly contains.
 
     B counts as contained in A if area(A∩B)/area(B) >= containment_threshold,
     and (if max_size_ratio is set) area(B)/area(A) <= max_size_ratio -- the
     size-ratio filter guards against near-duplicate predictions of the same
     object (B almost as big as A) being mistaken for a true inner layer.
+
+    `overlaps` is an optional precomputed pairwise_overlaps() of the same masks,
+    for callers that evaluate many threshold/ratio settings on one image.
     """
-    n = len(entries)
-    areas = [m.sum() for _, _, m in entries]
+    areas, inter = overlaps if overlaps is not None else pairwise_overlaps([m for _, _, m in entries])
     contains = defaultdict(set)  # ann_id -> set of ann_ids it contains
-    for i in range(n):
-        ai, _, mi = entries[i]
-        if areas[i] == 0:
+    for (i, j), v in inter.items():  # i = candidate container, j = candidate contained
+        if max_size_ratio is not None and areas[j] / areas[i] > max_size_ratio:
             continue
-        for j in range(n):
-            if i == j:
-                continue
-            aj, _, mj = entries[j]
-            if areas[j] == 0:
-                continue
-            if max_size_ratio is not None and areas[j] / areas[i] > max_size_ratio:
-                continue
-            inter = np.logical_and(mi, mj).sum()
-            if inter / areas[j] >= containment_threshold:
-                contains[ai].add(aj)
+        if v / areas[j] >= containment_threshold:
+            contains[entries[i][0]].add(entries[j][0])
     return contains
 
 
-def classify_roles(masks, containment_threshold: float = CONTAINMENT_THRESHOLD, max_size_ratio: float = None):
+def classify_roles(masks, containment_threshold: float = CONTAINMENT_THRESHOLD, max_size_ratio: float = None,
+                   overlaps=None):
     """
     Assign each mask a role purely from geometry -- shared by ground truth AND
     predictions, so both sides of any comparison use the identical rule. This
@@ -110,10 +135,11 @@ def classify_roles(masks, containment_threshold: float = CONTAINMENT_THRESHOLD, 
                       this is the true outermost boundary of the stack)
       'standalone'   otherwise
 
+    `overlaps`: optional precomputed pairwise_overlaps(masks) (see find_containment).
     Returns (role: dict[idx -> str], layer_count: dict[idx -> int]).
     """
     entries = [(i, "x", m) for i, m in enumerate(masks)]
-    contains = find_containment(entries, containment_threshold, max_size_ratio)
+    contains = find_containment(entries, containment_threshold, max_size_ratio, overlaps)
     contained_by_someone = set()
     for parent, children in contains.items():
         contained_by_someone |= children
