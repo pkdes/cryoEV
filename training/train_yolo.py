@@ -617,15 +617,27 @@ def load_gt_masks_from_labels(label_path: str, img_width: int, img_height: int) 
     return gt_masks
 
 
+_YOLO_CACHE = {}
+
+
 def load_predictions_with_classes_from_model(model_path: str, img_path: str, imgsz: int,
-                                             conf: float, iou: float, device: str) -> Tuple[List[np.ndarray], List[float], List[int]]:
-    """Load predicted masks, confidences, and class IDs from model output."""
+                                             conf: float, iou: float, device: str,
+                                             max_det: int = 300) -> Tuple[List[np.ndarray], List[float], List[int]]:
+    """Load predicted masks, confidences, and class IDs from model output.
+
+    max_det is ultralytics' per-image detection cap; its default of 300 silently
+    truncates dense fields, so callers running over crowded images should raise it.
+    Weights are cached per path so a folder-wide run loads each model once.
+    """
     from ultralytics import YOLO
     import cv2
 
-    model = YOLO(model_path)
+    if model_path not in _YOLO_CACHE:
+        _YOLO_CACHE[model_path] = YOLO(model_path)
+    model = _YOLO_CACHE[model_path]
     result = model.predict(source=str(img_path), imgsz=imgsz, conf=conf, iou=iou,
-                          device=device, verbose=False, retina_masks=True)[0]
+                          device=device, verbose=False, retina_masks=True,
+                          max_det=max_det)[0]
 
     img = Image.open(img_path)
     w, h = img.size
@@ -698,7 +710,7 @@ def load_predictions_yolo_format(label_path, img_width: int, img_height: int) ->
 
 
 def export_predictions_for_split(model_path: str, img_dir: str, output_dir, imgsz: int, conf: float,
-                                 iou: float, device: str) -> None:
+                                 iou: float, device: str, max_det: int = 300) -> None:
     """Run inference once over every image in a split and cache the raw predicted polygons to disk."""
     output_dir = Path(output_dir)
     img_paths = sorted(Path(img_dir).glob('*'))
@@ -708,7 +720,7 @@ def export_predictions_for_split(model_path: str, img_dir: str, output_dir, imgs
         img = Image.open(img_path)
         w, h = img.size
         pred_masks, confidences, class_ids = load_predictions_with_classes_from_model(
-            model_path, str(img_path), imgsz, conf, iou, device
+            model_path, str(img_path), imgsz, conf, iou, device, max_det=max_det
         )
         save_predictions_yolo_format(pred_masks, confidences, class_ids, w, h,
                                      output_dir / f"{img_path.stem}.txt")
@@ -767,7 +779,7 @@ def calculate_per_class_segmentation_metrics(model_path: str, img_dir: str, labe
         w, h = img.size
 
         pred_masks, _, pred_classes = load_predictions_with_classes_from_model(
-            model_path, str(img_path), imgsz, conf, iou, device
+            model_path, str(img_path), imgsz, conf, iou, device, max_det=max_det
         )
 
         label_path = Path(label_dir) / f"{img_path.stem}.txt"
@@ -932,7 +944,7 @@ def visualize_predictions_with_matching(model_path: str, source_dir: str, label_
         h, w = img.shape[:2]
 
         pred_masks, confidences, pred_classes = load_predictions_with_classes_from_model(
-            model_path, str(img_path), imgsz, conf, iou, device
+            model_path, str(img_path), imgsz, conf, iou, device, max_det=max_det
         )
         label_path = Path(label_dir) / f"{img_path.stem}.txt"
         gt_masks, gt_classes = load_gt_masks_and_classes_from_labels(label_path, w, h)
@@ -1032,7 +1044,7 @@ def calculate_segmentation_metrics(model_path: str, img_dir: str, label_dir: str
         
         # Load predictions using model (SAME as visualization)
         pred_masks, confidences = load_predictions_from_model(
-            model_path, str(img_path), imgsz, conf, iou, device
+            model_path, str(img_path), imgsz, conf, iou, device, max_det=max_det
         )
         
         # Load ground truth
