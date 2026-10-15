@@ -7,7 +7,11 @@ Per model, writes to <out>/<model_id>/:
   overlays/<stem>.png     -- predicted polygon outlines on the image
 Plus <out>/summary.csv: one row per image x model (n_detections, mean_conf).
 
-Each model runs at its own registered imgsz -- do not override it, or the comparison is skewed.
+Each model runs at its own registered imgsz by default -- do not override it casually, or the
+comparison is skewed. --imgsz exists for one documented case: inputs that have been rescaled to
+the models' TRAINING pixel spacing rather than their training dimensions. Because ultralytics
+letterboxes to imgsz, network_scale = pixel_size * max(W, H) / imgsz, so a scale-matched export
+must be run at imgsz == its own size or the rescale is undone by upsampling.
 
 Usage:
   python inference/predict_models.py --images <dir> --out <dir> [--models all|id1,id2] [--conf 0.25] [--device cuda]
@@ -40,6 +44,10 @@ def main():
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--iou", type=float, default=0.7)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--imgsz", type=int, default=None,
+                    help="override every model's registered imgsz; see the note above")
+    ap.add_argument("--max-det", type=int, default=300,
+                    help="ultralytics per-image detection cap (its default 300 truncates dense fields)")
     args = ap.parse_args()
 
     registry = yaml.safe_load(REGISTRY.read_text())["models"]
