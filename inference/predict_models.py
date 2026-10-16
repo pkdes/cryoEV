@@ -64,9 +64,16 @@ def main():
         pred_dir = args.out / mid / "predictions"
         ov_dir = args.out / mid / "overlays"
         ov_dir.mkdir(parents=True, exist_ok=True)
-        print(f"\n[{mid}] imgsz={spec['imgsz']}")
+        # --imgsz and --max-det were parsed but never passed on, so both flags
+        # did nothing: every run used the registered imgsz and kept
+        # ultralytics' 300-detection cap, which truncates dense fields without
+        # saying so.
+        imgsz = args.imgsz or spec["imgsz"]
+        note = "" if imgsz == spec["imgsz"] else f" (registry says {spec['imgsz']})"
+        print(f"\n[{mid}] imgsz={imgsz}{note} max_det={args.max_det}")
         export_predictions_for_split(str(REPO / spec["weights"]), str(args.images), pred_dir,
-                                     imgsz=spec["imgsz"], conf=args.conf, iou=args.iou, device=args.device)
+                                     imgsz=imgsz, conf=args.conf, iou=args.iou,
+                                     device=args.device, max_det=args.max_det)
         for img_path in images:
             img = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
             h, w = img.shape[:2]
