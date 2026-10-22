@@ -59,6 +59,8 @@ def main():
     ap.add_argument("--dataset", required=True, help="Folder under 'training outputs/' holding the run")
     ap.add_argument("--model-run-dir", required=True, help="Run folder under '<dataset>/runs/' whose predictions to show")
     ap.add_argument("--output-name", default=None, help="Folder under 'annotation review/' (default: <source>_review_<date>)")
+    ap.add_argument("--extra-classes", default="",
+                    help="Comma-separated classes to offer on top of the export's own (collapsed or dropped at training time)")
     ap.add_argument("--width", type=int, default=1440, help="Display width of the packaged images")
     ap.add_argument("--quality", type=int, default=72, help="JPEG quality of the packaged images")
     ap.add_argument("--part-size", type=int, default=40,
@@ -81,6 +83,7 @@ def main():
         cat_names = {c["id"]: c["name"] for c in coco["categories"]}
         if categories is None:
             categories = [c["name"] for c in coco["categories"] if c["name"] != "items-nfaR"]
+            categories += [c.strip() for c in args.extra_classes.split(",") if c.strip() and c.strip() not in categories]
         anns_by_img = {}
         for a in coco["annotations"]:
             anns_by_img.setdefault(a["image_id"], []).append(a)

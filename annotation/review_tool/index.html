@@ -39,6 +39,7 @@ canvas{display:block;width:100%;height:100%}
 .legend span{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
 #menuBtn,#sideBtn{display:none}
 #tri{--hot:#fd267a;--hot2:#ff7854;position:fixed;top:0;left:0;width:100vw;height:100dvh;overflow:hidden;z-index:20;display:flex;flex-direction:column;background:var(--bg);padding:env(safe-area-inset-top,0px) 0 env(safe-area-inset-bottom,0px)}
+#tri[hidden]{display:none}
 #tri .tbar{display:flex;align-items:center;gap:8px;padding:8px 12px 4px}
 #tri .logo{flex:1;text-align:center;line-height:1.05;cursor:pointer;user-select:none}
 #tri .logo b{font:900 32px/1.05 system-ui,sans-serif;letter-spacing:-.03em;background:linear-gradient(90deg,var(--hot),var(--hot2));-webkit-background-clip:text;background-clip:text;color:transparent}
@@ -191,7 +192,7 @@ canvas{display:block;width:100%;height:100%}
     <button id="aYes" class="round" title="Match">♥</button>
   </div>
 </section>
-<script src="data.js"></script>
+<script>document.write('<script src="data.js?h=' + Math.floor(Date.now() / 3.6e6) + '"><\/script>');  // at most an hour stale; the file is ~5 MB</script>
 <script>
 (() => {
 "use strict";
@@ -645,7 +646,7 @@ $("importFile").onchange = async ev => {
 // Cases: predictions with no matching label (possible missed label) and labels with no matching
 // prediction (check the label). Decisions are stored per image in edits[file].dec, keyed
 // "p<pred index>" / "g<label id>", and applied to edits[file].gt like any other edit.
-const TRI_CLASSES = ["EV", "Low conf EV", "MV", "inner", "Incomplete", "Overlapping"].filter(c => CATS.includes(c));
+const TRI_CLASSES = ["EV", "Low conf EV", "non-EV", "MV", "inner"].filter(c => CATS.includes(c));
 const tcv = $("tcv"), tctx = tcv.getContext("2d"), card = $("card");
 const tri = {queue: [], pos: 0, zoom: 0, undo: [], img: null, imgI: -1, ready: false, hideOutline: false, held: false};
 const ZOOMS = [3, 7, 0];  // crop = object size x this; 0 = whole image
