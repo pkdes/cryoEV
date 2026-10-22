@@ -1,0 +1,314 @@
+<title>CryoEV Training Ledger</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600&display=swap">
+<style>
+:root {
+  --ground: #f4f7f8; --surface: #ffffff; --sunk: #e9eff1; --ink: #14212a; --muted: #586a75;
+  --line: #d5dfe3; --accent: #0d7385; --accent-soft: #d6eef1; --ml: #b4532a; --inner: #6b4fa0;
+  --e1: #7d8a94; --e2: #9c4a6e; --e3: #b8862b; --e4: #5f8a3a; --e5: #0d7385;
+  --bar: #0d7385; --good: #2f7d4f; --warn: #a2650f;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --ground: #0d1418; --surface: #131d23; --sunk: #1a262d; --ink: #e2ebef; --muted: #93a6b1;
+    --line: #26353d; --accent: #4fbfcf; --accent-soft: #163840; --ml: #e98a5f; --inner: #a993d8;
+    --e1: #9aa7b0; --e2: #d98aae; --e3: #ddb05a; --e4: #94c36a; --e5: #4fbfcf;
+    --bar: #4fbfcf; --good: #6cc48f; --warn: #e2a64c;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ground: #0d1418; --surface: #131d23; --sunk: #1a262d; --ink: #e2ebef; --muted: #93a6b1;
+  --line: #26353d; --accent: #4fbfcf; --accent-soft: #163840; --ml: #e98a5f; --inner: #a993d8;
+  --e1: #9aa7b0; --e2: #d98aae; --e3: #ddb05a; --e4: #94c36a; --e5: #4fbfcf;
+  --bar: #4fbfcf; --good: #6cc48f; --warn: #e2a64c;
+}
+* { box-sizing: border-box; }
+body { background: var(--ground); color: var(--ink); font: 15px/1.55 "IBM Plex Sans", "Segoe UI", system-ui, sans-serif; }
+.wrap { max-width: 1240px; margin: 0 auto; padding: 32px 20px 64px; display: grid; gap: 36px; }
+h1, h2 { font-family: "IBM Plex Serif", Georgia, serif; font-weight: 600; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(1.7rem, 3.2vw, 2.4rem); line-height: 1.15; }
+h2 { font-size: 1.3rem; }
+p { margin: 0; max-width: 72ch; }
+.eyebrow { font: 500 0.72rem/1 "IBM Plex Mono", ui-monospace, monospace; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+header { display: grid; gap: 12px; }
+.lede { color: var(--muted); }
+.caveats { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px 24px; padding: 16px 18px; background: var(--sunk); border-radius: 6px; font-size: 0.9rem; }
+.caveats b { display: block; font-weight: 600; margin-bottom: 2px; }
+section { display: grid; gap: 14px; }
+.sec-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 16px; }
+.note { color: var(--muted); font-size: 0.85rem; }
+
+/* timeline of approaches */
+.timeline { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+.era { padding: 12px 14px 14px; background: var(--surface); border: 1px solid var(--line); border-top: 3px solid var(--c); border-radius: 4px; display: grid; gap: 6px; align-content: start; }
+.era .when { font: 500 0.75rem "IBM Plex Mono", monospace; color: var(--c); }
+.era .what { font-weight: 600; line-height: 1.3; }
+.era .detail { font-size: 0.85rem; color: var(--muted); }
+
+/* chart */
+.chart-box { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 12px 8px 4px; overflow-x: auto; }
+.chart-box svg { display: block; min-width: 760px; width: 100%; height: auto; }
+.chart-box text { fill: var(--muted); font: 11px "IBM Plex Mono", monospace; }
+.chart-box .lab { fill: var(--ink); font: 500 11.5px "IBM Plex Sans", sans-serif; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 0.85rem; color: var(--muted); padding: 4px 8px 8px; }
+.legend i { display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px; }
+
+/* controls */
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; background: var(--surface); }
+.seg button { font: 500 0.85rem "IBM Plex Sans", sans-serif; color: var(--muted); background: none; border: 0; padding: 7px 12px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--ink); }
+input[type="search"], select { font: 0.875rem "IBM Plex Sans", sans-serif; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 7px 10px; min-width: 0; }
+input[type="search"] { width: min(260px, 100%); }
+button:focus-visible, input:focus-visible, select:focus-visible, th:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.count { font: 0.8rem "IBM Plex Mono", monospace; color: var(--muted); }
+
+/* tables */
+.tbl { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; max-height: 70vh; }
+table { border-collapse: collapse; width: 100%; font-size: 0.83rem; }
+th, td { padding: 6px 10px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--line); }
+th { position: sticky; top: 0; z-index: 1; background: var(--sunk); font-weight: 600; font-size: 0.76rem; color: var(--muted); cursor: pointer; user-select: none; }
+th[aria-sort="ascending"]::after { content: " ▲"; } th[aria-sort="descending"]::after { content: " ▼"; }
+td.num { font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; text-align: right; }
+td.wrap { white-space: normal; min-width: 220px; }
+tbody tr:hover { background: var(--accent-soft); }
+.run { font-family: "IBM Plex Mono", monospace; font-size: 0.78rem; }
+.chip { display: inline-block; padding: 1px 7px; border-radius: 3px; font: 500 0.72rem "IBM Plex Mono", monospace; color: var(--c); border: 1px solid var(--c); }
+.f1 { display: inline-flex; align-items: center; gap: 6px; justify-content: flex-end; }
+.f1 span { display: inline-block; height: 6px; background: var(--c, var(--bar)); border-radius: 1px; opacity: 0.8; }
+.dim { color: var(--muted); }
+.tag-role { color: var(--ml); } .tag-native { color: var(--muted); }
+@media (max-width: 600px) { .wrap { padding-inline: 16px; } th, td { padding: 5px 8px; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Carney lab · CryoEV · YOLO segmentation runs</div>
+    <h1>Training runs, May 2026 to now</h1>
+    <p class="lede" id="lede"></p>
+    <div class="caveats">
+      <div><b>Not directly comparable across eras</b>Runs before v3 were only ever scored on their own validation sets (5 to 26 images), which differ by campaign. From v3 on, the headline numbers are from the held-out test set.</div>
+      <div><b>"Multilayer" means two different things</b>Until July it was a class the model predicted (the outer outline only). Since July the model finds every membrane layer as one EV class, and a detection that contains others is counted as multilayer afterwards (containment).</div>
+      <div><b>How runs are scored</b>Detections are matched one-to-one to labels at mask IoU ≥ 0.5, conf ≥ 0.25 (the May sanity runs used 0.35 / 0.30). F1 combines precision and recall. Mask IoU is the average overlap of matched detections with their labels, i.e. how well the outlines fit.</div>
+      <div><b>Coverage</b>This page only gathers numbers already saved on disk; nothing was re-run. Multilayer and inner-layer scores exist only for the five runs that had a containment analysis. Re-scoring every run the same way is the next step.</div>
+    </div>
+  </header>
+
+  <section>
+    <div class="sec-head"><h2>How the approach changed</h2></div>
+    <div class="timeline" id="timeline"></div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>Best run per campaign</h2><span class="note">Best is by object-level F1 on that campaign's headline split.</span></div>
+    <div class="chart-box"><div class="legend" id="legend"></div><div id="chart"></div></div>
+    <div class="tbl"><table id="best"></table></div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>Every run</h2><span class="count" id="runs-count"></span></div>
+    <div class="controls">
+      <div class="seg" role="group" aria-label="Table">
+        <button id="tab-runs" aria-pressed="true" data-tab="runs">Completed runs</button>
+        <button id="tab-pc" aria-pressed="false" data-tab="pc">Per class and role</button>
+        <button id="tab-img" aria-pressed="false" data-tab="img">Image sets</button>
+        <button id="tab-app" aria-pressed="false" data-tab="app">Appendix</button>
+        <button id="tab-notes" aria-pressed="false" data-tab="notes">Log issues</button>
+      </div>
+      <div class="seg" role="group" aria-label="Columns" id="colset">
+        <button id="cols-results" aria-pressed="true" data-cols="results">Results</button>
+        <button id="cols-params" aria-pressed="false" data-cols="params">Parameters</button>
+      </div>
+      <select id="era-filter" aria-label="Era"><option value="">All eras</option></select>
+      <input type="search" id="q" placeholder="Filter rows (e.g. y8m, test, multilayer)" aria-label="Filter rows">
+    </div>
+    <div class="tbl"><table id="main"></table></div>
+  </section>
+
+  <p class="note">Generated by <span class="run">CryoEV Github/analysis/compile_run_report.py</span> on <span id="gen"></span>. The same tables are in <span class="run">secondary analyses/cross_run_report/</span> as CSV and REPORT.md.</p>
+</div>
+
+<script>
+const D = /*DATA*/null;
+const ERA_C = { "1": "var(--e1)", "2": "var(--e2)", "3": "var(--e3)", "4": "var(--e4)", "5": "var(--e5)" };
+const SHORT = {
+  quick_bench: "Yifei re-train", roboflow_202512_yifei: "Yifei sanity", roboflow_20260529: "3-class 0529",
+  roboflow20260604_backup: "2-class random", roboflow20260604_stratified: "2-class stratified", vldl: "VLDL tiles",
+  roboflow_20260713_all_layer_singleclass: "All-layer 0713", roboflow_20260824_cryoai_v3_singleclass: "v3",
+  roboflow_20260924_cryoai_v4_singleclass: "v4",
+};
+const ERAS = [
+  ["1", "May", "Yifei's dataset, 1 class", "Re-trained Yifei's 202512 vesicle model to benchmark the setup."],
+  ["2", "Early June", "3 classes: EV, multilayer EV, non-EV", "Multilayer EV found 0 to 2 of 7; non-EV never detected."],
+  ["3", "June", "2 classes: EV, multilayer EV", "Stratified split and data-scaling runs. Multilayer recall stuck near 0.39."],
+  ["4", "June", "VLDL tiles: EV, non-EV EP", "Side experiment on lipoprotein contamination, 12 tiles from 2 images."],
+  ["5", "July to now", "1 class EV (every layer) + containment", "Multilayer found geometrically after detection. v3 added a test set; v4 doubled training data."],
+];
+const eraOf = r => (r.era || "").slice(0, 1);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const n3 = v => (v === null || v === undefined || v === "" || isNaN(v)) ? "" : Number(v).toFixed(3);
+const split3 = r => ["train", "val", "test"].map(s => r[s + "_images"] ?? "–").join(" / ");
+const f1cell = (v, c) => v === null || v === undefined || v === "" ? "" :
+  `<span class="f1">${n3(v)}<span style="width:${Math.round(Number(v) * 44)}px;--c:${c || "var(--bar)"}"></span></span>`;
+
+// ---- columns: [header, value fn, kind, sort value fn]
+const C = {
+  date: ["Date", r => r.date, "txt"],
+  era: ["Era", r => `<span class="chip" style="--c:${ERA_C[eraOf(r)]}">${esc(SHORT[r.campaign] || r.campaign)}</span>`, "txt", r => r.date + r.campaign],
+  run: ["Run", r => `<span class="run">${esc(r.run)}</span>`, "txt", r => r.run],
+  approach: ["Approach", r => esc(r.approach), "wrap"],
+  classes: ["Classes", r => esc(r.classes), "txt"],
+  imageset: ["Image set", r => esc(r.imageset), "txt"],
+  labels: ["Labels", r => esc(r.labels), "wrap"],
+  splitm: ["Split method", r => esc(r.split_method), "wrap"],
+  split: ["Train / val / test img", r => split3(r), "num", r => r.train_images ?? -1],
+  inst: ["Train / val / test objects", r => ["train", "val", "test"].map(s => r[s + "_instances"] ?? "–").join(" / "), "num", r => r.train_instances ?? -1],
+  model: ["Model", r => esc(r.model), "txt"],
+  imgsz: ["imgsz", r => r.imgsz ?? "", "num"],
+  batch: ["Batch", r => r.batch ?? "", "num"],
+  epochs: ["Epochs done / max", r => `${r.epochs_done ?? "–"} / ${r.epochs ?? "–"}`, "num", r => r.epochs_done ?? -1],
+  best_epoch: ["Best epoch", r => r.best_epoch ?? "", "num"],
+  optimizer: ["Optimizer", r => esc(r.optimizer), "txt"],
+  lr0: ["lr0", r => r.lr0 ?? "", "num"], lrf: ["lrf", r => r.lrf ?? "", "num"],
+  patience: ["Patience", r => r.patience ?? "", "num"],
+  overlap: ["overlap_mask", r => r.overlap_mask === undefined ? "" : String(r.overlap_mask), "txt"],
+  rect: ["rect", r => r.rect === undefined ? "" : String(r.rect), "txt"],
+  mask_ratio: ["mask_ratio", r => r.mask_ratio ?? "", "num"],
+  aug: ["Augmentation", r => esc(r.augmentation), "wrap"],
+  seed: ["Seed", r => r.seed ?? "", "num"],
+  wall: ["Train time (min)", r => r.wall_time_s ? (r.wall_time_s / 60).toFixed(0) : "", "num", r => r.wall_time_s ?? -1],
+  vmap: ["Val mask mAP50-95", r => n3(r.val_mask_mAP50_95), "num", r => r.val_mask_mAP50_95 ?? -1],
+  vmap50: ["Val mask mAP50", r => n3(r.val_mask_mAP50), "num", r => r.val_mask_mAP50 ?? -1],
+  vbox: ["Val box mAP50-95", r => n3(r.val_box_mAP50_95), "num", r => r.val_box_mAP50_95 ?? -1],
+  scored: ["Scored on", r => esc(r.headline_split), "txt"],
+  allP: ["Precision", r => n3(r.all_P), "num", r => r.all_P ?? -1],
+  allR: ["Recall", r => n3(r.all_R), "num", r => r.all_R ?? -1],
+  allF1: ["F1 (all objects)", r => f1cell(r.all_F1), "num", r => r.all_F1 ?? -1],
+  iou: ["Mask IoU", r => n3(r.all_mask_IoU), "num", r => r.all_mask_IoU ?? -1],
+  single: ["Single-layer F1", r => f1cell(r.single_F1, "var(--accent)"), "num", r => r.single_F1 ?? -1],
+  ml: ["Multilayer F1", r => f1cell(r.multilayer_F1, "var(--ml)") + (r.multilayer_source ? ` <span class="tag-${r.multilayer_source}">${r.multilayer_source === "role" ? "role" : "class"}</span>` : ""), "num", r => r.multilayer_F1 ?? -1],
+  mlR: ["Multilayer recall", r => n3(r.multilayer_R), "num", r => r.multilayer_R ?? -1],
+  inner: ["Inner-layer F1", r => f1cell(r.inner_F1, "var(--inner)"), "num", r => r.inner_F1 ?? -1],
+  nonev: ["non-EV F1", r => n3(r.nonEV_F1), "num", r => r.nonEV_F1 ?? -1],
+  roleThr: ["Containment", r => esc(r.role_containment) + (r.role_split ? ` <span class="dim">(${esc(r.role_split)})</span>` : ""), "txt"],
+  sw25: ["F1 @ conf 0.25 (cache)", r => n3(r.sweep_F1_at_0_25), "num", r => r.sweep_F1_at_0_25 ?? -1],
+  swb: ["Best F1 (conf)", r => r.sweep_best_F1 ? `${n3(r.sweep_best_F1)} <span class="dim">@${r.sweep_best_conf}</span>` : "", "num", r => r.sweep_best_F1 ?? -1],
+  status: ["Why not in main table", r => esc(r.status_reason), "wrap"],
+};
+const SETS = {
+  results: ["date", "era", "run", "classes", "split", "model", "imgsz", "batch", "epochs", "vmap", "scored", "allP", "allR", "allF1", "iou", "single", "ml", "mlR", "inner", "nonev", "roleThr", "sw25", "swb"],
+  params: ["date", "era", "run", "imageset", "labels", "approach", "splitm", "split", "inst", "model", "imgsz", "batch", "epochs", "best_epoch", "optimizer", "lr0", "lrf", "patience", "overlap", "rect", "mask_ratio", "aug", "seed", "wall", "vbox", "vmap50", "vmap"],
+  app: ["date", "era", "run", "model", "imgsz", "batch", "epochs", "status"],
+};
+const PC = [
+  ["Run", r => `<span class="run">${esc(r.run)}</span>`, "txt", r => r.run],
+  ["Split", r => esc(r.split), "txt"],
+  ["Scheme", r => `<span class="tag-${r.scheme === "geometric role" ? "role" : "native"}">${esc(r.scheme)}</span>`, "txt", r => r.scheme],
+  ["Class / role", r => esc(r.cls), "txt"],
+  ["Labels", r => r.n_gt, "num"], ["Detections", r => r.n_pred, "num"],
+  ["TP", r => r.tp, "num"], ["FP", r => r.fp, "num"], ["FN", r => r.fn, "num"],
+  ["Precision", r => n3(r.precision), "num", r => r.precision], ["Recall", r => n3(r.recall), "num", r => r.recall],
+  ["F1", r => f1cell(r.f1, r.scheme === "geometric role" ? "var(--ml)" : null), "num", r => r.f1],
+  ["Mask IoU", r => n3(r.mask_iou), "num", r => r.mask_iou ?? -1],
+  ["Conf / match IoU", r => `${r.conf} / ${r.match_iou}`, "txt"],
+  ["Containment", r => esc(r.containment), "txt"],
+  ["Source", r => `<span class="run dim">${esc(r.source)}</span>`, "txt", r => r.source],
+];
+const IMG = [["Image set", r => esc(r.imageset), "txt", r => r.imageset], ["Split", r => esc(r.split), "txt"], ["Format", r => r.format, "txt"],
+  ["Images", r => r.images, "num"], ["Annotations", r => r.annotations, "num"], ["Annotations per category", r => esc(r.per_category), "wrap", r => r.per_category]];
+const NOTES = [["Run", r => `<span class="run">${esc(r.run)}</span>`, "txt", r => r.run], ["Campaign", r => esc(r.campaign), "txt"], ["Issue", r => esc(r.issue), "wrap", r => r.issue]];
+
+function table(el, cols, rows, state) {
+  const s = state.sort;
+  if (s) {
+    const get = cols[s.i][3] || (r => { const v = cols[s.i][1](r); return typeof v === "string" ? v.replace(/<[^>]+>/g, "") : v; });
+    rows = [...rows].sort((a, b) => { const x = get(a), y = get(b); const c = (typeof x === "number" && typeof y === "number") ? x - y : String(x ?? "").localeCompare(String(y ?? ""), undefined, { numeric: true }); return s.dir * c; });
+  }
+  el.innerHTML = `<thead><tr>${cols.map((c, i) => `<th tabindex="0" data-i="${i}" aria-sort="${s && s.i === i ? (s.dir > 0 ? "ascending" : "descending") : "none"}">${c[0]}</th>`).join("")}</tr></thead>` +
+    `<tbody>${rows.map(r => `<tr>${cols.map(c => `<td class="${c[2] === "num" ? "num" : c[2] === "wrap" ? "wrap" : ""}">${c[1](r) ?? ""}</td>`).join("")}</tr>`).join("")}</tbody>`;
+  el.querySelectorAll("th").forEach(th => {
+    const go = () => { const i = +th.dataset.i; state.sort = { i, dir: state.sort && state.sort.i === i ? -state.sort.dir : (cols[i][2] === "num" ? -1 : 1) }; state.render(); };
+    th.onclick = go; th.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } };
+  });
+}
+
+const main = D.runs.filter(r => r.status === "main");
+const app = D.runs.filter(r => r.status !== "main");
+const runEra = Object.fromEntries(D.runs.map(r => [r.run, eraOf(r)]));
+document.getElementById("gen").textContent = D.generated || "";
+document.getElementById("lede").textContent =
+  `${main.length} completed training runs across ${new Set(main.map(r => r.campaign)).size} campaigns, plus ${app.length} sanity checks, probes and failed runs in the appendix. For each run: image set and labels, split, approach, training parameters, and precision, recall, F1 and mask fit, overall and per class.`;
+
+// timeline
+document.getElementById("timeline").innerHTML = ERAS.map(([k, when, what, detail]) => {
+  const n = main.filter(r => eraOf(r) === k).length;
+  return `<div class="era" style="--c:${ERA_C[k]}"><div class="when">${when} · ${n} run${n === 1 ? "" : "s"}</div><div class="what">${what}</div><div class="detail">${detail}</div></div>`;
+}).join("");
+
+// best per campaign
+const best = {};
+main.forEach(r => { const k = r.all_F1 ?? -1; if (!best[r.campaign] || k > (best[r.campaign].all_F1 ?? -1)) best[r.campaign] = r; });
+const bestRows = Object.values(best).filter(r => r.all_F1 != null).sort((a, b) => a.date.localeCompare(b.date));
+const bestState = { sort: null, render: () => table(document.getElementById("best"), SETS.results.filter(k => !["date", "classes", "batch", "nonev", "sw25"].includes(k)).map(k => C[k]), bestRows, bestState) };
+bestState.render();
+
+// chart: every scored run per campaign; F1 dots, multilayer diamonds, inner squares
+(function chart() {
+  const camps = [...new Set(main.filter(r => r.all_F1 != null).sort((a, b) => a.date.localeCompare(b.date)).map(r => r.campaign))];
+  const W = 980, H = 300, L = 46, R = 12, T = 14, B = 56, cw = (W - L - R) / camps.length;
+  const y = v => T + (1 - v) * (H - T - B);
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="F1 by campaign">`;
+  for (let t = 0; t <= 1.0001; t += 0.2) s += `<line x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}" stroke="var(--line)" stroke-width="1"/><text x="${L - 8}" y="${y(t) + 4}" text-anchor="end">${t.toFixed(1)}</text>`;
+  camps.forEach((c, i) => {
+    const rs = main.filter(r => r.campaign === c && r.all_F1 != null);
+    const x0 = L + i * cw, mid = x0 + cw / 2, col = ERA_C[eraOf(rs[0])];
+    if (i) s += `<line x1="${x0}" x2="${x0}" y1="${T}" y2="${H - B}" stroke="var(--line)" stroke-dasharray="2 3"/>`;
+    rs.forEach((r, j) => {
+      const x = rs.length === 1 ? mid : x0 + 16 + j * (cw - 32) / (rs.length - 1);
+      s += `<circle cx="${x}" cy="${y(r.all_F1)}" r="4.5" fill="${col}" fill-opacity="0.85"><title>${esc(r.run)}\nF1 ${n3(r.all_F1)} (${r.headline_split})</title></circle>`;
+      if (r.multilayer_F1 != null) s += `<rect x="${x - 4}" y="${y(r.multilayer_F1) - 4}" width="8" height="8" transform="rotate(45 ${x} ${y(r.multilayer_F1)})" fill="var(--ml)"><title>${esc(r.run)}\nmultilayer F1 ${n3(r.multilayer_F1)} (${r.multilayer_source})</title></rect>`;
+      if (r.inner_F1 != null) s += `<rect x="${x - 3.5}" y="${y(r.inner_F1) - 3.5}" width="7" height="7" fill="none" stroke="var(--inner)" stroke-width="2"><title>${esc(r.run)}\ninner-layer F1 ${n3(r.inner_F1)}</title></rect>`;
+    });
+    const sp = [...new Set(rs.map(r => r.headline_split))].join("+");
+    s += `<text class="lab" x="${mid}" y="${H - B + 20}" text-anchor="middle">${esc(SHORT[c] || c)}</text><text x="${mid}" y="${H - B + 36}" text-anchor="middle">${rs.length} run${rs.length > 1 ? "s" : ""} · ${sp}</text>`;
+  });
+  document.getElementById("chart").innerHTML = s + `<text x="${L}" y="${H - 6}">Each column is one campaign in date order; points are its completed runs. Scores are on that campaign's own split (val before v3, test after).</text></svg>`;
+  document.getElementById("legend").innerHTML =
+    `<span><i style="background:var(--e5);border-radius:50%"></i>F1, all objects (colour = era)</span><span><i style="background:var(--ml);transform:rotate(45deg) scale(.8)"></i>Multilayer F1</span><span><i style="border:2px solid var(--inner)"></i>Inner-layer F1</span>`;
+})();
+
+// main tabbed table
+const eraSel = document.getElementById("era-filter");
+ERAS.forEach(([k, when, what]) => eraSel.insertAdjacentHTML("beforeend", `<option value="${k}">${when}: ${what}</option>`));
+const st = { tab: "runs", cols: "results", sort: null, render };
+function render() {
+  const q = document.getElementById("q").value.trim().toLowerCase(), era = eraSel.value;
+  const match = (r, keyEra) => (!era || keyEra === era) && (!q || JSON.stringify(r).toLowerCase().includes(q));
+  let cols, rows;
+  if (st.tab === "runs") { cols = SETS[st.cols].map(k => C[k]); rows = main.filter(r => match(r, eraOf(r))); }
+  else if (st.tab === "app") { cols = SETS.app.map(k => C[k]); rows = app.filter(r => match(r, eraOf(r))); }
+  else if (st.tab === "pc") { cols = PC; rows = D.per_class.filter(r => match(r, runEra[r.run])); }
+  else if (st.tab === "img") { cols = IMG; rows = D.imagesets.filter(r => match(r, "")); }
+  else { cols = NOTES; rows = D.notes.filter(r => match(r, "")); }
+  document.getElementById("colset").hidden = st.tab !== "runs";
+  document.getElementById("runs-count").textContent = `${rows.length} rows`;
+  table(document.getElementById("main"), cols, rows, st);
+}
+document.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => {
+  st.tab = b.dataset.tab; st.sort = null;
+  document.querySelectorAll("[data-tab]").forEach(x => x.setAttribute("aria-pressed", x === b));
+  render();
+});
+document.querySelectorAll("[data-cols]").forEach(b => b.onclick = () => {
+  st.cols = b.dataset.cols; st.sort = null;
+  document.querySelectorAll("[data-cols]").forEach(x => x.setAttribute("aria-pressed", x === b));
+  render();
+});
+document.getElementById("q").oninput = render;
+eraSel.onchange = render;
+render();
+</script>
