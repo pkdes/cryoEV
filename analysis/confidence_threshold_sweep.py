@@ -6,7 +6,7 @@ the effective threshold from there; nothing below 0.25 is recoverable
 without rerunning inference.
 
 Outputs:
-  <dataset>/confidence_sweep/confidence_sweep.csv   (split, conf, P, R, F1, tp, fp, fn)
+  <dataset>/runs/<model-run-dir>/confidence_sweep.csv   (split, conf, P, R, F1, tp, fp, fn)
   console table per split + combined, marking the best-F1 threshold.
 """
 
@@ -102,7 +102,7 @@ def main():
     source_root = ROOT / "training images" / args.source_name
     dataset_root = ROOT / "training outputs" / args.dataset
     run_dir = dataset_root / "runs" / args.model_run_dir
-    out_dir = dataset_root / "confidence_sweep"
+    out_dir = dataset_root / "runs" / args.model_run_dir  # per run, so sweeps of different runs don't overwrite each other
     out_dir.mkdir(parents=True, exist_ok=True)
 
     split_map = {"train": "train", "valid": "val"}

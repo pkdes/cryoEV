@@ -1,0 +1,182 @@
+<title>CryoEV Training Progress</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600&display=swap">
+<style>
+:root {
+  --ground: #f4f7f8; --surface: #ffffff; --sunk: #e9eff1; --ink: #14212a; --muted: #586a75;
+  --line: #d5dfe3; --accent: #0d7385; --accent-soft: #d6eef1; --ml: #b4532a; --inner: #6b4fa0;
+  --old: #9c4a6e; --s1: #8fa3ad; --s2: #b8862b; --s3: #0d7385;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --ground: #0d1418; --surface: #131d23; --sunk: #1a262d; --ink: #e2ebef; --muted: #93a6b1;
+    --line: #26353d; --accent: #4fbfcf; --accent-soft: #163840; --ml: #e98a5f; --inner: #a993d8;
+    --old: #d98aae; --s1: #8a9ca6; --s2: #ddb05a; --s3: #4fbfcf;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ground: #0d1418; --surface: #131d23; --sunk: #1a262d; --ink: #e2ebef; --muted: #93a6b1;
+  --line: #26353d; --accent: #4fbfcf; --accent-soft: #163840; --ml: #e98a5f; --inner: #a993d8;
+  --old: #d98aae; --s1: #8a9ca6; --s2: #ddb05a; --s3: #4fbfcf;
+}
+* { box-sizing: border-box; }
+body { background: var(--ground); color: var(--ink); font: 15px/1.55 "IBM Plex Sans", "Segoe UI", system-ui, sans-serif; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 32px 20px 64px; display: grid; gap: 40px; }
+h1, h2 { font-family: "IBM Plex Serif", Georgia, serif; font-weight: 600; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(1.7rem, 3.2vw, 2.3rem); line-height: 1.15; }
+h2 { font-size: 1.35rem; }
+p { margin: 0; max-width: 75ch; }
+.eyebrow { font: 500 0.72rem/1 "IBM Plex Mono", ui-monospace, monospace; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+header { display: grid; gap: 12px; }
+.lede, .caveat, .sub { color: var(--muted); }
+.lede { font-size: 0.95rem; }
+section { display: grid; gap: 14px; padding-top: 20px; border-top: 1px solid var(--line); }
+.key { font-size: 1.08rem; font-weight: 500; line-height: 1.45; max-width: 70ch; }
+.caveat { font-size: 0.86rem; }
+.sub { font: 500 0.8rem "IBM Plex Mono", monospace; }
+.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 14px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 12px 14px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.chart { overflow-x: auto; }
+.chart svg { display: block; width: 100%; height: auto; min-width: 380px; }
+.chart text { fill: var(--muted); font: 11px "IBM Plex Mono", monospace; }
+.chart .lab { fill: var(--ink); font: 12px "IBM Plex Sans", sans-serif; }
+.chart .val { fill: var(--ink); font: 500 10.5px "IBM Plex Mono", monospace; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 0.82rem; color: var(--muted); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+.tbl { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; }
+table { border-collapse: collapse; width: 100%; font-size: 0.84rem; }
+th, td { padding: 6px 10px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--line); }
+tr:last-child td { border-bottom: 0; }
+th { background: var(--sunk); font-weight: 600; font-size: 0.75rem; color: var(--muted); }
+td.num { font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; text-align: right; }
+td.hi { font-weight: 600; color: var(--ink); }
+td.old { color: var(--old); }
+.foot { font-size: 0.82rem; color: var(--muted); }
+@media (max-width: 600px) { .wrap { padding-inline: 16px; } th, td { padding: 5px 8px; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Carney lab · CryoEV · YOLO segmentation</div>
+    <h1>What moved EV detection forward, May to September 2026</h1>
+    <p class="lede">Three comparisons from the training runs: the change of approach for multilayer EVs, more training data, and bigger models. Detections are matched one-to-one to labels at mask IoU ≥ 0.5. <b>F1 @ 0.25</b> uses a confidence cutoff of 0.25; <b>best F1</b> is the best cutoff on that set. Multilayer and inner-layer scores for the single-class models come from containment (<span id="cont"></span>) on held-out test images.</p>
+  </header>
+
+  <section id="secA">
+    <div class="eyebrow">A · Approach</div>
+    <h2>A dedicated multilayer class vs finding multilayer by containment</h2>
+    <p class="key" id="keyA"></p>
+    <div class="card"><div class="legend" id="legA"></div><div class="chart" id="chartA"></div></div>
+    <div class="tbl"><table id="tA"></table></div>
+    <p class="caveat" id="cavA"></p>
+  </section>
+
+  <section id="secB">
+    <div class="eyebrow">B · Training data</div>
+    <h2>More training images, a more balanced split</h2>
+    <p class="key" id="keyB"></p>
+    <div class="pair">
+      <div class="card"><div class="sub">Same y8n config · same 50 test images</div><div class="legend" id="legB1"></div><div class="chart" id="chartB1"></div></div>
+      <div class="card"><div class="sub">June 2-class runs · same 26-image validation set</div><div class="legend" id="legB2"></div><div class="chart" id="chartB2"></div></div>
+    </div>
+    <div class="tbl"><table id="tB1"></table></div>
+    <div class="tbl"><table id="tB2"></table></div>
+    <p class="caveat" id="cavB"></p>
+  </section>
+
+  <section id="secC">
+    <div class="eyebrow">C · Model size</div>
+    <h2>Nano, small and medium on the same data</h2>
+    <p class="key" id="keyC"></p>
+    <div class="pair">
+      <div class="card"><div class="sub">v3 data · 51 train / 99 test images</div><div class="legend" id="legC1"></div><div class="chart" id="chartC1"></div></div>
+      <div class="card"><div class="sub">v4 data · 100 train / 50 test images</div><div class="legend" id="legC2"></div><div class="chart" id="chartC2"></div></div>
+    </div>
+    <div class="tbl"><table id="tC"></table></div>
+    <p class="caveat" id="cavC"></p>
+  </section>
+
+  <p class="foot">Generated <span id="gen"></span> by <code>CryoEV Github/analysis/summarize_training_progress.py</code>. CSVs and SUMMARY.md are in <code>secondary analyses/training_progress_summary/</code>; every run is in the full cross-run report.</p>
+</div>
+
+<script>
+const D = /*DATA*/null;
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const n3 = v => v === null || v === undefined || v === "" ? "–" : Number(v).toFixed(3);
+const $ = id => document.getElementById(id);
+$("gen").textContent = D.generated;
+$("cont").textContent = `containment ${D.containment[0]}, size ratio ${D.containment[1]}`;
+["A", "B", "C"].forEach(k => { $("key" + k).textContent = D.takeaways[k][0]; $("cav" + k).textContent = D.takeaways[k][1]; });
+
+// Dot chart: one row per item, one dot per series on a shared x scale.
+function dots(el, legEl, rows, series, lo, hi, W = 520, L = 150) {
+  const R = 30, rowH = 30, T = 8, B = 26, H = T + rows.length * rowH + B;
+  const x = v => L + (v - lo) / (hi - lo) * (W - L - R);
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img">`;
+  const step = (hi - lo) > 0.5 ? 0.2 : 0.05;
+  for (let t = Math.ceil(lo / step) * step; t <= hi + 1e-9; t += step)
+    s += `<line x1="${x(t)}" x2="${x(t)}" y1="${T}" y2="${H - B}" stroke="var(--line)"/><text x="${x(t)}" y="${H - 8}" text-anchor="middle">${t.toFixed(2)}</text>`;
+  rows.forEach((r, i) => {
+    const y = T + i * rowH + rowH / 2;
+    s += `<text class="lab" x="${L - 10}" y="${y + 4}" text-anchor="end">${esc(r.label)}</text>`;
+    const vals = series.map(se => r[se.key]).filter(v => v != null);
+    if (vals.length > 1) s += `<line x1="${x(Math.min(...vals))}" x2="${x(Math.max(...vals))}" y1="${y}" y2="${y}" stroke="var(--line)" stroke-width="3"/>`;
+    series.forEach(se => {
+      const v = r[se.key]; if (v == null) return;
+      s += `<circle cx="${x(Math.max(lo, v))}" cy="${y}" r="6" fill="${se.color}"><title>${esc(r.label)} · ${esc(se.name)}: ${n3(v)}</title></circle>`;
+    });
+  });
+  el.innerHTML = s + "</svg>";
+  legEl.innerHTML = series.map(se => `<span><i style="background:${se.color}"></i>${esc(se.name)}</span>`).join("");
+}
+// Dot chart where rows are metrics and series are runs (before/after views)
+function metricDots(el, legEl, runs, metrics, lo, hi) {
+  const rows = metrics.map(([k, label]) => Object.assign({ label }, Object.fromEntries(runs.map((r, i) => ["s" + i, r.row[k]]))));
+  dots(el, legEl, rows, runs.map((r, i) => ({ key: "s" + i, name: r.name, color: r.color })), lo, hi);
+}
+
+function table(el, cols, rows) {
+  el.innerHTML = `<thead><tr>${cols.map(c => `<th>${c[0]}</th>`).join("")}</tr></thead><tbody>` +
+    rows.map(r => `<tr>${cols.map(c => { const v = c[1](r); const num = typeof r[c[2]] === "number" || /^[\d.]+$/.test(String(v)); return `<td class="${num ? "num" : ""} ${c[3] ? c[3](r) : ""}">${v ?? ""}</td>`; }).join("")}</tr>`).join("") + "</tbody>";
+}
+const col = (h, k, fmt = v => v, cls) => [h, r => (r[k] === null || r[k] === undefined || r[k] === "") ? "–" : fmt(r[k]), k, cls];
+const isOld = r => r.approach && !r.approach.startsWith("1-class");
+
+// ---- A
+const aLabel = r => isOld(r)
+  ? `${r.approach.startsWith("3") ? "3-class" : "2-class"} · y8n ${r.imgsz}px (val)`
+  : `Containment · ${r.model.replace("yolov8", "y8")}, ${Number(r.train_images) > 60 ? "v4" : "v3"} data (test)`;
+dots($("chartA"), $("legA"), D.A.map(r => ({ label: aLabel(r), ml: r.multilayer_F1, mr: r.multilayer_R, all: r.all_objects_F1 })),
+  [{ key: "ml", name: "Multilayer F1", color: "var(--ml)" }, { key: "mr", name: "Multilayer recall", color: "var(--inner)" }, { key: "all", name: "All-object F1", color: "var(--accent)" }], 0, 1, 860, 250);
+table($("tA"), [
+  col("Approach", "approach", esc, r => isOld(r) ? "old" : ""), col("Model", "model"), col("imgsz", "imgsz"), col("Train img", "train_images"),
+  col("Scored on", "scored_on"), col("Images", "images"), col("Multilayer labels", "multilayer_labels"),
+  col("Multilayer P", "multilayer_P", n3), col("Multilayer R", "multilayer_R", n3), col("Multilayer F1", "multilayer_F1", n3, () => "hi"),
+  col("All-object F1", "all_objects_F1", n3)], D.A);
+
+// ---- B
+const B1 = D.B.filter(r => r.block.startsWith("B1")), B2 = D.B.filter(r => r.block.startsWith("B2"));
+metricDots($("chartB1"), $("legB1"), B1.map((r, i) => ({ name: `${r.setting} (${r.train_images} train)`, color: i ? "var(--s3)" : "var(--s1)", row: r })),
+  [["F1_at_0_25", "F1 @ 0.25"], ["best_F1", "Best F1"], ["multilayer_F1", "Multilayer F1"], ["inner_F1", "Inner-layer F1"], ["val_mask_mAP50_95", "Val mask mAP50-95"]], 0.6, 0.9);
+dots($("chartB2"), $("legB2"), B2.map(r => ({ label: `${r.train_images} train (${r.setting.replace(" of train", "")})`, ev: r.EV_F1, mlr: r.multilayer_R, ml: r.multilayer_F1 })),
+  [{ key: "ev", name: "EV F1", color: "var(--accent)" }, { key: "mlr", name: "Multilayer recall", color: "var(--inner)" }, { key: "ml", name: "Multilayer F1", color: "var(--ml)" }], 0, 1);
+const split = r => `${r.train_images} / ${r.val_images} / ${r.test_images || "–"}`;
+table($("tB1"), [["Split", r => esc(r.setting)], ["Weights", r => esc(r.run)], ["Train / val / test", split],
+  col("F1 @ 0.25", "F1_at_0_25", n3), col("Best F1", "best_F1", n3), col("at conf", "best_conf"), col("Multilayer F1", "multilayer_F1", n3, () => "hi"),
+  col("Inner F1", "inner_F1", n3, () => "hi"), col("Val mask mAP50-95", "val_mask_mAP50_95", n3)], B1);
+table($("tB2"), [["Training data (June 2-class)", r => esc(r.setting)], col("Train img", "train_images"), col("EV F1", "EV_F1", n3),
+  col("Multilayer R", "multilayer_R", n3), col("Multilayer F1", "multilayer_F1", n3, () => "hi"), col("Val mask mAP50-95", "val_mask_mAP50_95", n3)], B2);
+
+// ---- C
+const SC = { yolov8n: "var(--s1)", yolov8s: "var(--s2)", yolov8m: "var(--s3)" };
+const cMetrics = [["F1_at_0_25", "F1 @ 0.25"], ["best_F1", "Best F1"], ["multilayer_F1", "Multilayer F1"], ["inner_F1", "Inner-layer F1"], ["val_mask_mAP50_95", "Val mask mAP50-95"]];
+["C1", "C2"].forEach(b => {
+  const rs = D.C.filter(r => r.block.startsWith(b));
+  metricDots($("chart" + b), $("leg" + b), rs.map(r => ({ name: `${r.model.replace("yolov8", "y8")} (${r.params_M}M)`, color: SC[r.model], row: r })), cMetrics, 0.6, 0.9);
+});
+table($("tC"), [["Data", r => esc(r.block.split(":")[0] + ": " + (r.block.includes("v3") ? "v3" : "v4"))], col("Model", "model"), col("Params (M)", "params_M"), col("Batch", "batch"),
+  col("Train min", "train_min"), col("Val mask mAP50-95", "val_mask_mAP50_95", n3), col("P", "P", n3), col("R", "R", n3), col("F1 @ 0.25", "F1_at_0_25", n3, () => "hi"),
+  col("Best F1", "best_F1", n3), col("at conf", "best_conf"), col("Mask IoU", "mask_IoU", n3), col("Multilayer F1", "multilayer_F1", n3, () => "hi"), col("Inner F1", "inner_F1", n3, () => "hi")], D.C);
+</script>

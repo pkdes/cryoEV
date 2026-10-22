@@ -3,6 +3,32 @@
 # val_mask_map50_95 is each model's OWN val set (different sets, different sizes): not comparable across models.
 
 models:
+  v4_y8m_20260924:
+    weights: models/v4_y8m_20260924/best.pt
+    imgsz: 1440
+    class_name: EV
+    annotation: all membrane layers as separate polygons (multilayer recoverable via containment)
+    arch: yolov8m-seg, rect, overlap_mask=False, batch 16, ultralytics 8.4.94
+    train_data: roboflow - 20260924 cryoai v4 (100 train / 20 val / 50 test images; same labels as v3)
+    val_mask_map50_95: 0.696   # 20 val images (same val set as v3)
+    test_detection: P=0.819 R=0.889 F1=0.853 at conf 0.25; best F1 0.866 at conf 0.50   # 50 test images
+    test_roles: multilayer F1=0.839 inner-layer F1=0.820   # containment 0.99 / size ratio 0.75
+    source_run: training outputs/roboflow_20260924_cryoai_v4_singleclass/runs/2026-09-24_172246_y8m_1440_16b_300ep_Run_2
+    note: Current best. Needs a GPU for routine use; see models/README.md for hardware and runtime.
+
+  v4_y8n_20260924:
+    weights: models/v4_y8n_20260924/best.pt
+    imgsz: 1440
+    class_name: EV
+    annotation: all membrane layers as separate polygons (multilayer recoverable via containment)
+    arch: yolov8n-seg, rect, overlap_mask=False, batch 24, ultralytics 8.4.94
+    train_data: roboflow - 20260924 cryoai v4 (100 train / 20 val / 50 test images; same labels as v3)
+    val_mask_map50_95: 0.684   # 20 val images (same val set as v3)
+    test_detection: P=0.788 R=0.869 F1=0.826 at conf 0.25; best F1 0.843 at conf 0.45   # 50 test images
+    test_roles: multilayer F1=0.734 inner-layer F1=0.732   # containment 0.99 / size ratio 0.75
+    source_run: training outputs/roboflow_20260924_cryoai_v4_singleclass/runs/2026-09-24_134221_y8n_1440_24b_300ep_Run_1
+    note: Lightweight option for CPU-only machines or quick passes; same data as v4_y8m.
+
   v3_run1_20260824:
     weights: models/v3_run1_20260824/best.pt
     imgsz: 1440
@@ -12,7 +38,7 @@ models:
     train_data: roboflow - 20260824 cryoai v3 (51 train / 20 val / 99 test images)
     val_mask_map50_95: 0.666   # 20 val images
     test_detection: P=0.810 R=0.862 F1=0.835   # 99 test images
-    note: Current best. Known issues - over-detects holey-carbon texture, sparse hallucinations on blank ice, misses small/faint EVs.
+    note: Superseded by the v4 models. On the 50 v4 test images it scores F1 0.816 at conf 0.25, multilayer 0.667, inner-layer 0.657. Known issues - over-detects holey-carbon texture, sparse hallucinations on blank ice, misses small/faint EVs.
 
   allLayer_run14_20260713:
     weights: models/allLayer_run14_20260713/best.pt

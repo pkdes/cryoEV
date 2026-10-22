@@ -73,7 +73,7 @@ To add a model, put `best.pt` in `models/<model_id>/` and add an entry to `model
   - `overlap_mask=False`: mask mAP 0.614 vs 0.511.
   - `imgsz=1440` with `rect=True`: matches the native resolution.
   - Augmentation on: turning it off causes severe overfitting.
-  - The main untried option is a larger model (y8s/y8m).
+  - Model size: y8s/y8m tied y8n on v3 (51 train images), but y8m clearly wins on v4 (100 train images).
 - **Known v3 error patterns:**
   - Over-detection on holey-carbon grid texture.
   - Occasional false detections on blank ice.
@@ -97,6 +97,8 @@ To add a model, put `best.pt` in `models/<model_id>/` and add an entry to `model
 | `training/train_yolo.py` | Core training, evaluation, Hungarian matching, and prediction file read/write functions |
 | `analysis/rank_predictions.py` | Ranks images by errors (FP + FN), to decide which overlays to look at |
 | `analysis/confidence_threshold_sweep.py` | Precision/recall/F1 vs. confidence threshold, computed from the prediction files (no GPU) |
+| `analysis/compile_run_report.py` | Report covering every training run, harvested from the run folders (no GPU) into `CryoAI/secondary analyses/cross_run_report/`, including a sortable HTML page |
+| `analysis/summarize_training_progress.py` | Three comparison tables for slides (multilayer approach, training data, model size), with role F1 on one shared setting |
 | `analysis/morphology.py` | Ellipse fitting and shape descriptors |
 | `training/monitor_run.py`, `notify.py` | Live training monitor, completion notifications |
 | `embedding/` | DINO embedding + clustering workflow; see `embedding/README.md`. Planned to move to its own fork |
@@ -169,6 +171,19 @@ python -m annotation.web_qc.export --images-dir <images> \
 | Pending | outlines never decided (e.g. hidden below the confidence cut) are not exported or scored |
 
 The first PC launch may raise a Windows Firewall prompt; allow private networks or the phone can't connect.
+
+## Label review in the browser (active)
+
+Reviews ground-truth labels against cached model predictions, to fix annotation errors before retraining. It is a single HTML page: a desktop polygon Editor, and a swipe mode for phones to accept or reject false positives and false negatives, assign a class and reshape outlines. It works offline from a folder or zip (export/import JSON), or from a server that several reviewers can use at once.
+
+```bash
+python annotation/build_review_package.py --source-name "roboflow - 20260924 cryoai v4" \
+    --dataset roboflow_20260924_cryoai_v4_singleclass --model-run-dir <run> --output-name cryoai_v4_review
+python annotation/review_server.py --package "../CryoAI/annotation review/cryoai_v4_review"   # prints ?k= link
+```
+Put the server behind a tunnel to share it; it only binds to 127.0.0.1. Each image's saved decisions go to `<package>/edits/<file>.json`, merged per decision (newest wins). The page template is `annotation/review_tool/index.html`.
+
+`--extra-classes "A,B"` offers classes the export doesn't contain. The page loads `data.js` through a URL that changes every hour, so a rebuilt package reaches reviewers' cached browsers within an hour.
 
 ## Reference: human-in-the-loop annotation (not in active use)
 
