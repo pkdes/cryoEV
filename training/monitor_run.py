@@ -52,9 +52,10 @@ def find_run_dirs(output_root: Path) -> list[Path]:
     """Find all run directories under common output layouts."""
     run_dirs: list[Path] = []
 
-    for runs_dir in output_root.glob("**/runs"):
-        if runs_dir.is_dir():
-            run_dirs.extend([p for p in runs_dir.iterdir() if p.is_dir()])
+    for pattern in ("**/runs", "**/probes"):  # probes = short batch-size fit tests (run_experiments --queue)
+        for runs_dir in output_root.glob(pattern):
+            if runs_dir.is_dir():
+                run_dirs.extend([p for p in runs_dir.iterdir() if p.is_dir()])
 
     # Backward compatibility with the older layout.
     legacy_root = output_root / "training"

@@ -73,7 +73,7 @@ To add a model, put `best.pt` in `models/<model_id>/` and add an entry to `model
   - `overlap_mask=False`: mask mAP 0.614 vs 0.511.
   - `imgsz=1440` with `rect=True`: matches the native resolution.
   - Augmentation on: turning it off causes severe overfitting.
-  - The main untried option is a larger model (y8s/y8m).
+  - Model size: y8s/y8m tied y8n on v3 (51 train images), but y8m clearly wins on v4 (100 train images).
 - **Known v3 error patterns:**
   - Over-detection on holey-carbon grid texture.
   - Occasional false detections on blank ice.
@@ -141,6 +141,17 @@ Morphology metrics per object:
 `--pixel-size` (nm/px) reports physical units instead of pixels.
 
 **Confidence review:** detections at or above the acceptance threshold (default 0.5) are accepted automatically. Below it they're rejected automatically, unless `--review` is passed. With `--review`, a matplotlib pop-up shows each object (circled in red) with **Accept / Reject / Exit** buttons.
+
+## Label review in the browser (active)
+
+Reviews ground-truth labels against cached model predictions, to fix annotation errors before retraining. It is a single HTML page: a desktop polygon Editor, and a swipe mode for phones to accept or reject false positives and false negatives, assign a class and reshape outlines. It works offline from a folder or zip (export/import JSON), or from a server that several reviewers can use at once.
+
+```bash
+python annotation/build_review_package.py --source-name "roboflow - 20260924 cryoai v4" \
+    --dataset roboflow_20260924_cryoai_v4_singleclass --model-run-dir <run> --output-name cryoai_v4_review
+python annotation/review_server.py --package "../CryoAI/annotation review/cryoai_v4_review"   # prints ?k= link
+```
+Put the server behind a tunnel to share it; it only binds to 127.0.0.1. Each image's saved decisions go to `<package>/edits/<file>.json`, merged per decision (newest wins). The page template is `annotation/review_tool/index.html`.
 
 ## Reference: human-in-the-loop annotation (not in active use)
 

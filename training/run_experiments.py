@@ -228,6 +228,43 @@ def generate_campaign_summary(all_results: List[Dict], output_file: Path):
     print(f"[OK] Summary saved to {output_file}")
 
 
+def probe_batch(model_size: str, batch: int, epochs: int, limit_gb: float):
+    """Short training run at this model size/batch; returns peak reserved GB, or None if it didn't fit."""
+    import torch
+    kw = {k: BEST_CONFIG[k] for k in ('imgsz', 'workers', 'optimizer', 'overlap_mask', 'mask_ratio', 'rect')}
+    try:
+        res = train_yolo_segmentation(
+            data_yaml=str(DATASET_YAML), model_size=model_size, epochs=epochs, batch_size=batch,
+            device='0', project=str(DATASET_ROOT / "probes"), use_v11=False, patience=epochs,
+            name=f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}_probe_y8{model_size}_b{batch}", **kw)
+    except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
+        print(f"[PROBE] y8{model_size} b{batch}: FAILED ({str(e)[:120]})", flush=True)
+        return None
+    peak, actual = res.peak_reserved_gb, res.actual_batch
+    ok = actual == batch and peak <= limit_gb
+    print(f"[PROBE] y8{model_size} b{batch}: peak {peak:.1f} GB reserved, ran at batch {actual} -> "
+          f"{'FITS' if ok else 'too big'} (limit {limit_gb} GB)", flush=True)
+    return peak if ok else None
+
+
+def build_queue(specs: List[str], start_run: int, probe_epochs: int, limit_gb: float) -> List[Dict]:
+    """Probe each 'size:b1,b2,...' ladder largest-first and queue the first batch that fits."""
+    queue, run_num = [], start_run
+    for spec in specs:
+        size, ladder = spec.split(':')
+        for batch in sorted((int(b) for b in ladder.split(',')), reverse=True):
+            peak = probe_batch(size, batch, probe_epochs, limit_gb)
+            if peak is not None:
+                queue.append({**BEST_CONFIG, 'run_num': run_num, 'model_size': size, 'batch_size': batch,
+                              'name': f"Bigger-model y8{size} 1440/b{batch} AdamW rect (Run14 recipe; probe peak {peak:.1f} GB)"})
+                run_num += 1
+                break
+        else:
+            print(f"[PROBE] y8{size}: no batch in {ladder} fits; skipped", flush=True)
+    print(f"[PROBE] queue: {[(c['run_num'], 'y8' + c['model_size'], c['batch_size']) for c in queue]}", flush=True)
+    return queue
+
+
 def main():
     """Run the 8-experiment sweep on the 20260713 all-layer single-class dataset."""
 
@@ -255,14 +292,14 @@ def main():
         print(f"RUN {run_num}: {config['name']}")
         print(f"{'='*80}")
 
-        experiment_name = f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}_y{config['model_version']}_" \
+        experiment_name = f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}_y{config['model_version']}{config.get('model_size', 'n')}_" \
                          f"{config['imgsz']}_{config['batch_size']}b_{config['epochs']}ep_Run_{run_num}"
 
         result = {
             'run_num': run_num,
             'config_name': config['name'],
             'experiment_name': experiment_name,
-            'model': f"yolo{config['model_version']}-seg",
+            'model': f"yolo{config['model_version']}{config.get('model_size', 'n')}-seg",
             'imgsz': config['imgsz'],
             'batch_size': config['batch_size'],
             'epochs': config['epochs'],
@@ -334,6 +371,8 @@ def main():
 
             train_elapsed = time.time() - train_start
             result['training_time_sec'] = train_elapsed
+            result['peak_gpu_memory_gb'] = getattr(results, 'peak_reserved_gb', 0.0)
+            result['batch_size'] = getattr(results, 'actual_batch', config['batch_size'])
             result['best_model_path'] = str(results.save_dir / 'weights' / 'best.pt')
 
             # Extract metrics from results.csv (more reliable than results object)
@@ -457,6 +496,13 @@ if __name__ == '__main__':
                          help="Folder name under 'training outputs/' to train against")
     parser.add_argument("--single-run", action="store_true",
                          help="Run only the known-best Run 14 config instead of the EXPERIMENTS sweep list")
+    parser.add_argument("--queue", nargs="+", metavar="SIZE:B1,B2,...",
+                        help="Model-size runs with the BEST_CONFIG recipe, e.g. s:24,16,8 m:16,8,4. Each batch "
+                             "ladder is probed largest-first; the first batch that fits --probe-limit-gb is trained")
+    parser.add_argument("--start-run-num", type=int, default=2)
+    parser.add_argument("--probe-epochs", type=int, default=2)
+    parser.add_argument("--probe-limit-gb", type=float, default=35.0,
+                        help="Max reserved GPU memory a probe may reach (cap is 0.85 x VRAM, ~41 GB on the A6000)")
     cli_args = parser.parse_args()
 
     DATASET_ID = cli_args.dataset
@@ -470,5 +516,10 @@ if __name__ == '__main__':
 
     if cli_args.single_run:
         EXPERIMENTS = [BEST_CONFIG]
+    elif cli_args.queue:
+        EXPERIMENTS = build_queue(cli_args.queue, cli_args.start_run_num,
+                                  cli_args.probe_epochs, cli_args.probe_limit_gb)
+        if not EXPERIMENTS:
+            sys.exit("[x] No queued model fits the memory limit at any batch size")
 
     main()

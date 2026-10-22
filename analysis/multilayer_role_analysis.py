@@ -38,7 +38,7 @@ from train_yolo import (
 )
 
 sys.path.insert(0, str(Path(__file__).parent))
-from multilayer_containment import load_image_annotations, classify_roles
+from multilayer_containment import load_image_annotations, classify_roles, pairwise_overlaps
 
 ROOT = Path(__file__).parent.parent.parent / "CryoAI"
 
@@ -121,6 +121,8 @@ def build_cache():
                 "split": yolo_split, "image": img["file_name"], "img_path": img_path,
                 "pred_masks": pred_masks, "gt_entries": gt_entries,
                 "matches": matches, "unmatched_preds": unmatched_preds, "unmatched_gts": unmatched_gts,
+                # mask-pair overlaps, computed once and reused by every threshold/ratio setting
+                "pred_overlaps": pairwise_overlaps(pred_masks), "gt_overlaps": pairwise_overlaps(gt_masks),
             })
     print(f"Predictions loaded from cache: {n_from_cache}, freshly inferred (and cached for next time): {n_from_inference}")
     return cache
@@ -142,9 +144,9 @@ def evaluate(cache, containment_threshold, max_size_ratio, collect_details=False
     details = defaultdict(list) if collect_details else None  # category -> list of (record, gt_idx/pred_idx)
 
     for rec in cache:
-        role, layers = classify_roles(rec["pred_masks"], containment_threshold, max_size_ratio)
+        role, layers = classify_roles(rec["pred_masks"], containment_threshold, max_size_ratio, rec["pred_overlaps"])
         gt_masks = [m for _, _, m in rec["gt_entries"]]
-        gt_role, _ = classify_roles(gt_masks, containment_threshold, max_size_ratio)
+        gt_role, _ = classify_roles(gt_masks, containment_threshold, max_size_ratio, rec["gt_overlaps"])
 
         for pred_idx, gt_idx in rec["matches"]:
             t = gt_role[gt_idx]
@@ -275,9 +277,9 @@ def generate_overlays(cache, containment_threshold, max_size_ratio, tag: str, cl
     if clear and out_dir.exists():
         shutil.rmtree(out_dir)  # clear stale files from a prior run/combo before regenerating
     for rec in tqdm(cache, desc=f"Generating role overlays ({tag})"):
-        role, layers = classify_roles(rec["pred_masks"], containment_threshold, max_size_ratio)
+        role, layers = classify_roles(rec["pred_masks"], containment_threshold, max_size_ratio, rec["pred_overlaps"])
         gt_masks = [m for _, _, m in rec["gt_entries"]]
-        gt_role, _ = classify_roles(gt_masks, containment_threshold, max_size_ratio)
+        gt_role, _ = classify_roles(gt_masks, containment_threshold, max_size_ratio, rec["gt_overlaps"])
         gt_of_pred = {pi: gi for pi, gi in rec["matches"]}
 
         raw = np.array(Image.open(rec["img_path"]).convert("RGB"))
@@ -327,7 +329,7 @@ def generate_failure_crops(cache, containment_threshold, max_size_ratio, pad=150
         cat_dir = out_dir / category
         cat_dir.mkdir(parents=True, exist_ok=True)
         for n, (rec, gt_idx, pred_idx) in enumerate(items):
-            role, _ = classify_roles(rec["pred_masks"], containment_threshold, max_size_ratio)
+            role, _ = classify_roles(rec["pred_masks"], containment_threshold, max_size_ratio, rec["pred_overlaps"])
             raw = np.array(Image.open(rec["img_path"]).convert("RGB"))
             h, w = raw.shape[:2]
             overlay = raw.copy().astype(float)
