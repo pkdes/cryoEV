@@ -1,0 +1,17 @@
+# QC classes. Order sets the 1-7 hotkeys and the chip bar. `id` is the class
+# index written to exported YOLO labels; keep ids stable once data is exported.
+# `is_ev` decides what counts as a true positive in the metrics.
+classes:
+  - {id: 0, name: EV,               color: "#3fb950", is_ev: true}
+  - {id: 1, name: multilayer outer, color: "#a371f7", is_ev: true}
+  - {id: 2, name: inner layer,      color: "#58a6ff", is_ev: true}
+  - {id: 3, name: not-EV,           color: "#8b949e", is_ev: false}
+  - {id: 4, name: carbon edge,      color: "#f0883e", is_ev: false}
+  - {id: 5, name: ice contaminant,  color: "#39c5cf", is_ev: false}
+  - {id: 6, name: aggregate,        color: "#db61a2", is_ev: false}
+
+# classify_roles() output -> initial class for model objects.
+role_to_class:
+  standalone: EV
+  multilayer: multilayer outer
+  inner-layer: inner layer

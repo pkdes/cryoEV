@@ -2,3 +2,8 @@
 -r requirements.txt
 napari
 PyQt5
+# Browser QC tool (annotation/web_qc/), PC + phone
+fastapi
+uvicorn[standard]
+qrcode
+pyyaml

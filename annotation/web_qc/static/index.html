@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>EV QC</title>
+<style>
+:root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--fg:#e6edf3;--mut:#8b949e;--acc:#3fb950;--rej:#f85149;--btn:#21262d}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:14px system-ui,-apple-system,Segoe UI,Roboto,sans-serif;overscroll-behavior:none}
+#app{display:grid;grid-template-columns:1fr 320px;grid-template-rows:auto 1fr;height:100dvh}
+header{grid-column:1/3;display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:6px 8px;background:var(--panel);border-bottom:1px solid var(--line)}
+header .name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:32ch}
+header .grow{flex:1}
+button{background:var(--btn);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 10px;font:inherit;cursor:pointer;touch-action:manipulation}
+button.on{border-color:#58a6ff;background:#1f3a5f}
+button:disabled{opacity:.4}
+#stage{position:relative;overflow:hidden;touch-action:none;background:#000}
+canvas{display:block;width:100%;height:100%;touch-action:none}
+#hint{position:absolute;left:8px;top:8px;background:#000a;padding:4px 8px;border-radius:6px;color:var(--mut);pointer-events:none;font-size:12px}
+#side{background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+.sec{padding:8px;border-bottom:1px solid var(--line)}
+.chips{display:flex;flex-wrap:wrap;gap:5px}
+.chip{border-radius:999px;padding:5px 10px;border:2px solid transparent;font-size:13px}
+.chip.on{border-color:#fff}
+#sel{min-height:46px;color:var(--mut)}
+#list{overflow:auto;flex:1;min-height:0}
+.row{display:flex;gap:6px;align-items:center;padding:6px 8px;border-bottom:1px solid #21262d;cursor:pointer}
+.row.cur{background:#1f3a5f}
+.dot{width:10px;height:10px;border-radius:50%;flex:none}
+.st{margin-left:auto;font-size:12px;color:var(--mut)}
+.st.accepted{color:var(--acc)} .st.rejected{color:var(--rej)}
+#actbar{display:flex;gap:8px;padding:8px;touch-action:none;user-select:none;background:var(--panel);border-top:1px solid var(--line)}
+#actbar button{flex:1;padding:12px 0;font-size:16px;font-weight:600}
+#bAcc{background:#1a3d24;border-color:var(--acc)} #bRej{background:#4a1d1d;border-color:var(--rej)}
+input[type=range]{width:100%}
+.kbd{color:var(--mut);font-size:12px}
+#sheetToggle{display:none}
+#stageBtns{position:absolute;right:8px;top:8px;display:flex;gap:6px;z-index:2}
+#stageBtns button{background:#000b;padding:5px 9px;font-size:13px}
+#queue{position:fixed;inset:0;background:#000a;z-index:20;display:none;align-items:flex-start;justify-content:center;padding:50px 10px}
+#queue.open{display:flex}
+#queue .box{background:var(--panel);border:1px solid var(--line);border-radius:10px;width:min(460px,100%);max-height:80dvh;display:flex;flex-direction:column}
+#queue .head{display:flex;align-items:center;gap:8px;padding:10px;border-bottom:1px solid var(--line)}
+#queue .rows{overflow:auto}
+#queue .row .ic{width:1.4em;text-align:center}
+.ic.done{color:var(--acc)} .ic.part{color:#d29922} .ic.none{color:var(--mut)}
+@media (max-width:800px){
+  #app{grid-template-columns:1fr;grid-template-rows:auto 1fr auto}
+  header{grid-column:1}
+  header .name{max-width:13ch;font-size:13px}
+  header{gap:4px;padding:4px 6px}
+  #prog,header .grow{display:none}
+  header button{padding:6px 8px;font-size:13px}
+  .desk{display:none}
+  #side{position:fixed;left:0;right:0;bottom:calc(64px + env(safe-area-inset-bottom));max-height:55dvh;border-left:none;border-top:1px solid var(--line);transform:translateY(calc(100% + 100px));transition:transform .2s;z-index:5;border-radius:12px 12px 0 0}
+  #side.open{transform:none}
+  #sheetToggle{display:inline-block}
+  #actbar{padding-bottom:calc(8px + env(safe-area-inset-bottom))}
+  button{padding:8px 11px}
+}
+@media (min-width:801px){ #actbar{grid-column:1} .mob{display:none} }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <button id="bPrev" title="previous image ( [ )">&#9664;</button>
+    <span class="name" id="imgName">…</span>
+    <button id="bNext" title="next image ( ] )">&#9654;</button>
+    <button id="bQueue" title="all images and their status">Images</button>
+    <span id="prog" class="kbd"></span>
+    <span class="grow"></span>
+    <button id="mSel" class="on" title="select / edit (S)">Select</button>
+    <button id="mDraw" title="freehand draw (D)">Draw</button>
+    <button id="mTap" title="tap-vertex polygon (V)">Vertex</button>
+    <button id="bClose" style="display:none">Close shape</button>
+    <button id="bUndo" title="undo (Ctrl+Z)">Undo</button>
+    <button id="bFit" class="desk" title="fit (F)">Fit</button>
+    <button id="bDone" title="mark image done → next">Done ✓</button>
+    <button id="sheetToggle">List</button>
+  </header>
+  <div id="stage"><canvas id="cv"></canvas><div id="hint"></div>
+    <div id="stageBtns">
+      <button id="bOv" class="on" title="show / hide outlines (O; hold H to peek)">Outlines</button>
+      <button id="bSplit" title="raw | outlines side by side (B)">Split</button>
+    </div>
+  </div>
+  <div id="queue"><div class="box">
+    <div class="head"><b>Images</b><span id="qSum" class="kbd"></span><span class="grow" style="flex:1"></span><button id="qClose">Close</button></div>
+    <div class="rows" id="qRows"></div>
+  </div></div>
+  <aside id="side">
+    <div class="sec">
+      <div class="kbd" style="margin-bottom:4px">Class (1–7) — reclasses selection; used for new shapes</div>
+      <div class="chips" id="chips"></div>
+    </div>
+    <div class="sec">
+      <div class="kbd">Show detections with confidence ≥ <b id="cutVal"></b></div>
+      <input type="range" id="cut" min="0" max="1" step="0.05">
+      <label class="kbd"><input type="checkbox" id="autoNext" checked> jump to next pending after a decision</label><br>
+      <label class="kbd"><input type="checkbox" id="showRej" checked> show rejected</label>
+    </div>
+    <div class="sec">
+      <div class="kbd">Line width <b id="lwVal"></b></div>
+      <input type="range" id="lw" min="0.5" max="4" step="0.25">
+      <div class="kbd">Reshape radius <b id="radVal"></b> px (− / =)</div>
+      <input type="range" id="rad" min="4" max="100" step="2">
+    </div>
+    <div class="sec" id="sel"></div>
+    <div id="list"></div>
+    <div class="sec kbd desk">A accept · R reject · 1–7 class · Del delete/reject · N next pending · D draw · V vertex · S select · Enter close · Esc cancel · [ ] image · F fit · O outlines · hold H peek · B split · − = reshape radius · wheel zoom · drag pan<br>Reshape: select an outline, drag its edge. Dbl-click edge = add point · Shift-click point = remove</div>
+  </aside>
+  <div id="actbar">
+    <button id="bRej">✕ Reject</button>
+    <button id="bNextP">Next ▸</button>
+    <button id="bAcc">✓ Accept</button>
+  </div>
+</div>
+<script>
+"use strict";
+const TOKEN = new URLSearchParams(location.search).get("t") || "";
+const $ = id => document.getElementById(id);
+const cv = $("cv"), ctx = cv.getContext("2d");
+let CFG, IMAGES = [], idx = 0, doc = null, img = null;
+let sel = null, mode = "select", activeCls = null, cut = 0, undo = [];
+let view = {s: 1, tx: 0, ty: 0}, dpr = 1, saveTimer = null, saving = Promise.resolve();
+let drawPts = null;           // in-progress shape, image px
+const ptrs = new Map();       // active pointers
+let gesture = null;
+let showOv = true, peek = false, split = false;   // outline visibility; side-by-side view
+let curPane = null;           // pane the current gesture started in
+const pref = (k, d) => { try { const v = localStorage.getItem("evqc." + k); return v === null ? d : +v; } catch (_) { return d; } };
+const setPref = (k, v) => { try { localStorage.setItem("evqc." + k, v); } catch (_) {} };
+let LW = pref("lw", 1.5), RAD = pref("rad", 25);   // line-width factor; reshape radius (screen px)
+
+async function api(path, opts = {}) {
+  opts.headers = Object.assign({"x-token": TOKEN, "content-type": "application/json"}, opts.headers || {});
+  const r = await fetch(path, opts);
+  if (r.status === 401) { document.body.innerHTML = "<p style='padding:20px'>Missing or wrong token — open the full URL printed by the server.</p>"; throw new Error("401"); }
+  return r;
+}
+const clsByName = n => CFG.classes.find(c => c.name === n) || {color: "#fff"};
+
+// ------------------------------------------------------------ geometry
+const W = () => doc.width, H = () => doc.height;
+const toPx = o => o.poly.map(([x, y]) => [x * W(), y * H()]);
+const s2i = (sx, sy) => [(sx - view.tx) / view.s, (sy - view.ty) / view.s];
+function area(p) { let a = 0; for (let i = 0, j = p.length - 1; i < p.length; j = i++) a += (p[j][0] + p[i][0]) * (p[j][1] - p[i][1]); return Math.abs(a / 2); }
+function inside(p, x, y) { let c = false; for (let i = 0, j = p.length - 1; i < p.length; j = i++) { const [xi, yi] = p[i], [xj, yj] = p[j]; if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c; } return c; }
+function segDist(px, py, [ax, ay], [bx, by]) { const dx = bx - ax, dy = by - ay, L = dx * dx + dy * dy; let t = L ? ((px - ax) * dx + (py - ay) * dy) / L : 0; t = Math.max(0, Math.min(1, t)); return Math.hypot(px - ax - t * dx, py - ay - t * dy); }
+function rdp(pts, eps) {
+  if (pts.length < 3) return pts;
+  let dmax = 0, k = 0;
+  for (let i = 1; i < pts.length - 1; i++) { const d = segDist(pts[i][0], pts[i][1], pts[0], pts[pts.length - 1]); if (d > dmax) { dmax = d; k = i; } }
+  if (dmax <= eps) return [pts[0], pts[pts.length - 1]];
+  return rdp(pts.slice(0, k + 1), eps).slice(0, -1).concat(rdp(pts.slice(k), eps));
+}
+const visible = o => o.source === "human" || o.conf === null || o.conf >= cut - 1e-9;
+const shown = o => visible(o) && ($("showRej").checked || o.status !== "rejected" || o === sel);
+
+// ------------------------------------------------------------ render
+// Panes share one view transform, each relative to its own origin. Split view:
+// raw image | image + outlines (stacked top/bottom when the stage is tall).
+function panes() {
+  const r = $("stage").getBoundingClientRect();
+  if (!split) return [{x: 0, y: 0, w: r.width, h: r.height, ov: true}];
+  if (r.height > r.width * 1.1) { const h = r.height / 2; return [{x: 0, y: 0, w: r.width, h, ov: false}, {x: 0, y: h, w: r.width, h, ov: true}]; }
+  const w = r.width / 2; return [{x: 0, y: 0, w, h: r.height, ov: false}, {x: w, y: 0, w, h: r.height, ov: true}];
+}
+const paneAt = (sx, sy) => panes().find(p => sx >= p.x && sx < p.x + p.w && sy >= p.y && sy < p.y + p.h) || panes()[0];
+const outlinesOn = () => showOv && !peek;
+function resize() {
+  const r = $("stage").getBoundingClientRect(); dpr = window.devicePixelRatio || 1;
+  cv.width = r.width * dpr; cv.height = r.height * dpr; draw();
+}
+function fit() {
+  if (!doc) return; const r = panes()[0];
+  const s = Math.min(r.w / W(), r.h / H()) * 0.98;
+  view = {s, tx: (r.w - W() * s) / 2, ty: (r.h - H() * s) / 2}; draw();
+}
+function center(o) {
+  const p = toPx(o), pn = panes()[0], r = {width: pn.w, height: pn.h};
+  const cx = p.reduce((a, q) => a + q[0], 0) / p.length, cy = p.reduce((a, q) => a + q[1], 0) / p.length;
+  const s = Math.max(view.s, Math.min(r.width / W(), r.height / H()) * 2.2);
+  view = {s, tx: r.width / 2 - cx * s, ty: r.height / 2 - cy * s};
+}
+function path(p) { ctx.beginPath(); p.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath(); }
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!doc) return;
+  const ps = panes();
+  for (const pn of ps) {
+    ctx.save();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.beginPath(); ctx.rect(pn.x, pn.y, pn.w, pn.h); ctx.clip();
+    ctx.setTransform(dpr * view.s, 0, 0, dpr * view.s, dpr * (pn.x + view.tx), dpr * (pn.y + view.ty));
+    if (img) ctx.drawImage(img, 0, 0, W(), H());
+    if (pn.ov && outlinesOn()) drawOutlines();
+    drawInProgress();
+    ctx.restore();
+  }
+  if (ps.length > 1) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.fillStyle = "#58a6ff";
+    const b = ps[1]; if (b.x > 0) ctx.fillRect(b.x - 1, 0, 2, b.h); else ctx.fillRect(0, b.y - 1, b.w, 2);
+    ctx.font = "12px system-ui"; ctx.fillStyle = "#fffc";
+    ctx.fillText("raw", ps[0].x + 8, ps[0].y + ps[0].h - 10); ctx.fillText("outlines", b.x + 8, b.y + b.h - 10);
+  }
+}
+function drawOutlines() {
+  const lw = LW / view.s;
+  for (const o of doc.objects) {
+    if (!shown(o) || o === sel) continue;
+    const c = clsByName(o.cls).color, p = toPx(o);
+    path(p);
+    if (o.status === "rejected") { ctx.setLineDash([4 * lw, 4 * lw]); ctx.strokeStyle = "#8b949e"; ctx.globalAlpha = .55; ctx.lineWidth = 1.5 * lw; ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1; continue; }
+    if (o.status === "accepted") { ctx.globalAlpha = .18; ctx.fillStyle = c; ctx.fill(); }
+    ctx.globalAlpha = o.conf === null ? 1 : 0.35 + 0.65 * o.conf;
+    ctx.strokeStyle = c; ctx.lineWidth = (o.status === "accepted" ? 2.5 : 1.6) * lw; ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  if (sel) {
+    const p = toPx(sel), c = clsByName(sel.cls).color;
+    path(p); ctx.lineWidth = 4 * lw; ctx.strokeStyle = "#fff"; ctx.stroke();
+    ctx.lineWidth = 2 * lw; ctx.strokeStyle = c; ctx.stroke();
+    ctx.fillStyle = "#fff";
+    const dot = (matchMedia("(pointer:coarse)").matches ? 3 : 2) / view.s;
+    for (const [x, y] of p) { ctx.beginPath(); ctx.arc(x, y, dot, 0, 7); ctx.fill(); }
+    if (gesture && gesture.kind === "soft" && gesture.moved) {   // show the reshape reach
+      const [cx, cy] = p[gesture.k]; ctx.beginPath(); ctx.arc(cx, cy, gesture.R, 0, 7);
+      ctx.setLineDash([4 / view.s, 4 / view.s]); ctx.lineWidth = 1 / view.s; ctx.strokeStyle = "#fff8"; ctx.stroke(); ctx.setLineDash([]);
+    }
+  }
+}
+function drawInProgress() {
+  const lw = LW / view.s;
+  if (drawPts && drawPts.length) {
+    ctx.beginPath(); drawPts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+    ctx.strokeStyle = clsByName(activeCls).color; ctx.lineWidth = 2 * lw; ctx.stroke();
+    if (mode === "tap") { ctx.fillStyle = "#fff"; drawPts.forEach(([x, y], i) => { ctx.beginPath(); ctx.arc(x, y, (i ? 3 : 6) * lw, 0, 7); ctx.fill(); }); }
+  }
+}
+const handleR = () => (matchMedia("(pointer:coarse)").matches ? 18 : 9);
+
+// ------------------------------------------------------------ panel
+function chips() {
+  $("chips").innerHTML = "";
+  CFG.classes.forEach((c, i) => {
+    const b = document.createElement("button");
+    b.className = "chip" + (c.name === activeCls ? " on" : ""); b.style.background = c.color + "33"; b.style.color = c.color;
+    b.textContent = `${i + 1} ${c.name}`; b.onclick = () => reclass(i); $("chips").appendChild(b);
+  });
+}
+function panel() {
+  const objs = doc.objects.filter(shown).slice().sort((a, b) => (a.conf ?? 2) - (b.conf ?? 2));
+  const L = $("list"); L.innerHTML = "";
+  for (const o of objs) {
+    const d = document.createElement("div"); d.className = "row" + (o === sel ? " cur" : "");
+    d.innerHTML = `<span class="dot" style="background:${clsByName(o.cls).color}"></span><span>${o.cls}</span><span class="kbd">${o.conf === null ? "drawn" : o.conf.toFixed(2)}</span><span class="st ${o.status}">${o.status}</span>`;
+    d.onclick = () => { select(o, true); if (innerWidth <= 800) $("side").classList.remove("open"); };
+    L.appendChild(d);
+  }
+  const n = doc.objects.filter(visible), dec = n.filter(o => o.status !== "pending").length;
+  const doneN = IMAGES.filter(i => i.done).length;
+  $("prog").textContent = `${idx + 1}/${IMAGES.length} · ${dec}/${n.length} decided · ${doneN} images done${doc.done ? " · ✓" : ""}`;
+  $("sel").innerHTML = sel
+    ? `<b style="color:${clsByName(sel.cls).color}">${sel.cls}</b> · ${sel.status} · conf ${sel.conf === null ? "— (drawn)" : sel.conf.toFixed(3)}<br><span class="kbd">model said: ${sel.model_class ?? "—"}${sel.role ? " (" + sel.role + ")" : ""} · ${Math.round(area(toPx(sel)))} px²</span>`
+    : `<span class="kbd">Nothing selected. Tap an outline, or Next ▸ for the lowest-confidence pending one.</span>`;
+  $("cutVal").textContent = cut.toFixed(2);
+  ["Sel", "Draw", "Tap"].forEach(m => $("m" + m).classList.toggle("on", mode === m.toLowerCase().replace("sel", "select")));
+  $("bClose").style.display = mode === "tap" && drawPts && drawPts.length >= 3 ? "" : "none";
+  $("bQueue").textContent = `${innerWidth <= 800 ? "" : "Images "}${doneN}/${IMAGES.length} ✓`;
+  $("bOv").classList.toggle("on", showOv); $("bSplit").classList.toggle("on", split);
+  $("bSplit").style.display = innerWidth <= 800 && innerWidth > innerHeight ? "none" : "";
+  $("lwVal").textContent = LW.toFixed(2) + "×"; $("radVal").textContent = RAD;
+  const tip = {select: sel ? "drag the outline's edge to reshape · tap elsewhere to select · pinch/wheel to zoom" : "tap/click to select · drag to pan · pinch/wheel to zoom", draw: "drag to draw a closed outline", tap: "tap to add vertices · tap first point or Close to finish"}[mode];
+  $("hint").textContent = innerWidth <= 800 ? $("prog").textContent : tip;
+  $("bUndo").disabled = !undo.length;
+}
+function refresh() { draw(); panel(); }
+
+// ------------------------------------------------------------ image queue
+function queueRows() {
+  const doneN = IMAGES.filter(i => i.done).length, started = IMAGES.filter(i => !i.done && i.reviewed).length;
+  $("qSum").textContent = `${doneN} done · ${started} started · ${IMAGES.length - doneN - started} not started`;
+  const R = $("qRows"); R.innerHTML = "";
+  IMAGES.forEach((e, i) => {
+    const [ic, cl] = e.done ? ["✓", "done"] : e.reviewed ? ["◐", "part"] : ["○", "none"];
+    const cnt = e.n_objects ? `${e.n_decided}/${e.n_objects} decided` : "";
+    const d = document.createElement("div"); d.className = "row" + (i === idx ? " cur" : "");
+    d.innerHTML = `<span class="ic ${cl}">${ic}</span><span>${e.name}</span><span class="st">${cnt}</span>`;
+    d.onclick = () => { $("queue").classList.remove("open"); load(i); };
+    R.appendChild(d);
+  });
+}
+async function openQueue() {
+  $("queue").classList.add("open"); queueRows();
+  try { const c = await (await api("/api/config")).json(); IMAGES = c.images; queueRows(); panel(); } catch (_) {}
+}
+function noteProgress() {   // keep this image's queue entry current without a round trip
+  const e = IMAGES.find(i => i.name === doc.image); if (!e) return;
+  e.reviewed = true; e.done = doc.done; e.n_objects = doc.objects.length;
+  e.n_decided = doc.objects.filter(o => o.status !== "pending").length;
+}
+
+// ------------------------------------------------------------ reshape (soft drag)
+// Grabbed vertex follows the pointer fully; neighbours follow with a cosine
+// falloff over distance ALONG the outline (not straight-line, which would drag
+// the far side of a small EV too). Reach is capped at a quarter perimeter.
+function softGrab(p, k) {
+  const n = p.length, cum = [0];
+  for (let i = 1; i <= n; i++) cum.push(cum[i - 1] + Math.hypot(p[i % n][0] - p[i - 1][0], p[i % n][1] - p[i - 1][1]));
+  const P = cum[n], R = Math.min(RAD / view.s, P / 4);
+  const w = p.map((_, i) => { let d = Math.abs(cum[i] - cum[k]); d = Math.min(d, P - d); return d < R ? 0.5 * (1 + Math.cos(Math.PI * d / R)) : 0; });
+  return {w, R};
+}
+function nearestOnSel(ix, iy) {   // nearest vertex of sel to a point on/near its edge, or -1
+  const p = toPx(sel), tol = handleR() / view.s;
+  let bi = -1, bd = tol;
+  for (let i = 0; i < p.length; i++) { const d = segDist(ix, iy, p[i], p[(i + 1) % p.length]); if (d < bd) { bd = d; bi = i; } }
+  if (bi < 0) return -1;
+  const j = (bi + 1) % p.length;
+  return Math.hypot(p[bi][0] - ix, p[bi][1] - iy) <= Math.hypot(p[j][0] - ix, p[j][1] - iy) ? bi : j;
+}
+const norm = ([x, y]) => [+(Math.min(Math.max(x / W(), 0), 1)).toFixed(6), +(Math.min(Math.max(y / H(), 0), 1)).toFixed(6)];
+function markEdited() { if (sel.status !== "rejected") sel.status = "accepted"; changed(); }
+
+// ------------------------------------------------------------ editing
+function snapshot() { undo.push(JSON.stringify(doc.objects)); if (undo.length > 100) undo.shift(); }
+function changed() { noteProgress(); refresh(); clearTimeout(saveTimer); saveTimer = setTimeout(save, 600); }
+function select(o, ctr) { sel = o; if (o && ctr) center(o); refresh(); }
+function nextPending() {
+  const pend = doc.objects.filter(o => visible(o) && o.status === "pending").sort((a, b) => (a.conf ?? 2) - (b.conf ?? 2));
+  select(pend[0] || null, true);
+  if (!pend.length) $("hint").textContent = "No pending outlines left — press Done ✓";
+}
+function decide(fn) { if (!sel) return; snapshot(); fn(sel); const was = sel; changed(); if ($("autoNext").checked && was.status !== "pending") nextPending(); }
+const accept = () => decide(o => { o.status = "accepted"; });
+const reject = () => decide(o => { o.status = "rejected"; });
+function reclass(i) {
+  activeCls = CFG.classes[i].name; chips();
+  if (sel) decide(o => { o.cls = activeCls; o.status = "accepted"; }); else panel();
+}
+function del() {
+  if (!sel) return;
+  if (sel.source === "human") { snapshot(); doc.objects = doc.objects.filter(o => o !== sel); sel = null; changed(); }
+  else reject();   // model objects are rejected, never removed: the metrics need them
+}
+function doUndo() { if (!undo.length) return; const id = sel && sel.id; doc.objects = JSON.parse(undo.pop()); sel = doc.objects.find(o => o.id === id) || null; changed(); }
+function finishShape(pts) {
+  const eps = 1.2 / Math.max(view.s, 1e-3) + 0.5;
+  let p = rdp(pts, eps);
+  if (p.length < 3 || area(p) < 20) { drawPts = null; refresh(); return; }
+  snapshot();
+  const o = {id: "h" + Date.now().toString(36), poly: p.map(([x, y]) => [+(Math.min(Math.max(x / W(), 0), 1)).toFixed(6), +(Math.min(Math.max(y / H(), 0), 1)).toFixed(6)]),
+    conf: null, model_class: null, role: null, cls: activeCls, status: "accepted", source: "human"};
+  doc.objects.push(o); drawPts = null; sel = o; changed();
+}
+function setMode(m) { mode = m; drawPts = null; refresh(); }
+
+// ------------------------------------------------------------ persistence
+async function save() {
+  clearTimeout(saveTimer); saveTimer = null;
+  const body = JSON.stringify({version: doc.version, done: doc.done, conf_cut: cut, objects: doc.objects});
+  const name = doc.image;
+  saving = saving.then(async () => {
+    const r = await api(`/api/ann/${encodeURIComponent(name)}`, {method: "PUT", body});
+    if (r.status === 409) {
+      const j = await r.json(); alert("This image was changed on another device — loading the latest version.");
+      if (doc.image === name) { doc = j.current; sel = null; undo = []; refresh(); }
+      return;
+    }
+    if (!r.ok) { $("hint").textContent = `Save failed (${r.status}) — retrying`; saveTimer = setTimeout(save, 3000); return; }
+    const j = await r.json(); if (doc.image === name) doc.version = j.version;
+    const e = IMAGES.find(i => i.name === name); if (e) e.done = j.done;
+  });
+  return saving;
+}
+async function load(i) {
+  if (saveTimer) await save(); await saving;
+  idx = (i + IMAGES.length) % IMAGES.length; sel = null; undo = []; drawPts = null;
+  const name = IMAGES[idx].name; $("imgName").textContent = name;
+  doc = await (await api(`/api/ann/${encodeURIComponent(name)}`)).json();
+  if (doc.conf_cut !== undefined && doc.conf_cut !== null) { cut = doc.conf_cut; $("cut").value = cut; }
+  img = null; fit(); panel();
+  const im = new Image(); im.onload = () => { if (doc.image === name) { img = im; draw(); } };
+  im.src = `/api/image/${encodeURIComponent(name)}?t=${encodeURIComponent(TOKEN)}`;
+}
+async function markDone() {
+  snapshot();
+  for (const o of doc.objects) if (visible(o) && o.status === "pending") o.status = "accepted";
+  doc.done = true; noteProgress(); await save(); load(idx + 1);
+}
+
+// ------------------------------------------------------------ pointer input
+function rawPos(e) { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
+// Pointer position relative to the pane the gesture started in (R5: a drag that
+// crosses into the other pane keeps mapping through its starting pane).
+function pos(e) { const [x, y] = rawPos(e), pn = curPane || paneAt(x, y); return [x - pn.x, y - pn.y]; }
+function hit(ix, iy) {
+  const cands = doc.objects.filter(shown);
+  let best = null, ba = Infinity;
+  for (const o of cands) { const p = toPx(o); if (inside(p, ix, iy)) { const a = area(p); if (a < ba) { ba = a; best = o; } } }
+  if (best) return best;
+  const tol = handleR() / view.s; let bd = tol;
+  for (const o of cands) { const p = toPx(o); for (let i = 0; i < p.length; i++) { const d = segDist(ix, iy, p[i], p[(i + 1) % p.length]); if (d < bd) { bd = d; best = o; } } }
+  return best;
+}
+cv.addEventListener("pointerdown", e => {
+  if (!doc) return; cv.setPointerCapture(e.pointerId);
+  if (ptrs.size === 0) curPane = paneAt(...rawPos(e));
+  const [sx, sy] = pos(e); ptrs.set(e.pointerId, [sx, sy]);
+  if (ptrs.size === 2) {     // pinch: abandon any one-finger action
+    if (gesture && gesture.kind === "free") drawPts = null;
+    if (gesture && gesture.kind === "soft") { if (gesture.moved) markEdited(); else undo.pop(); }
+    const [a, b] = [...ptrs.values()];
+    gesture = {kind: "pinch", d: Math.hypot(a[0] - b[0], a[1] - b[1]), m: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], v: {...view}};
+    return;
+  }
+  if (ptrs.size > 2) return;
+  const [ix, iy] = s2i(sx, sy);
+  const panOK = e.pointerType === "mouse" ? e.button === 1 || e.button === 2 || e.altKey : false;
+  if (mode === "draw" && !panOK) { gesture = {kind: "free"}; drawPts = [[ix, iy]]; return; }
+  if (mode === "select" && sel && !panOK) {
+    const k = nearestOnSel(ix, iy);
+    if (k >= 0 && e.shiftKey && e.pointerType === "mouse") {   // remove a point (desktop)
+      if (sel.poly.length > 3) { snapshot(); sel.poly.splice(k, 1); markEdited(); }
+      gesture = null; return;
+    }
+    if (k >= 0) {
+      snapshot(); const orig = toPx(sel), {w, R} = softGrab(orig, k);
+      gesture = {kind: "soft", k, orig, w, R, s0: [sx, sy], i0: [ix, iy], moved: false}; return;
+    }
+  }
+  gesture = {kind: "pan", s0: [sx, sy], v: {...view}, moved: false};
+});
+cv.addEventListener("pointermove", e => {
+  if (!ptrs.has(e.pointerId) || !gesture) return;
+  const [sx, sy] = pos(e); ptrs.set(e.pointerId, [sx, sy]);
+  if (gesture.kind === "pinch" && ptrs.size === 2) {
+    const [a, b] = [...ptrs.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]), m = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    const s = Math.min(40, Math.max(0.05, gesture.v.s * d / gesture.d));
+    const ix = (gesture.m[0] - gesture.v.tx) / gesture.v.s, iy = (gesture.m[1] - gesture.v.ty) / gesture.v.s;
+    view = {s, tx: m[0] - ix * s, ty: m[1] - iy * s}; draw(); return;
+  }
+  const [ix, iy] = s2i(sx, sy);
+  if (gesture.kind === "free") { const l = drawPts[drawPts.length - 1]; if (Math.hypot(l[0] - ix, l[1] - iy) * view.s > 2) { drawPts.push([ix, iy]); draw(); } return; }
+  if (gesture.kind === "soft") {
+    if (!gesture.moved && Math.hypot(sx - gesture.s0[0], sy - gesture.s0[1]) <= 3) return;   // R2: a tap is not an edit
+    gesture.moved = true;
+    const dx = ix - gesture.i0[0], dy = iy - gesture.i0[1], g = gesture;
+    sel.poly = g.orig.map(([x, y], i) => g.w[i] ? norm([x + g.w[i] * dx, y + g.w[i] * dy]) : sel.poly[i]);
+    draw(); return;
+  }
+  if (gesture.kind === "pan") {
+    const dx = sx - gesture.s0[0], dy = sy - gesture.s0[1];
+    if (Math.hypot(dx, dy) > 6) gesture.moved = true;
+    if (gesture.moved) { view = {...gesture.v, tx: gesture.v.tx + dx, ty: gesture.v.ty + dy}; draw(); }
+  }
+});
+function endPtr(e) {
+  if (!ptrs.has(e.pointerId)) return;
+  const [sx, sy] = ptrs.get(e.pointerId); ptrs.delete(e.pointerId);
+  const g = gesture;
+  if (!g) return;
+  if (ptrs.size === 0) curPane = null;
+  if (g.kind === "pinch") { if (ptrs.size === 0) gesture = null; return; }
+  gesture = null;
+  if (g.kind === "free") { if (drawPts && drawPts.length > 2) finishShape(drawPts); else { drawPts = null; draw(); } return; }
+  if (g.kind === "soft") {
+    if (g.moved) return markEdited();
+    undo.pop();   // a tap on the selected outline: fall through to selection
+    const [ix, iy] = s2i(sx, sy); if (mode === "select") { const h = hit(ix, iy); if (h !== sel) select(h, false); }
+    return;
+  }
+  if (g.kind === "pan" && !g.moved) {
+    const [ix, iy] = s2i(sx, sy);
+    if (mode === "tap") {
+      drawPts = drawPts || [];
+      if (drawPts.length >= 3 && Math.hypot(drawPts[0][0] - ix, drawPts[0][1] - iy) < handleR() / view.s) return finishShape(drawPts);
+      drawPts.push([ix, iy]); refresh(); return;
+    }
+    if (mode === "select") select(hit(ix, iy), false);
+  }
+}
+cv.addEventListener("pointerup", endPtr);
+cv.addEventListener("pointercancel", endPtr);
+cv.addEventListener("contextmenu", e => e.preventDefault());
+cv.addEventListener("dblclick", e => {   // add a point on the selected outline's edge (desktop)
+  if (!doc || !sel || mode !== "select") return;
+  const [ix, iy] = s2i(...pos(e)), p = toPx(sel), tol = handleR() / view.s;
+  let bi = -1, bd = tol;
+  for (let i = 0; i < p.length; i++) { const d = segDist(ix, iy, p[i], p[(i + 1) % p.length]); if (d < bd) { bd = d; bi = i; } }
+  if (bi < 0) return;
+  snapshot(); sel.poly.splice(bi + 1, 0, norm([ix, iy])); markEdited();
+});
+cv.addEventListener("wheel", e => {
+  e.preventDefault(); const [sx, sy] = pos(e), [ix, iy] = s2i(sx, sy);
+  const s = Math.min(40, Math.max(0.05, view.s * Math.exp(-e.deltaY * 0.0015)));
+  view = {s, tx: sx - ix * s, ty: sy - iy * s}; draw();
+}, {passive: false});
+
+// swipe on the action bar: right = accept, left = reject
+let swiped = false;
+(() => { let x0 = null; const bar = $("actbar");
+  bar.addEventListener("pointerdown", e => { x0 = e.clientX; swiped = false; });
+  // capture only once it is a drag, so plain taps/clicks still reach the buttons
+  bar.addEventListener("pointermove", e => { if (x0 !== null && Math.abs(e.clientX - x0) > 12 && !bar.hasPointerCapture(e.pointerId)) bar.setPointerCapture(e.pointerId); });
+  bar.addEventListener("pointerup", e => {
+    if (x0 === null) return; const dx = e.clientX - x0; x0 = null;
+    if (Math.abs(dx) > 70) { swiped = true; dx > 0 ? accept() : reject(); }
+  });
+  bar.addEventListener("pointercancel", () => { x0 = null; });
+  // a swipe that ends on a button must not also click it
+  bar.addEventListener("click", e => { if (swiped) { e.stopPropagation(); e.preventDefault(); swiped = false; } }, true);
+})();
+
+// ------------------------------------------------------------ keys + buttons
+addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT") return;
+  const k = e.key;
+  if ((e.ctrlKey || e.metaKey) && k.toLowerCase() === "z") { e.preventDefault(); return doUndo(); }
+  if (k === "a" || k === "A") accept();
+  else if (k === "r" || k === "R") reject();
+  else if (k >= "1" && k <= String(CFG.classes.length)) reclass(+k - 1);
+  else if (k === "Delete" || k === "Backspace") del();
+  else if (k === "n" || k === "N" || k === " ") { e.preventDefault(); nextPending(); }
+  else if (k === "d" || k === "D") setMode("draw");
+  else if (k === "v" || k === "V") setMode("tap");
+  else if (k === "s" || k === "S") setMode("select");
+  else if (k === "Enter" && mode === "tap" && drawPts && drawPts.length >= 3) finishShape(drawPts);
+  else if (k === "Escape") { drawPts = null; sel = null; refresh(); }
+  else if (k === "[" || k === "ArrowLeft") load(idx - 1);
+  else if (k === "]" || k === "ArrowRight") load(idx + 1);
+  else if (k === "f" || k === "F") fit();
+  else if (k === "o" || k === "O") toggleOv();
+  else if ((k === "h" || k === "H") && !e.repeat) { peek = true; draw(); }
+  else if (k === "b" || k === "B") toggleSplit();
+  else if (k === "-" || k === "_") setRad(RAD - 4);
+  else if (k === "=" || k === "+") setRad(RAD + 4);
+});
+addEventListener("keyup", e => { if (e.key === "h" || e.key === "H") { peek = false; draw(); } });
+addEventListener("blur", () => { if (peek) { peek = false; draw(); } });
+function toggleOv() { showOv = !showOv; refresh(); }
+function toggleSplit() { split = !split; fit(); refresh(); }
+function setRad(v) { RAD = Math.min(100, Math.max(4, v)); $("rad").value = RAD; setPref("rad", RAD); panel(); }
+$("bPrev").onclick = () => load(idx - 1);
+$("bNext").onclick = () => load(idx + 1);
+$("mSel").onclick = () => setMode("select");
+$("mDraw").onclick = () => setMode("draw");
+$("mTap").onclick = () => setMode("tap");
+$("bClose").onclick = () => drawPts && drawPts.length >= 3 && finishShape(drawPts);
+$("bUndo").onclick = doUndo;
+$("bFit").onclick = fit;
+$("bDone").onclick = markDone;
+$("bAcc").onclick = accept;
+$("bRej").onclick = reject;
+$("bNextP").onclick = nextPending;
+$("sheetToggle").onclick = () => $("side").classList.toggle("open");
+$("cut").oninput = e => { cut = +e.target.value; if (sel && !visible(sel)) sel = null; refresh(); clearTimeout(saveTimer); saveTimer = setTimeout(save, 600); };
+$("showRej").onchange = refresh;
+$("bOv").onclick = toggleOv;
+$("bSplit").onclick = toggleSplit;
+$("bQueue").onclick = openQueue;
+$("qClose").onclick = () => $("queue").classList.remove("open");
+$("queue").onclick = e => { if (e.target.id === "queue") $("queue").classList.remove("open"); };
+$("lw").value = LW; $("rad").value = RAD;
+$("lw").oninput = e => { LW = +e.target.value; setPref("lw", LW); refresh(); };
+$("rad").oninput = e => setRad(+e.target.value);
+addEventListener("resize", resize);
+document.addEventListener("visibilitychange", () => { if (document.hidden && saveTimer) save(); });
+
+(async () => {
+  CFG = await (await api("/api/config")).json();
+  IMAGES = CFG.images; activeCls = CFG.classes[0].name;
+  cut = Math.min(...[].concat(CFG.role_conf, 0.25)); $("cut").value = cut;
+  chips(); resize();
+  const first = IMAGES.findIndex(i => !i.done);
+  await load(first < 0 ? 0 : first);
+})();
+</script>
+</body>
+</html>

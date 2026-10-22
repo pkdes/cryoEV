@@ -142,6 +142,34 @@ Morphology metrics per object:
 
 **Confidence review:** detections at or above the acceptance threshold (default 0.5) are accepted automatically. Below it they're rejected automatically, unless `--review` is passed. With `--review`, a matplotlib pop-up shows each object (circled in red) with **Accept / Reject / Exit** buttons.
 
+## Browser QC tool (PC + phone)
+
+Review cached detections in a browser: accept / reject / reclass, draw missed outlines, then export
+labels and score the model. No model load. `pip install -r requirements-annotation.txt`.
+
+```bash
+python -m annotation.web_qc.server --images-dir <images> \
+    --predictions-dir <pred_out>/v3_run1_20260824/predictions --review-dir <out>/qc_review \
+    [--images-list list.txt | --sample 14]
+python -m annotation.web_qc.export --images-dir <images> \
+    --predictions-dir <pred_out>/v3_run1_20260824/predictions --review-dir <out>/qc_review \n    [--pixel-size 1.4724]
+```
+
+| | |
+|---|---|
+| Open | `--open-browser` opens it on the server PC; else the printed URL (PC), or scan the QR (phone, same Wi-Fi). Off-network: Tailscale on both, use its 100.x URL. Another PC works the same way; saves land on the server PC |
+| Access | token in the URL, kept in `qc_review/token.txt` so bookmarks survive relaunch (delete it to rotate); URLs also in `qc_urls.txt`; no token → 401. Plain HTTP: use home Wi-Fi or Tailscale, not public Wi-Fi |
+| Keys (PC) | `A` accept · `R` reject · `1–7` class · `N`/Space next lowest-confidence · `D` draw · `V` vertex · `Del` · `Ctrl+Z` · `[ ]` image · `O` outlines on/off · hold `H` peek · `B` split · `−`/`=` reshape radius |
+| Reshape | select an outline, drag its edge: nearby points follow with a smooth falloff along the outline (radius slider). PC: double-click edge adds a point, Shift-click removes one |
+| View | Outlines on/off and Split (raw \| outlines, linked zoom; stacked on a phone) buttons on the image; line width slider; **Images** list shows ✓ done / ◐ started / ○ not started |
+| Phone | pinch zoom · Reject / Next / Accept bar (or swipe it left/right) · List sheet · finger/stylus Draw |
+| Done ✓ | accepts every still-pending outline shown, so reject junk first |
+| Classes | `annotation/web_qc/classes.yaml`; initial multilayer/inner calls from `classify_roles()` |
+| Output | one JSON per image (source of truth); `export/` YOLO-seg + COCO; `export/reanalysis/` reviewed EV outlines in prediction-cache format (drawn = conf 1.0); `export/compare/` + `compare_all.pdf` (original model outlines \| revised: kept, reclassed yellow, edited orange, drawn cyan, rejected red dashed); `metrics/qc_report.html` (one self-contained page: figures, tables, before/after), `qc_metrics.xlsx`, `figures/`; CSVs: P/R/F1 by threshold, precision by confidence bin, class confusion, `morphology_reviewed.csv` (role = reviewer's class, no conf cut) vs `morphology_model.csv` (same tiles, conf cut, geometric roles) |
+| Pending | outlines never decided (e.g. hidden below the confidence cut) are not exported or scored |
+
+The first PC launch may raise a Windows Firewall prompt; allow private networks or the phone can't connect.
+
 ## Reference: human-in-the-loop annotation (not in active use)
 
 Uses model predictions as first-pass polygons, then lets you correct them in a GUI. Requires `pip install -r requirements-annotation.txt`.

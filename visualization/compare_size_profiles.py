@@ -124,7 +124,7 @@ def plot_histogram(ax: plt.Axes, series: Dict[str, List[float]], xlabel: str) ->
     ax.legend(frameon=False)
 
 
-def plot_violin(ax: plt.Axes, series: Dict[str, List[float]], xlabel: str) -> None:
+def plot_violin(ax: plt.Axes, series: Dict[str, List[float]], xlabel: str, group_label: str = "EV line") -> None:
     labels = list(series.keys())
     data = [np.asarray(series[label], dtype=float) for label in labels]
 
@@ -159,7 +159,7 @@ def plot_violin(ax: plt.Axes, series: Dict[str, List[float]], xlabel: str) -> No
         )
 
     ax.set_title("Violin plot + individual EVs")
-    ax.set_xlabel("EV line")
+    ax.set_xlabel(group_label)
     ax.set_ylabel(xlabel)
     ax.grid(True, axis="y", alpha=0.2)
 
@@ -214,6 +214,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", action="append", required=True, help="Repeated LABEL=PATH to morphology_all.csv")
     parser.add_argument("--metric", default="equivalent_diameter", help="Morphology metric to compare")
     parser.add_argument("--metric-label", default="Equivalent diameter (px)", help="Axis label for the chosen metric")
+    parser.add_argument("--group-label", default="EV line", help="x-axis label for the violin groups")
     parser.add_argument("--scale-factor", type=float, default=1.0, help="Optional multiplier to convert the metric values before plotting (e.g. nm/px)")
     parser.add_argument("--output-dir", required=True, type=Path, help="Directory for plots and summary CSV")
     return parser.parse_args()
@@ -248,14 +249,14 @@ def main() -> None:
     with plt.rc_context(STYLE):
         fig, axes = plt.subplots(1, 2, figsize=(13, 5.6), constrained_layout=True)
         plot_histogram(axes[0], series, xlabel=args.metric_label)
-        plot_violin(axes[1], series, xlabel=args.metric_label)
+        plot_violin(axes[1], series, xlabel=args.metric_label, group_label=args.group_label)
         add_stats_box(axes[0], summary_rows, x=0.98, y=0.50, ha="right")
         fig.suptitle(f"EV size comparison: {args.metric.replace('_', ' ').title()}")
         save_figure(fig, output_dir / f"{args.metric}_comparison_overview")
         plt.close(fig)
 
         fig2, ax2 = plt.subplots(figsize=(6.5, 5.4), constrained_layout=True)
-        plot_violin(ax2, series, xlabel=args.metric_label)
+        plot_violin(ax2, series, xlabel=args.metric_label, group_label=args.group_label)
         add_stats_box(ax2, summary_rows, x=0.02, y=0.98, ha="left")
         save_figure(fig2, output_dir / f"{args.metric}_violin")
         plt.close(fig2)
