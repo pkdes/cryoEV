@@ -180,7 +180,7 @@ def main():
             lab = lab_dir / pred.name
             n = yolo_label(pred, args.conf_cut, lab)
         tags = [session, f"g{r['grid']}", r["sample_label"].replace(" ", ""), f"{apx}Apx",
-                f"{args.model}-preannot@{args.conf_cut:.2f}" if lab else "blind-eval"]
+                f"{args.model}-preannot@{args.conf_cut:.2f}" if lab else r["split_role"]]
         plan.append((r, img, lab, n, tags))
         if args.dry_run:
             print(f"  DRY {r['split_role']:13s} {n:4d} outlines  {img.name}")

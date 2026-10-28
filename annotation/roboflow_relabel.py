@@ -2,10 +2,12 @@
 Put a human-labeled COCO export onto the matching bar-free tiles already in
 Roboflow, replacing their model pre-annotations, and record it.
 
-The export's images are the delivered scalebar JPGs (`extra.name` = the
-MANIFEST's source_file); the bar-free tile is the same field at 1/factor scale,
-so polygons are divided by the MANIFEST factor. Labels keep the labeler's
-classes. Rows get label_source=<source> and split_role=<role>.
+The export's images are matched to MANIFEST rows by `extra.name` = source_file
+(the delivered stem); the target tile is the same field at any scale, so
+polygons are normalized by the export image's own size and checked only for
+the same aspect ratio. Labels keep the labeler's classes. Rows get
+label_source=<source> and split_role=<role>. roboflow_snapshot.py writes a
+COCO of what Roboflow currently holds, for moving reviewed labels to new copies.
 
     python annotation/roboflow_relabel.py --coco ".../_annotations.coco.json" \
         --manifest ".../3d.../MANIFEST.csv" --source AU-job3 --out ".../AU_job3" \
@@ -53,9 +55,9 @@ def convert(coco, rows, out_dir):
             sys.exit(f"no MANIFEST row for {name}")
         w, h = im["width"], im["height"]
         ow, oh = (int(v) for v in r["output_size"].split("x"))
-        f = float(r["factor"])
-        if abs(w / f - ow) > 1 or abs(h / f - oh) > 1:
-            sys.exit(f"{name}: {w}x{h} / {f} != {r['output_size']}")
+        # normalized coords carry across scales; the field must be the same shape
+        if abs(w / h - ow / oh) > 2e-3:
+            sys.exit(f"{name}: {w}x{h} is not the same field as {r['output_size']}")
         lines, n = [], Counter()
         for a in anns.get(im["id"], []):
             for poly in a["segmentation"]:
