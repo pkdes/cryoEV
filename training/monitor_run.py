@@ -142,6 +142,31 @@ def clear_screen() -> None:
     os.system("cls" if os.name == "nt" else "clear")
 
 
+def print_per_class(run_dir: Path) -> None:
+    """Per-class val metrics from per_class_epoch.csv (written by train_yolo's
+    epoch callback): latest epoch, plus each class's best mask mAP50-95 so far."""
+    rows = read_results(run_dir / "per_class_epoch.csv")
+    if not rows:
+        return
+    last_epoch = rows[-1]["epoch"]
+    best = {}
+    for r in rows:
+        v = to_float(r.get("mask_mAP50-95"))
+        if v >= best.get(r["class"], (-1, ""))[0]:
+            best[r["class"]] = (v, r["epoch"])
+    print(f"\nPer class, epoch {last_epoch} (mask; box mAP50-95 in last column)")
+    print("-" * 72)
+    print(f"{'class':<14s} {'P':>6s} {'R':>6s} {'mAP50':>6s} {'mAP50-95':>9s} {'best (ep)':>12s} {'box mAP':>8s}")
+    for r in rows:
+        if r["epoch"] != last_epoch:
+            continue
+        b, ep = best[r["class"]]
+        print(f"{r['class']:<14s} {to_float(r['mask_P']):6.3f} {to_float(r['mask_R']):6.3f} "
+              f"{to_float(r['mask_mAP50']):6.3f} {to_float(r['mask_mAP50-95']):9.3f} "
+              f"{b:7.3f} ({ep:>3s}) {to_float(r['box_mAP50-95']):8.3f}")
+    print("-" * 72)
+
+
 def print_status(run_dir: Path, total_epochs: int, rows: list[dict], started_at: float) -> None:
     clear_screen()
     gpu = get_gpu_info()
@@ -185,6 +210,7 @@ def print_status(run_dir: Path, total_epochs: int, rows: list[dict], started_at:
     print(f"mAP50(M)    : {to_float(latest.get('metrics/mAP50(M)')):.4f}")
     print(f"mAP50-95(M) : {to_float(latest.get('metrics/mAP50-95(M)')):.4f}")
     print("-" * 72)
+    print_per_class(run_dir)
 
     print("\nLatest losses (train / val)")
     print("-" * 72)

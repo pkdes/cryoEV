@@ -14,5 +14,6 @@ Automated detection and characterization of extracellular vesicles and particles
 - **Run inference once, analyze many times.** Downstream analysis should read prediction files (`<model_id>/predictions/*.txt`, via `train_yolo.load_predictions_yolo_format()`) rather than loading a model.
 - **Run long jobs in the background** with output logged to a file the user can follow, instead of polling repeatedly.
 - **Don't reorder `classify_roles()`** in `analysis/multilayer_containment.py`: the containment checks must stay in their current order.
+- **Multi-class datasets** (`--class-scheme ev_nonev*`): class 0 is still EV. Containment and role analysis assume EV-only polygons, so filter non-EV and Undetermined out first.
 - **Don't re-test settled training choices:** `overlap_mask=False`, `imgsz=1440` + `rect=True`, augmentation on.
 - **Git remote naming:** on the lab desktop the remote is named `CarneyMLdesktop`; a fresh clone calls it `origin`. Check with `git remote -v` before pushing.

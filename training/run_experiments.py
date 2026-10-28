@@ -19,6 +19,8 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+import yaml
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -349,6 +351,8 @@ def main():
                 'overlap_mask': config.get('overlap_mask', True),
                 'mask_ratio': config.get('mask_ratio', 4),
                 'rect': config.get('rect', False),
+                'weights': config.get('weights'),
+                **({'time': config['time']} if config.get('time') else {}),
                 'hsv_h': 0.015 if augs_on else 0,
                 'hsv_s': 0.7 if augs_on else 0,
                 'hsv_v': 0.4 if augs_on else 0,
@@ -400,37 +404,39 @@ def main():
             # also fails on train images it saw directly, that points at the
             # nested-mask encoding rather than at generalization/overfitting).
             best_pt = Path(results.save_dir) / 'weights' / 'best.pt'
-            for split_name in ("val", "train", "test"):
+            for split_name in EVAL_SPLITS:
                 if not best_pt.exists():
                     break
                 if not (DATASET_ROOT / "images" / split_name).exists():
                     continue  # this dataset has no test split, etc.
-                try:
-                    pc_metrics = calculate_per_class_segmentation_metrics(
-                        model_path=str(best_pt),
-                        img_dir=str(DATASET_ROOT / f"images/{split_name}"),
-                        label_dir=str(DATASET_ROOT / f"labels/{split_name}"),
-                        imgsz=config['imgsz'], conf=0.25, iou=0.5, device='0',
-                        class_names=CLASS_NAMES
-                    )
-                    save_per_class_metrics(pc_metrics, results.save_dir / f"per_class_metrics_{split_name}.txt", split_name)
-                    for name, m in pc_metrics.items():
-                        print(f"  [{split_name}] {name}: P={m['precision']:.4f} R={m['recall']:.4f} F1={m['f1']:.4f}")
-                except Exception as pc_e:
-                    print(f"  [WARN] Per-class metrics ({split_name}) failed: {pc_e}")
+                # --predictions-only: skip per-class metrics + overlays (slow on 24 MP images); keep the cache
+                if not PREDICTIONS_ONLY:
+                    try:
+                        pc_metrics = calculate_per_class_segmentation_metrics(
+                            model_path=str(best_pt),
+                            img_dir=str(DATASET_ROOT / f"images/{split_name}"),
+                            label_dir=str(DATASET_ROOT / f"labels/{split_name}"),
+                            imgsz=config['imgsz'], conf=0.25, iou=0.5, device='0',
+                            class_names=CLASS_NAMES, max_det=1000
+                        )
+                        save_per_class_metrics(pc_metrics, results.save_dir / f"per_class_metrics_{split_name}.txt", split_name)
+                        for name, m in pc_metrics.items():
+                            print(f"  [{split_name}] {name}: P={m['precision']:.4f} R={m['recall']:.4f} F1={m['f1']:.4f}")
+                    except Exception as pc_e:
+                        print(f"  [WARN] Per-class metrics ({split_name}) failed: {pc_e}")
 
-                try:
-                    visualize_predictions_with_matching(
-                        model_path=str(best_pt),
-                        source_dir=str(DATASET_ROOT / f"images/{split_name}"),
-                        label_dir=str(DATASET_ROOT / f"labels/{split_name}"),
-                        output_dir=str(results.save_dir / "overlays" / split_name),
-                        imgsz=config['imgsz'], conf=0.25, iou=0.7, device='0',
-                        match_threshold=0.5, class_names=CLASS_NAMES,
-                    )
-                    print(f"  [OK] {split_name} overlays saved to {results.save_dir / 'overlays' / split_name / 'visualizations'}")
-                except Exception as ov_e:
-                    print(f"  [WARN] Overlay generation ({split_name}) failed: {ov_e}")
+                    try:
+                        visualize_predictions_with_matching(
+                            model_path=str(best_pt),
+                            source_dir=str(DATASET_ROOT / f"images/{split_name}"),
+                            label_dir=str(DATASET_ROOT / f"labels/{split_name}"),
+                            output_dir=str(results.save_dir / "overlays" / split_name),
+                            imgsz=config['imgsz'], conf=0.25, iou=0.7, device='0',
+                            match_threshold=0.5, class_names=CLASS_NAMES, max_det=1000,
+                        )
+                        print(f"  [OK] {split_name} overlays saved to {results.save_dir / 'overlays' / split_name / 'visualizations'}")
+                    except Exception as ov_e:
+                        print(f"  [WARN] Overlay generation ({split_name}) failed: {ov_e}")
 
                 # Cache raw prediction polygons to disk so secondary analyses (multilayer
                 # containment, confidence sweeps, etc.) can reuse them without re-running
@@ -441,7 +447,7 @@ def main():
                         model_path=str(best_pt),
                         img_dir=str(DATASET_ROOT / f"images/{split_name}"),
                         output_dir=results.save_dir / "predictions" / split_name,
-                        imgsz=config['imgsz'], conf=0.25, iou=0.7, device='0',
+                        imgsz=config['imgsz'], conf=0.25, iou=0.7, device='0', max_det=1000,
                     )
                     print(f"  [OK] {split_name} predictions cached to {results.save_dir / 'predictions' / split_name}")
                 except Exception as exp_e:
@@ -499,6 +505,17 @@ if __name__ == '__main__':
     parser.add_argument("--queue", nargs="+", metavar="SIZE:B1,B2,...",
                         help="Model-size runs with the BEST_CONFIG recipe, e.g. s:24,16,8 m:16,8,4. Each batch "
                              "ladder is probed largest-first; the first batch that fits --probe-limit-gb is trained")
+    parser.add_argument("--model-size", help="--single-run override, e.g. m")
+    parser.add_argument("--batch", type=int, help="--single-run override")
+    parser.add_argument("--epochs", type=int, help="--single-run override")
+    parser.add_argument("--patience", type=int, help="--single-run override")
+    parser.add_argument("--time", type=float, help="Hard training-time cap in hours (Ultralytics 'time'; overrides epochs)")
+    parser.add_argument("--weights", help="Fine-tune from this .pt instead of the COCO-pretrained weights")
+    parser.add_argument("--run-num", type=int, help="--single-run override for the Run_N suffix")
+    parser.add_argument("--eval-splits", default="val,train,test",
+                        help="Splits for post-training metrics, overlays and the prediction cache")
+    parser.add_argument("--predictions-only", action="store_true",
+                        help="After training, only write the prediction cache (no per-class metrics or overlays)")
     parser.add_argument("--start-run-num", type=int, default=2)
     parser.add_argument("--probe-epochs", type=int, default=2)
     parser.add_argument("--probe-limit-gb", type=float, default=35.0,
@@ -514,8 +531,22 @@ if __name__ == '__main__':
     VAL_IMAGES, VAL_INSTANCES = count_split_stats(DATASET_ROOT, "val")
     TEST_IMAGES, TEST_INSTANCES = count_split_stats(DATASET_ROOT, "test")
 
+    EVAL_SPLITS = cli_args.eval_splits.split(",")
+    PREDICTIONS_ONLY = cli_args.predictions_only
+    with open(DATASET_YAML, encoding="utf-8") as fh:
+        CLASS_NAMES = [n for _, n in sorted(yaml.safe_load(fh)["names"].items())]
+
     if cli_args.single_run:
-        EXPERIMENTS = [BEST_CONFIG]
+        overrides = {k: v for k, v in [('model_size', cli_args.model_size), ('batch_size', cli_args.batch),
+                                       ('epochs', cli_args.epochs), ('patience', cli_args.patience),
+                                       ('time', cli_args.time), ('weights', cli_args.weights),
+                                       ('run_num', cli_args.run_num)] if v is not None}
+        cfg = {**BEST_CONFIG, **overrides}
+        if overrides:
+            cfg['name'] = (f"y8{cfg['model_size']} 1440/b{cfg['batch_size']} AdamW rect (Run14 recipe)"
+                           + (f", fine-tuned from {Path(cfg['weights']).parent.name}" if cfg.get('weights') else "")
+                           + (f", time cap {cfg['time']} h" if cfg.get('time') else ""))
+        EXPERIMENTS = [cfg]
     elif cli_args.queue:
         EXPERIMENTS = build_queue(cli_args.queue, cli_args.start_run_num,
                                   cli_args.probe_epochs, cli_args.probe_limit_gb)

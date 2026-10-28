@@ -375,6 +375,30 @@ def create_yolo_yaml(dataset_root: str, output_path: str, class_names: List[str]
     print(f"[OK] Created config: {output_path}")
 
 
+PER_CLASS_COLUMNS = ["epoch", "class", "box_P", "box_R", "box_mAP50", "box_mAP50-95",
+                     "mask_P", "mask_R", "mask_mAP50", "mask_mAP50-95"]
+
+
+def _log_per_class_epoch(trainer):
+    """Ultralytics callback: append this epoch's per-class val metrics to
+    <save_dir>/per_class_epoch.csv (results.csv only has the all-class mean).
+    Classes with no val instances are absent. Never interrupts training."""
+    import csv
+    try:
+        metrics = trainer.validator.metrics
+        names = trainer.data["names"]
+        path = Path(trainer.save_dir) / "per_class_epoch.csv"
+        new = not path.exists()
+        with open(path, "a", newline="") as f:
+            w = csv.writer(f)
+            if new:
+                w.writerow(PER_CLASS_COLUMNS)
+            for i, c in enumerate(metrics.ap_class_index):
+                w.writerow([trainer.epoch + 1, names[int(c)], *[f"{x:.4f}" for x in metrics.class_result(i)]])
+    except Exception as e:
+        print(f"[WARN] per-class epoch log failed: {e}")
+
+
 def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int = 300, imgsz: int = 1024,
                            batch_size: int = 16, device: str = '0', project: str = 'yolo_results',
                            name: str = 'vesicle_seg', patience: int = 50, overlap_mask: bool = True,
@@ -386,7 +410,7 @@ def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int =
                            shear: float = 0.0, perspective: float = 0.0,
                            fliplr: float = 0.5, flipud: float = 0.5,
                            mosaic: float = 1.0, mixup: float = 0.15, copy_paste: float = 0.3,
-                           mem_fraction: float = 0.85,
+                           mem_fraction: float = 0.85, weights: str = None,
                            **kwargs):
     """
     Train YOLO instance segmentation model with optimized hyperparameters for cryo-EM vesicles.
@@ -398,6 +422,8 @@ def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int =
     
     Args:
         use_v11: If True, use YOLOv11 (default). If False, use YOLOv8.
+        weights: Start from this .pt (fine-tune) instead of the COCO-pretrained model_size weights.
+            A different class count is fine: Ultralytics transfers every layer but the class head.
         mem_fraction: Hard cap on this process's share of GPU memory. On Windows the driver
             otherwise spills past VRAM into system RAM (10-50x slowdown, no error); the cap
             turns that into a real OOM. Note Ultralytics halves the batch on a first-epoch
@@ -417,7 +443,8 @@ def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int =
     print("Augmentation optimized to avoid artifacts: flips + crops + moderate rotation")
     print("Primary augmentations: color jitter, random crops, flips\n")
     
-    model = YOLO(model_name)
+    model = YOLO(weights or model_name)
+    model.add_callback("on_fit_epoch_end", _log_per_class_epoch)
 
     import time, torch, gc
     if torch.cuda.is_available() and mem_fraction:
@@ -645,9 +672,11 @@ def load_predictions_with_classes_from_model(model_path: str, img_path: str, img
     if model_path not in _YOLO_CACHE:
         _YOLO_CACHE[model_path] = YOLO(model_path)
     model = _YOLO_CACHE[model_path]
+    # Multi-class models: class-agnostic NMS so one object can't come out as both
+    # EV and Undetermined (a near-identical pair would read as a fake multilayer).
     result = model.predict(source=str(img_path), imgsz=imgsz, conf=conf, iou=iou,
                           device=device, verbose=False, retina_masks=True,
-                          max_det=max_det)[0]
+                          max_det=max_det, agnostic_nms=len(model.names) > 1)[0]
 
     img = Image.open(img_path)
     w, h = img.size
@@ -789,7 +818,8 @@ def load_gt_masks_and_classes_from_labels(label_path: str, img_width: int, img_h
 
 def calculate_per_class_segmentation_metrics(model_path: str, img_dir: str, label_dir: str,
                                              imgsz: int, conf: float, iou: float, device: str,
-                                             class_names: List[str], match_threshold: float = 0.5) -> Dict[str, Dict]:
+                                             class_names: List[str], match_threshold: float = 0.5,
+                                             max_det: int = 300) -> Dict[str, Dict]:
     """Calculate object-level metrics separately for each class using class-aware matching."""
     img_paths = sorted(Path(img_dir).glob('*'))
     img_paths = [p for p in img_paths if p.suffix.lower() in ['.png', '.jpg', '.jpeg', '.tif', '.tiff']]
@@ -929,7 +959,7 @@ def match_objects_hungarian(pred_masks: List[np.ndarray], gt_masks: List[np.ndar
 def visualize_predictions_with_matching(model_path: str, source_dir: str, label_dir: str, output_dir: str,
                                        imgsz: int = 1024, conf: float = 0.25, iou: float = 0.7,
                                        device: str = '0', match_threshold: float = 0.5,
-                                       class_names: List[str] = None):
+                                       class_names: List[str] = None, max_det: int = 300):
     """
     Visualize predictions broken out per class.
     Layout: [Original] [Class 0 overlay] [Class 1 overlay] ...
@@ -1044,7 +1074,7 @@ def visualize_predictions_with_matching(model_path: str, source_dir: str, label_
 
 def calculate_segmentation_metrics(model_path: str, img_dir: str, label_dir: str,
                                    imgsz: int, conf: float, iou: float, device: str,
-                                   match_threshold: float = 0.5) -> Dict:
+                                   match_threshold: float = 0.5, max_det: int = 300) -> Dict:
     """
     Calculate comprehensive metrics using the SAME prediction method as visualization.
     

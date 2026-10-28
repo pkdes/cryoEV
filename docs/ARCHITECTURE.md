@@ -20,7 +20,7 @@ flowchart LR
   end
 
   subgraph CONSUME["Analysis: run many times, no GPU"]
-    AN["layer_count_stats · rank_predictions<br/>confidence_threshold_sweep<br/>multilayer_role_analysis"]
+    AN["layer_count_stats · rank_predictions<br/>confidence_threshold_sweep<br/>multilayer_role_analysis<br/>evaluate_coco_export (any COCO export, per class)"]
     BSP["inference/batch_size_profile.py<br/>--predictions-dir"]
     HA["annotation/hitl_annotator.py<br/>--predictions-dir"]
   end
