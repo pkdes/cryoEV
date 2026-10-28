@@ -15,9 +15,9 @@ images, which is the whole point of exporting at one spacing.
 Example
 -------
 python -m inference.size_profile_from_predictions \
-    --predictions-dir <out>/v3_run1_20260824/predictions \
+    --predictions-dir <out>/v4_y8m_20260924/predictions \
     --images-dir <yolo_input>/accept \
-    --output-dir <out>/v3_run1_20260824/morphology \
+    --output-dir <out>/v4_y8m_20260924/morphology \
     --pixel-size 1.47288
 """
 

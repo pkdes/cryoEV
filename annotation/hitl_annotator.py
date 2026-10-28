@@ -34,7 +34,7 @@ from inference.perf_log import PerformanceLogger
 from training.train_yolo import load_prediction_polygons, load_predictions_from_model, polygon_to_mask
 
 
-DEFAULT_MODEL_PATH = str(Path(__file__).resolve().parent.parent / "models" / "v3_run1_20260824" / "best.pt")
+DEFAULT_MODEL_PATH = str(Path(__file__).resolve().parent.parent / "models" / "v4_y8m_20260924" / "best.pt")
 
 
 def _default_output_dir_for(input_images: Path | None) -> Path:

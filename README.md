@@ -39,7 +39,8 @@ The pipeline scripts find the data directory at `Path(__file__).parent.parent.pa
 ```bash
 pip install -r requirements.txt            # add: -r requirements-annotation.txt for the annotation GUI
 python inference/predict_models.py --images <image_dir> --out <out_dir>                     # all registered models
-python inference/predict_models.py --images <image_dir> --out <out_dir> --models v3_run1_20260824 --device cpu
+python inference/predict_models.py --images <image_dir> --out <out_dir> --models v4_y8m_20260924                       # current best
+python inference/predict_models.py --images <image_dir> --out <out_dir> --models v4_y8n_20260924 --device cpu       # CPU-only machine
 ```
 Options: `--models all|id1,id2`, `--conf 0.25`, `--iou 0.7`, `--device cuda|cpu`.
 
@@ -53,9 +54,13 @@ Outputs:
 ### Registered models ([`models/`](models/README.md), [`models.yaml`](models/models.yaml))
 | model_id | Detects | imgsz | Notes |
 |---|---|---|---|
-| `v3_run1_20260824` | every membrane layer | 1440 | **Current best.** 51 training images; test P=0.81, R=0.86 |
+| `v4_y8m_20260924` | every membrane layer | 1440 | **Current best** (YOLOv8m, 27M params). 100 training images; on 50 test images F1 0.853 (0.866 at conf 0.50), multilayer F1 0.839 |
+| `v4_y8n_20260924` | every membrane layer | 1440 | Light option (YOLOv8n, 3.3M params), same data; F1 0.826, multilayer F1 0.734. Same speed on GPU, ~3.5x faster on CPU |
+| `v3_run1_20260824` | every membrane layer | 1440 | Superseded. 51 training images; on the same 50 test images F1 0.816, multilayer F1 0.667 |
 | `allLayer_run14_20260713` | every membrane layer | 1440 | Same recipe, 26 training images; a baseline for how much the extra data helped |
 | `yifei_202512` | whole EVs only | 1024 | Legacy detector, >100 training images, different annotation convention |
+
+Accuracy vs. compute (GPU memory, time per image on GPU and CPU) and which model to pick: [`models/README.md`](models/README.md).
 
 To add a model, put `best.pt` in `models/<model_id>/` and add an entry to `models.yaml`. No code changes are needed.
 
@@ -94,6 +99,7 @@ To add a model, put `best.pt` in `models/<model_id>/` and add an entry to `model
 | Path | Does |
 |---|---|
 | `inference/predict_models.py` | Multi-model inference on any image folder (see Quick start) |
+| `inference/benchmark_models.py` | Times registered models per device: params, GFLOPs, peak GPU memory, seconds per image |
 | `training/train_yolo.py` | Core training, evaluation, Hungarian matching, and prediction file read/write functions |
 | `analysis/rank_predictions.py` | Ranks images by errors (FP + FN), to decide which overlays to look at |
 | `analysis/confidence_threshold_sweep.py` | Precision/recall/F1 vs. confidence threshold, computed from the prediction files (no GPU) |
@@ -123,9 +129,9 @@ Each run appends a row to `CryoAI/EXPERIMENT_LOG.csv`. Long runs should go in th
 `inference/batch_size_profile.py` measures every accepted object in a folder of images. It reads prediction files and doesn't load a model, so run inference first:
 
 ```bash
-python inference/predict_models.py --images <images> --out <pred_out> --models v3_run1_20260824
+python inference/predict_models.py --images <images> --out <pred_out> --models v4_y8m_20260924
 python inference/batch_size_profile.py --input-dir <images> --output-dir <profile_out> \
-    --predictions-dir <pred_out>/v3_run1_20260824/predictions [--pixel-size 3.5] [--review]
+    --predictions-dir <pred_out>/v4_y8m_20260924/predictions [--pixel-size 3.5] [--review]
 python -m analysis.aggregate_size_results --morphology-csv <profile_out>/morphology_all.csv \
     --per-image-csv <profile_out>/per_image_summary.csv --output-dir <agg_out>      # per-sample plots
 ```
@@ -151,10 +157,10 @@ labels and score the model. No model load. `pip install -r requirements-annotati
 
 ```bash
 python -m annotation.web_qc.server --images-dir <images> \
-    --predictions-dir <pred_out>/v3_run1_20260824/predictions --review-dir <out>/qc_review \
+    --predictions-dir <pred_out>/v4_y8m_20260924/predictions --review-dir <out>/qc_review \
     [--images-list list.txt | --sample 14]
 python -m annotation.web_qc.export --images-dir <images> \
-    --predictions-dir <pred_out>/v3_run1_20260824/predictions --review-dir <out>/qc_review \n    [--pixel-size 1.4724]
+    --predictions-dir <pred_out>/v4_y8m_20260924/predictions --review-dir <out>/qc_review \n    [--pixel-size 1.4724]
 ```
 
 | | |
@@ -192,8 +198,8 @@ Uses model predictions as first-pass polygons, then lets you correct them in a G
 ```bash
 # Recommended: seed from prediction files (no GPU; model only used for images without a prediction file)
 python -m annotation.hitl_annotator --input-images <images> --output-dir <out> \
-    --predictions-dir <pred_out>/v3_run1_20260824/predictions --save-auto-labels
-# Live inference (default model: models/v3_run1_20260824, imgsz 1440)
+    --predictions-dir <pred_out>/v4_y8m_20260924/predictions --save-auto-labels
+# Live inference (default model: models/v4_y8m_20260924, imgsz 1440)
 python -m annotation.hitl_annotator --input-images <images> --output-dir <out> --device cuda --save-auto-labels
 python -m annotation.hitl_annotator --gui --device cuda --save-auto-labels     # folder/file pickers
 python -m annotation.hitl_annotator --ui napari --gui --device cuda            # older Napari editor

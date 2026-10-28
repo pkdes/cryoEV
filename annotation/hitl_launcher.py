@@ -16,7 +16,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 # Default model weights (change if moved)
-_DEFAULT_MODEL = str(Path(__file__).resolve().parent.parent / "models" / "v3_run1_20260824" / "best.pt")
+_DEFAULT_MODEL = str(Path(__file__).resolve().parent.parent / "models" / "v4_y8m_20260924" / "best.pt")
 
 # Repo root (parent of this file's package)
 _REPO_ROOT = Path(__file__).resolve().parent.parent

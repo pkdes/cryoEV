@@ -3,8 +3,8 @@
 
 No model is loaded here. Run inference once first, then profile from its prediction files:
 
-    python inference/predict_models.py --images <dir> --out <pred_out> --models v3_run1_20260824
-    python inference/batch_size_profile.py --input-dir <dir>         --predictions-dir <pred_out>/v3_run1_20260824/predictions --output-dir <profile_out>
+    python inference/predict_models.py --images <dir> --out <pred_out> --models v4_y8m_20260924
+    python inference/batch_size_profile.py --input-dir <dir>         --predictions-dir <pred_out>/v4_y8m_20260924/predictions --output-dir <profile_out>
 
 Any `<stem>.txt` prediction folder works (e.g. a training run's predictions/test).
 
