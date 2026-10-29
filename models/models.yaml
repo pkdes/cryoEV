@@ -3,6 +3,20 @@
 # val_mask_map50_95 is each model's OWN val set (different sets, different sizes): not comparable across models.
 
 models:
+  v5_evnonev_y8m_20261029:
+    weights: models/v5_evnonev_y8m_20261029/best.pt
+    imgsz: 1440
+    class_name: EV (0), non-EV (1; VLDL + non-EV)   # prediction lines carry the class id; summary.csv n_detections counts BOTH classes
+    annotation: all membrane layers as separate polygons, collapsed to EV; VLDL/non-EV as a second class
+    arch: yolov8m-seg, rect=False (mosaic + mixup on), overlap_mask=False, batch 8, fine-tuned from v4_y8m_20260924, ultralytics 8.4.94
+    train_data: roboflow - 20261028 cryoai v5 S1 (114 train / 26 val / 39 test images; split balanced by session)
+    val_mask_map50_95: 0.622   # 26 val images; inflated -- v4 init has seen 16 of them
+    test_mask_map50_95: EV 0.708 / non-EV 0.508   # 39 S1 test images
+    test_detection: EV F1=0.828 at conf 0.25, 0.868 at val-chosen conf; non-EV F1=0.827; lipo tiles EV F1 0.898 (v4_y8m 0.724)   # practical view
+    test_roles: multilayer F1=0.868 inner-layer F1=0.842   # containment 0.99 / size ratio 0.75
+    source_run: training outputs/roboflow_20261028_cryoai_v5_S1_evnonev/runs/2026-10-29_054810_y8m_1440_8b_300ep_Run_15
+    note: Production candidate ("F5") per secondary analyses/v5_full_runs/RESULTS.md; use conf 0.50. Filter to class 0 before counting EVs. Small test set (5 lipo tiles); a batch-16 rerun is recommended before relying on it.
+
   v4_y8m_20260924:
     weights: models/v4_y8m_20260924/best.pt
     imgsz: 1440
