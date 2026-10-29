@@ -353,6 +353,8 @@ def main():
                 'rect': config.get('rect', False),
                 'weights': config.get('weights'),
                 **({'time': config['time']} if config.get('time') else {}),
+                # Optional --single-run overrides; absent keys keep train_yolo's defaults.
+                **{k: config[k] for k in ('cache', 'cls', 'lr0') if config.get(k) is not None},
                 'hsv_h': 0.015 if augs_on else 0,
                 'hsv_s': 0.7 if augs_on else 0,
                 'hsv_v': 0.4 if augs_on else 0,
@@ -512,6 +514,12 @@ if __name__ == '__main__':
     parser.add_argument("--time", type=float, help="Hard training-time cap in hours (Ultralytics 'time'; overrides epochs)")
     parser.add_argument("--weights", help="Fine-tune from this .pt instead of the COCO-pretrained weights")
     parser.add_argument("--run-num", type=int, help="--single-run override for the Run_N suffix")
+    parser.add_argument("--rect", type=int, choices=[0, 1],
+                        help="--single-run override; 0 = square letterbox, which is what lets mosaic/mixup run "
+                             "(Ultralytics zeroes both when rect=True)")
+    parser.add_argument("--cache", choices=["ram", "disk"], help="Ultralytics image cache (decoded, resized images)")
+    parser.add_argument("--cls", type=float, help="--single-run override for the classification loss gain (default 0.5)")
+    parser.add_argument("--lr0", type=float, help="--single-run override for the initial learning rate (default 0.002)")
     parser.add_argument("--eval-splits", default="val,train,test",
                         help="Splits for post-training metrics, overlays and the prediction cache")
     parser.add_argument("--predictions-only", action="store_true",
@@ -540,12 +548,17 @@ if __name__ == '__main__':
         overrides = {k: v for k, v in [('model_size', cli_args.model_size), ('batch_size', cli_args.batch),
                                        ('epochs', cli_args.epochs), ('patience', cli_args.patience),
                                        ('time', cli_args.time), ('weights', cli_args.weights),
-                                       ('run_num', cli_args.run_num)] if v is not None}
+                                       ('run_num', cli_args.run_num),
+                                       ('rect', None if cli_args.rect is None else bool(cli_args.rect)),
+                                       ('cache', cli_args.cache), ('cls', cli_args.cls),
+                                       ('lr0', cli_args.lr0)] if v is not None}
         cfg = {**BEST_CONFIG, **overrides}
         if overrides:
             cfg['name'] = (f"y8{cfg['model_size']} 1440/b{cfg['batch_size']} AdamW rect (Run14 recipe)"
                            + (f", fine-tuned from {Path(cfg['weights']).parent.name}" if cfg.get('weights') else "")
-                           + (f", time cap {cfg['time']} h" if cfg.get('time') else ""))
+                           + (f", time cap {cfg['time']} h" if cfg.get('time') else "")
+                           + ("" if cfg['rect'] else ", rect=False (mosaic/mixup on)")
+                           + "".join(f", {k}={cfg[k]}" for k in ('cls', 'lr0') if cfg.get(k) is not None))
         EXPERIMENTS = [cfg]
     elif cli_args.queue:
         EXPERIMENTS = build_queue(cli_args.queue, cli_args.start_run_num,
