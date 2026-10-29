@@ -76,7 +76,7 @@ To add a model, put `best.pt` in `models/<model_id>/` and add an entry to `model
 - **`classify_roles()`** in `analysis/multilayer_containment.py` is deliberately ordered: "contained by something" is checked before "contains something". Don't reorder it.
 - **Settled training choices; don't re-test these:**
   - `overlap_mask=False`: mask mAP 0.614 vs 0.511.
-  - `imgsz=1440` with `rect=True`: matches the native resolution.
+  - `imgsz=1440` with `rect=True`: matches the native resolution. **But** `rect=True` makes Ultralytics zero out mosaic, mixup and cutmix, so the configured `mosaic=1.0` / `mixup=0.15` never ran. `--rect 0` (square 1440, mosaic and mixup on) gave the best test mask mAP on v5 (EV 0.708, non-EV 0.508; 2026-10-29), so this one is open again.
   - Augmentation on: turning it off causes severe overfitting.
   - Model size: y8s/y8m tied y8n on v3 (51 train images), but y8m clearly wins on v4 (100 train images).
 - **Known v3 error patterns:**
@@ -85,7 +85,10 @@ To add a model, put `best.pt` in `models/<model_id>/` and add an entry to `model
   - Missed small or faint vesicles.
 - **v4's test split leaks.** 5 of its 50 images are renamed copies of train/val images (`20260512-A549-EV__grid4__4_…` ≡ `4_…`). Roboflow projects collect re-uploads like this, so re-split with `data_utils/make_balanced_split.py`, which drops duplicates by name and image hash.
 - **One y8m and one y8n run don't fit on the A6000 together** (~30 GB + ~23 GB). Windows then spills GPU memory into system RAM, and both slow down ~20x without an error. Run them one after the other.
-- **Post-training metrics and overlays are slow on 24 MP images** (~26 s per image). Use `--predictions-only` for quick runs and score from the prediction files.
+- **Overlays are slow on 24 MP images.** Mask matching used to be too (~21 s per image) until `mask_iou_matrix()` (2026-10-29) made it ~100x faster with identical results. `--predictions-only` and `multilayer_role_analysis.py --no-overlays` skip the overlays.
+- **Windows commit memory, not VRAM, is the training limit on this PC.** Windows counts GPU allocations against commit, so y8m at batch 16 uses ~50–60 GB of it. With a system-managed page file the limit drifts (72–104 GB on 2026-10-29), and runs die mid-training with `Status: oom` or `ArrayMemoryError` in a DataLoader worker. Fix: a fixed page file (C:, 48–64 GB, admin). Without that, use batch 8 (nbs=64 keeps the effective batch) and fewer workers, and don't run evaluation beside training.
+- **`--time` sets the schedule length; it is not a safety cap.** Ultralytics recomputes `epochs` from the time budget, so the LR schedule ends exactly at the cap. Cap wall time from outside instead.
+- **Runs started from v4 weights have seen most of S1 val** (16 of 26 images were in v4 train), so val-based early stopping and `best.pt` choice are unreliable for them. Use `--patience 300` and compare on test.
 
 ## Repo map
 
@@ -94,9 +97,9 @@ To add a model, put `best.pt` in `models/<model_id>/` and add an entry to `model
 |:-:|---|---|
 | 0 | `data_utils/make_balanced_split.py` | Optional. Re-splits a Roboflow export so each acquisition session (from the filename) is spread across train/val/test, and keeps duplicate copies of one micrograph in one split. `--history <old export>` allows an old image in test only if it was in that export's test, so older models stay a leak-free baseline. `--propose` writes the report only |
 | 1 | `data_utils/prepare_all_layer_singleclass.py` | Roboflow COCO export → YOLO labels. `--class-scheme`: `ev` (default; all layer categories → "EV"), `ev_nonev` (+ "non-EV" = VLDL + non-EV), `ev_nonev_undet` (+ "Undetermined" = Low conf EV). Raises an error on unknown categories |
-| 2 | `training/run_experiments.py` | Training campaign; `--single-run` uses the known-best config, overridable with `--model-size --batch --epochs --patience --time` (hours cap) and `--weights` (fine-tune). Class names come from `dataset.yaml`. Writes metrics, overlays and the prediction files (`--eval-splits`, `--predictions-only`) |
+| 2 | `training/run_experiments.py` | Training campaign; `--single-run` uses the known-best config, overridable with `--model-size --batch --epochs --patience --time --rect 0/1 --cache --cls --lr0 --run-num` and `--weights` (fine-tune). Class names come from `dataset.yaml`. Writes metrics, overlays and the prediction files (`--eval-splits`, `--predictions-only`) |
 | 3 | `analysis/multilayer_containment.py` | Validates the containment geometry on ground truth. Home of `classify_roles()` |
-| 4 | `analysis/multilayer_role_analysis.py` | Multilayer / inner-layer / standalone roles, predicted vs. ground truth |
+| 4 | `analysis/multilayer_role_analysis.py` | Multilayer / inner-layer / standalone roles, predicted vs. ground truth. For comparable numbers: `--splits test --fixed 0.99,0.75 --no-overlays --out-dir <dir>`. Multi-class: `--ev-classes 0` (or `0,2`), `--gt-exclude VLDL --keep-empty-gt`, optional `--fair`, `--group-csv` |
 | 5 | `analysis/layer_count_stats.py` | Layer-count distributions, predicted vs. ground truth |
 
 **Support:**
@@ -107,7 +110,8 @@ To add a model, put `best.pt` in `models/<model_id>/` and add an entry to `model
 | `training/train_yolo.py` | Core training, evaluation, Hungarian matching, and prediction file read/write functions |
 | `analysis/rank_predictions.py` | Ranks images by errors (FP + FN), to decide which overlays to look at |
 | `analysis/confidence_threshold_sweep.py` | Precision/recall/F1 vs. confidence threshold, computed from the prediction files (no GPU) |
-| `analysis/evaluate_coco_export.py` | Scores a prediction folder against any COCO export, per group (`--group-csv`, e.g. by batch). For multi-class vs single-class comparisons: `--view fair` (Low conf / VLDL / non-EV ignored) or `practical` (an EV prediction on VLDL is an FP), plus per-class `--nonev-class` / `--undet-class` |
+| `analysis/evaluate_coco_export.py` | Scores a prediction folder against any COCO export, per group (`--group-csv`, e.g. by batch). For multi-class vs single-class comparisons: `--view fair` (Low conf / VLDL / non-EV ignored) or `practical` (an EV prediction on VLDL is an FP), plus per-class `--nonev-class` / `--undet-class`. `--per-image` adds per-image counts and matched IoU |
+| `analysis/compare_eval_runs.py` | Collects several models' `evaluate_coco_export` and role-analysis outputs into one per-class table: confidence chosen on val, mean matched IoU, and paired bootstrap 95% intervals against a reference model |
 | `analysis/compile_run_report.py` | Report covering every training run, harvested from the run folders (no GPU) into `CryoAI/secondary analyses/cross_run_report/`, including a sortable HTML page |
 | `analysis/summarize_training_progress.py` | Three comparison tables for slides (multilayer approach, training data, model size), with role F1 on one shared setting |
 | `analysis/morphology.py` | Ellipse fitting and shape descriptors |
@@ -127,14 +131,14 @@ python analysis/multilayer_role_analysis.py --dataset roboflow_20260824_cryoai_v
 ```
 Each run appends a row to `CryoAI/EXPERIMENT_LOG.csv`. Long runs should go in the background with output logged to a file.
 
-Multi-class (EV / non-EV), re-split by session, fine-tuned from a registered model with a time cap:
+Multi-class (EV / non-EV), re-split by session, fine-tuned from a registered model (full schedule; see the gotchas on `--time` and v4-init early stopping):
 ```bash
 python data_utils/make_balanced_split.py --source-name "roboflow - 20261028 cryoai v5"     --history "roboflow - 20260924 cryoai v4" --output-name "roboflow - 20261028 cryoai v5 S1"
 python data_utils/prepare_all_layer_singleclass.py --source-name "roboflow - 20261028 cryoai v5 S1"     --output-name roboflow_20261028_cryoai_v5_S1_evnonev --class-scheme ev_nonev
-python training/run_experiments.py --dataset roboflow_20261028_cryoai_v5_S1_evnonev --single-run     --model-size m --batch 16 --patience 30 --time 0.5 --weights models/v4_y8m_20260924/best.pt     --eval-splits test --predictions-only
+python training/run_experiments.py --dataset roboflow_20261028_cryoai_v5_S1_evnonev --single-run     --model-size m --batch 8 --patience 300 --cache ram --weights models/v4_y8m_20260924/best.pt     --eval-splits val,test --predictions-only
 python analysis/evaluate_coco_export.py --coco-json "<S1 export>/test/_annotations.coco.json"     --pred-dir "<run>/predictions/test" --group-csv "<S1 export>/split_assignment.csv"     --view practical --nonev-class 1 --label my_run --out <dir>
 ```
-Multi-class predictions use class-agnostic NMS, so one object can't come out as two classes. Containment and role analysis still expect EV-only predictions; filter by class first.
+Multi-class predictions use class-agnostic NMS, so one object can't come out as two classes. Containment needs EV-only predictions: `multilayer_role_analysis.py --ev-classes` filters them before matching. To compare several runs: `--per-image` on the evaluator, then `analysis/compare_eval_runs.py --eval-dir <dir> --role-dir <dir> --ref <model>`.
 
 ---
 

@@ -53,8 +53,10 @@ def load_detection(eval_dir):
         m = re.match(r"eval_(.+)_(test|val)_(fair|practical)\.csv$", f.name)
         if not m:
             continue
-        model, split = m.group(1), m.group(2)
+        model, split, file_view = m.groups()
         for r in read(f):
+            if r["target"] != "ev" and file_view != "practical":
+                continue  # non-EV / Undetermined rows are written to both view files; count them once
             g = r["split_role"]
             for s in (["ALL"] if g == "ALL" else [subset_of(g)]):
                 k = (model, split, r["target"], r["view"], s, round(float(r["conf"]), 2))
