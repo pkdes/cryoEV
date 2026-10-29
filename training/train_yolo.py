@@ -919,7 +919,42 @@ def save_per_class_metrics(per_class_metrics: Dict[str, Dict], output_path: Path
             writer.writerow({'class_name': class_name, **metrics})
 
 
-def match_objects_hungarian(pred_masks: List[np.ndarray], gt_masks: List[np.ndarray], 
+def _mask_areas_boxes(masks: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
+    """Pixel area and bounding box (y0, y1, x0, x1; exclusive ends) of each boolean mask."""
+    areas = np.array([int(m.sum()) for m in masks], dtype=np.int64)
+    boxes = np.zeros((len(masks), 4), dtype=np.int64)
+    for k, m in enumerate(masks):
+        if areas[k]:
+            rows, cols = np.flatnonzero(m.any(axis=1)), np.flatnonzero(m.any(axis=0))
+            boxes[k] = (rows[0], rows[-1] + 1, cols[0], cols[-1] + 1)
+    return areas, boxes
+
+
+def mask_iou_matrix(pred_masks: List[np.ndarray], gt_masks: List[np.ndarray]) -> np.ndarray:
+    """Full-resolution mask IoU for every (pred, gt) pair -- exact, but only pairs whose
+    bounding boxes overlap are intersected, and only inside the shared box (every other
+    pair's IoU is 0). The dense all-pairs version took ~21 s/image on the 24 MP Jul30
+    images; this gives an identical matrix ~100x faster. Same trick as
+    multilayer_containment.pairwise_overlaps()."""
+    iou = np.zeros((len(pred_masks), len(gt_masks)))
+    if len(pred_masks) == 0 or len(gt_masks) == 0:
+        return iou
+    ap, bp = _mask_areas_boxes(pred_masks)
+    ag, bg = _mask_areas_boxes(gt_masks)
+    y0 = np.maximum(bp[:, None, 0], bg[None, :, 0])
+    y1 = np.minimum(bp[:, None, 1], bg[None, :, 1])
+    x0 = np.maximum(bp[:, None, 2], bg[None, :, 2])
+    x1 = np.minimum(bp[:, None, 3], bg[None, :, 3])
+    overlap = (y1 > y0) & (x1 > x0) & (ap[:, None] > 0) & (ag[None, :] > 0)
+    for i, j in zip(*np.nonzero(overlap)):
+        sl = (slice(y0[i, j], y1[i, j]), slice(x0[i, j], x1[i, j]))
+        inter = int(np.logical_and(pred_masks[i][sl], gt_masks[j][sl]).sum())
+        union = ap[i] + ag[j] - inter
+        iou[i, j] = inter / union if union > 0 else 0.0
+    return iou
+
+
+def match_objects_hungarian(pred_masks: List[np.ndarray], gt_masks: List[np.ndarray],
                             iou_threshold: float = 0.5) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
     """
     Match predicted and ground truth objects using Hungarian algorithm.
@@ -931,15 +966,9 @@ def match_objects_hungarian(pred_masks: List[np.ndarray], gt_masks: List[np.ndar
     """
     if len(pred_masks) == 0 or len(gt_masks) == 0:
         return [], list(range(len(pred_masks))), list(range(len(gt_masks)))
-    
-    # Compute IoU matrix
-    iou_matrix = np.zeros((len(pred_masks), len(gt_masks)))
-    for i, pred_mask in enumerate(pred_masks):
-        for j, gt_mask in enumerate(gt_masks):
-            intersection = (pred_mask & gt_mask).sum()
-            union = (pred_mask | gt_mask).sum()
-            iou_matrix[i, j] = intersection / union if union > 0 else 0
-    
+
+    iou_matrix = mask_iou_matrix(pred_masks, gt_masks)
+
     # Hungarian algorithm for optimal assignment
     pred_indices, gt_indices = linear_sum_assignment(-iou_matrix)
     

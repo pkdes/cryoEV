@@ -42,12 +42,13 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "training"))
 sys.path.insert(0, str(Path(__file__).parent))
 from train_yolo import load_predictions_yolo_format
 from multilayer_containment import load_image_annotations
-from confidence_threshold_sweep import (CONF_VALUES, GT_EXCLUDE, compute_iou_matrix,
+from confidence_threshold_sweep import (CONF_VALUES, GT_EXCLUDE, MATCH_IOU, compute_iou_matrix,
                                         score_at_threshold)
 
 
@@ -106,6 +107,21 @@ def load_records(coco_json, pred_dir, roles, view=None, ev_classes=(0,), undet_c
     return by_role, unmatched
 
 
+def match_counts(rec, conf):
+    """One image at one conf: TP/FP/FN as score_at_threshold() counts them, plus the
+    summed IoU of the matched pairs (mean matched IoU = sum_iou / tp, a mask-quality
+    measure that the IoU >= 0.5 match itself doesn't show)."""
+    keep = rec["confidences"] >= conf
+    sub = rec["iou_matrix"][keep, :]
+    n_pred = int(keep.sum())
+    if n_pred == 0 or rec["n_gt"] == 0:
+        return {"tp": 0, "fp": n_pred, "fn": rec["n_gt"], "sum_iou": 0.0}
+    pi, gi = linear_sum_assignment(-sub)
+    matched = sub[pi, gi][sub[pi, gi] >= MATCH_IOU]
+    tp = len(matched)
+    return {"tp": tp, "fp": n_pred - tp, "fn": rec["n_gt"] - tp, "sum_iou": round(float(matched.sum()), 4)}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--coco-json", required=True, type=Path)
@@ -119,6 +135,8 @@ def main():
     ap.add_argument("--undet-class", type=int, help="Predicted class id for Undetermined")
     ap.add_argument("--nonev-class", type=int, help="Also score this predicted class vs VLDL + non-EV GT")
     ap.add_argument("--label", default="", help="Model label written into the CSV")
+    ap.add_argument("--per-image", action="store_true",
+                    help="Also write per-image TP/FP/FN and summed matched IoU per conf (for bootstrap CIs, mask quality)")
     args = ap.parse_args()
 
     roles = {}
@@ -136,12 +154,19 @@ def main():
     if args.undet_class is not None and args.view == "practical":
         targets.append(("undet", "undet"))   # Undetermined preds vs Low conf EV GT
 
-    rows = []
+    rows, image_rows = [], []
     for target, view_name in targets:
         by_role, unmatched = load_records(args.coco_json, args.pred_dir, roles, args.view, ev_classes,
                                           args.undet_class, target, args.nonev_class)
         if unmatched:
             print(f"WARNING {len(unmatched)} export images have no prediction file, e.g. {unmatched[:2]}")
+        if args.per_image:
+            for role, recs in by_role.items():
+                for rec in recs:
+                    for c in CONF_VALUES:
+                        image_rows.append({"model": args.label, "target": target, "view": view_name,
+                                           "split_role": role, "image": rec["stem"], "conf": c,
+                                           **match_counts(rec, c)})
         groups = dict(by_role)
         if args.group_csv:
             groups["ALL"] = [r for recs in by_role.values() for r in recs]
@@ -163,6 +188,13 @@ def main():
             w.writeheader()
             w.writerows(rows)
         print(f"\n-> {args.out / name}")
+        if image_rows:
+            name = name.replace(".csv", "_per_image.csv")
+            with open(args.out / name, "w", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=list(image_rows[0].keys()))
+                w.writeheader()
+                w.writerows(image_rows)
+            print(f"-> {args.out / name}")
 
 
 if __name__ == "__main__":

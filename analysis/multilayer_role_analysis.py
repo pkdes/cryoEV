@@ -18,6 +18,7 @@ Outputs all saved under:
 """
 
 import argparse
+import re
 import sys
 import shutil
 from pathlib import Path
@@ -39,6 +40,7 @@ from train_yolo import (
 
 sys.path.insert(0, str(Path(__file__).parent))
 from multilayer_containment import load_image_annotations, classify_roles, pairwise_overlaps
+from evaluate_coco_export import NON_EV_CATS, drop_ignored, original_stem
 
 ROOT = Path(__file__).parent.parent.parent / "CryoAI"
 
@@ -59,6 +61,13 @@ MATCH_IOU = 0.5
 
 SPLIT_MAP = {"train": "train", "valid": "val"}  # coco split -> yolo dataset split dir
 GT_CATEGORY_EXCLUDE = {"non-EV", "items-nfaR"}  # not real EV instances, excluded from the role question
+# Multi-class options (see --help); the defaults reproduce the single-class behavior.
+EV_CLASSES = None      # predicted class ids treated as EV; None = every prediction
+FAIR = False           # drop EV predictions on VLDL / non-EV GT instead of counting them as FP
+KEEP_EMPTY_GT = False  # keep images with no EV GT (their predictions are all FP)
+GROUPS = {}            # original image stem -> group label (--group-csv)
+FIXED = None           # (containment_threshold, max_size_ratio) instead of the sweep
+NO_OVERLAYS = False
 
 CLASSES = ["multilayer", "inner-layer", "standalone"]
 ROLE_COLOR = {
@@ -92,14 +101,18 @@ def build_cache():
     for coco_split, yolo_split in SPLIT_MAP.items():
         coco_path = SOURCE_ROOT / coco_split / "_annotations.coco.json"
         img_dir = DATASET / "images" / yolo_split
-        cache_dir = PRED_CACHE_DIR / yolo_split
+        # <pred dir>/<split>/ (run_experiments' cache) or a flat folder of one split's files
+        flat = not (PRED_CACHE_DIR / yolo_split).is_dir() and any(PRED_CACHE_DIR.glob("*.txt"))
+        cache_dir = PRED_CACHE_DIR if flat else PRED_CACHE_DIR / yolo_split
 
         for img, gt_entries_all in tqdm(list(load_image_annotations(coco_path)), desc=f"Loading predictions ({coco_split})"):
             img_path = img_dir / img["file_name"]
             if not img_path.exists():
                 continue
             gt_entries = [(aid, cat, m) for aid, cat, m in gt_entries_all if cat not in GT_CATEGORY_EXCLUDE]
-            if not gt_entries:
+            # Without --keep-empty-gt, an image whose only GT is excluded (VLDL, non-EV) is skipped,
+            # which hides any EV it hallucinates there.
+            if not gt_entries and not KEEP_EMPTY_GT:
                 continue
 
             w, h = img["width"], img["height"]
@@ -114,11 +127,20 @@ def build_cache():
                 save_predictions_yolo_format(pred_masks, confidences, pred_classes, w, h, cache_path)
                 n_from_inference += 1
             gt_masks = [m for _, _, m in gt_entries]
+            # Multi-class models: only EV-class predictions take part in containment and
+            # matching. Filtered here, before matching and overlaps, so indices stay aligned.
+            if EV_CLASSES is not None:
+                keep = [i for i, c in enumerate(pred_classes) if c in EV_CLASSES]
+                pred_masks, confidences = [pred_masks[i] for i in keep], [confidences[i] for i in keep]
+            if FAIR:  # an EV prediction sitting on VLDL / non-EV GT is neither TP nor FP
+                ignore_gt = [m for _, cat, m in gt_entries_all if cat in NON_EV_CATS]
+                pred_masks, confidences = drop_ignored(pred_masks, confidences, ignore_gt, gt_masks)
             matches, unmatched_preds, unmatched_gts = match_objects_hungarian(
                 pred_masks, gt_masks, iou_threshold=MATCH_IOU
             )
             cache.append({
                 "split": yolo_split, "image": img["file_name"], "img_path": img_path,
+                "group": GROUPS.get(original_stem(img), "unknown"),
                 "pred_masks": pred_masks, "gt_entries": gt_entries,
                 "matches": matches, "unmatched_preds": unmatched_preds, "unmatched_gts": unmatched_gts,
                 # mask-pair overlaps, computed once and reused by every threshold/ratio setting
@@ -371,24 +393,33 @@ def main():
     cache = build_cache()
     print(f"\nCached {len(cache)} images with predictions + GT matches.\n")
 
-    print("=" * 100)
-    print("THRESHOLD / SIZE-RATIO SWEEP (combined across all splits)")
-    print("=" * 100)
-    best, rows = run_sweep(cache)
-    print(f"\nBest combo by average F1: containment_threshold={best['containment_threshold']}, "
-          f"max_size_ratio={best['max_size_ratio']} (avg_f1={best['avg_f1']:.4f})")
+    if FIXED:
+        thr, ratio = FIXED
+        base_tag = f"thr{thr}_ratio{ratio if ratio else 'none'}"
+        print(f"Fixed setting (no sweep): containment_threshold={thr}, max_size_ratio={ratio}")
+    else:
+        print("=" * 100)
+        print("THRESHOLD / SIZE-RATIO SWEEP (combined across all splits)")
+        print("=" * 100)
+        best, rows = run_sweep(cache)
+        print(f"\nBest combo by average F1: containment_threshold={best['containment_threshold']}, "
+              f"max_size_ratio={best['max_size_ratio']} (avg_f1={best['avg_f1']:.4f})")
 
-    thr = best["containment_threshold"]
-    ratio = None if best["max_size_ratio"] == "none" else best["max_size_ratio"]
-    base_tag = f"thr{thr}_ratio{best['max_size_ratio']}"
+        thr = best["containment_threshold"]
+        ratio = None if best["max_size_ratio"] == "none" else best["max_size_ratio"]
+        base_tag = f"thr{thr}_ratio{best['max_size_ratio']}"
 
     out_overlays = OUT_ROOT / "overlays"
-    if out_overlays.exists():
+    if out_overlays.exists() and not NO_OVERLAYS:
         shutil.rmtree(out_overlays)  # clear once; per-split calls below append with clear=False
 
     present_splits = sorted({rec["split"] for rec in cache})
-    for split_label in [*present_splits, "combined"]:
-        sub_cache = cache if split_label == "combined" else [r for r in cache if r["split"] == split_label]
+    subsets = [(s, [r for r in cache if r["split"] == s]) for s in present_splits] + [("combined", cache)]
+    if GROUPS:  # pooled over the selected splits, e.g. old sessions vs lipo
+        subsets += [(f"group-{g}", [r for r in cache if r["group"] == g])
+                    for g in sorted({r["group"] for r in cache})]
+    summary = []
+    for split_label, sub_cache in subsets:
         if not sub_cache:
             continue
         tag = f"{base_tag}_{split_label}"
@@ -399,13 +430,31 @@ def main():
             m = per_class[c]
             print(f"  {c:>12}: P={m['precision']:.4f} R={m['recall']:.4f} F1={m['f1']:.4f} "
                   f"(TP={m['tp']} FP={m['fp']} FN={m['fn']})")
+            summary.append({"subset": split_label, "n_images": len(sub_cache), "role": c, **m})
 
         save_confusion_matrix(confusion, tag)
-        generate_overlays(sub_cache, thr, ratio, tag, clear=False)
+        if not NO_OVERLAYS and not split_label.startswith("group-"):
+            generate_overlays(sub_cache, thr, ratio, tag, clear=False)
+
+    # Per-subset and per-image role counts (the per-image file feeds bootstrap CIs).
+    per_image = []
+    for rec in cache:
+        _, per_class, _ = evaluate([rec], thr, ratio)
+        per_image += [{"image": rec["image"], "split": rec["split"], "group": rec["group"], "role": c,
+                       "tp": per_class[c]["tp"], "fp": per_class[c]["fp"], "fn": per_class[c]["fn"]}
+                      for c in CLASSES]
+    OUT_ROOT.mkdir(parents=True, exist_ok=True)
+    for name, rows_ in ((f"role_f1_{base_tag}.csv", summary), (f"role_per_image_{base_tag}.csv", per_image)):
+        with open(OUT_ROOT / name, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows_[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows_)
+    print(f"[OK] Role F1 summary and per-image counts saved under {OUT_ROOT}")
 
     # Failure-mode crops: pooled across all splits (diagnostic examples, not a
     # per-split reporting artifact).
-    generate_failure_crops(cache, thr, ratio)
+    if not NO_OVERLAYS:
+        generate_failure_crops(cache, thr, ratio)
 
     print(f"\n[DONE] All outputs under: {OUT_ROOT}")
 
@@ -418,16 +467,46 @@ if __name__ == "__main__":
                          help="Folder name under 'training images/' holding the raw Roboflow COCO export")
     parser.add_argument("--model-run-dir", default="2026-07-13_181034_y8_1440_24b_300ep_Run_14",
                          help="Run folder name under '<dataset>/runs/' whose weights/best.pt to evaluate")
+    # Multi-class models and single-setting reporting (defaults keep the original behavior).
+    parser.add_argument("--model-path", type=Path, help="Weights to evaluate, instead of --model-run-dir's best.pt")
+    parser.add_argument("--pred-dir", type=Path,
+                        help="Prediction cache: a folder of <split>/ subfolders, or one flat folder (default: next to the weights)")
+    parser.add_argument("--splits", help="COCO splits to use, e.g. test (default: train,valid and test if present)")
+    parser.add_argument("--fixed", help="THR,RATIO (e.g. 0.99,0.75; RATIO 'none') instead of the sweep")
+    parser.add_argument("--no-overlays", action="store_true", help="Skip overlays and failure crops (slow on 24 MP images)")
+    parser.add_argument("--out-dir", type=Path, help="Output folder (default: <dataset>/multilayer_role_analysis)")
+    parser.add_argument("--ev-classes", help="Predicted class ids that are EV layers, e.g. 0 (A) or 0,2 (B); default all")
+    parser.add_argument("--gt-exclude", default="", help="Extra GT categories to leave out, comma-separated, e.g. VLDL")
+    parser.add_argument("--keep-empty-gt", action="store_true", help="Keep images with no EV GT, so their predictions count as FP")
+    parser.add_argument("--fair", action="store_true", help="Drop EV predictions on VLDL / non-EV GT (IoU >= 0.5) instead of counting them as FP")
+    parser.add_argument("--group-csv", type=Path, help="CSV keyed by image name; adds per-group results")
+    parser.add_argument("--group-col", default="domain")
     cli_args = parser.parse_args()
 
     SOURCE_ROOT = ROOT / "training images" / cli_args.source_name
     DATASET = ROOT / "training outputs" / cli_args.dataset
-    MODEL_PATH = DATASET / "runs" / cli_args.model_run_dir / "weights" / "best.pt"
-    OUT_ROOT = DATASET / "multilayer_role_analysis"
-    PRED_CACHE_DIR = MODEL_PATH.parent.parent / "predictions"
+    MODEL_PATH = cli_args.model_path or DATASET / "runs" / cli_args.model_run_dir / "weights" / "best.pt"
+    OUT_ROOT = cli_args.out_dir or DATASET / "multilayer_role_analysis"
+    PRED_CACHE_DIR = cli_args.pred_dir or MODEL_PATH.parent.parent / "predictions"
 
     SPLIT_MAP = {"train": "train", "valid": "val"}
     if (DATASET / "images" / "test").exists():
         SPLIT_MAP["test"] = "test"
+    if cli_args.splits:
+        SPLIT_MAP = {s: {"valid": "val"}.get(s, s) for s in cli_args.splits.split(",")}
+
+    FIXED = None
+    if cli_args.fixed:
+        t, r = cli_args.fixed.split(",")
+        FIXED = (float(t), None if r == "none" else float(r))
+    NO_OVERLAYS = cli_args.no_overlays
+    EV_CLASSES = {int(c) for c in cli_args.ev_classes.split(",")} if cli_args.ev_classes else None
+    GT_CATEGORY_EXCLUDE = GT_CATEGORY_EXCLUDE | {c for c in cli_args.gt_exclude.split(",") if c}
+    KEEP_EMPTY_GT = cli_args.keep_empty_gt
+    FAIR = cli_args.fair
+    if cli_args.group_csv:
+        with open(cli_args.group_csv, newline="", encoding="utf-8") as fh:
+            GROUPS = {re.sub(r"_(png|jpg|jpeg|tif|tiff)$", "", r["image"]): r[cli_args.group_col]
+                      for r in csv.DictReader(fh)}
 
     main()

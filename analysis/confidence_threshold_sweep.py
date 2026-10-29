@@ -19,7 +19,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "training"))
-from train_yolo import load_predictions_yolo_format
+from train_yolo import load_predictions_yolo_format, mask_iou_matrix
 
 sys.path.insert(0, str(Path(__file__).parent))
 from multilayer_containment import load_image_annotations
@@ -32,16 +32,10 @@ CONF_VALUES = [0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75,
 
 
 def compute_iou_matrix(pred_masks: list, gt_masks: list) -> np.ndarray:
-    """Full-resolution pixel-mask IoU between every (pred, gt) pair -- the expensive O(n*m)
-    step. Computed ONCE per image, independent of confidence threshold, so the sweep below
+    """Full-resolution pixel-mask IoU between every (pred, gt) pair (train_yolo.mask_iou_matrix).
+    Computed ONCE per image, independent of confidence threshold, so the sweep below
     only reruns the cheap Hungarian assignment on threshold-filtered rows of this matrix."""
-    iou = np.zeros((len(pred_masks), len(gt_masks)))
-    for i, pm in enumerate(pred_masks):
-        for j, gm in enumerate(gt_masks):
-            inter = (pm & gm).sum()
-            union = (pm | gm).sum()
-            iou[i, j] = inter / union if union > 0 else 0.0
-    return iou
+    return mask_iou_matrix(pred_masks, gt_masks)
 
 
 def load_split_records(coco_path: Path, img_dir: Path, pred_dir: Path):
