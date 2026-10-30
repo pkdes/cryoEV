@@ -158,6 +158,19 @@ class ServerAPI(unittest.TestCase):
         self.assertEqual(rx["g301"], first)
         self.assertGreaterEqual(rx["p0"], first)
 
+    def test_reviewer_name_without_markup(self):
+        f = "fixC_old.png"
+        before = self.srv.request("GET", "/api/edits")[1].get(f)
+        for who in ("<img src=x onerror=window.__pwn=1>", 'a"b', "x" * (rs.WHO_MAX + 1)):
+            with self.subTest(who=who):
+                code, _, _ = self.srv.put(f, {"t": 5, "dec": {"g301": {"v": "del", "t": 5, "who": who}}})
+                self.assertEqual(code, 400)
+                self.assertEqual(self.srv.request("POST", "/api/claim?c=x&who=" + quote(who), b"")[0],
+                                 400 if len(who) <= rs.WHO_MAX else 200)  # claim names are cut to WHO_MAX first
+        self.assertEqual(self.srv.request("GET", "/api/edits")[1].get(f), before)
+        for who in ("", "pujan", "September review", "Puj", "AU-1 x.y_z"):
+            self.assertTrue(rs.valid_who(who), who)
+
     def test_people(self):
         code, body, _ = self.srv.request("GET", "/api/people")
         self.assertEqual(code, 200)
