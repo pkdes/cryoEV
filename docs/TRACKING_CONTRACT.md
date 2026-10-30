@@ -144,7 +144,9 @@ Answered on 2026-10-30, see the Registry section: 1 (per-entity files), 2 (sessi
 5. Who promotes a model to `production`, and is `candidate` the right state for v5 F5 now?
 6. Legacy model ids (`allLayer_run14_20260713`, `yifei_202512`): keep them as they are, or alias them?
 
-## Suggested changes to files owned by others (not made)
+- **Answers (user, 2026-10-30):** 1 yes; 2 session-prefixed ids in the registry; 3 SANDBOX left out; 4 straight from `lv_*` is fine; 5 only the user promotes, v5 F5 is `production`; 6 aliased (canonical ids to be confirmed, see [NEXT_ITERATION.md](NEXT_ITERATION.md)).
+
+## Suggested changes to files owned by others (not made; listed in NEXT_ITERATION.md)
 - `inference/inference_check.py`: add `"schema": "inference_check/1"` (and `id` = `batch_id`) to each `batches.jsonl` line.
 - `annotation/apply_review_edits.py`: when a version replaces an older one, write `supersedes` into the new version.json. Keep SUPERSEDED.md, but also log a `label_version` status line.
 - `annotation/build_review_package.py`:
@@ -156,7 +158,7 @@ Answered on 2026-10-30, see the Registry section: 1 (per-entity files), 2 (sessi
 - `models/models.yaml`: add `run`, `dataset`, `status` and `weights_sha256` keys.
 
 ## History page (piece 7)
-- `python registry/history_page.py [--registry FILE_OR_DIR ...] [--out FILE]`. Defaults: `CryoAI-laptop/registry/registry.jsonl` → `CryoAI-laptop/registry/history.html`. Try it with `--registry registry/samples`.
+- `python registry/history_page.py [--registry FILE_OR_DIR ...] [--out FILE]`. Defaults: every `*.jsonl` in `CryoAI-laptop/registry/` (one file per entity, as `registry.py` writes) → `CryoAI-laptop/registry/history.html`. Try it with `--registry registry/samples`.
 - One static HTML file (inline CSS/JS, no network): status board by lane (table above), history tree (pull → label versions → datasets → job bundles → runs → models; review packages under the label version they produced, else their model/base; inference checks under their model), detail with status history on tap, entity/status filters, id search.
 - Reads child → parent links only and derives children (a label version is superseded when another one has `supersedes: <id>`, or by its status). Current = last line per id in file order. Partial status lines keep earlier fields. `*_gap` fields and `copy_of` are shown.
 - Has its own JSONL reader. It can switch to `registry.current()` / `history(id)` later. The output path is checked with `data_utils/path_guard.py`. Tests: `registry/tests/test_history_page.py`.

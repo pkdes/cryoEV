@@ -205,9 +205,20 @@ python annotation/build_review_package.py --source-name "roboflow - 20260924 cry
     --dataset roboflow_20260924_cryoai_v4_singleclass --model-run-dir <run> --output-name cryoai_v4_review
 python annotation/review_server.py --package "../CryoAI/annotation review/cryoai_v4_review"   # prints ?k= link
 ```
-Put the server behind a tunnel to share it; it only binds to 127.0.0.1. Each image's saved decisions go to `<package>/edits/<file>.json`, merged per decision (newest wins). The page template is `annotation/review_tool/index.html`.
+It binds to 127.0.0.1 by default; for phones use `tailscale serve` (tailnet only, see [docs/REVIEW_TOOL.md](docs/REVIEW_TOOL.md)). Each image's saved decisions go to `<package>/edits/<file>.json`, merged per decision (newest wins). The page template is `annotation/review_tool/index.html`.
 
 `--extra-classes "A,B"` offers classes the export doesn't contain. The page loads `data.js` through a URL that changes every hour, so a rebuilt package reaches reviewers' cached browsers within an hour.
+
+From review to training data (2026-10-30, iteration 1 of the HITL platform):
+
+| Step | Tool | Doc |
+|---|---|---|
+| Review (pick your name; phone cards include September edits) | `annotation/review_server.py` | [REVIEW_TOOL.md](docs/REVIEW_TOOL.md) |
+| Edits → new label version `lv_*` + change log | `python annotation/apply_review_edits.py --base <pull> --package <pkg> --out-root <CryoAI-laptop>/labels` | [LABEL_CHANGES.md](docs/LABEL_CHANGES.md) |
+| Tracking registry (ids, links, statuses) + history page | `python registry/registry.py import`, `python registry/history_page.py` | [TRACKING_CONTRACT.md](docs/TRACKING_CONTRACT.md) |
+| Inference check of a model on a new session | `inference/inference_check.py stage`, then `score` | [INFERENCE_CHECK.md](docs/INFERENCE_CHECK.md) |
+
+Next iteration (job queue, model page, lineage graph): [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md).
 
 ## Reference: human-in-the-loop annotation (not in active use)
 
