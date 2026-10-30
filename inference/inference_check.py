@@ -56,8 +56,10 @@ NAME_COLUMNS = ("output_name", "image", "file_name", "filename", "name")
 LOG_FIELDS = ["batch_id", "created", "session", "tiles_dir", "model", "predictions_dir",
               "n", "seed", "strata", "status", "reviewer", "cryoEV_commit"]
 STATUSES = ("staged", "reviewed", "scored", "failed")
-# Raw data and synced storage: a batch is never written under these (any depth).
-PROTECTED_ROOTS = (Path.home() / "Desktop" / "Cryo-image-processing", Path.home() / "Box")
+sys.path.insert(0, str(REPO))
+# Raw data and synced storage: a batch is never written under these (any depth). The check (prefixes, UNC,
+# trailing spaces, links) lives in data_utils/path_guard.py, shared with annotation/apply_review_edits.py.
+from data_utils.path_guard import PROTECTED_ROOTS, protected_problem  # noqa: E402
 
 
 def warn(msg: str):
@@ -71,13 +73,13 @@ def _under(path: Path, root: Path) -> bool:
 
 def out_root_problem(root: Path, tiles_dir: Path, protected=PROTECTED_ROOTS) -> str | None:
     """Why --out may not be used, or None. Refuses protected roots and the tiles' session folder."""
+    problem = protected_problem(root, protected)
+    if problem:
+        return f"--out {problem}; stage elsewhere"
     root = Path(os.path.abspath(root))
-    for p in protected:
-        if _under(root, Path(os.path.abspath(p))):
-            return f"--out {root} is under {p}, which is read-only; stage elsewhere"
     tiles_dir = Path(os.path.abspath(tiles_dir))
     session = next((p for p in [tiles_dir, *tiles_dir.parents] if re.match(r"\d{8}", p.name)), tiles_dir)
-    if _under(root, session):
+    if protected_problem(root, [session]):
         return f"--out {root} is inside the session folder {session}; stage elsewhere"
     return None
 
