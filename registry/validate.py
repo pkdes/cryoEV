@@ -30,6 +30,9 @@ import ids  # noqa: E402
 from schema_check import check_record, load_schemas  # noqa: E402
 
 REPO = HERE.parent
+sys.path.insert(0, str(REPO))
+from data_utils.path_guard import protected_problem  # noqa: E402
+
 PROTECTED = [Path(r"C:\Users\pujan\Box"), Path(r"C:\Users\pujan\Desktop\Cryo-image-processing")]
 EXCLUDED_SESSIONS = {"20261012"}
 ENTITIES = ["image", "session", "grid", "roboflow_image", "pull", "roboflow_export", "label_version",
@@ -90,11 +93,11 @@ def under(path, root):
 
 
 def check_report_path(path, protected=PROTECTED):
-    """Raise ValueError if the report may not be written there."""
+    """Raise ValueError if the report may not be written there (root check: data_utils.path_guard)."""
+    problem = protected_problem(path, protected)
+    if problem:
+        raise ValueError(f"refused: --report {problem}")
     p = Path(os.path.realpath(os.path.abspath(str(path))))
-    for root in protected:
-        if under(p, root) or under(os.path.abspath(str(path)), root):
-            raise ValueError(f"refused: --report {path} is under protected root {root}")
     if p.exists():
         try:
             if read_json(p).get("schema") != "validate_report/1":

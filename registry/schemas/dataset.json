@@ -72,8 +72,18 @@
      "type": "string"
     },
     "sha256": {
-     "type": "string",
+     "type": [
+      "string",
+      "null"
+     ],
      "pattern": "^[0-9a-f]{64}$"
+    },
+    "sha256_gap": {
+     "type": [
+      "string",
+      "null"
+     ],
+     "description": "why split.sha256 is null"
     }
    },
    "required": [
@@ -169,7 +179,10 @@
    }
   },
   "images_sha256": {
-   "type": "string",
+   "type": [
+    "string",
+    "null"
+   ],
    "pattern": "^[0-9a-f]{64}$",
    "description": "sha256 of sorted '<split>\\t<stem>\\n' lines"
   },
@@ -213,6 +226,21 @@
     "trained",
     "retired"
    ]
+  },
+  "status_by": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^[a-z0-9_]+$",
+   "description": "people.json id of whoever set this status explicitly (registry.py set-status); explicit beats derived"
+  },
+  "images_sha256_gap": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "description": "why images_sha256 is null"
   }
  },
  "required": [

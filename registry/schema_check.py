@@ -71,11 +71,24 @@ def errors(value, schema, path="$"):
     return out
 
 
+def walk(schema, path="$"):
+    """Raise UnsupportedKeyword for any keyword anywhere in `schema` (checked once, at load)."""
+    bad = set(schema) - SUPPORTED
+    if bad:
+        raise UnsupportedKeyword(f"{path}: unsupported keyword(s) {sorted(bad)}")
+    for k, sub in (schema.get("properties") or {}).items():
+        walk(sub, f"{path}.{k}")
+    for key in ("items", "additionalProperties"):
+        if isinstance(schema.get(key), dict):
+            walk(schema[key], f"{path}[{key}]")
+
+
 def load_schemas(schema_dir=SCHEMA_DIR):
-    """{'image/1': schema, ...} keyed by each schema's const `schema` value."""
+    """{'image/1': schema, ...} keyed by each schema's const `schema` value. Every keyword is checked here."""
     out = {}
     for p in sorted(Path(schema_dir).glob("*.json")):
         sch = json.loads(p.read_text(encoding="utf-8"))
+        walk(sch, p.name)
         out[sch["properties"]["schema"]["const"]] = sch
     return out
 

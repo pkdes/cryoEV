@@ -115,7 +115,28 @@ Registry style follows `batches.jsonl` ([INFERENCE_CHECK.md](INFERENCE_CHECK.md)
 - It belongs to another session/project. Its images are in the v5 exports and S1 (`split_assignment.csv` batch `20261012 …`), and its own session folder exists.
 - The contract covers them like any session, but **nothing about them is written** here, in samples or in reports. The validator skips them and only counts `excluded`.
 
+## Registry (v1.1, `registry/registry.py`)
+- **One file per entity:** `CryoAI-laptop/registry/<entity>.jsonl` (local, not Box). Writes go through `data_utils/path_guard.py`.
+- **Last means file order**, not `logged`. `current()` → `{id: record}`, `history(id)` → lines oldest first.
+- **Single writer.** Owner logs (`inference_checks/batches.jsonl`, `labels/lv_*/version.json`) stay the source of truth and are read by the importers, not copied.
+  `inference_check` and `label_version` lines are pointers (`owner` = `<batches.jsonl>#<batch_id>` / `<version.json>`) plus status lines.
+  The rest of the record is derived from the owner file at read time.
+- **Explicit beats derived.** A `set-status` line (with `status_by`, a `people.json` id) wins over any derived status, and the importers keep it.
+- Model `production` is set only by `registry.py set-status <id> production --who pujan`.
+- **Image keys.** Legacy keys (in a pull or `tracking/v2`) stay as they are. New session tiles (only in a session MANIFEST) are `<session>__<key>`.
+  Generic upload/labeling copies (`blind_NN`) are `<session>_<key>` (e.g. `20261027_blind_03_png`), with `copy_of` from `*selection_PRIVATE.csv` when it names a registered tile. Files are not renamed.
+  The importer refuses an existing key that arrives with a different session, and a stem that a second Roboflow id claims. It reports them and writes nothing for them.
+- **Model ids** may contain uppercase (`^[A-Za-z0-9][A-Za-z0-9_]*$`). This applies to `model.id`, `init_from`, `review_package.model` and `inference_check.model`.
+  Legacy ids become `aliases` of a canonical `v0_…` id: `allLayer_run14_20260713` → `v0_alllayer_y8n_20260713`, `yifei_202512` → `v0_yifei_y8n_20251201` (the day is unknown). `models.yaml` keys are unchanged.
+- **Child → parent links only.** Removed: `model.scores`, `review_package.parts`, `label_version.superseded_by` (the new version keeps `supersedes`), `session.grids`, `grid.legacy_ids`, `image.rf_id`/`roboflow_project` (now `roboflow_image.stem` → image).
+  Grid and session records hold only an id and links.
+- Datasets may link straight to a local `lv_*` (`source.kind: label_version`), with no Roboflow push needed. `roboflow_export` has an optional `label_version`.
+- Dataset `images_sha256` / `split.sha256` may be null, with an `images_sha256_gap` / `split.sha256_gap` reason. Never use fake all-zero hashes.
+- `SANDBOX*` review packages are left out of the registry. `label_change/1` status also allows `duplicate-dropped`, which `apply_review_edits.py` writes.
+
 ## Open questions (user)
+Answered on 2026-10-30, see the Registry section: 1 (per-entity files), 2 (session-prefixed ids + `copy_of`), 3 (SANDBOX excluded), 4 (local lv allowed), 5 (pujan sets production; v5 F5 = production), 6 (aliases).
+
 1. Where does the registry live? Proposal: `CryoAI-laptop/registry/<entity>.jsonl` (local, not Box).
 2. Blind and labeling upload copies (`blind_01.png` …) have generic names that will collide across sessions. Either give them session-prefixed names, or add a `copy_of` link (the mapping is now only in a PRIVATE selection file).
 3. `SANDBOX_prelipo_v5F5_review` reuses the id `prelipo_v5F5_review`. Should it be renamed, or should SANDBOX folders be left out of the registry?
