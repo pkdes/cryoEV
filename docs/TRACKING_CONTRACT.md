@@ -133,3 +133,9 @@ Registry style follows `batches.jsonl` ([INFERENCE_CHECK.md](INFERENCE_CHECK.md)
 - `training/make_job_bundle.py`: append a `job_bundle/1` line, and put `bundle_id` into JOB.json.
 - `training/run_experiments.py`: write `run.json` (`run/1`: dataset, bundle id, commit, config) into each run folder.
 - `models/models.yaml`: add `run`, `dataset`, `status` and `weights_sha256` keys.
+
+## History page (piece 7)
+- `python registry/history_page.py [--registry FILE_OR_DIR ...] [--out FILE]`. Defaults: `CryoAI-laptop/registry/registry.jsonl` → `CryoAI-laptop/registry/history.html`. Try it with `--registry registry/samples`.
+- One static HTML file (inline CSS/JS, no network): status board by lane (table above), history tree (pull → label versions → datasets → job bundles → runs → models; review packages under the label version they produced, else their model/base; inference checks under their model), detail with status history on tap, entity/status filters, id search.
+- Reads child → parent links only and derives children (a label version is superseded when another one has `supersedes: <id>`, or by its status). Current = last line per id in file order. Partial status lines keep earlier fields. `*_gap` fields and `copy_of` are shown.
+- Has its own JSONL reader. It can switch to `registry.current()` / `history(id)` later. The output path is checked with `data_utils/path_guard.py`. Tests: `registry/tests/test_history_page.py`.
