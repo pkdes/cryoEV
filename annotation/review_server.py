@@ -354,7 +354,10 @@ def effective_labels(image: dict, edit) -> list:
             continue
         if key[0] == "p" and v.startswith("add:"):
             try:
-                pr = image["pr"][int(key[1:])]
+                k = int(key[1:])
+                if k < 0:  # "p-1" is out of range, as in effGt(); never Python's last-item index
+                    continue
+                pr = image["pr"][k]
             except (ValueError, IndexError):
                 continue
             out.append({"id": None, "c": v[4:], "p": json.loads(json.dumps(d.get("p") or pr["p"])), "src": key})
