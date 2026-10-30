@@ -28,7 +28,7 @@
   },
   "model": {
    "type": "string",
-   "pattern": "^[a-z0-9][a-z0-9_]*$"
+   "pattern": "^[A-Za-z0-9][A-Za-z0-9_]*$"
   },
   "predictions_dir": {
    "type": "string"
@@ -111,6 +111,21 @@
     "scored",
     "failed"
    ]
+  },
+  "status_by": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^[a-z0-9_]+$",
+   "description": "people.json id of whoever set this status explicitly (registry.py set-status); explicit beats derived"
+  },
+  "owner": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "description": "owner file the registry pointer derives from at read time"
   }
  },
  "required": [

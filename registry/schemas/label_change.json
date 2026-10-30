@@ -115,7 +115,8 @@
    "type": "string",
    "enum": [
     "applied",
-    "conflict"
+    "conflict",
+    "duplicate-dropped"
    ]
   },
   "reason": {

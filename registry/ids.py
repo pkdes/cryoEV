@@ -16,7 +16,7 @@ PATTERNS = {
     "dataset": r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
     "bundle": r"^.+__job_\d{8}-\d{6}$",
     "run": r"^\d{4}-\d{2}-\d{2}_\d{6}_.+$",
-    "model": r"^[a-z0-9][a-z0-9_]*$",
+    "model": r"^[A-Za-z0-9][A-Za-z0-9_]*$",
     "model_new": r"^v\d+_[a-z0-9]+(_[a-z0-9]+)*_\d{8}$",
     "person": r"^[a-z0-9_]+$",
 }

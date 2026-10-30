@@ -89,19 +89,6 @@
     "null"
    ]
   },
-  "rf_id": {
-   "type": [
-    "string",
-    "null"
-   ],
-   "pattern": "^[A-Za-z0-9]{20}$"
-  },
-  "roboflow_project": {
-   "type": [
-    "string",
-    "null"
-   ]
-  },
   "duplicate_of": {
    "type": [
     "string",
@@ -126,6 +113,22 @@
     "string",
     "null"
    ]
+  },
+  "status_by": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^[a-z0-9_]+$",
+   "description": "people.json id of whoever set this status explicitly (registry.py set-status); explicit beats derived"
+  },
+  "copy_of": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^[^/\\\\\\s]+_[A-Za-z0-9]+$",
+   "description": "source tile of an upload / labeling copy (blind_NN)"
   }
  },
  "required": [
@@ -133,8 +136,7 @@
   "id",
   "logged",
   "session",
-  "grid",
-  "rf_id"
+  "grid"
  ],
  "additionalProperties": true
 }

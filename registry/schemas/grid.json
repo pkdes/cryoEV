@@ -11,69 +11,12 @@
    "type": "string",
    "pattern": "^\\d{4,}$"
   },
-  "legacy_ids": {
-   "type": "array",
-   "items": {
-    "type": "string",
-    "pattern": "^\\d{4,}$"
-   },
-   "uniqueItems": true
-  },
   "replaced_by": {
    "type": [
     "string",
     "null"
    ],
    "pattern": "^\\d{4,}$"
-  },
-  "prep_date": {
-   "type": [
-    "string",
-    "null"
-   ],
-   "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
-  },
-  "project": {
-   "type": [
-    "string",
-    "null"
-   ]
-  },
-  "sample": {
-   "type": "string"
-  },
-  "grid_type": {
-   "type": [
-    "string",
-    "null"
-   ]
-  },
-  "replicate": {
-   "type": [
-    "integer",
-    "null"
-   ],
-   "minimum": 0
-  },
-  "storage": {
-   "type": [
-    "string",
-    "null"
-   ]
-  },
-  "discarded": {
-   "type": [
-    "boolean",
-    "null"
-   ]
-  },
-  "imaged": {
-   "type": "array",
-   "items": {
-    "type": "string",
-    "pattern": "^\\d{8}(-\\d+)?$"
-   },
-   "uniqueItems": true
   },
   "logged": {
    "type": "string",
@@ -92,13 +35,20 @@
     "string",
     "null"
    ]
+  },
+  "status_by": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^[a-z0-9_]+$",
+   "description": "people.json id of whoever set this status explicitly (registry.py set-status); explicit beats derived"
   }
  },
  "required": [
   "schema",
   "id",
-  "logged",
-  "sample"
+  "logged"
  ],
  "additionalProperties": true
 }

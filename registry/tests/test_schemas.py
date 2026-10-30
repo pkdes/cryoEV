@@ -67,6 +67,15 @@ class TestSchemas(unittest.TestCase):
               "cls_from", "cls_to", "who_raw", "who", "who_auth", "t", "rx", "seed", "reviewed", "status", "reason"}
         self.assertEqual(set(self.schemas["label_change/1"]["properties"]), v1)
         self.assertTrue(self.schemas["label_change/1"]["additionalProperties"])
+        # tie to the writer: its ROW_FIELDS and the status values it writes (apply_review_edits.py row builder)
+        import re
+        src = (REG.parent / "annotation" / "apply_review_edits.py").read_text(encoding="utf-8")
+        m = re.search(r"ROW_FIELDS = \[(.*?)\]", src, re.S)
+        self.assertEqual(set(re.findall(r'"([^"]+)"', m.group(1))), v1)
+        line = re.search(r'"status": ("conflict" if .*?)\n', src).group(1)
+        written = set(re.findall(r'(?<!get\()(?<!\[)"([a-z-]+)"', line))     # literals, not r.get("x") / r["x"]
+        self.assertEqual(written, {"conflict", "duplicate-dropped", "applied"})
+        self.assertEqual(set(self.schemas["label_change/1"]["properties"]["status"]["enum"]), written)
 
     def test_checker_basics(self):
         self.assertEqual(errors(1, {"type": "integer"}), [])

@@ -62,13 +62,6 @@
    ],
    "pattern": "^lv_\\d{8}_\\d{4}$"
   },
-  "superseded_by": {
-   "type": [
-    "string",
-    "null"
-   ],
-   "pattern": "^lv_\\d{8}_\\d{4}$"
-  },
   "pushed_to": {
    "type": [
     "string",
@@ -102,6 +95,21 @@
     "superseded",
     "pushed"
    ]
+  },
+  "status_by": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^[a-z0-9_]+$",
+   "description": "people.json id of whoever set this status explicitly (registry.py set-status); explicit beats derived"
+  },
+  "owner": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "description": "owner file the registry pointer derives from at read time"
   }
  },
  "required": [
