@@ -1,0 +1,12 @@
+# Class groups for build_review_package.py --class-aware (default for --class-groups).
+# A label and a prediction matched across groups is flagged class-disagree (x).
+# low_conf labels match like any other but are never class-disagree, and their
+# unmatched count (flc) is kept out of the image ranking.
+groups:
+  ev_type: [EV, MV, inner, Incomplete, Overlapping]
+  non_ev_type: [VLDL, non-EV]
+  low_conf: [Low conf EV]
+# predicted class id -> group (v5_evnonev models: 0 = EV, 1 = non-EV)
+model_classes:
+  0: ev_type
+  1: non_ev_type
