@@ -51,16 +51,22 @@ Most moved keys: cards 3 (was non-EV, now MV) and 5 (was inner); Editor 2, 3, 5 
 ## Reviewer name
 - A picker lists the roster from `GET /api/people` (`annotation/people.json`). It is asked once per browser and kept in localStorage (`cryoev-review:who`).
 - **An edit is never saved without a name.** Any edit (Editor or cards) opens the picker first; once a name is picked, that edit goes through. "Not now" lets you look around without editing.
-- Saved `who` = the roster **id** (e.g. `pujan`), shown as the roster name. "Other…" takes free text, saved as typed.
+- Saved `who` = the roster **id** (e.g. `pujan`), shown as the roster name. "Other…" takes free text, saved as typed. It must fit what the server accepts (`review_server.valid_who`: letters, digits, spaces, `. _ -`, at most 40); otherwise Save stays off and a message says why. A `?who=` or stored name that doesn't fit is ignored and the picker asks.
+- If the card or the Editor selection changes while the picker is open, the edit that asked is dropped rather than applied to the new object.
+- No claims are made until there is a name.
+- Records saved offline by an older version can hold entries with an empty `who`. Before uploading them, the page asks for a name and writes it into those entries only. Entries already on the server, which may be someone else's, are left alone, and `t` doesn't change.
 - If `/api/people` fails, or the page is opened from a folder or zip, the picker asks for a typed name (required).
 - `&who=<name>` in the link, or a name typed into the old prompt, becomes the roster id when it matches an id, name or alias (any case, e.g. `Puj` → `pujan`). Otherwise it is kept as given.
 - The current name shows in the Editor header and the cards' filter row (👤). Tap it to change.
 - Claims (`/api/claim?who=`) use the same value.
 
+**Escaping:** strings from edit records and claims (who, seed, a decision's class) are HTML-escaped wherever the page builds HTML. The server also refuses names with markup.
+
 ## Deep links
 `?img=<file>&obj=<decision key>&mode=editor` opens the Editor with that image loaded and the object selected and centered. Opening it directly or from a bookmark works the same.
 - `obj` is a decision key: `g<id>`, `p<idx>` (a prediction, or the label it became once accepted) or `n<uid>`. `img` may also be the file's stem.
 - Each card's **Open in editor ↗** is such a link. It keeps the page's `k=` (so it also works on a device without the cookie) and drops `who=`. Tapping it opens the Editor in place, and Back returns to the same card. Long-press it to copy or bookmark it.
+- After it opens, `img`, `obj` and `mode` are removed from the address bar (`replaceState`, `k=` stays), so a reload doesn't jump back to the object.
 - If the object is gone (deleted or undone), the Editor centres where it was and says so. A prediction is drawn even if the confidence slider was above its score (the slider is lowered to it).
 - The server's access-key check is unchanged: without `k=` or the cookie, the link gets 403.
 
@@ -68,8 +74,11 @@ Most moved keys: cards 3 (was non-EV, now MV) and 5 (was inner); Editor 2, 3, 5 
 Display only. A decision with `seed` (`september:<v4 file>:<v4 key>`, written by `resolve_review_edits.py`) was carried over from the September review.
 - Editor: a small **Sept** tag above the label's outline (the header's "Sept" checkbox hides them), a line in the selection box, and a legend entry.
 - Queue: images with seeded decisions show **Sept n**.
-- Cards: a **Sept** tag in the header. Seeded objects already have a decision, so the queue normally skips them.
-- The tool never writes `seed`. A reviewer's new decision on that object has none, so its tag goes. Undoing that decision restores its value but not its `seed`.
+- Cards (user decision, 2026-10-30): a seeded decision counts as **not yet checked**. The cards include every seeded object: in class review, seeded labels, accepted predictions (`add:`) and drawn outlines (`new:`); in triage, any seeded `g`/`p`/`n`. They come after the image's flagged cards, and they count in "n labels to check".
+  - The card shows the **Sept** tag and the September decision in blue: "Sept: keep as non-EV", "Sept: add MV", "Sept: new inner", "Sept: delete".
+  - ✓ / ♥ / swipe right confirms it: the same value and outline are written again, fresh, credited to the reviewer.
+  - A class pick (same or different class) writes a fresh decision. An accepted prediction or drawn outline keeps its September outline.
+- The tool never writes `seed`. A reviewer's new decision on that object has none, so it is resolved and its tag goes. Undoing that decision restores its value but not its `seed`.
 
 ## Editor (desktop)
 | Action | How |
@@ -119,7 +128,8 @@ Narrow screens open the cards automatically. "Editor" goes back.
 - **auto-next** (default **off**, remembered in localStorage `cryoev-review:autoNext`). It applies to class picks: the class buttons, the triage class chips and keys `1`–`8`.
   - Off: the card stays. The chosen class is highlighted, and a green "✓ class …" line shows the card's decision. **Next →** (or `N`, ↑, swipe up; in class review also swipe left) moves on, with no decision. A server pull doesn't move you off a card you just picked on.
   - On: a pick moves to the next card, as before.
-  - Swipes, ✓ / ♥ / ✕ and "Save shape" always move on.
+  - Swipes, ✓ / ♥ / ✕ and "Save shape" always move on. After a pick on the card they **only** move on: they never overwrite the pick.
+- **Two reviewers:** when the server refuses a card's claim (someone else has it), the page moves on. Cards poll every 5 s for claims and decisions, and leave a card that is now someone else's or was decided elsewhere. The card you just picked on is never left this way. The screen re-renders only when something on it changed.
 
 The mode menu has two modes:
 - **flagged objects** (triage, as before):
@@ -213,6 +223,9 @@ python -m unittest discover -s annotation/tests -v
   - reclass, accept, freehand, tap-vertex, redraw and vertex drag;
   - two reviewers: offline redraw vs a later Editor save; undo vs someone's newer decision; selection and Redraw through a pull;
   - class review at 400 px with touch;
+  - QC fixes (`QcFixTests`): a swipe / ♥ / ✕ / Enter after a pick only moves on (M1); markup in who / seed / class / claims renders as text (M3); Other limited to the server's characters; a retry dropped when the card changed; no claims without a name; blank-who offline entries named before upload; a deep link stripped after it opens;
+  - two phones (`TwoReviewerTests`): never on the same card, and a card decided by one is left by the other (M2);
+  - September cards (`SeptCardTests`): seeded keep / delete / add / new cards in class review and triage, confirm and pick write fresh decisions, counts;
   - phone review (`PhoneReviewTests`, 400 px touch and 1280 px desktop): card header, flag order and object outline (U1); auto-next off by default, stays on a picked card through a pull, remembered when on (U2); deep links opened directly at both sizes, for a label, a prediction and a missing object, in-place open + Back, and 403 without the key (U3); name picker from `/api/people`, required before card and Editor edits, roster id saved and claimed, Other, alias mapping, typed fallback when `/api/people` fails (U5); Sept tags and their removal on a new decision (U7);
   - page labels == `effective_labels()`, on the fixture and on both real packages. Re-saving the September records changes no labels.
 - Real packages are copied to a temp folder and never written.

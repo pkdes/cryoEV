@@ -486,7 +486,7 @@ class PhoneReviewTests(Base):
         page.tap("#triCls button:has-text('Overlapping')")
         time.sleep(0.4)
         self.assertEqual(self.state(page)["tri"]["pos"], pos)  # the card stays
-        self.assertIn("class Overlapping", page.inner_text("#triPicked"))
+        self.assertIn("keep as Overlapping", page.inner_text("#triPicked"))
         self.assertIn("cur", page.locator("#triCls button", has_text="Overlapping").get_attribute("class"))
         self.assertIn("on", page.locator("#aNext").get_attribute("class"))
         self.synced(page)
@@ -670,20 +670,289 @@ class PhoneReviewTests(Base):
         self.assertEqual(row.locator(".sept").inner_text(), "Sept 1")
         self.assertNotIn("September", ed.inner_text("#selBox"))
         self.check_js_equals_python(ed)
-        # the phone card tags the seeded object (g403 is the last class-review card of fixD)
+
+
+class CardBase(Base):
+    """Phone card helpers; each subclass gets its own server, so other tests' claims don't move its cards."""
+    PHONE = PhoneTests.PHONE
+    DESK = PhoneReviewTests.DESK
+    card, file_of, wait_card, shot = PhoneReviewTests.card, PhoneReviewTests.file_of, PhoneReviewTests.wait_card, PhoneReviewTests.shot
+
+    def go_card(self, page, file, key):
+        keys = [(self.file_of(c), c["key"]) for c in self.state(page)["tri"]["queue"]]
+        page.evaluate(f"__review.triGo({keys.index((file, key))})")
+        page.wait_for_function("__review.state().tri.ready")
+        self.assertEqual((self.file_of(self.card(page)), self.card(page)["key"]), (file, key))
+
+    def put_seeds(self, file, dec):
+        t = int(time.time() * 1000)
+        body = {"t": t, "dec": {k: dict(d, t=t, who=d.get("who", "Pujan")) for k, d in dec.items()}}
+        self.assertEqual(self.srv.put(file, body)[0], 200)
+
+
+class QcFixTests(CardBase):
+    """QC on 1a5a0bd: M1 (a swipe after a pick), M3 (markup in records), and the should-fix items."""
+
+    def test_m1_swipe_after_a_pick_only_moves_on(self):
+        page = self.open("&who=swp&mode=cards", **self.PHONE)
+        self.wait_card(page)
+        self.assertFalse(page.is_checked("#autoNext"))
+        cases = [("fixB_old.png", "p1", "MV", "add:MV", "#aYes"),         # ♥ after a chip pick
+                 ("fixA_new.png", "g104", "→ MV", "keep:MV", "#aNope"),   # ✕
+                 ("fixA_new.png", "g105", "→ Incomplete", "keep:Incomplete", "Enter"),
+                 ("fixB_old.png", "g202", "→ inner", "keep:inner", "swipe-right"),
+                 ("fixB_old.png", "g203", "→ EV", "keep:EV", "swipe-left")]
+        for f, key, chip, want, how in cases:
+            self.go_card(page, f, key)
+            page.locator("#triChips button", has_text=re.compile("^" + re.escape(chip) + "$")).tap()
+            page.wait_for_function("__review.state().tri.picked")
+            pos = self.state(page)["tri"]["pos"]
+            if how.startswith("#"):
+                page.tap(how)
+            elif how == "Enter":
+                page.keyboard.press("Enter")
+            else:
+                box = page.locator("#tcv").bounding_box()
+                x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+                dx = 160 if how == "swipe-right" else -160
+                page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x + dx, y, steps=8); page.mouse.up()
+            page.wait_for_function(f"__review.state().tri.pos !== {pos}")
+            time.sleep(0.3)
+            self.synced(page)
+            self.assertEqual(self.saved_dec(f)[key]["v"], want, (key, how))
+        self.check_js_equals_python(page)
+
+    def test_m3_markup_in_records_is_not_html(self):
+        """The server now refuses such names (0512245), so the record is put into the page directly. Uploads are
+        blocked here, so the bad record never reaches the server."""
+        bad = "<img src=x onerror=window.__pwn=1>"
+        claims = json.dumps({"claims": {"fixA_new.png|editor": bad.replace("1", "4")}})
+
+        def block(ctx, pg, mode):
+            pg.route("**/api/edits?f=*", lambda r: r.abort() if r.request.method == "PUT" else r.continue_())
+            if mode == "editor":  # in the cards it would make every fixA card someone else's
+                pg.route(re.compile(r".*/api/claims?(\?.*)?$"), lambda r: r.fulfill(status=200, content_type="application/json", body=claims))
+        for mode, view in (("classes", self.PHONE), ("editor", self.DESK)):
+            page = self.open(f"&who=esc&mode={mode}", setup=lambda ctx, pg, m=mode: block(ctx, pg, m), **view)
+            page.evaluate("""bad => { const e = __review.edits(), f = "fixA_new.png";
+                e[f] = e[f] || {dec: {}, reviewed: false, modified: false}; e[f].dec = e[f].dec || {};
+                e[f].dec.g102 = {v: "keep:" + bad.replace("1", "2"), t: Date.now(), who: bad, seed: bad.replace("1", "3")};
+                e[f].dec.g103 = {v: "keep:MV", t: Date.now(), who: bad}; __review.render(); }""", bad)
+            if mode == "classes":
+                self.go_card(page, "fixA_new.png", "g102")
+                self.assertIn("<img", page.inner_text("#triPicked"))  # shown as text
+                self.assertIn("<img", page.inner_text("#triBio h2"))
+                n = [(self.file_of(c), c["key"]) for c in self.state(page)["tri"]["queue"]].index(("fixA_new.png", "g103"))
+                # g103 is decided, so the card is left once its claim returns: read it in the same tick
+                self.assertIn("by <img", page.evaluate(f"__review.triGo({n}), document.getElementById('triPicked').textContent"))
+            else:
+                self.go(page, "fixA_new.png")
+                self.click_obj(page, self.image("fixA_new.png")["gt"][1]["p"][0])  # g102
+                self.assertIn("<img", page.inner_text("#selBox"))
+                page.wait_for_function("[...document.querySelectorAll('#items .who')].some(e => e.textContent.includes('<img'))", timeout=12000)
+            time.sleep(0.3)
+            self.assertIsNone(page.evaluate("window.__pwn || null"), mode)
+            self.assertEqual(page.locator("#triBio img, #selBox img, #items img").count(), 0)
+        self.errors = [e for e in self.errors if "Failed to load resource" not in e]  # the blocked uploads
+
+    def test_other_name_limited_to_what_the_server_takes(self):
+        page = self.open("&mode=classes", **self.PHONE)
+        page.wait_for_selector("#whoDlg:not([hidden])")
+        page.locator("#whoOtherBtn").tap()
+        for bad in ("<b>x</b>", "Ann!", "a/b"):
+            page.fill("#whoText", bad)
+            self.assertTrue(page.locator("#whoSave").is_disabled(), bad)
+            self.assertTrue(page.locator("#whoErr").is_visible(), bad)
+        page.fill("#whoText", "José O'Neil")  # apostrophe: refused too
+        self.assertTrue(page.locator("#whoSave").is_disabled())
+        page.fill("#whoText", "José Ñ-2.b_c")
+        self.assertFalse(page.locator("#whoSave").is_disabled())
+        self.assertTrue(page.locator("#whoErr").is_hidden())
+        page.tap("#whoSave")
+        c = self.card(page)
+        page.tap("#triCls button:has-text('MV')")
+        self.synced(page)  # the server takes it (a refused name would leave this record unsynced)
+        self.assertEqual(self.saved_dec(self.file_of(c))[c["key"]]["who"], "José Ñ-2.b_c")
+        bad_link = self.open("&who=%3Cb%3E&mode=editor", **self.DESK)  # a link with markup is not used as a name
+        bad_link.wait_for_selector("#whoDlg:not([hidden])")
+
+    def test_name_retry_dropped_when_the_card_changed(self):
+        page = self.open("&mode=classes", **self.PHONE)
+        self.wait_card(page)
+        page.wait_for_selector("#whoDlg:not([hidden])")
+        page.tap("#whoCancel")
+        c0 = self.card(page)
+        page.tap("#triCls button:has-text('VLDL')")  # blocked: asks for a name
+        page.wait_for_selector("#whoDlg:not([hidden])")
+        page.evaluate(f"__review.triGo({self.state(page)['tri']['pos'] + 1})")  # the card changes underneath
+        page.locator("#whoList button", has_text="AU 1").tap()
+        time.sleep(0.5)
+        self.synced(page)
+        c1 = self.card(page)
+        for c in (c0, c1):
+            self.assertNotIn(c["key"], self.saved_dec(self.file_of(c)), c)
+
+    def test_no_claims_without_a_name(self):
+        page = self.open("&mode=classes", **self.PHONE)
+        self.wait_card(page)
+        page.wait_for_selector("#whoDlg:not([hidden])")
+        time.sleep(1.5)
+        sent = page.evaluate("performance.getEntriesByType('resource').filter(e => e.name.includes('api/claim?')).map(e => e.name)")
+        self.assertEqual(sent, [])
+        page.locator("#whoList button", has_text="Pujan").tap()
+        page.wait_for_function("performance.getEntriesByType('resource').some(e => e.name.includes('api/claim?') && e.name.includes('who=pujan'))")
+
+    def test_blank_who_entries_get_the_name_before_upload(self):
+        """Records saved offline by an older version (who '') are uploaded only once there is a name; only the
+        entries the server doesn't have get it, with the same t."""
+        f, t_srv = "fixC_old.png", int(time.time() * 1000) - 5000
+        self.assertEqual(self.srv.put(f, {"t": t_srv, "dec": {"g302": {"v": "keep:MV", "t": t_srv, "who": ""}}})[0], 200)
+        t_off = t_srv + 1000
+        pkg = self.srv.data["id"]
+        rec = {"dec": {"g302": {"v": "keep:MV", "t": t_srv, "who": ""}, "g301": {"v": "keep:inner", "t": t_off, "who": ""}},
+               "reviewed": False, "modified": True, "t": t_off}
+        init = ("localStorage.setItem('cryoev-review:" + pkg + "', " + json.dumps(json.dumps({f: rec})) + ");"
+                "localStorage.setItem('cryoev-review:" + pkg + ":dirty', " + json.dumps(json.dumps([f])) + ");")
+        page = self.open("&mode=editor", setup=lambda ctx, pg: ctx.add_init_script(init), **self.DESK)
+        page.wait_for_selector("#whoDlg:not([hidden])")
+        time.sleep(1.5)
+        self.assertNotIn("g301", self.saved_dec(f))  # not uploaded without a name
+        page.click("#whoList button:has-text('AU 1')")
+        self.synced(page)
+        dec = self.saved_dec(f)
+        self.assertEqual((dec["g301"]["v"], dec["g301"]["who"], dec["g301"]["t"]), ("keep:inner", "au1", t_off))
+        self.assertEqual(dec["g302"]["who"], "")  # the server's own blank entry is not claimed by this reviewer
+
+    def test_deep_link_reload_stays_put(self):
+        url = self.srv.url + "&img=fixB_old.png&obj=g201&mode=editor&who=dl"
+        page = self.open(url=url, **self.DESK)
+        page.wait_for_function("__review.state().server && __review.state().sel && __review.state().sel.key === 'g201'")
+        page.wait_for_function("!location.search.includes('img=')")
+        self.assertIn("k=" + KEY, page.url)
+        self.assertNotIn("obj=", page.url)
+        self.go(page, "fixC_old.png")
+        page.reload()
+        page.wait_for_function("window.__review && __review.state().server && __review.state().imgReady")
+        self.assertIsNone(self.state(page)["sel"])  # no snap back to g201
+
+
+class TwoReviewerTests(CardBase):
+    """M2: two phones never sit on the same card, and a card decided elsewhere is left."""
+
+    def test_two_phones_get_different_cards(self):
+        a = self.open("&who=ra&mode=classes", **self.PHONE); self.wait_card(a)
+        a.wait_for_function("performance.getEntriesByType('resource').some(e => e.name.includes('api/claim?'))")
+        time.sleep(0.5)
+        b = self.open("&who=rb&mode=classes", **self.PHONE); self.wait_card(b)
+        key = lambda p: (self.file_of(self.card(p)), self.card(p)["key"])
+        b.wait_for_function(f"(() => {{ const s = __review.state(), c = s.tri.queue[s.tri.pos]; return c && c.key !== {json.dumps(self.card(a)['key'])}; }})()",
+                            timeout=8000)
+        seen = []
+        for _ in range(3):
+            self.assertNotEqual(key(a), key(b))
+            seen.append((key(a), key(b)))
+            a.tap("#aSkip"); time.sleep(1.2)
+            self.assertNotEqual(key(a), key(b))
+            b.tap("#aSkip"); time.sleep(1.2)
+        # A decides a card; B's poll (5 s) brings the decision in, so B's queue leaves it
+        ca = self.card(a)
+        a.tap("#triCls button:has-text('non-EV')")
+        self.synced(a)
+        b.wait_for_function(f"(__review.edits()[{json.dumps(self.file_of(ca))}] || {{dec: {{}}}}).dec[{json.dumps(ca['key'])}]", timeout=9000)
+        a.tap("#aNext")  # A moves on: its claim on ca lapses with the next claim
+        for _ in range(8):
+            b.tap("#aSkip"); time.sleep(0.3)
+            self.assertNotEqual(key(b), (self.file_of(ca), ca["key"]))
+        self.check_js_equals_python(b)
+
+
+class SeptCardTests(CardBase):
+    """User decision: September-seeded objects are cards again until a reviewer confirms or changes them."""
+
+    def setUp(self):
+        if getattr(type(self), "_seeded", False):
+            return
+        type(self)._seeded = True
+        ring = lambda cx, cy, r: [[round((cx + r * math.cos(2 * math.pi * k / 12)) / 360, 5),
+                                   round((cy + r * math.sin(2 * math.pi * k / 12)) / 256, 5)] for k in range(12)]
+        flat = lambda pts: [v for pt in pts for v in pt]
+        self.p1 = [flat(ring(262, 152, 21))]
+        self.n1 = [flat(ring(60, 200, 15))]
+        type(self).P1, type(self).N1 = self.p1, self.n1
+        self.put_seeds("fixC_old.png", {
+            "g301": {"v": "keep:non-EV", "seed": "september:old_c.png:g9"},
+            "g302": {"v": "del", "seed": "september:old_c.png:g10"},
+            "p1": {"v": "add:MV", "p": self.p1, "seed": "september:old_c.png:p2"},
+            "nsept1": {"v": "new:inner", "p": self.n1, "seed": "september:old_c.png:n1"}})
+        self.put_seeds("fixD_new.png", {"g403": {"v": "keep:Low conf EV", "seed": "september:old_d.png:g8"}})
+
+    def left(self, page):
+        return int(page.inner_text("#triProg").split(" of ")[0])
+
+    def test_seeded_cards_in_class_review(self):
         ph = self.open("&who=sept2&mode=classes", **self.PHONE)
         self.wait_card(ph)
-        q = self.state(ph)["tri"]["queue"]
-        # decided cards (seeded ones too) are skipped by the queue, so jump to them directly
-        keys = [(self.file_of(c), c["key"]) for c in q]
-        ph.evaluate(f"__review.triGo({keys.index((f, 'g401'))})")
-        ph.wait_for_function("__review.state().tri.ready")
+        keys = [(self.file_of(c), c["key"]) for c in self.state(ph)["tri"]["queue"]]
+        for k in ("g301", "g302", "p1", "nsept1"):  # fixC has no flags: these cards exist only because of the seeds
+            self.assertIn(("fixC_old.png", k), keys)
+        self.assertEqual(keys.count(("fixD_new.png", "g403")), 1)  # flagged and seeded: one card
+        n0 = self.left(ph)
+        self.assertEqual(n0, len(keys))  # seeded = still to check
+        self.go_card(ph, "fixD_new.png", "g401")
         self.assertTrue(ph.locator("#thSept").is_hidden())
-        ph.evaluate(f"__review.triGo({keys.index((f, 'g403'))})")
-        ph.wait_for_function("__review.state().tri.ready")
-        self.assertEqual(self.card(ph)["key"], "g403")
+        self.go_card(ph, "fixC_old.png", "g301")
         self.assertTrue(ph.locator("#thSept").is_visible())
-        self.shot(ph, "u7_sept_tag_card.png")
+        self.assertEqual(ph.inner_text("#triPicked").split(" · ")[0], "Sept: keep as non-EV")
+        self.shot(ph, "sept_card_keep.png")
+        pos = self.state(ph)["tri"]["pos"]
+        ph.tap("#aYes")  # confirm: the same value, fresh, credited to this reviewer
+        ph.wait_for_function(f"__review.state().tri.pos !== {pos}")
+        self.synced(ph)
+        d = self.saved_dec("fixC_old.png")["g301"]
+        self.assertEqual((d["v"], d["who"], "seed" in d), ("keep:non-EV", "sept2", False))
+        self.assertEqual(self.left(ph), n0 - 1)
+        self.go_card(ph, "fixC_old.png", "p1")
+        self.assertEqual(ph.inner_text("#triPicked").split(" · ")[0], "Sept: add MV")
+        self.shot(ph, "sept_card_add.png")
+        ph.tap("#triCls button:has-text('EV') >> nth=0")  # a different class: fresh, outline kept
+        self.synced(ph)
+        d = self.saved_dec("fixC_old.png")["p1"]
+        self.assertEqual((d["v"], d["who"], "seed" in d, d["p"]), ("add:EV", "sept2", False, self.P1))
+        self.assertTrue(ph.locator("#thSept").is_hidden())
+        self.assertIn("add EV", ph.inner_text("#triPicked"))
+        self.go_card(ph, "fixC_old.png", "nsept1")
+        self.assertEqual(ph.inner_text("#triPicked").split(" · ")[0], "Sept: new inner")
+        ph.tap("#triCls button:has-text('inner')")  # the same class, picked: fresh too
+        self.synced(ph)
+        d = self.saved_dec("fixC_old.png")["nsept1"]
+        self.assertEqual((d["v"], d["who"], "seed" in d, d["p"]), ("new:inner", "sept2", False, self.N1))
+        self.go_card(ph, "fixC_old.png", "g302")
+        self.assertEqual(ph.inner_text("#triPicked").split(" · ")[0], "Sept: delete")
+        self.shot(ph, "sept_card_delete.png")
+        pos = self.state(ph)["tri"]["pos"]
+        ph.tap("#aYes")
+        ph.wait_for_function(f"__review.state().tri.pos !== {pos}")
+        self.synced(ph)
+        d = self.saved_dec("fixC_old.png")["g302"]
+        self.assertEqual((d["v"], "seed" in d), ("del", False))
+        self.assertEqual(self.saved_dec("fixD_new.png")["g403"]["seed"], "september:old_d.png:g8")  # untouched
+        self.assertEqual(self.left(ph), n0 - 4)
+        self.check_js_equals_python(ph)
+
+    def test_seeded_cards_in_triage(self):
+        ph = self.open("&who=sept3&mode=cards", **self.PHONE)
+        self.wait_card(ph)
+        keys = [(self.file_of(c), c["key"]) for c in self.state(ph)["tri"]["queue"]]
+        self.assertIn(("fixD_new.png", "g403"), keys)
+        self.go_card(ph, "fixD_new.png", "g403")
+        self.assertTrue(ph.locator("#thSept").is_visible())
+        self.assertEqual(ph.inner_text("#triPicked").split(" · ")[0], "Sept: keep as Low conf EV")
+        self.shot(ph, "sept_card_triage.png")
+        ph.locator("#triChips button", has_text=re.compile(r"^→ MV$")).tap()
+        self.synced(ph)
+        d = self.saved_dec("fixD_new.png")["g403"]
+        self.assertEqual((d["v"], d["who"], "seed" in d), ("keep:MV", "sept3", False))
+        self.check_js_equals_python(ph)
 
 
 class RealPackageTests(Base):
