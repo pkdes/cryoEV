@@ -9,7 +9,7 @@
 @media (prefers-color-scheme:dark){:root{--bg:#161615;--panel:#20201f;--ink:#ecece8;--mute:#9a9a94;--line:#353532;--acc:#6ea0f0;--warn:#fb923c;color-scheme:dark}}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:13px/1.35 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;overflow:hidden}
-#app{display:grid;grid-template-columns:260px minmax(0,1fr) 250px;width:100%;grid-template-rows:auto 1fr;height:100%}
+#app{display:grid;grid-template-columns:300px minmax(0,1fr) 250px;width:100%;grid-template-rows:auto 1fr;height:100%}
 header{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--panel)}
 header .sep{width:1px;height:22px;background:var(--line);margin:0 4px}
 button,select,input[type=file]::file-selector-button{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 9px;cursor:pointer}
@@ -25,8 +25,19 @@ label.tg{display:inline-flex;gap:4px;align-items:center;cursor:pointer;user-sele
 #list .it.cur{background:color-mix(in srgb,var(--acc) 18%,transparent)}
 #list .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
 .badge{font-size:11px;padding:0 5px;border-radius:8px;border:1px solid var(--line);color:var(--mute)}
-.fl{color:var(--warn);font-size:11px;min-width:30px;text-align:right}
+.fl{font-size:11px;min-width:30px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.fl b{margin-left:3px;padding:0 3px;border-radius:4px;background:#000}
 .ok{color:#16a34a;font-weight:700;width:12px}
+.ok.edited{color:var(--acc)}
+.who{font-size:11px;color:var(--acc);max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#qSum{font-size:11px;color:var(--mute);width:100%}
+#chipBar{position:absolute;left:8px;right:8px;bottom:8px;display:flex;gap:5px;overflow-x:auto;scrollbar-width:none}
+#chipBar button{flex:none;border-radius:14px;padding:3px 10px;font-size:12px;background:rgba(0,0,0,.65);color:#fff;border:2px solid transparent;touch-action:manipulation}
+#chipBar button.on{border-color:#fff}
+#chipBar button.newcls,#triCls button.newcls{opacity:.6;border-style:dashed}
+.legend .newcls{opacity:.6;font-style:italic}
+.legend .sw{display:inline-block;width:28px;height:12px;background:#000;border-radius:2px;position:relative;vertical-align:-2px;margin-right:6px}
+.legend .sw i{position:absolute;left:3px;right:3px;top:50%;transform:translateY(-50%);height:0}
 #stage{min-width:0;min-height:0;position:relative;overflow:hidden;background:#000;touch-action:none}
 canvas{display:block;width:100%;height:100%}
 #side{overflow:auto;border-left:1px solid var(--line);background:var(--panel);padding:10px}
@@ -35,7 +46,7 @@ canvas{display:block;width:100%;height:100%}
 #side kbd{font:11px ui-monospace,monospace;border:1px solid var(--line);border-radius:4px;padding:0 4px}
 .help li{margin:2px 0;color:var(--mute)}
 #banner{position:absolute;left:8px;top:8px;right:8px;background:var(--warn);color:#fff;padding:6px 10px;border-radius:6px;display:none}
-#hint{position:absolute;left:8px;bottom:8px;background:rgba(0,0,0,.6);color:#fff;padding:4px 8px;border-radius:6px;font-size:12px;pointer-events:none}
+#hint{position:absolute;left:8px;bottom:44px;background:rgba(0,0,0,.6);color:#fff;padding:4px 8px;border-radius:6px;font-size:12px;pointer-events:none}
 .legend span{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
 #menuBtn,#sideBtn{display:none}
 #tri{--hot:#fd267a;--hot2:#ff7854;position:fixed;top:0;left:0;width:100vw;height:100dvh;overflow:hidden;z-index:20;display:flex;flex-direction:column;background:var(--bg);padding:env(safe-area-inset-top,0px) 0 env(safe-area-inset-bottom,0px)}
@@ -80,6 +91,12 @@ canvas{display:block;width:100%;height:100%}
 #aSkip{width:48px;height:48px;font-size:22px;color:#60a5fa}
 #triUndo{width:40px;height:40px;font-size:20px;color:#f59e0b}
 #triExit{border-radius:18px}
+#tri button{touch-action:manipulation}
+#triCls{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;padding:6px 10px}
+#triCls[hidden],#triChips[hidden],#aNope[hidden],#triAdj[hidden],#clsScope[hidden],#triConf[hidden]{display:none}
+#triCls button{min-height:50px;border-radius:12px;padding:2px 4px;font-size:13px;font-weight:600;line-height:1.15;border:2px solid var(--c);overflow-wrap:anywhere}
+#triCls button small{display:block;font-size:10px;font-weight:400;opacity:.7}
+#triCls button.cur{background:var(--c);color:#000}
 @media (max-width:900px){
   #app{grid-template-columns:minmax(0,1fr)}
   header{min-width:0}
@@ -103,8 +120,9 @@ canvas{display:block;width:100%;height:100%}
   <button id="toTri" title="One flagged object at a time, swipe to decide (phone friendly)">Cryonder</button>
   <span class="sep"></span>
   <button id="mSel" class="on" title="Select / edit (S)">Select</button>
-  <button id="mDraw" title="Draw a new polygon (D)">Draw</button>
-  <select id="newCat" title="Category for new polygons"></select>
+  <button id="mDraw" title="Freehand: drag around the object (D)">Draw</button>
+  <button id="mTap" title="Tap-vertex polygon: tap points, tap the first point or Enter to close (V)">Vertex</button>
+  <button id="bClose" title="Close the polygon (Enter)" hidden>Close shape</button>
   <button id="undo" title="Undo (Z)">Undo</button>
   <span class="sep"></span>
   <label class="tg"><input type="checkbox" id="showGt" checked> Labels</label>
@@ -121,33 +139,31 @@ canvas{display:block;width:100%;height:100%}
 </header>
 <nav id="list">
   <div class="ctl">
-    <select id="fSplit"><option value="">All splits</option><option>train</option><option>valid</option><option>test</option></select>
-    <select id="fSort"><option value="flags">Most flags first</option><option value="name">By name</option></select>
-    <select id="fStat"><option value="">Any status</option><option value="todo">Not reviewed</option><option value="done">Reviewed</option></select>
+    <select id="fSplit"><option value="">All splits</option></select>
+    <select id="fSort"><option value="flags">Most flags first</option><option value="pkg">Package order</option><option value="name">By name</option></select>
+    <select id="fStat"><option value="">Any status</option><option value="unreviewed">Unreviewed</option><option value="edited">Edited</option><option value="todo">Not reviewed</option><option value="reviewed">Reviewed</option></select>
+    <div id="qSum"></div>
   </div>
   <div id="items"></div>
 </nav>
-<main id="stage"><canvas id="cv"></canvas><div id="banner"></div><div id="hint"></div></main>
+<main id="stage"><canvas id="cv"></canvas><div id="banner"></div><div id="hint"></div><div id="chipBar" title="Class: a tap or 1–8 reclasses the selection and is used for new shapes"></div></main>
 <aside id="side">
   <div id="progress"></div>
   <h3>Selection</h3>
   <div id="selBox" class="row" style="color:var(--mute)">Click a polygon to select it.</div>
   <h3>Legend</h3>
   <div class="legend" id="legend"></div>
-  <div class="legend" style="margin-top:6px">
-    <div><span style="background:#22d3ee"></span>prediction (dashed)</div>
-    <div><span style="background:#facc15"></span>prediction with no label (possible miss)</div>
-    <div><span style="background:#f0f"></span>label with no prediction (check it)</div>
-  </div>
+  <div class="legend" id="flagLegend" style="margin-top:6px"></div>
   <h3>Controls</h3>
   <ul class="help" style="padding-left:16px;margin:0">
     <li>Drag empty space to pan; wheel or pinch to zoom; <kbd>F</kbd> fit</li>
     <li>Click a polygon to select (innermost wins)</li>
     <li>Drag a white handle to move a vertex</li>
     <li>Double-click a handle to delete it, an edge to add one</li>
-    <li><kbd>Del</kbd> delete label · <kbd>A</kbd> accept prediction as label</li>
-    <li><kbd>D</kbd> draw: click points, click the first point or press <kbd>Enter</kbd> to close, <kbd>Esc</kbd> cancel</li>
-    <li><kbd>1</kbd>–<kbd>7</kbd> set category of selected label</li>
+    <li><kbd>Del</kbd> delete label · <kbd>A</kbd> accept prediction (current class)</li>
+    <li><kbd>D</kbd> freehand: drag around the object · <kbd>V</kbd> vertex: tap points, tap the first point or <kbd>Enter</kbd> to close · <kbd>Esc</kbd> cancel. In both, right/middle-drag or two fingers pan</li>
+    <li><kbd>E</kbd> redraw the selected outline (keeps class and id)</li>
+    <li><kbd>1</kbd>–<kbd>8</kbd> or a class chip: reclass the selection; also the class for new shapes</li>
     <li><kbd>N</kbd>/<kbd>P</kbd> next/prev · <kbd>R</kbd> reviewed · <kbd>Z</kbd> undo · <kbd>T</kbd> toggle predictions · <kbd>H</kbd> hide/show all outlines</li>
   </ul>
   <h3>Saving</h3>
@@ -162,10 +178,16 @@ canvas{display:block;width:100%;height:100%}
   </div>
   <div class="tfil">
     <span id="triProg"></span>
+    <select id="triMode" title="Flagged objects: keep / delete / add. Class review: set the class only">
+      <option value="tri">flagged objects</option><option value="cls">class review</option>
+    </select>
+    <select id="clsScope" title="Which labels to review">
+      <option value="flags">class flags</option><option value="all">all labels</option>
+    </select>
     <select id="triConf" title="Only show predictions at or above this confidence">
       <option value="0.25">conf &ge; 0.25</option><option value="0.35" selected>conf &ge; 0.35</option><option value="0.45">conf &ge; 0.45</option><option value="0.6">conf &ge; 0.6</option>
     </select>
-    <select id="triSplit"><option value="">all splits</option><option>train</option><option>valid</option><option>test</option></select>
+    <select id="triSplit"><option value="">all splits</option></select>
     <span id="sync2" class="badge">local only</span>
     <button id="triWho" class="badge" title="Change your reviewer name">👤</button>
   </div>
@@ -181,6 +203,7 @@ canvas{display:block;width:100%;height:100%}
     <div id="triMatch" hidden></div>
   </div>
   <div id="triChips"></div>
+  <div id="triCls" hidden></div>
   <div id="triAdjBar" hidden>
     <button id="adjCancel" title="Stop editing, keep the original shape (Esc)">Cancel</button>
     <button id="adjRedraw" title="Trace a new outline with one stroke (R)">✏️ Redraw</button>
@@ -198,17 +221,29 @@ canvas{display:block;width:100%;height:100%}
 "use strict";
 const D = window.REVIEW_DATA;
 if (!D) { document.body.innerHTML = '<p style="padding:20px">data.js is missing. Keep index.html, data.js and images/ together in one folder.</p>'; return; }
-const CATS = D.categories;
-const PALETTE = ["#4ade80","#fb923c","#a78bfa","#f87171","#60a5fa","#f472b6","#e5e7eb","#34d399"];
-const catColor = c => PALETTE[Math.max(0, CATS.indexOf(c)) % PALETTE.length];
+// Classes are the Roboflow project's names, in hotkey order 1-8; any other class in data.js comes after.
+const CLASS_ORDER = ["EV", "Low conf EV", "MV", "inner", "Incomplete", "Overlapping", "VLDL", "non-EV"];
+const CATS = [...CLASS_ORDER, ...(D.categories || []).filter(c => !CLASS_ORDER.includes(c) && c !== "items-nfaR")];
+const CLASS_COLOR = {"EV": "#4ade80", "Low conf EV": "#a78bfa", "MV": "#f87171", "inner": "#f472b6", "Incomplete": "#fb923c",
+  "Overlapping": "#60a5fa", "VLDL": "#d4a373", "non-EV": "#e5e7eb"};
+const EXTRA_COLORS = ["#34d399", "#fde68a", "#93c5fd", "#fca5a5"];
+const catColor = c => CLASS_COLOR[c] || EXTRA_COLORS[Math.max(0, CATS.indexOf(c)) % EXTRA_COLORS.length];
+// Offered but missing from this package's categories: marked, since a COCO export must add the category.
+const PKG_CATS = new Set(D.categories || []), isNewCls = c => !PKG_CATS.has(c);
+const NEW_TIP = "new class: not in this package's categories (apply_review_edits must add it)";
+// Flags from build_review_package.py. u: no match (old); x, lc, fx, flc: optional, newer packages only.
+const FLAG = {gu: "rgba(255,0,255,.55)", pu: "#facc15", x: "#f97316", lc: "rgba(226,232,240,.9)"};
 const $ = id => document.getElementById(id);
+const clone = o => JSON.parse(JSON.stringify(o));
 const cv = $("cv"), ctx = cv.getContext("2d"), stage = $("stage");
 const KEY = "cryoev-review:" + D.id;
 
 // ---------- state ----------
 let edits = {};            // file -> {gt:[...], reviewed:bool, modified:bool}
 let cur = 0, order = [];   // cur = index into D.images
-let mode = "select", sel = null, draft = null;
+let mode = "select", sel = null, draft = null;  // mode: select | draw (freehand) | tap (vertex)
+let curCls = CATS[0];      // class for new shapes and accepted predictions; set by 1-8 and the chips
+let claims = {};           // "<file>|<key>" -> reviewer name, from /api/claims
 let img = new Image(), imgReady = false, W = 1, H = 1;
 let view = {s: 1, ox: 0, oy: 0};
 const undoStacks = {};
@@ -233,12 +268,13 @@ function persist() {
 }
 
 const curImg = () => D.images[cur];
-// Per-image edit record:
-//   dec  {key: {v, t, who}}  one triage decision per flagged object ("p<pred idx>" / "g<label id>"),
-//                            merged across reviewers per key, newest wins. v = "add:<cls>" | "no" |
-//                            "keep:<cls>" | "del" | null (undone).
-//   gt, gtT                  a full polygon list, only once someone edits polygons in the Editor; else the
-//                            original labels are the base. Decisions are re-applied on top (idempotent).
+// Per-image edit record (full spec: docs/REVIEW_TOOL.md):
+//   dec  {key: {v, t, who, p?}}  one decision per object, merged across reviewers per key, newest wins.
+//                            "g<label id>": "keep:<cls>" | "del";  "p<pred idx>": "add:<cls>" | "no";
+//                            "n<uid>" (drawn in the Editor): "new:<cls>" | "del";  null = undone.
+//                            p = the object's own outline (normalized rings) when reshaped; always on "new:".
+//   gt, gtT                  a full polygon list, once someone edits polygons in the Editor; else the
+//                            original labels are the base. Decisions newer than gtT are re-applied on top.
 //   reviewed, reviewedT, modified, t
 const me = () => { try { return localStorage.getItem("cryoev-review:who") || ""; } catch (e) { return ""; } };
 { // a personal link (…&who=Name) sets the reviewer name without asking
@@ -255,40 +291,98 @@ function migrate(e) {
 }
 Object.values(edits).forEach(migrate);
 const decV = (e, key) => { const d = e && e.dec && e.dec[key]; return d ? d.v : null; };
+// Polygon list items saved by this version carry t, the time of that object's last change. Its decision applies
+// whenever it is at least that new, so a per-object edit survives a merge with anyone's newer full list. Items
+// without t (lists from before) keep the old rule: a decision's outline applies only if newer than the whole list.
 function effGt(im) {  // labels as they stand: base list + everyone's decisions (+ reshaped outlines)
   const e = edits[im.file], base = e && e.gtT && e.gt ? e.gt : im.gt, out = [];
-  const decP = key => { const d = e && e.dec && e.dec[key]; return d && d.p && d.t > ((e && e.gtT) || 0) ? d.p : null; };
+  const dec = key => (key && e && e.dec && e.dec[key]) || null;
+  const decP = key => { const d = dec(key); return d && d.p && d.t > ((e && e.gtT) || 0) ? d.p : null; };
   for (const g of base) {
-    const v = g.id != null ? decV(e, "g" + g.id) : null;
-    if (v === "del" || (g.src && decV(e, g.src) === "no")) continue;
-    const add = g.src ? decV(e, g.src) : null;
-    const cls = v && v.startsWith("keep:") ? v.slice(5) : add && add.startsWith("add:") ? add.slice(4) : g.c;
+    if (typeof g.t === "number") {
+      const d = dec(keyOf(g));
+      if (!d || (d.t || 0) < g.t) { out.push(g); continue; }
+      if (d.v === "del" || d.v === "no" || (!d.v && g.src)) continue;
+      if (!d.v) { const o = im.gt.find(x => x.id === g.id); out.push(o ? {...g, c: o.c, p: o.p} : g); continue; }  // undone: the package label
+      const m = /^(?:keep|add|new):(.*)$/.exec(d.v);
+      out.push(m ? {...g, c: m[1], p: d.p || g.p} : g); continue;
+    }
+    const v = g.id != null ? decV(e, "g" + g.id) : null, sv = g.src ? decV(e, g.src) : null;
+    if (v === "del" || sv === "no" || sv === "del") continue;
+    const cls = v && v.startsWith("keep:") ? v.slice(5) : sv && /^(add|new):/.test(sv) ? sv.slice(4) : g.c;
     const np = (g.id != null && v && v.startsWith("keep:") && decP("g" + g.id)) || (g.src && decP(g.src)) || null;
     out.push(cls !== g.c || np ? {...g, c: cls, p: np || g.p} : g);
   }
   for (const [key, d] of Object.entries((e && e.dec) || {})) {
-    if (key[0] !== "p" || !d.v || !d.v.startsWith("add:") || out.some(g => g.src === key)) continue;
-    const pr = im.pr[+key.slice(1)];
-    if (pr) out.push({id: null, c: d.v.slice(4), p: JSON.parse(JSON.stringify(d.p || pr.p)), src: key});
+    if (!d.v || out.some(g => g.src === key)) continue;
+    if (key[0] === "p" && d.v.startsWith("add:")) {
+      const pr = im.pr[+key.slice(1)];
+      if (pr) out.push({id: null, c: d.v.slice(4), p: clone(d.p || pr.p), src: key});
+    } else if (key[0] === "n" && d.v.startsWith("new:") && d.p) out.push({id: null, c: d.v.slice(4), p: clone(d.p), src: key});
   }
   return out;
 }
 function gtOf(im) { return effGt(im); }
-function ensureEdit(im) { return edits[im.file] = migrate(edits[im.file] || {reviewed: false, modified: false, dec: {}}); }
-function setDec(e, key, v, p) { e.dec[key] = p ? {v, t: Date.now(), who: me(), p} : {v, t: Date.now(), who: me()}; }
-function materialize(im) {  // the Editor edits a concrete list: freeze the current labels into e.gt
-  const e = ensureEdit(im); e.gt = JSON.parse(JSON.stringify(effGt(im))); e.gtT = Date.now(); return e;
+const recFile = new WeakMap();  // edit record -> its image file, for setDec's bookkeeping
+const mine = new Set();         // "<file>\n<key>\n<t>" of every entry this tab wrote: the only ones its undo may revert
+function ensureEdit(im) {
+  const e = edits[im.file] = migrate(edits[im.file] || {reviewed: false, modified: false, dec: {}});
+  recFile.set(e, im.file); return e;
+}
+const keyOf = g => g.src || (g.id != null ? "g" + g.id : null);  // the decision key of a label, if it has one
+// Selection / Redraw identity: the decision key; an outline drawn by an older version (no key) goes by its shape
+// until the next Editor change gives it a key (materialize).
+const selKey = g => keyOf(g) || "L" + hash(JSON.stringify(g.p));
+const findKey = (list, key) => (list || []).find(g => selKey(g) === key) || null;
+const selObj = () => sel && sel.kind === "gt" ? findKey(gtOf(curImg()), sel.key) : null;
+const selEdit = e => sel && sel.kind === "gt" ? findKey(e.gt, sel.key) : null;  // the selection in the record's list
+// A new entry's t is above the entry and list item it replaces (and the list), so it wins the merge even when
+// another device's clock runs ahead.
+function setDec(e, key, v, p) {
+  const prev = e.dec[key], item = (e.gt || []).find(g => keyOf(g) === key);
+  const t = Math.max(Date.now(), prev ? (prev.t || 0) + 1 : 0, item && typeof item.t === "number" ? item.t + 1 : 0, (e.gtT || 0) + 1);
+  e.dec[key] = p ? {v, t, who: me(), p} : {v, t, who: me()};
+  const f = recFile.get(e); if (f) mine.add(f + "\n" + key + "\n" + t);
+}
+const decided = (im, key) => !!key && decV(edits[im.file], key) != null;
+function ownPoly(im, g) {  // g's outline if it differs from the package's, so its decision carries it
+  const orig = g.src && g.src[0] === "p" ? (im.pr[+g.src.slice(1)] || {}).p : g.id != null ? (im.gt.find(o => o.id === g.id) || {}).p : null;
+  return JSON.stringify(orig) === JSON.stringify(g.p) ? undefined : clone(g.p);
+}
+function record(im, e, g) {  // mirror one Editor change into that object's decision, so it merges per object
+  if (g.src && g.src[0] === "n") setDec(e, g.src, "new:" + g.c, clone(g.p));
+  else if (g.src && g.src[0] === "p") setDec(e, g.src, "add:" + g.c, ownPoly(im, g));
+  else if (g.id != null) setDec(e, "g" + g.id, "keep:" + g.c, ownPoly(im, g));
+}
+const newId = () => "n" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+function materialize(im) {  // the Editor edits a concrete list: freeze the current labels into e.gt, each with its t
+  const e = ensureEdit(im), legacyT = e.gtT && e.gt ? e.gtT : 0, list = clone(effGt(im));
+  for (const g of list) {
+    if (!keyOf(g)) {  // keyless outline from an older version: it becomes a drawn object with a decision of its own
+      const old = selKey(g); g.src = newId(); setDec(e, g.src, "new:" + g.c, clone(g.p));
+      if (sel && sel.key === old) sel.key = g.src;
+      if (redrawKey === old) redrawKey = g.src;
+    }
+    const d = e.dec[keyOf(g)];
+    g.t = Math.max(typeof g.t === "number" ? g.t : legacyT, d ? d.t || 0 : 0);
+  }
+  e.gt = list; e.gtT = Date.now(); return e;
 }
 const snapOf = e => JSON.stringify({gt: e.gt, gtT: e.gtT, dec: e.dec});
-function restoreSnap(im, snap) {  // undo; changed keys get a fresh timestamp so the undo also wins on merge
-  const s = JSON.parse(snap), e = ensureEdit(im), now = Date.now();
-  for (const k of new Set([...Object.keys(e.dec), ...Object.keys(s.dec || {})])) {
-    const was = s.dec && s.dec[k] ? s.dec[k].v : null;
-    const wasP = s.dec && s.dec[k] && s.dec[k].p, cur = e.dec[k] || {};
-    if (decV(e, k) !== was || JSON.stringify(cur.p || null) !== JSON.stringify(wasP || null))
-      e.dec[k] = wasP ? {v: was, t: now, who: me(), p: wasP} : {v: was, t: now, who: me()};
+function restoreSnap(im, snap) {  // undo: revert only entries this tab wrote since the snapshot; others' newer ones stay
+  const s = JSON.parse(snap), e = ensureEdit(im);
+  for (const k of Object.keys(e.dec)) {
+    const cur = e.dec[k], was = s.dec && s.dec[k];
+    if ((was && cur.t === was.t) || !mine.has(im.file + "\n" + k + "\n" + cur.t)) continue;
+    if (was) setDec(e, k, was.v, was.p);
+    else if (k[0] === "g") {  // no decision before: back to the label as it stood then, stated explicitly
+      const id = +k.slice(1), so = (s.gt || []).find(g => g.id === id), po = im.gt.find(g => g.id === id);
+      const sameP = so && po && JSON.stringify(so.p) === JSON.stringify(po.p);
+      if (so && po && (so.c !== po.c || !sameP)) setDec(e, k, "keep:" + so.c, sameP ? undefined : clone(so.p));
+      else setDec(e, k, null);
+    } else setDec(e, k, null);
   }
-  if (s.gt && s.gtT !== e.gtT) { e.gt = s.gt; e.gtT = now; }
+  if (s.gt && s.gtT !== e.gtT) { e.gt = s.gt; e.gtT = Date.now(); }
 }
 function mergeEdit(a, b) {
   if (!a) return migrate(b); if (!b) return migrate(a);
@@ -362,25 +456,30 @@ function draw() {
   ctx.drawImage(img, view.ox, view.oy, W * view.s, H * view.s);
   const im = curImg(), flags = $("showFlags").checked;
   if ($("showPr").checked) {
-    ctx.setLineDash([5, 4]);
-    im.pr.forEach((p, k) => {
+    im.pr.forEach((p, k) => {  // a flag stays drawn until someone decides on the object
       if (p.s < conf()) return;
-      const miss = flags && p.u;
-      ctx.lineWidth = miss ? 2.5 : 1.3; ctx.strokeStyle = miss ? "#facc15" : "#22d3ee";
+      const open = flags && !decided(im, "p" + k), miss = open && p.u, xd = open && p.x;
+      ctx.setLineDash(xd && !miss ? [2, 3] : [5, 4]);
+      ctx.lineWidth = miss || xd ? 2.5 : 1.3; ctx.strokeStyle = miss ? FLAG.pu : xd ? FLAG.x : "#22d3ee";
       p.p.forEach(rg => { path(rg); ctx.stroke(); });
       if (sel && sel.kind === "pr" && sel.i === k) { ctx.fillStyle = "rgba(250,204,21,.25)"; p.p.forEach(rg => { path(rg); ctx.fill(); }); }
     });
     ctx.setLineDash([]);
   }
   if ($("showGt").checked) {
-    gtOf(im).forEach((g, k) => {
-      if (flags && g.u) { ctx.lineWidth = 6; ctx.strokeStyle = "rgba(255,0,255,.55)"; g.p.forEach(rg => { path(rg); ctx.stroke(); }); }
+    const halo = (g, col, w, dash) => { ctx.setLineDash(dash); ctx.lineWidth = w; ctx.strokeStyle = col; g.p.forEach(rg => { path(rg); ctx.stroke(); }); ctx.setLineDash([]); };
+    gtOf(im).forEach(g => {
+      if (flags && (g.u || g.x || g.lc) && !decided(im, keyOf(g))) {
+        if (g.u) halo(g, FLAG.gu, 6, []);
+        if (g.x) halo(g, FLAG.x, 5, [2, 4]);
+        if (g.lc) halo(g, FLAG.lc, 4, [9, 6]);
+      }
       ctx.lineWidth = 1.6; ctx.strokeStyle = catColor(g.c);
       g.p.forEach(rg => { path(rg); ctx.stroke(); });
     });
   }
   if (sel && sel.kind === "gt") {
-    const g = gtOf(im)[sel.i];
+    const g = selObj();
     if (g) {
       ctx.fillStyle = "rgba(39,100,197,.28)"; g.p.forEach(rg => { path(rg); ctx.fill(); });
       ctx.lineWidth = 2.2; ctx.strokeStyle = "#fff"; g.p.forEach(rg => { path(rg); ctx.stroke(); });
@@ -389,65 +488,111 @@ function draw() {
     }
   }
   if (draft && draft.length) {
-    ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.8; ctx.beginPath();
+    ctx.strokeStyle = redrawKey != null ? "#fff" : catColor(curCls); ctx.lineWidth = 1.8; ctx.beginPath();
     for (let i = 0; i < draft.length; i += 2) { const [x, y] = toScr(draft[i], draft[i+1]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
-    if (hover) ctx.lineTo(hover[0], hover[1]);
+    if (hover && mode === "tap") ctx.lineTo(hover[0], hover[1]);
     ctx.stroke();
-    ctx.fillStyle = "#facc15";
-    for (let i = 0; i < draft.length; i += 2) { const [x, y] = toScr(draft[i], draft[i+1]); ctx.beginPath(); ctx.arc(x, y, i ? 3 : 6, 0, 7); ctx.fill(); }
+    if (mode === "tap") {
+      ctx.fillStyle = "#facc15";
+      for (let i = 0; i < draft.length; i += 2) { const [x, y] = toScr(draft[i], draft[i+1]); ctx.beginPath(); ctx.arc(x, y, i ? 3 : 6, 0, 7); ctx.fill(); }
+    }
   }
 }
 let hover = null;
 
 // ---------- list / side panels ----------
+// ---- queue: every image with its status, flags, split and who has it open ----
+const statusOf = im => {
+  const e = edits[im.file];
+  return e && e.reviewed ? "reviewed" : e && (e.modified || Object.values(e.dec || {}).some(d => d.v)) ? "edited" : "unreviewed";
+};
+const FLAG_COUNTS = [["fg", FLAG.gu, "labels with no prediction"], ["fp", FLAG.pu, "predictions with no label"],
+  ["fx", FLAG.x, "class disagreements with the model"], ["flc", FLAG.lc, "Low conf EV labels with no match"]];
+const flagRank = im => (im.fg || 0) + (im.fp || 0) + (im.fx || 0);  // flc is shown, but doesn't rank (spec)
+const meName = () => me() || "anonymous";
+const claimedBy = file => [...new Set(Object.entries(claims).filter(([k]) => k.startsWith(file + "|")).map(([, w]) => w))];
 function renderList() {
-  const fs = $("fSplit").value, st = $("fStat").value, byName = $("fSort").value === "name";
+  const fs = $("fSplit").value, st = $("fStat").value, srt = $("fSort").value;
   order = D.images.map((_, i) => i).filter(i => {
-    const im = D.images[i], rv = !!(edits[im.file] && edits[im.file].reviewed);
-    return (!fs || im.split === fs) && (!st || (st === "done") === rv);
+    const im = D.images[i], s = statusOf(im);
+    return (!fs || im.split === fs) && (!st || st === s || (st === "todo" && s !== "reviewed"));
   });
-  if (byName) order.sort((a, b) => D.images[a].file.localeCompare(D.images[b].file));
+  if (srt === "flags") order.sort((a, b) => flagRank(D.images[b]) - flagRank(D.images[a]) || a - b);
+  else if (srt === "name") order.sort((a, b) => D.images[a].file.localeCompare(D.images[b].file));
   const box = $("items"); box.innerHTML = "";
   const frag = document.createDocumentFragment();
   for (const i of order) {
-    const im = D.images[i], e = edits[im.file];
+    const im = D.images[i], s = statusOf(im), who = claimedBy(im.file);
+    const fl = FLAG_COUNTS.filter(([k]) => im[k]).map(([k, col, t]) => `<b style="color:${col}" title="${t}">${im[k]}</b>`).join("");
     const d = document.createElement("div"); d.className = "it" + (i === cur ? " cur" : "");
-    d.innerHTML = `<span class="ok">${e && e.reviewed ? "✓" : (e && e.modified ? "•" : "")}</span>` +
+    d.innerHTML = `<span class="ok ${s}" title="${s}">${s === "reviewed" ? "✓" : s === "edited" ? "•" : ""}</span>` +
       `<span class="nm" title="${im.file}">${im.file.replace(/_(jpg|png)\.rf\..*$/, "")}</span>` +
-      `<span class="badge">${im.split}</span><span class="fl" title="unmatched labels + unmatched predictions">${im.fg + im.fp ? "⚑" + (im.fg + im.fp) : ""}</span>`;
+      (who.length ? `<span class="who" title="open now: ${who.join(", ")}">👤${who.join(",")}</span>` : "") +
+      `<span class="badge">${im.split}</span><span class="fl" title="flags: ${FLAG_COUNTS.map(([k, , t]) => `${im[k] || 0} ${t}`).join(" · ")}">${fl}</span>`;
     d.onclick = () => { go(i); $("list").classList.remove("show"); };
     frag.appendChild(d);
   }
   box.appendChild(frag);
-  const done = D.images.filter(im => edits[im.file] && edits[im.file].reviewed).length;
-  const mod = D.images.filter(im => edits[im.file] && edits[im.file].modified).length;
-  $("progress").innerHTML = `<b>${done}</b> / ${D.images.length} reviewed · ${mod} edited<br><span style="color:var(--mute)">Predictions: ${D.run}</span>`;
+  const n = {unreviewed: 0, edited: 0, reviewed: 0}; D.images.forEach(im => n[statusOf(im)]++);
+  $("qSum").textContent = `${order.length} shown · ${n.unreviewed} unreviewed · ${n.edited} edited · ${n.reviewed} reviewed`;
+  $("progress").innerHTML = `<b>${n.reviewed}</b> / ${D.images.length} reviewed · ${n.edited} edited<br><span style="color:var(--mute)">Predictions: ${D.run}</span>`;
+}
+function flagText(o, pred) {
+  const t = [];
+  if (o.u) t.push(`<span style="color:${pred ? FLAG.pu : "#f0f"}">${pred ? "no matching label" : "no matching prediction"}</span>`);
+  if (o.x) t.push(`<span style="color:${FLAG.x}">class disagrees with ${pred ? "label" : "model"}</span>`);
+  if (o.lc) t.push(`<span style="color:var(--mute)">Low conf EV: confirm the class</span>`);
+  return t.length ? " (" + t.join(", ") + ")" : "";
 }
 function renderSide() {
   const im = curImg(), box = $("selBox");
   const g = gtOf(im);
   $("title").textContent = `${im.file.replace(/_(jpg|png)\.rf\..*$/, "")}  (${im.split})`;
-  $("title").title = `${im.file} · ${g.length} labels · ${im.pr.length} predictions · flags: ${im.fg} labels, ${im.fp} predictions`;
+  $("title").title = `${im.file} · ${g.length} labels · ${im.pr.length} predictions · flags: ` + FLAG_COUNTS.map(([k, , t]) => `${im[k] || 0} ${t}`).join(", ");
   const e = edits[im.file]; $("reviewed").classList.toggle("on", !!(e && e.reviewed));
   $("undo").disabled = !(undoStacks[im.file] && undoStacks[im.file].length);
+  $("bClose").hidden = !(mode === "tap" && draft && draft.length >= 6);
+  renderChips();
   if (!sel) { box.innerHTML = `${g.length} labels, ${im.pr.filter(p => p.s >= conf()).length} predictions shown.<br>Click a polygon to select it.`; return; }
   if (sel.kind === "gt") {
-    const a = g[sel.i]; if (!a) { sel = null; return renderSide(); }
-    box.innerHTML = `<div>Label${a.u ? ' <span style="color:#f0f">(no matching prediction)</span>' : ""}</div>`;
+    const a = selObj(); if (!a) { sel = null; return renderSide(); }
+    box.innerHTML = `<div>Label <b style="color:${catColor(a.c)}">${a.c}</b>${a.id == null ? " (new)" : ""}${flagText(a, false)}</div>`;
     const s = document.createElement("select"); CATS.forEach((c, k) => { const o = new Option(`${k+1}. ${c}`, c); o.selected = c === a.c; s.add(o); });
     s.onchange = () => setCat(s.value);
     const del = document.createElement("button"); del.textContent = "Delete label"; del.onclick = deleteSel;
-    const rd = document.createElement("button"); rd.textContent = "Redraw outline"; rd.title = "Trace a new outline for this label (keeps its class)";
-    rd.onclick = () => { const i = sel.i; setMode("draw"); redrawIdx = i; hint(); };
+    const rd = document.createElement("button"); rd.textContent = "Redraw outline (E)"; rd.title = "Trace a new outline for this label (keeps its class and id)";
+    rd.onclick = startRedraw;
     box.append(s, del, rd);
   } else {
     const p = im.pr[sel.i];
-    box.innerHTML = `<div>Prediction, confidence ${p.s.toFixed(2)}${p.u ? ' <span style="color:#facc15">(no matching label)</span>' : ""}</div>`;
-    const acc = document.createElement("button"); acc.textContent = `Accept as ${$("newCat").value}`; acc.onclick = acceptPred;
+    box.innerHTML = `<div>Prediction${p.c ? ` <b style="color:${catColor(p.c)}">${p.c}</b>` : ""}, confidence ${p.s.toFixed(2)}${flagText(p, true)}</div>`;
+    const acc = document.createElement("button"); acc.textContent = `Accept as ${curCls}`; acc.onclick = () => acceptPred();
     box.append(acc);
+    if (p.c && p.c !== curCls) { const b = document.createElement("button"); b.textContent = `Accept as ${p.c}`; b.onclick = () => acceptPred(p.c); box.append(b); }
   }
 }
-function legend() { $("legend").innerHTML = CATS.map(c => `<div><span style="background:${catColor(c)}"></span>${c}</div>`).join(""); }
+function legend() {
+  $("legend").innerHTML = CATS.map((c, k) => `<div${isNewCls(c) ? ` class="newcls" title="${NEW_TIP}"` : ""}><span style="background:${catColor(c)}"></span>${k < 9 ? k + 1 + ". " : ""}${c}${isNewCls(c) ? " (new class)" : ""}</div>`).join("");
+  const sw = st => `<span class="sw"><i style="border-top:${st}"></i></span>`;
+  $("flagLegend").innerHTML = [
+    [sw("1.5px dashed #22d3ee"), "prediction"],
+    [sw(`2.5px dashed ${FLAG.pu}`), "prediction with no label (possible miss)"],
+    [sw(`6px solid ${FLAG.gu}`), "label with no prediction (check it)"],
+    [sw(`5px dotted ${FLAG.x}`), "class disagrees with the matched object (label halo, dotted prediction)"],
+    [sw(`4px dashed ${FLAG.lc}`), "Low conf EV label: confirm the class"],
+  ].map(([s, t]) => `<div>${s}${t}</div>`).join("") + `<div style="color:var(--mute);margin-top:3px">Flags disappear once the object has a decision. Older packages have only the first three.</div>`;
+}
+function renderChips() {
+  const bar = $("chipBar"), selG = selObj();
+  bar.innerHTML = "";
+  CATS.forEach((c, k) => {
+    const b = document.createElement("button"); b.textContent = (k < 9 ? k + 1 + " " : "") + c;
+    b.style.color = catColor(c); b.className = [c === curCls ? "on" : "", isNewCls(c) ? "newcls" : ""].join(" ").trim();
+    if (selG && selG.c === c) b.style.background = "rgba(255,255,255,.18)";
+    b.title = (sel ? `Reclass the selection as ${c}` : `New shapes: ${c}`) + (isNewCls(c) ? ` · ${NEW_TIP}` : "");
+    b.onclick = () => setCat(c); bar.appendChild(b);
+  });
+}
 
 // ---------- actions ----------
 function go(i) {
@@ -460,72 +605,121 @@ function go(i) {
   const nx = order[order.indexOf(i) + 1]; if (nx !== undefined) (new Image()).src = D.images[nx].src; // preload
   renderList(); renderSide(); draw();
   const el = $("items").querySelector(".it.cur"); if (el) el.scrollIntoView({block: "nearest"});
+  if (server && $("tri").hidden) postClaim(im.file + "|editor");
 }
 function step(d) { const k = order.indexOf(cur); const n = order[(k < 0 ? 0 : k + d)]; if (n !== undefined) go(n); }
-let redrawIdx = null;  // Editor: index of the label being redrawn
-function setMode(m) { mode = m; draft = null; redrawIdx = null; $("mSel").classList.toggle("on", m === "select"); $("mDraw").classList.toggle("on", m === "draw"); hint(); draw(); }
-function hint() { $("hint").textContent = mode === "draw" ? (redrawIdx != null ? "Redraw: click points around the object · click first point or Enter to finish · Esc cancels" : "Draw: click points · click first point or Enter to close · Esc cancels") : ""; $("hint").style.display = mode === "draw" ? "block" : "none"; }
-function setCat(c) {
-  if (!sel || sel.kind !== "gt") return; pushUndo();
-  const e = ensureEdit(curImg()), g = e.gt[sel.i]; g.c = c;
-  if (g.src) setDec(e, g.src, "add:" + c); else if (g.id != null && e.dec["g" + g.id]) setDec(e, "g" + g.id, "keep:" + c);
+let redrawKey = null;   // Editor: selKey of the label being redrawn (kept while switching Draw / Vertex)
+let drawPref = "draw";  // the drawing method Redraw starts with: the last one used
+function setMode(m) {
+  const r = m === "select" ? null : redrawKey;
+  mode = m; draft = null; redrawKey = r; if (m !== "select") drawPref = m;
+  $("mSel").classList.toggle("on", m === "select"); $("mDraw").classList.toggle("on", m === "draw"); $("mTap").classList.toggle("on", m === "tap");
+  hint(); renderSide(); draw();
+}
+function hint() {
+  const how = mode === "draw" ? "drag around the object" : "tap points · tap the first point or Enter to close";
+  $("hint").textContent = mode === "select" ? "" : (redrawKey != null ? "Redraw (keeps class): " : `New ${curCls}: `) + how + " · Esc cancels";
+  $("hint").style.display = mode === "select" ? "none" : "block";
+}
+function startRedraw() {
+  if (!selObj()) return;
+  const k = sel.key; setMode(drawPref); redrawKey = k; hint(); draw();
+}
+function setCat(c) {  // Select mode: reclass the selection (accept a selected prediction). Always: class for new shapes.
+  curCls = c;
+  if (mode === "select" && sel && sel.kind === "pr") return acceptPred(c);
+  if (!sel || sel.kind !== "gt" || (mode !== "select" && redrawKey == null)) { hint(); renderSide(); return; }
+  const im = curImg(); pushUndo();
+  const e = ensureEdit(im), g = selEdit(e); if (!g) return; g.c = c; record(im, e, g);
   changed();
 }
 function deleteSel() {
   if (!sel || sel.kind !== "gt") return; pushUndo();
-  const e = ensureEdit(curImg()), g = e.gt.splice(sel.i, 1)[0];
-  if (g.src) setDec(e, g.src, "no"); else if (g.id != null) setDec(e, "g" + g.id, "del");
+  const e = ensureEdit(curImg()), i = e.gt.indexOf(selEdit(e)); if (i < 0) return;
+  const g = e.gt.splice(i, 1)[0];
+  if (g.src) setDec(e, g.src, g.src[0] === "n" ? "del" : "no"); else if (g.id != null) setDec(e, "g" + g.id, "del");
   sel = null; changed();
 }
-function acceptPred() {
+function acceptPred(cls) {
   if (!sel || sel.kind !== "pr") return;
-  const p = curImg().pr[sel.i]; pushUndo();
-  const e = ensureEdit(curImg()), gt = e.gt; gt.push({id: null, c: $("newCat").value, p: JSON.parse(JSON.stringify(p.p)), src: "p" + sel.i});
-  setDec(e, "p" + sel.i, "add:" + $("newCat").value);
-  sel = {kind: "gt", i: gt.length - 1}; changed();
+  cls = cls || curCls;
+  const im = curImg(), key = "p" + sel.i, p = im.pr[sel.i]; pushUndo();
+  const e = ensureEdit(im); e.gt = e.gt.filter(g => g.src !== key);  // accepting twice must not duplicate it
+  e.gt.push({id: null, c: cls, p: clone(p.p), src: key});
+  setDec(e, key, "add:" + cls);
+  sel = {kind: "gt", key}; changed();
 }
-function finishDraft() {
-  if (!draft || draft.length < 6) { draft = null; draw(); return; }
-  if (redrawIdx != null) {  // replace the selected label's outline, keep its class
-    const i = redrawIdx; pushUndo(); const g = ensureEdit(curImg()).gt[i];
-    if (g) g.p = [draft.map(v => Math.round(v * 1e5) / 1e5)];
-    setMode("select"); sel = g ? {kind: "gt", i} : null; changed(); return;
+function rdp(pts, eps) {  // Ramer-Douglas-Peucker on [[x, y]] (from web_qc)
+  if (pts.length < 3) return pts;
+  let dmax = 0, k = 0; const a = pts[0], b = pts[pts.length - 1];
+  for (let i = 1; i < pts.length - 1; i++) { const d = segDist(pts[i][0], pts[i][1], a[0], a[1], b[0], b[1]); if (d > dmax) { dmax = d; k = i; } }
+  if (dmax <= eps) return [a, b];
+  return rdp(pts.slice(0, k + 1), eps).slice(0, -1).concat(rdp(pts.slice(k), eps));
+}
+function simplify(ring) {  // a freehand stroke: drop points within ~1 screen px of the outline
+  const pts = []; for (let i = 0; i < ring.length; i += 2) pts.push([ring[i] * W, ring[i+1] * H]);
+  return rdp(pts, 1.2 / Math.max(view.s, 1e-3) + 0.5).flatMap(([x, y]) => [x / W, y / H]);
+}
+function finishShape(ring) {  // a closed outline from Draw or Vertex: a new label, or the redrawn one
+  draft = null; hover = null;
+  if (!ring || ring.length < 6 || area(ring) * W * H < 20) { renderSide(); draw(); return; }
+  const im = curImg(), p = [ring.map(v => Math.round(clamp01(v) * 1e5) / 1e5)];
+  pushUndo(); const e = ensureEdit(im);
+  if (redrawKey != null) {  // replace the outline; class, id and decision key stay
+    const g = findKey(e.gt, redrawKey);
+    if (g) { g.p = p; record(im, e, g); }
+    setMode("select"); sel = g ? {kind: "gt", key: selKey(g)} : null; changed(); return;
   }
-  pushUndo(); const gt = ensureEdit(curImg()).gt;
-  gt.push({id: null, c: $("newCat").value, p: [draft.map(v => Math.round(v * 1e5) / 1e5)]});
-  draft = null; sel = {kind: "gt", i: gt.length - 1}; changed();
+  const g = {id: null, c: curCls, p, src: newId()};
+  e.gt.push(g); record(im, e, g);
+  sel = {kind: "gt", key: g.src}; changed();
 }
+const finishDraft = () => finishShape(draft);
 function markReviewed() {
   const e = ensureEdit(curImg()); e.reviewed = !e.reviewed; e.reviewedT = Date.now(); touch(curImg().file); renderList(); renderSide();
   if (e.reviewed) step(1);
 }
 function hitTest(sx, sy) {
   const [x, y] = toImg(sx, sy), im = curImg(); let best = null, ba = Infinity;
-  if ($("showGt").checked) gtOf(im).forEach((g, k) => g.p.forEach(rg => { if (pip(x, y, rg)) { const a = area(rg); if (a < ba) { ba = a; best = {kind: "gt", i: k}; } } }));
+  if ($("showGt").checked) gtOf(im).forEach((g, k) => g.p.forEach(rg => { if (pip(x, y, rg)) { const a = area(rg); if (a < ba) { ba = a; best = {kind: "gt", key: selKey(g)}; } } }));
   if ($("showPr").checked) im.pr.forEach((p, k) => { if (p.s < conf()) return; p.p.forEach(rg => { if (pip(x, y, rg)) { const a = area(rg) * 1.001; if (a < ba) { ba = a; best = {kind: "pr", i: k}; } } }); });
   return best;
 }
 function nearVertex(sx, sy) {
-  if (!sel || sel.kind !== "gt") return null; const g = gtOf(curImg())[sel.i]; if (!g) return null;
+  const g = selObj(); if (!g) return null;
   let best = null, bd = 9;
   g.p.forEach((rg, r) => { for (let i = 0; i < rg.length; i += 2) { const [x, y] = toScr(rg[i], rg[i+1]); const d = Math.hypot(sx - x, sy - y); if (d < bd) { bd = d; best = {r, i}; } } });
   return best;
 }
 function nearEdge(sx, sy) {
-  if (!sel || sel.kind !== "gt") return null; const g = gtOf(curImg())[sel.i]; if (!g) return null;
+  const g = selObj(); if (!g) return null;
   let best = null, bd = 8;
   g.p.forEach((rg, r) => { for (let i = 0; i < rg.length; i += 2) { const j = (i + 2) % rg.length; const [ax, ay] = toScr(rg[i], rg[i+1]), [bx, by] = toScr(rg[j], rg[j+1]); const d = segDist(sx, sy, ax, ay, bx, by); if (d < bd) { bd = d; best = {r, i: j}; } } });
   return best;
 }
 
 // ---------- pointer input ----------
+// Select: drag a handle to move a vertex, drag empty space to pan. Draw (freehand, from web_qc): one stroke
+// around the object. Vertex: tap points, tap the first one to close. Two fingers pinch / pan in every mode;
+// with a mouse, right / middle / Alt-drag pans too.
 const ptrs = new Map(); let drag = null, pinch = null;
 const pos = ev => { const r = cv.getBoundingClientRect(); return [ev.clientX - r.left, ev.clientY - r.top]; };
+function endVertexDrag(d) {
+  const im = curImg();
+  if (d.moved) { const e = ensureEdit(im), g = selEdit(e); if (g) record(im, e, g); changed(); }
+  else undoStacks[im.file].pop();
+}
 cv.addEventListener("pointerdown", ev => {
   cv.setPointerCapture(ev.pointerId); const [x, y] = pos(ev); ptrs.set(ev.pointerId, [x, y]);
-  if (ptrs.size === 2) { const [a, b] = [...ptrs.values()]; pinch = {d: Math.hypot(a[0]-b[0], a[1]-b[1]), mx: (a[0]+b[0])/2, my: (a[1]+b[1])/2, s: view.s, ox: view.ox, oy: view.oy}; drag = null; return; }
-  if (ev.button === 2) return;
-  const v = mode === "select" ? nearVertex(x, y) : null;
+  if (ptrs.size === 2) {  // pinch: abandon any one-finger action
+    if (drag && drag.type === "free") draft = null;
+    if (drag && drag.type === "vertex") endVertexDrag(drag);
+    const [a, b] = [...ptrs.values()]; pinch = {d: Math.hypot(a[0]-b[0], a[1]-b[1]), mx: (a[0]+b[0])/2, my: (a[1]+b[1])/2, s: view.s, ox: view.ox, oy: view.oy}; drag = null; return;
+  }
+  if (ptrs.size > 2) return;
+  const panBtn = ev.pointerType === "mouse" && (ev.button === 1 || ev.button === 2 || ev.altKey);
+  if (mode === "draw" && !panBtn) { const [ix, iy] = toImg(x, y); draft = [clamp01(ix), clamp01(iy)]; drag = {type: "free", lx: x, ly: y}; return; }
+  const v = mode === "select" && !panBtn ? nearVertex(x, y) : null;
   if (v) { pushUndo(); drag = {type: "vertex", v, moved: false}; return; }
   drag = {type: "pan", x0: x, y0: y, ox: view.ox, oy: view.oy, moved: false};
 });
@@ -537,11 +731,14 @@ cv.addEventListener("pointermove", ev => {
     const s = Math.max(0.05, Math.min(40, pinch.s * d / pinch.d));
     view.s = s; view.ox = mx - (pinch.mx - pinch.ox) * s / pinch.s; view.oy = my - (pinch.my - pinch.oy) * s / pinch.s; draw(); return;
   }
-  if (mode === "draw") { hover = [x, y]; if (!drag) { draw(); return; } }
+  if (mode === "tap") { hover = [x, y]; if (!drag) { draw(); return; } }
   if (!drag) return;
-  if (drag.type === "vertex") {
-    const [ix, iy] = toImg(x, y), rg = ensureEdit(curImg()).gt[sel.i].p[drag.v.r];
-    rg[drag.v.i] = Math.min(1, Math.max(0, ix)); rg[drag.v.i+1] = Math.min(1, Math.max(0, iy)); drag.moved = true; draw();
+  if (drag.type === "free") {
+    if (Math.hypot(x - drag.lx, y - drag.ly) >= 2) { const [ix, iy] = toImg(x, y); draft.push(clamp01(ix), clamp01(iy)); drag.lx = x; drag.ly = y; draw(); }
+  } else if (drag.type === "vertex") {
+    const g = selEdit(ensureEdit(curImg())), rg = g && g.p[drag.v.r], [ix, iy] = toImg(x, y);
+    if (!rg || drag.v.i >= rg.length) { drag = null; return; }  // the object went away under the drag (a pull)
+    rg[drag.v.i] = clamp01(ix); rg[drag.v.i+1] = clamp01(iy); drag.moved = true; draw();
   } else if (drag.type === "pan") {
     if (Math.hypot(x - drag.x0, y - drag.y0) > 4) drag.moved = true;
     if (drag.moved) { view.ox = drag.ox + x - drag.x0; view.oy = drag.oy + y - drag.y0; draw(); }
@@ -552,25 +749,30 @@ function endPtr(ev) {
   if (pinch) { if (ptrs.size < 2) pinch = null; drag = null; return; }
   if (!drag) return;
   const [x, y] = pos(ev), d = drag; drag = null;
-  if (d.type === "vertex") { if (d.moved) changed(); else undoStacks[curImg().file].pop(); return; }
-  if (d.moved) return;
-  if (mode === "draw") {
+  if (d.type === "free") { if (draft && draft.length >= 6) finishShape(simplify(draft)); else { draft = null; draw(); } return; }
+  if (d.type === "vertex") return endVertexDrag(d);
+  if (d.moved || mode === "draw") return;
+  if (mode === "tap") {
     const [ix, iy] = toImg(x, y);
-    if (draft && draft.length >= 6) { const [fx, fy] = toScr(draft[0], draft[1]); if (Math.hypot(x - fx, y - fy) < 10) return finishDraft(); }
-    (draft = draft || []).push(Math.min(1, Math.max(0, ix)), Math.min(1, Math.max(0, iy))); draw(); return;
+    if (draft && draft.length >= 6) { const [fx, fy] = toScr(draft[0], draft[1]); if (Math.hypot(x - fx, y - fy) < (ev.pointerType === "touch" ? 18 : 10)) return finishDraft(); }
+    (draft = draft || []).push(clamp01(ix), clamp01(iy)); renderSide(); draw(); return;
   }
   if (nearEdge(x, y)) return; // clicking the selected outline keeps it selected (double-click adds a vertex)
   sel = hitTest(x, y); renderSide(); draw();
 }
 cv.addEventListener("pointerup", endPtr);
 cv.addEventListener("pointercancel", endPtr);
-cv.addEventListener("pointerleave", () => { hover = null; if (mode === "draw") draw(); });
+cv.addEventListener("pointerleave", () => { hover = null; if (mode === "tap") draw(); });
 cv.addEventListener("dblclick", ev => {
   if (mode !== "select" || !sel || sel.kind !== "gt") return;
-  const [x, y] = pos(ev), v = nearVertex(x, y);
-  if (v) { const rg = gtOf(curImg())[sel.i].p[v.r]; if (rg.length > 6) { pushUndo(); ensureEdit(curImg()).gt[sel.i].p[v.r].splice(v.i, 2); changed(); } return; }
-  const e = nearEdge(x, y);
-  if (e) { const [ix, iy] = toImg(x, y); pushUndo(); ensureEdit(curImg()).gt[sel.i].p[e.r].splice(e.i, 0, ix, iy); changed(); }
+  const [x, y] = pos(ev), v = nearVertex(x, y), im = curImg();
+  if (v) {
+    const rg = selObj().p[v.r];
+    if (rg.length > 6) { pushUndo(); const e = ensureEdit(im), g = selEdit(e); if (!g) return; g.p[v.r].splice(v.i, 2); record(im, e, g); changed(); }
+    return;
+  }
+  const ed = nearEdge(x, y);
+  if (ed) { const [ix, iy] = toImg(x, y); pushUndo(); const e = ensureEdit(im), g = selEdit(e); if (!g) return; g.p[ed.r].splice(ed.i, 0, clamp01(ix), clamp01(iy)); record(im, e, g); changed(); }
 });
 cv.addEventListener("wheel", ev => {
   ev.preventDefault(); const [x, y] = pos(ev), f = Math.exp(-ev.deltaY * 0.0015), s = Math.max(0.05, Math.min(40, view.s * f));
@@ -583,32 +785,33 @@ document.addEventListener("keydown", ev => {
   if (!$("tri").hidden) return triKey(ev);
   if (ev.target.tagName === "SELECT" || ev.target.tagName === "INPUT" && ev.target.type !== "checkbox" && ev.target.type !== "range") return;
   const k = ev.key;
-  if (k === "Escape") { draft = null; if (mode === "draw") setMode("select"); else { sel = null; renderSide(); draw(); } }
-  else if (k === "Enter" && mode === "draw") finishDraft();
+  if (k === "Escape") { draft = null; if (mode !== "select") setMode("select"); else { sel = null; renderSide(); draw(); } }
+  else if (k === "Enter" && mode === "tap") finishDraft();
   else if ((k === "Delete" || k === "Backspace") && mode === "select") { ev.preventDefault(); deleteSel(); }
   else if (k === "n" || k === "N" || k === "ArrowRight") step(1);
   else if (k === "p" || k === "P" || k === "ArrowLeft") step(-1);
   else if (k === "d" || k === "D") setMode(mode === "draw" ? "select" : "draw");
+  else if (k === "v" || k === "V") setMode(mode === "tap" ? "select" : "tap");
   else if (k === "s" || k === "S") setMode("select");
+  else if (k === "e" || k === "E") startRedraw();
   else if (k === "a" || k === "A") acceptPred();
   else if (k === "r" || k === "R") markReviewed();
   else if (k === "f" || k === "F") fit();
   else if (k === "t" || k === "T") { $("showPr").checked = !$("showPr").checked; draw(); }
   else if (k === "h" || k === "H") { const on = !($("showGt").checked || $("showPr").checked); $("showGt").checked = on; $("showPr").checked = on; draw(); }
-  else if ((k === "z" || k === "Z") && !ev.shiftKey) { if (mode === "draw" && draft && draft.length) { draft.splice(-2, 2); draw(); } else undo(); }
+  else if ((k === "z" || k === "Z") && !ev.shiftKey) { if (mode === "tap" && draft && draft.length) { draft.splice(-2, 2); renderSide(); draw(); } else undo(); }
   else if (/^[1-9]$/.test(k) && CATS[+k - 1]) setCat(CATS[+k - 1]);
 });
 $("prev").onclick = () => step(-1); $("next").onclick = () => step(1);
-$("mSel").onclick = () => setMode("select"); $("mDraw").onclick = () => setMode("draw");
+$("mSel").onclick = () => setMode("select"); $("mDraw").onclick = () => setMode("draw"); $("mTap").onclick = () => setMode("tap");
+$("bClose").onclick = finishDraft;
 $("undo").onclick = undo; $("reviewed").onclick = markReviewed;
 ["showGt", "showPr", "showFlags"].forEach(id => $(id).onchange = draw);
 $("conf").oninput = () => { $("confOut").textContent = conf().toFixed(2); if (sel && sel.kind === "pr") sel = null; renderSide(); draw(); };
 ["fSplit", "fSort", "fStat"].forEach(id => $(id).onchange = renderList);
 $("menuBtn").onclick = () => $("list").classList.toggle("show");
 $("sideBtn").onclick = () => $("side").classList.toggle("show");
-CATS.forEach(c => $("newCat").add(new Option(c, c)));
-$("newCat").value = CATS.includes("EV") ? "EV" : CATS[0];
-$("newCat").onchange = renderSide;
+[...new Set(D.images.map(im => im.split))].forEach(s => { $("fSplit").add(new Option(s, s)); $("triSplit").add(new Option(s, s)); });
 
 $("export").onclick = () => {
   const out = {format: "cryoev-review-edits-v1", package: D.id, source: D.source, exported: new Date().toISOString(), images: {}};
@@ -646,9 +849,13 @@ $("importFile").onchange = async ev => {
 // Cases: predictions with no matching label (possible missed label) and labels with no matching
 // prediction (check the label). Decisions are stored per image in edits[file].dec, keyed
 // "p<pred index>" / "g<label id>", and applied to edits[file].gt like any other edit.
-const TRI_CLASSES = ["EV", "Low conf EV", "non-EV", "MV", "inner"].filter(c => CATS.includes(c));
+// Class review (tri.mode "cls", the phone mode): labels only, one tap sets the class; no outline editing.
+// Its queue is labels flagged x (class disagrees) or lc / of class Low conf EV, or every label.
 const tcv = $("tcv"), tctx = tcv.getContext("2d"), card = $("card");
-const tri = {queue: [], pos: 0, zoom: 0, undo: [], img: null, imgI: -1, ready: false, hideOutline: false, held: false};
+const tri = {queue: [], pos: 0, zoom: 0, undo: [], img: null, imgI: -1, ready: false, hideOutline: false, held: false, mode: "tri"};
+try { tri.mode = localStorage.getItem("cryoev-review:triMode") === "cls" ? "cls" : "tri"; } catch (e) {}
+{ const m = new URLSearchParams(location.search).get("mode"); if (m === "classes" || m === "cls") tri.mode = "cls"; else if (m === "cards") tri.mode = "tri"; }
+const clsMode = () => tri.mode === "cls";
 const ZOOMS = [3, 7, 0];  // crop = object size x this; 0 = whole image
 // Bios are assembled from an opener + a closer (+ sometimes a line about the object itself),
 // chosen by a hash of the image and object, so each card is stable but repeats are rare.
@@ -744,9 +951,15 @@ function resolved(c) {
   return c.kind === "g" && !effGt(im).some(g => g.id === c.id);
 }
 function buildQueue() {
-  const th = parseFloat($("triConf").value), fs = $("triSplit").value, q = [];
+  const th = parseFloat($("triConf").value), fs = $("triSplit").value, all = $("clsScope").value === "all", q = [];
   D.images.forEach((im, i) => {
     if (fs && im.split !== fs) return;
+    if (clsMode()) {  // class flags first within each image: disagreements, then Low conf EV
+      const rank = g => g.x ? 0 : g.lc || g.c === "Low conf EV" ? 1 : 2;
+      im.gt.filter(g => g.id != null && (all || rank(g) < 2)).sort((a, b) => rank(a) - rank(b))
+        .forEach(g => q.push({i, kind: "g", id: g.id, key: "g" + g.id}));
+      return;
+    }
     im.pr.map((p, k) => [p, k]).filter(([p]) => p.u && p.s >= th).sort((a, b) => b[0].s - a[0].s)
       .forEach(([p, k]) => q.push({i, kind: "p", k, key: "p" + k}));
     im.gt.forEach(g => { if (g.u && g.id != null) q.push({i, kind: "g", id: g.id, key: "g" + g.id}); });
@@ -754,15 +967,29 @@ function buildQueue() {
   tri.queue = q;
 }
 // Claims: the server reserves the card on each reviewer's screen for 90 s; other queues skip it.
-let claims = {};  // "<file>|<key>" -> reviewer name
+// The Editor claims "<file>|editor", so cards from an image someone is editing are skipped too.
 const caseId = c => D.images[c.i].file + "|" + c.key;
-const takenByOther = c => { const w = claims[caseId(c)]; return !!w && w !== (me() || "anonymous"); };
-async function claim(c) {
-  if (!server || !c) return;
+const takenByOther = c => { const w = claims[caseId(c)] || claims[D.images[c.i].file + "|editor"]; return !!w && w !== meName(); };
+let claimT = 0;
+async function postClaim(id) {
+  if (!server || !id) return;
+  claimT = Date.now();
   try {
-    const r = await fetch("api/claim?c=" + encodeURIComponent(caseId(c)) + "&who=" + encodeURIComponent(me() || "anonymous"), {method: "POST"});
+    const r = await fetch("api/claim?c=" + encodeURIComponent(id) + "&who=" + encodeURIComponent(meName()), {method: "POST"});
     if (r.ok) claims = (await r.json()).claims || {};
   } catch (e) {}
+}
+const claim = c => c && postClaim(caseId(c));
+function nearestPred(im, ring) {  // the prediction overlapping this outline most (box IoU >= 0.3): what the model called it
+  const th = parseFloat($("triConf").value), [a0, b0, a1, b1] = ringBox(ring); let best = null, bi = 0.3;
+  im.pr.forEach(p => {
+    if (p.s < th) return;
+    const [c0, d0, c1, d1] = ringBox(p.p[0]), iw = Math.min(a1, c1) - Math.max(a0, c0), ih = Math.min(b1, d1) - Math.max(b0, d0);
+    if (iw <= 0 || ih <= 0) return;
+    const inter = iw * ih, iou = inter / ((a1 - a0) * (b1 - b0) + (c1 - c0) * (d1 - d0) - inter);
+    if (iou > bi) { bi = iou; best = p; }
+  });
+  return best;
 }
 async function pullClaims() {
   if (!server) return;
@@ -793,8 +1020,17 @@ function askName(force) {
   }
   $("triWho").textContent = "👤 " + (who || "anonymous");
 }
+function setTriMode(m) {
+  tri.mode = m === "cls" ? "cls" : "tri"; try { localStorage.setItem("cryoev-review:triMode", tri.mode); } catch (e) {}
+  if (tri.adj) { tri.adj = null; updAdjBar(); }
+  openTri();
+}
 function openTri() {
   askName(false);
+  const cm = clsMode();
+  $("triMode").value = tri.mode; $("clsScope").hidden = !cm; $("triConf").hidden = cm;
+  $("triChips").hidden = cm; $("triCls").hidden = !cm; $("triAdj").hidden = cm; $("aNope").hidden = cm;
+  $("aYes").textContent = cm ? "✓" : "♥"; $("aSkip").title = cm ? "Next: decide later (swipe left or up)" : "Maybe later";
   // each reviewer starts at a different point in the queue, so people working at once rarely collide
   buildQueue(); const off = me() ? hash(me()) % Math.max(1, tri.queue.length) : 0;
   let n = nextOpen(off); if (n < 0) n = nextOpen(0); tri.pos = n < 0 ? tri.queue.length : n; tri.zoom = 0;
@@ -813,21 +1049,22 @@ function closeTri() {
     const b = stage.getBoundingClientRect(), span = Math.max((x1 - x0) * W, (y1 - y0) * H, 40) * 4;
     view.s = Math.min(b.width, b.height) / span;
     view.ox = b.width / 2 - (x0 + x1) / 2 * W * view.s; view.oy = b.height / 2 - (y0 + y1) / 2 * H * view.s;
-    sel = c.kind === "g" ? {kind: "gt", i: gtOf(curImg()).findIndex(g => g.id === c.id)} : {kind: "pr", i: c.k};
-    if (sel.i < 0) sel = null;
+    sel = c.kind === "g" ? {kind: "gt", key: c.key} : {kind: "pr", i: c.k};
+    if (sel.kind === "gt" && !selObj()) sel = null;
     renderSide(); draw();
   };
   if (imgReady) focus(); else img.addEventListener("load", () => setTimeout(focus, 0), {once: true});
 }
 function triRender() {
   const left = tri.queue.filter(c => !resolved(c)).length, c = tri.queue[tri.pos];
-  const others = new Set(Object.values(claims).filter(w => w !== (me() || "anonymous"))).size;
-  $("triProg").textContent = `${left} of ${tri.queue.length} singles left` + (others ? ` · ${others} other swiper${others > 1 ? "s" : ""} online` : "");
+  const others = new Set(Object.values(claims).filter(w => w !== meName())).size;
+  $("triProg").textContent = `${left} of ${tri.queue.length} ${clsMode() ? "labels to check" : "singles left"}` + (others ? ` · ${others} other swiper${others > 1 ? "s" : ""} online` : "");
   $("triUndo").disabled = !tri.undo.length;
-  const bio = $("triBio"), chips = $("triChips"); chips.innerHTML = "";
+  const bio = $("triBio"), chips = $("triChips"); chips.innerHTML = ""; $("triCls").innerHTML = "";
   ["aNope", "aSkip", "aYes"].forEach(id => $(id).disabled = !c);
   if (!c) {
-    bio.innerHTML = `<h2>${brand().empty}</h2>` + "<p>Lower the confidence filter to meet more vesicles, or open the Editor.</p>";
+    bio.innerHTML = `<h2>${brand().empty}</h2>` + (clsMode() ? "<p>No labels left to check here. Pick “all labels”, or open the Editor.</p>"
+      : "<p>Lower the confidence filter to meet more vesicles, or open the Editor.</p>");
     tri.imgI = -1; triDraw(); return;
   }
   const im = D.images[c.i];
@@ -842,18 +1079,31 @@ function triRender() {
   const diam = Math.round(Math.max((x1 - x0) * im.w, (y1 - y0) * im.h)), frac = Math.max(x1 - x0, y1 - y0);
   const sample = im.file.replace(/_(jpg|png)\.rf\..*$/, "").split(/__|_square|_grid/)[0];
   const chip = (label, cls, fn) => { const b = document.createElement("button"); b.textContent = label; if (cls) b.className = cls; b.onclick = fn; chips.appendChild(b); };
-  if (c.kind === "p") {
-    const conf = im.pr[c.k].s.toFixed(2);
+  if (clsMode()) {  // class review: big class buttons, one tap sets the class and moves on
+    const g = gtOf(im).find(g => g.id === c.id) || {}, pm = nearestPred(im, caseRing(c));
+    const model = pm ? `Model: <b>${pm.c || "detected"}</b> ${pm.s.toFixed(2)}` : "No prediction overlaps it";
+    const why = [g.x ? `<b style="color:${FLAG.x}">class disagrees</b>` : "", g.lc || g.c === "Low conf EV" ? "Low conf EV: confirm" : ""].filter(Boolean);
+    bio.innerHTML = `<h2>${g.c}, <span>labeled</span></h2><p>${[model, ...why].join(" · ")}</p><small>⌀ ~${diam} px · ${sample} · ${im.split} set</small>`;
+    $("aYes").title = `Keep ${g.c} (swipe right)`;
+    CATS.forEach((cl, k) => {
+      const b = document.createElement("button"); b.style.setProperty("--c", catColor(cl));
+      b.className = [cl === g.c ? "cur" : "", isNewCls(cl) ? "newcls" : ""].join(" ").trim(); if (isNewCls(cl)) b.title = NEW_TIP;
+      b.innerHTML = `${k < 9 ? k + 1 + ". " : ""}${cl}` + (pm && pm.c === cl && cl !== g.c ? "<small>model</small>" : cl === g.c ? "<small>now</small>" : "");
+      b.onclick = () => react("yes", () => decide("keep", cl), cl === g.c ? `kept ${cl}` : `now ${cl}`);
+      $("triCls").appendChild(b);
+    });
+  } else if (c.kind === "p") {
+    const p = im.pr[c.k], conf = p.s.toFixed(2);
     bio.innerHTML = `<h2>Vesicle?, <span>${conf}</span></h2><p>${makeBio(im, c, {conf, cls: "EV", sample, diam, frac, nested: nestedCount(im, c, caseRing(c), parseFloat($("triConf").value))})}</p>` +
-      `<small>⌀ ~${diam} px · ${sample} · ${im.split} set</small>`;
+      `<small>⌀ ~${diam} px · ${sample} · ${im.split} set${p.c ? ` · model: ${p.c}` : ""}</small>`;
     $("aYes").title = "Swipe right: add as EV"; $("aNope").title = "Swipe left: not a vesicle";
-    TRI_CLASSES.filter(cl => cl !== "EV").forEach(cl => chip(cl, "", () => tri.adj ? saveAdjust(cl) : react("yes", () => decide("add", cl), `added as ${cl}`)));
+    CATS.filter(cl => cl !== "EV").forEach(cl => chip(cl, "", () => tri.adj ? saveAdjust(cl) : react("yes", () => decide("add", cl), `added as ${cl}`)));
   } else {
     const g = gtOf(im).find(g => g.id === c.id);
     bio.innerHTML = `<h2>${g.c}, <span>labeled</span></h2><p>${makeBio(im, c, {conf: "", cls: g.c, sample, diam, frac, nested: nestedCount(im, c, caseRing(c), 0)})}</p>` +
       `<small>⌀ ~${diam} px · ${sample} · ${im.split} set</small>`;
     $("aYes").title = `Swipe right: keep as ${g.c}`; $("aNope").title = "Swipe left: delete label";
-    TRI_CLASSES.filter(cl => cl !== g.c).forEach(cl => chip(`→ ${cl}`, "", () => tri.adj ? saveAdjust(cl) : react("yes", () => decide("keep", cl), `now ${cl}`)));
+    CATS.filter(cl => cl !== g.c).forEach(cl => chip(`→ ${cl}`, "", () => tri.adj ? saveAdjust(cl) : react("yes", () => decide("keep", cl), `now ${cl}`)));
   }
   triDraw();
 }
@@ -864,11 +1114,15 @@ function decide(act, cls, poly) {
   if (c.kind === "p") {
     if (act === "add") { setDec(e, c.key, "add:" + cls, poly); e.modified = true; } else setDec(e, c.key, "no");
   } else if (act === "del") { setDec(e, c.key, "del"); e.modified = true; }
-  else { const g = im.gt.find(g => g.id === c.id); setDec(e, c.key, "keep:" + cls, poly); if ((g && g.c !== cls) || poly) e.modified = true; }
+  else {
+    const g = im.gt.find(g => g.id === c.id), prev = e.dec[c.key];
+    poly = poly || (prev && prev.v && prev.v.startsWith("keep:") && prev.p) || undefined;  // a class change keeps an earlier reshape
+    setDec(e, c.key, "keep:" + cls, poly); if ((g && g.c !== cls) || poly) e.modified = true;
+  }
   touch(im.file); renderList(); advance();
 }
 function swipeYes() { const c = tri.queue[tri.pos]; if (!c) return; if (c.kind === "p") decide("add", "EV"); else decide("keep", (gtOf(D.images[c.i]).find(g => g.id === c.id) || {}).c); }
-function swipeNo() { const c = tri.queue[tri.pos]; if (c) decide(c.kind === "p" ? "no" : "del"); }
+function swipeNo() { const c = tri.queue[tri.pos]; if (!c) return; if (clsMode()) advance(); else decide(c.kind === "p" ? "no" : "del"); }
 function triUndo() {
   const u = tri.undo.pop(); if (!u) return;
   restoreSnap(D.images[u.i], u.snap); touch(D.images[u.i].file); renderList();
@@ -949,7 +1203,7 @@ function adjPtr(ev, phase) {
   }
 }
 function startAdjust() {
-  const c = tri.queue[tri.pos]; if (!c) return;
+  const c = tri.queue[tri.pos]; if (!c || clsMode()) return;  // class review never edits outlines
   tri.adj = {ring: resample(caseRing(c), 40), redraw: false, path: [], drag: -1, drawing: false};
   if (ZOOMS[tri.zoom] === 0) tri.zoom = 0;
   updAdjBar(); triDraw();
@@ -1017,7 +1271,7 @@ tcv.addEventListener("pointermove", ev => {
   if (!g0.drag) return;
   card.style.transition = ""; card.style.transform = `translate(${dx}px, ${dy}px) rotate(${dx / 25}deg)`;
   const c = tri.queue[tri.pos];
-  setStamp(dy < -60 && Math.abs(dy) > Math.abs(dx) ? "skip" : dx > 0 ? "yes" : "nope", c);
+  setStamp((dy < -60 && Math.abs(dy) > Math.abs(dx)) || (dx < 0 && clsMode()) ? "skip" : dx > 0 ? "yes" : "nope", c);
   stamp.style.opacity = Math.min(1, Math.max(Math.abs(dx), -dy) / 100);
 });
 tcv.addEventListener("pointerup", ev => {
@@ -1028,7 +1282,7 @@ tcv.addEventListener("pointerup", ev => {
   if (!wasDrag) { tri.zoom = (tri.zoom + 1) % ZOOMS.length; triDraw(); return; }
   if (dy < -90 && Math.abs(dy) > Math.abs(dx)) flyOff(dx, -1200, advance);
   else if (dx > 90) { const c = tri.queue[tri.pos]; flyOff(card.getBoundingClientRect().width * 1.5, dy, swipeYes); if (c) toast(c.kind === "g" ? brand().keep : brand().match, c.kind === "g" ? "label kept" : "added as EV"); }
-  else if (dx < -90) flyOff(-card.getBoundingClientRect().width * 1.5, dy, swipeNo);
+  else if (dx < -90) flyOff(-card.getBoundingClientRect().width * 1.5, dy, swipeNo);  // class review: next
   else cardReset(true);
 });
 tcv.addEventListener("pointercancel", () => { clearTimeout(pressT); g0 = null; if (tri.held) { tri.held = false; tri.hideOutline = tri.peekPrev; triDraw(); } cardReset(true); });
@@ -1044,14 +1298,14 @@ function triKey(ev) {
     return;
   }
   if (ev.key === "e" || ev.key === "E") return startAdjust();
-  const k = ev.key, c = tri.queue[tri.pos];
-  if (/^[1-9]$/.test(k) && TRI_CLASSES[+k - 1] && c) {
-    const cl = TRI_CLASSES[+k - 1];
+  const k = ev.key, c = tri.queue[tri.pos], cm = clsMode();
+  if (/^[1-9]$/.test(k) && CATS[+k - 1] && c) {
+    const cl = CATS[+k - 1];
     react("yes", () => decide(c.kind === "p" ? "add" : "keep", cl), c.kind === "p" ? `added as ${cl}` : `now ${cl}`);
   }
   else if (k === "ArrowRight" || k === "Enter") react("yes", swipeYes);
-  else if (k === "ArrowLeft" || k === "x" || k === "X" || k === "Delete") react("nope", swipeNo);
-  else if (k === "ArrowUp" || k === "s" || k === "S") react("skip", advance);
+  else if (!cm && (k === "ArrowLeft" || k === "x" || k === "X" || k === "Delete")) react("nope", swipeNo);
+  else if (k === "ArrowUp" || k === "s" || k === "S" || (cm && (k === "ArrowLeft" || k === "n" || k === "N"))) react("skip", advance);
   else if (k === "z" || k === "Z") triUndo();
   else if (k === " ") { ev.preventDefault(); tri.zoom = (tri.zoom + 1) % ZOOMS.length; triDraw(); }
   else if (k === "o" || k === "O" || k === "h" || k === "H") toggleOutlines();
@@ -1059,7 +1313,8 @@ function triKey(ev) {
 }
 $("toTri").onclick = openTri; applyBrand();
 $("triWho").onclick = () => askName(true); $("triExit").onclick = closeTri; $("triUndo").onclick = triUndo;
-$("triConf").onchange = openTri; $("triSplit").onchange = openTri;
+$("triConf").onchange = openTri; $("triSplit").onchange = openTri; $("clsScope").onchange = openTri;
+$("triMode").onchange = () => setTriMode($("triMode").value);
 window.addEventListener("resize", () => { if (!$("tri").hidden) triDraw(); });
 
 // ---------- server sync (only when served by review_server.py) ----------
@@ -1077,6 +1332,7 @@ async function sync() {
   for (const file of [...dirty]) {
     try {
       const r = await fetch("api/edits?f=" + encodeURIComponent(file), {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(edits[file])});
+      if (r.status === 400) { err = true; banner(`The server rejected the edits for ${file}. Export them and tell the lab.`); continue; }
       if (!r.ok) { err = true; break; }
       const merged = (await r.json()).edit;  // server merged our record with everyone else's
       const local = edits[file]; edits[file] = mergeEdit(merged, local);
@@ -1105,14 +1361,24 @@ async function connect() {
   try { await pull(); server = true; go(cur); syncBadge(); sync(); if (!$("tri").hidden) { tri.claimed = null; triRender(); } }
   catch (e) { syncBadge(); }
 }
-setInterval(() => { if (server && !$("tri").hidden) pullClaims(); }, 5000);
+setInterval(async () => {  // claims: cards poll; the Editor renews its claim on the open image and shows others' in the queue
+  if (!server) return;
+  if (!$("tri").hidden) return pullClaims();
+  const was = JSON.stringify(claims);
+  await (Date.now() - claimT > 40000 ? postClaim(curImg().file + "|editor") : pullClaims());
+  if (JSON.stringify(claims) !== was) renderList();
+}, 5000);
 setInterval(() => { if (server) pull().then(() => { if (dirty.size) sync(); }).catch(() => syncBadge(true)); }, 20000);
 window.addEventListener("online", () => scheduleSync(100));
 
 window.addEventListener("resize", resize);
 legend(); renderList(); resize(); go(order.length ? order[0] : 0); hint(); connect();
 let startMode = null; try { startMode = localStorage.getItem("cryoev-review:mode"); } catch (e) {}
+{ const m = new URLSearchParams(location.search).get("mode");  // a link with &mode=classes|cards|editor picks the view
+  if (m === "classes" || m === "cls" || m === "cards") startMode = "tri"; else if (m === "editor") startMode = "editor"; }
 if (startMode === "tri" || (!startMode && window.matchMedia("(max-width: 700px)").matches)) openTri();
+window.__review = {D, CATS, effGt, mergeEdit, pull, materialize, edits: () => edits, state: () => ({mode, sel, curCls, redrawKey, cur, order, view: {...view}, W, H, imgReady, server, dirty: dirty.size,
+  tri: {mode: tri.mode, pos: tri.pos, queue: tri.queue}})};  // for annotation/tests
 })();
 </script>
 </body>
