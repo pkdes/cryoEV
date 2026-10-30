@@ -31,7 +31,7 @@ sys.path.insert(0, str(REPO))
 from data_utils.path_guard import protected_problem  # noqa: E402
 
 REAL_DIR = Path.home() / "Desktop" / "cryoEV pujrog" / "CryoAI-laptop" / "registry"
-DEFAULT_REGISTRY = REAL_DIR / "registry.jsonl"
+DEFAULT_REGISTRY = REAL_DIR  # one <entity>.jsonl per entity (registry.py); every *.jsonl in it is read
 DEFAULT_OUT = REAL_DIR / "history.html"
 
 # Page lanes, from the contract's "Statuses (queue and history view)" table.
