@@ -1,0 +1,4 @@
+# written by make_fixture.py / review_server.py when the fixture is used by hand
+index.html
+edits/
+.review_key
