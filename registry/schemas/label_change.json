@@ -1,0 +1,140 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "cryoEV/registry/label_change/1",
+ "title": "Label change row (changes.jsonl, contract v1; owned by apply_review_edits.py)",
+ "type": "object",
+ "properties": {
+  "schema": {
+   "const": "label_change/1"
+  },
+  "label_version": {
+   "type": "string",
+   "pattern": "^lv_\\d{8}_\\d{4}$"
+  },
+  "base": {
+   "type": "string",
+   "pattern": "^roboflow_pull_\\d{8}_\\d{4}$"
+  },
+  "pkg": {
+   "type": "string",
+   "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+  },
+  "image": {
+   "type": "string",
+   "pattern": "^[^/\\\\\\s]+_[A-Za-z0-9]+$"
+  },
+  "rf_id": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^[A-Za-z0-9]{20}$"
+  },
+  "dec_key": {
+   "type": "string",
+   "description": "g<id>, p<idx>, n<uid> or gt"
+  },
+  "op": {
+   "type": "string",
+   "enum": [
+    "keep",
+    "reclass",
+    "reshape",
+    "reclass+reshape",
+    "delete",
+    "add",
+    "new",
+    "reject"
+   ]
+  },
+  "ann_old": {
+   "type": [
+    "integer",
+    "null"
+   ],
+   "minimum": 0
+  },
+  "ann_new": {
+   "type": [
+    "integer",
+    "null"
+   ],
+   "minimum": 0
+  },
+  "cls_from": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "cls_to": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "who_raw": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "who": {
+   "type": "string"
+  },
+  "who_auth": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "t": {
+   "type": [
+    "integer",
+    "null"
+   ],
+   "minimum": 0
+  },
+  "rx": {
+   "type": [
+    "integer",
+    "null"
+   ],
+   "minimum": 0
+  },
+  "seed": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "reviewed": {
+   "type": "boolean"
+  },
+  "status": {
+   "type": "string",
+   "enum": [
+    "applied",
+    "conflict"
+   ]
+  },
+  "reason": {
+   "type": [
+    "string",
+    "null"
+   ]
+  }
+ },
+ "required": [
+  "schema",
+  "label_version",
+  "base",
+  "pkg",
+  "image",
+  "dec_key",
+  "op",
+  "who",
+  "status"
+ ],
+ "additionalProperties": true
+}
