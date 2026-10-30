@@ -56,8 +56,10 @@ class LiveServer:
         build(self.pkg)
         self.data = load_data(self.pkg)
         self.port = free_port()
+        self.log = self.dir / "server.log"  # a file, not a pipe: an unread pipe fills up and stalls the server
+        self._log = open(self.log, "wb")
         self.proc = subprocess.Popen([sys.executable, str(SERVER), "--package", str(self.pkg), "--port", str(self.port),
-                                      "--key", KEY], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                                      "--key", KEY], stdout=self._log, stderr=subprocess.STDOUT)
         for _ in range(100):
             try:
                 if self.request("GET", "/api/ping")[0] == 200:
@@ -87,10 +89,14 @@ class LiveServer:
         return self.request("PUT", "/api/edits?f=" + quote(file), edit, **kw)
 
     def close(self):
-        self.proc.terminate()
-        self.proc.wait(10)
-        self.proc.stdout.close()
+        self.stop()
         shutil.rmtree(self.dir, ignore_errors=True)
+
+    def stop(self):
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            self.proc.wait(10)
+        self._log.close()
 
 
 class ServerAPI(unittest.TestCase):
@@ -206,6 +212,87 @@ class ServerAPI(unittest.TestCase):
         self.assertNotIn("fixA_new.png|p3", active)
         self.assertEqual(claim("fixA_new.png|p3", "bob")[1]["claims"]["fixA_new.png|p3"], "bob")
 
+    # ---- QC 61d2c72, item 3: input validation; a rejected PUT is never stored ----
+    def test_bad_values_rejected_and_not_stored(self):
+        f = "fixC_old.png"
+        target = self.srv.pkg / "edits" / f"{f}.json"
+        before = target.read_bytes() if target.exists() else None
+        sq = [0.1, 0.1, 0.2, 0.1, 0.2, 0.2]
+        bad_bodies = {
+            "NaN": b'{"t": 1, "dec": {"g301": {"v": "keep:EV", "t": NaN}}}',
+            "Infinity": b'{"t": Infinity, "dec": {}}',
+            "new without p": {"t": 1, "dec": {"nx": {"v": "new:EV", "t": 1}}},
+            "coordinate > 1": {"t": 1, "dec": {"g301": {"v": "keep:EV", "t": 1, "p": [[0.1, 0.1, 1.2, 0.1, 0.2, 0.2]]}}},
+            "coordinate < 0": {"t": 1, "dec": {"nx": {"v": "new:EV", "t": 1, "p": [[-0.1, 0.1, 0.2, 0.1, 0.2, 0.2]]}}},
+            "gt item without p": {"t": 1, "gtT": 1, "gt": [{"id": 301, "c": "EV"}]},
+            "gt item bad class": {"t": 1, "gtT": 1, "gt": [{"id": 301, "c": 3, "p": [sq]}]},
+            "gt item bad ring": {"t": 1, "gtT": 1, "gt": [{"id": 301, "c": "EV", "p": [[0.1, 0.2, 0.3]]}]},
+            "gt item bad src": {"t": 1, "gtT": 1, "gt": [{"id": None, "c": "EV", "p": [sq], "src": "zz"}]},
+            "gt item not a dict": {"t": 1, "gtT": 1, "gt": [[0.1, 0.2]]},
+        }
+        for name, body in bad_bodies.items():
+            with self.subTest(name):
+                self.assertEqual(self.srv.put(f, body)[0], 400)
+                self.assertEqual(target.read_bytes() if target.exists() else None, before)
+        # a hair outside [0, 1] from float rounding is fine
+        ok = {"t": 1, "dec": {"g301": {"v": "keep:EV", "t": 1, "p": [[0.1, 0.1, 1.0000001, 0.1, 0.2, -1e-9]]}}}
+        self.assertTrue(rs.valid_edit(ok))
+
+    # ---- QC item 7: hardening ----
+    def test_bad_content_length_is_a_clean_400(self):
+        for cl in ("abc", "-5"):
+            with self.subTest(cl=cl):
+                s = socket.create_connection(("127.0.0.1", self.srv.port), timeout=5)
+                s.sendall(f"PUT /api/edits?f=fixC_old.png HTTP/1.1\r\nHost: x\r\nX-Review-Key: {KEY}\r\n"
+                          f"Content-Length: {cl}\r\n\r\n".encode())
+                head = s.recv(200).decode(errors="replace")
+                s.close()
+                self.assertTrue(head.startswith("HTTP/1.0 4") or head.startswith("HTTP/1.1 4"), head)
+        self.assertEqual(self.srv.request("GET", "/api/ping")[0], 200)  # still serving
+
+    def test_claims_are_capped(self):
+        for k in range(rs.MAX_CLAIMS + 30):
+            self.srv.request("POST", f"/api/claim?c=fixA_new.png%7Cp{k}&who=r{k}", b"")
+        self.assertLessEqual(len(self.srv.request("GET", "/api/claims")[1]["claims"]), rs.MAX_CLAIMS)
+
+
+class Hardening(unittest.TestCase):
+    def test_idle_connection_times_out(self):
+        self.assertEqual(rs.make_handler(Path(tempfile.mkdtemp()), "k", set()).timeout, rs.SOCKET_TIMEOUT)
+        import threading
+        from http.server import ThreadingHTTPServer
+        h = rs.make_handler(Path(tempfile.mkdtemp()), "k", set())
+        h.timeout = 0.3
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), h)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            s = socket.create_connection(srv.server_address, timeout=5)
+            t0 = time.time()
+            self.assertEqual(s.recv(10), b"")  # the server hangs up on a client that sends nothing
+            self.assertLess(time.time() - t0, 3)
+            s.close()
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_key_not_in_request_logs(self):
+        srv = LiveServer()
+        try:
+            srv.request("GET", f"/?k={KEY}", key=None)
+            srv.request("GET", f"/api/ping?k={KEY}", key=None)
+        finally:
+            srv.stop()
+            out = srv.log.read_text(encoding="utf-8", errors="replace")
+            srv.close()
+        lines = [ln for ln in out.splitlines() if KEY in ln]
+        self.assertEqual(len(lines), 1, lines)  # only the startup link
+        self.assertTrue(lines[0].startswith("[OK] Link: "), lines)
+        self.assertIn("GET /?k=", out)  # the request is logged, its key redacted
+
+    def test_default_host_is_loopback(self):
+        out = subprocess.run([sys.executable, str(SERVER), "--help"], capture_output=True, text=True).stdout
+        self.assertIn("default: 127.0.0.1", out)
+
 
 class MergeAndApply(unittest.TestCase):
     """No server: the record functions on hand-made and real records."""
@@ -229,6 +316,20 @@ class MergeAndApply(unittest.TestCase):
         self.assertEqual([(g["id"], g["c"]) for g in labels], [(1, "EV"), (None, "inner")])
         self.assertEqual(labels[0]["p"], listed[0]["p"])  # g1's polygon (t 5) is older than the list (gtT 10)
         self.assertEqual(list(m["dec"]), ["p0", "g1"])  # key order follows mergeEdit() in the page
+
+    def test_offline_reshape_survives_a_newer_polygon_list(self):
+        """QC 61d2c72, item 1. A redraws label 1 offline; B later deletes label 2 in the Editor, saving a newer full
+        list that still has label 1's old outline. After the merge, A's outline must win."""
+        orig1, orig2, redrawn = [[0.1, 0.1, 0.2, 0.1, 0.2, 0.2]], [[0.5, 0.5, 0.6, 0.5, 0.6, 0.6]], [[0.1, 0.1, 0.3, 0.1, 0.3, 0.3]]
+        im = {"gt": [{"id": 1, "c": "EV", "p": orig1}, {"id": 2, "c": "MV", "p": orig2}], "pr": []}
+        a = {"t": 101, "modified": True, "gtT": 100,
+             "gt": [{"id": 1, "c": "EV", "p": redrawn, "t": 101}, {"id": 2, "c": "MV", "p": orig2, "t": 0}],
+             "dec": {"g1": {"v": "keep:EV", "t": 101, "who": "a", "p": redrawn}}}
+        b = {"t": 201, "modified": True, "gtT": 200, "gt": [{"id": 1, "c": "EV", "p": orig1, "t": 0}],
+             "dec": {"g2": {"v": "del", "t": 201, "who": "b"}}}
+        for m in (rs.merge_edits(a, b), rs.merge_edits(b, a)):
+            labels = rs.effective_labels(im, m)
+            self.assertEqual([(g["id"], g["c"], g["p"]) for g in labels], [(1, "EV", redrawn)])
 
     def test_real_september_edits_load(self):
         pkg = real_package()

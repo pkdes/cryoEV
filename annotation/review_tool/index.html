@@ -34,6 +34,8 @@ label.tg{display:inline-flex;gap:4px;align-items:center;cursor:pointer;user-sele
 #chipBar{position:absolute;left:8px;right:8px;bottom:8px;display:flex;gap:5px;overflow-x:auto;scrollbar-width:none}
 #chipBar button{flex:none;border-radius:14px;padding:3px 10px;font-size:12px;background:rgba(0,0,0,.65);color:#fff;border:2px solid transparent;touch-action:manipulation}
 #chipBar button.on{border-color:#fff}
+#chipBar button.newcls,#triCls button.newcls{opacity:.6;border-style:dashed}
+.legend .newcls{opacity:.6;font-style:italic}
 .legend .sw{display:inline-block;width:28px;height:12px;background:#000;border-radius:2px;position:relative;vertical-align:-2px;margin-right:6px}
 .legend .sw i{position:absolute;left:3px;right:3px;top:50%;transform:translateY(-50%);height:0}
 #stage{min-width:0;min-height:0;position:relative;overflow:hidden;background:#000;touch-action:none}
@@ -226,6 +228,9 @@ const CLASS_COLOR = {"EV": "#4ade80", "Low conf EV": "#a78bfa", "MV": "#f87171",
   "Overlapping": "#60a5fa", "VLDL": "#d4a373", "non-EV": "#e5e7eb"};
 const EXTRA_COLORS = ["#34d399", "#fde68a", "#93c5fd", "#fca5a5"];
 const catColor = c => CLASS_COLOR[c] || EXTRA_COLORS[Math.max(0, CATS.indexOf(c)) % EXTRA_COLORS.length];
+// Offered but missing from this package's categories: marked, since a COCO export must add the category.
+const PKG_CATS = new Set(D.categories || []), isNewCls = c => !PKG_CATS.has(c);
+const NEW_TIP = "new class: not in this package's categories (apply_review_edits must add it)";
 // Flags from build_review_package.py. u: no match (old); x, lc, fx, flc: optional, newer packages only.
 const FLAG = {gu: "rgba(255,0,255,.55)", pu: "#facc15", x: "#f97316", lc: "rgba(226,232,240,.9)"};
 const $ = id => document.getElementById(id);
@@ -286,10 +291,22 @@ function migrate(e) {
 }
 Object.values(edits).forEach(migrate);
 const decV = (e, key) => { const d = e && e.dec && e.dec[key]; return d ? d.v : null; };
+// Polygon list items saved by this version carry t, the time of that object's last change. Its decision applies
+// whenever it is at least that new, so a per-object edit survives a merge with anyone's newer full list. Items
+// without t (lists from before) keep the old rule: a decision's outline applies only if newer than the whole list.
 function effGt(im) {  // labels as they stand: base list + everyone's decisions (+ reshaped outlines)
   const e = edits[im.file], base = e && e.gtT && e.gt ? e.gt : im.gt, out = [];
-  const decP = key => { const d = e && e.dec && e.dec[key]; return d && d.p && d.t > ((e && e.gtT) || 0) ? d.p : null; };
+  const dec = key => (key && e && e.dec && e.dec[key]) || null;
+  const decP = key => { const d = dec(key); return d && d.p && d.t > ((e && e.gtT) || 0) ? d.p : null; };
   for (const g of base) {
+    if (typeof g.t === "number") {
+      const d = dec(keyOf(g));
+      if (!d || (d.t || 0) < g.t) { out.push(g); continue; }
+      if (d.v === "del" || d.v === "no" || (!d.v && g.src)) continue;
+      if (!d.v) { const o = im.gt.find(x => x.id === g.id); out.push(o ? {...g, c: o.c, p: o.p} : g); continue; }  // undone: the package label
+      const m = /^(?:keep|add|new):(.*)$/.exec(d.v);
+      out.push(m ? {...g, c: m[1], p: d.p || g.p} : g); continue;
+    }
     const v = g.id != null ? decV(e, "g" + g.id) : null, sv = g.src ? decV(e, g.src) : null;
     if (v === "del" || sv === "no" || sv === "del") continue;
     const cls = v && v.startsWith("keep:") ? v.slice(5) : sv && /^(add|new):/.test(sv) ? sv.slice(4) : g.c;
@@ -306,10 +323,27 @@ function effGt(im) {  // labels as they stand: base list + everyone's decisions 
   return out;
 }
 function gtOf(im) { return effGt(im); }
-function ensureEdit(im) { return edits[im.file] = migrate(edits[im.file] || {reviewed: false, modified: false, dec: {}}); }
-// t stays above the record's polygon-list time (gtT), so the decision applies on top of it even with clock skew
-function setDec(e, key, v, p) { const t = Math.max(Date.now(), (e.gtT || 0) + 1); e.dec[key] = p ? {v, t, who: me(), p} : {v, t, who: me()}; }
+const recFile = new WeakMap();  // edit record -> its image file, for setDec's bookkeeping
+const mine = new Set();         // "<file>\n<key>\n<t>" of every entry this tab wrote: the only ones its undo may revert
+function ensureEdit(im) {
+  const e = edits[im.file] = migrate(edits[im.file] || {reviewed: false, modified: false, dec: {}});
+  recFile.set(e, im.file); return e;
+}
 const keyOf = g => g.src || (g.id != null ? "g" + g.id : null);  // the decision key of a label, if it has one
+// Selection / Redraw identity: the decision key; an outline drawn by an older version (no key) goes by its shape
+// until the next Editor change gives it a key (materialize).
+const selKey = g => keyOf(g) || "L" + hash(JSON.stringify(g.p));
+const findKey = (list, key) => (list || []).find(g => selKey(g) === key) || null;
+const selObj = () => sel && sel.kind === "gt" ? findKey(gtOf(curImg()), sel.key) : null;
+const selEdit = e => sel && sel.kind === "gt" ? findKey(e.gt, sel.key) : null;  // the selection in the record's list
+// A new entry's t is above the entry and list item it replaces (and the list), so it wins the merge even when
+// another device's clock runs ahead.
+function setDec(e, key, v, p) {
+  const prev = e.dec[key], item = (e.gt || []).find(g => keyOf(g) === key);
+  const t = Math.max(Date.now(), prev ? (prev.t || 0) + 1 : 0, item && typeof item.t === "number" ? item.t + 1 : 0, (e.gtT || 0) + 1);
+  e.dec[key] = p ? {v, t, who: me(), p} : {v, t, who: me()};
+  const f = recFile.get(e); if (f) mine.add(f + "\n" + key + "\n" + t);
+}
 const decided = (im, key) => !!key && decV(edits[im.file], key) != null;
 function ownPoly(im, g) {  // g's outline if it differs from the package's, so its decision carries it
   const orig = g.src && g.src[0] === "p" ? (im.pr[+g.src.slice(1)] || {}).p : g.id != null ? (im.gt.find(o => o.id === g.id) || {}).p : null;
@@ -321,19 +355,34 @@ function record(im, e, g) {  // mirror one Editor change into that object's deci
   else if (g.id != null) setDec(e, "g" + g.id, "keep:" + g.c, ownPoly(im, g));
 }
 const newId = () => "n" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-function materialize(im) {  // the Editor edits a concrete list: freeze the current labels into e.gt
-  const e = ensureEdit(im); e.gt = JSON.parse(JSON.stringify(effGt(im))); e.gtT = Date.now(); return e;
+function materialize(im) {  // the Editor edits a concrete list: freeze the current labels into e.gt, each with its t
+  const e = ensureEdit(im), legacyT = e.gtT && e.gt ? e.gtT : 0, list = clone(effGt(im));
+  for (const g of list) {
+    if (!keyOf(g)) {  // keyless outline from an older version: it becomes a drawn object with a decision of its own
+      const old = selKey(g); g.src = newId(); setDec(e, g.src, "new:" + g.c, clone(g.p));
+      if (sel && sel.key === old) sel.key = g.src;
+      if (redrawKey === old) redrawKey = g.src;
+    }
+    const d = e.dec[keyOf(g)];
+    g.t = Math.max(typeof g.t === "number" ? g.t : legacyT, d ? d.t || 0 : 0);
+  }
+  e.gt = list; e.gtT = Date.now(); return e;
 }
 const snapOf = e => JSON.stringify({gt: e.gt, gtT: e.gtT, dec: e.dec});
-function restoreSnap(im, snap) {  // undo; changed keys get a fresh timestamp so the undo also wins on merge
-  const s = JSON.parse(snap), e = ensureEdit(im), now = Date.now();
-  for (const k of new Set([...Object.keys(e.dec), ...Object.keys(s.dec || {})])) {
-    const was = s.dec && s.dec[k] ? s.dec[k].v : null;
-    const wasP = s.dec && s.dec[k] && s.dec[k].p, cur = e.dec[k] || {};
-    if (decV(e, k) !== was || JSON.stringify(cur.p || null) !== JSON.stringify(wasP || null))
-      e.dec[k] = wasP ? {v: was, t: now, who: me(), p: wasP} : {v: was, t: now, who: me()};
+function restoreSnap(im, snap) {  // undo: revert only entries this tab wrote since the snapshot; others' newer ones stay
+  const s = JSON.parse(snap), e = ensureEdit(im);
+  for (const k of Object.keys(e.dec)) {
+    const cur = e.dec[k], was = s.dec && s.dec[k];
+    if ((was && cur.t === was.t) || !mine.has(im.file + "\n" + k + "\n" + cur.t)) continue;
+    if (was) setDec(e, k, was.v, was.p);
+    else if (k[0] === "g") {  // no decision before: back to the label as it stood then, stated explicitly
+      const id = +k.slice(1), so = (s.gt || []).find(g => g.id === id), po = im.gt.find(g => g.id === id);
+      const sameP = so && po && JSON.stringify(so.p) === JSON.stringify(po.p);
+      if (so && po && (so.c !== po.c || !sameP)) setDec(e, k, "keep:" + so.c, sameP ? undefined : clone(so.p));
+      else setDec(e, k, null);
+    } else setDec(e, k, null);
   }
-  if (s.gt && s.gtT !== e.gtT) { e.gt = s.gt; e.gtT = now; }
+  if (s.gt && s.gtT !== e.gtT) { e.gt = s.gt; e.gtT = Date.now(); }
 }
 function mergeEdit(a, b) {
   if (!a) return migrate(b); if (!b) return migrate(a);
@@ -430,7 +479,7 @@ function draw() {
     });
   }
   if (sel && sel.kind === "gt") {
-    const g = gtOf(im)[sel.i];
+    const g = selObj();
     if (g) {
       ctx.fillStyle = "rgba(39,100,197,.28)"; g.p.forEach(rg => { path(rg); ctx.fill(); });
       ctx.lineWidth = 2.2; ctx.strokeStyle = "#fff"; g.p.forEach(rg => { path(rg); ctx.stroke(); });
@@ -439,7 +488,7 @@ function draw() {
     }
   }
   if (draft && draft.length) {
-    ctx.strokeStyle = redrawIdx != null ? "#fff" : catColor(curCls); ctx.lineWidth = 1.8; ctx.beginPath();
+    ctx.strokeStyle = redrawKey != null ? "#fff" : catColor(curCls); ctx.lineWidth = 1.8; ctx.beginPath();
     for (let i = 0; i < draft.length; i += 2) { const [x, y] = toScr(draft[i], draft[i+1]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
     if (hover && mode === "tap") ctx.lineTo(hover[0], hover[1]);
     ctx.stroke();
@@ -459,7 +508,7 @@ const statusOf = im => {
 };
 const FLAG_COUNTS = [["fg", FLAG.gu, "labels with no prediction"], ["fp", FLAG.pu, "predictions with no label"],
   ["fx", FLAG.x, "class disagreements with the model"], ["flc", FLAG.lc, "Low conf EV labels with no match"]];
-const flagTotal = im => FLAG_COUNTS.reduce((n, [k]) => n + (im[k] || 0), 0);
+const flagRank = im => (im.fg || 0) + (im.fp || 0) + (im.fx || 0);  // flc is shown, but doesn't rank (spec)
 const meName = () => me() || "anonymous";
 const claimedBy = file => [...new Set(Object.entries(claims).filter(([k]) => k.startsWith(file + "|")).map(([, w]) => w))];
 function renderList() {
@@ -468,7 +517,7 @@ function renderList() {
     const im = D.images[i], s = statusOf(im);
     return (!fs || im.split === fs) && (!st || st === s || (st === "todo" && s !== "reviewed"));
   });
-  if (srt === "flags") order.sort((a, b) => flagTotal(D.images[b]) - flagTotal(D.images[a]) || a - b);
+  if (srt === "flags") order.sort((a, b) => flagRank(D.images[b]) - flagRank(D.images[a]) || a - b);
   else if (srt === "name") order.sort((a, b) => D.images[a].file.localeCompare(D.images[b].file));
   const box = $("items"); box.innerHTML = "";
   const frag = document.createDocumentFragment();
@@ -506,7 +555,7 @@ function renderSide() {
   renderChips();
   if (!sel) { box.innerHTML = `${g.length} labels, ${im.pr.filter(p => p.s >= conf()).length} predictions shown.<br>Click a polygon to select it.`; return; }
   if (sel.kind === "gt") {
-    const a = g[sel.i]; if (!a) { sel = null; return renderSide(); }
+    const a = selObj(); if (!a) { sel = null; return renderSide(); }
     box.innerHTML = `<div>Label <b style="color:${catColor(a.c)}">${a.c}</b>${a.id == null ? " (new)" : ""}${flagText(a, false)}</div>`;
     const s = document.createElement("select"); CATS.forEach((c, k) => { const o = new Option(`${k+1}. ${c}`, c); o.selected = c === a.c; s.add(o); });
     s.onchange = () => setCat(s.value);
@@ -523,7 +572,7 @@ function renderSide() {
   }
 }
 function legend() {
-  $("legend").innerHTML = CATS.map((c, k) => `<div><span style="background:${catColor(c)}"></span>${k < 9 ? k + 1 + ". " : ""}${c}</div>`).join("");
+  $("legend").innerHTML = CATS.map((c, k) => `<div${isNewCls(c) ? ` class="newcls" title="${NEW_TIP}"` : ""}><span style="background:${catColor(c)}"></span>${k < 9 ? k + 1 + ". " : ""}${c}${isNewCls(c) ? " (new class)" : ""}</div>`).join("");
   const sw = st => `<span class="sw"><i style="border-top:${st}"></i></span>`;
   $("flagLegend").innerHTML = [
     [sw("1.5px dashed #22d3ee"), "prediction"],
@@ -534,13 +583,13 @@ function legend() {
   ].map(([s, t]) => `<div>${s}${t}</div>`).join("") + `<div style="color:var(--mute);margin-top:3px">Flags disappear once the object has a decision. Older packages have only the first three.</div>`;
 }
 function renderChips() {
-  const bar = $("chipBar"), selG = sel && sel.kind === "gt" ? gtOf(curImg())[sel.i] : null;
+  const bar = $("chipBar"), selG = selObj();
   bar.innerHTML = "";
   CATS.forEach((c, k) => {
     const b = document.createElement("button"); b.textContent = (k < 9 ? k + 1 + " " : "") + c;
-    b.style.color = catColor(c); b.className = c === curCls ? "on" : "";
+    b.style.color = catColor(c); b.className = [c === curCls ? "on" : "", isNewCls(c) ? "newcls" : ""].join(" ").trim();
     if (selG && selG.c === c) b.style.background = "rgba(255,255,255,.18)";
-    b.title = sel ? `Reclass the selection as ${c}` : `New shapes: ${c}`;
+    b.title = (sel ? `Reclass the selection as ${c}` : `New shapes: ${c}`) + (isNewCls(c) ? ` · ${NEW_TIP}` : "");
     b.onclick = () => setCat(c); bar.appendChild(b);
   });
 }
@@ -559,34 +608,35 @@ function go(i) {
   if (server && $("tri").hidden) postClaim(im.file + "|editor");
 }
 function step(d) { const k = order.indexOf(cur); const n = order[(k < 0 ? 0 : k + d)]; if (n !== undefined) go(n); }
-let redrawIdx = null;   // Editor: index of the label being redrawn (kept while switching Draw / Vertex)
+let redrawKey = null;   // Editor: selKey of the label being redrawn (kept while switching Draw / Vertex)
 let drawPref = "draw";  // the drawing method Redraw starts with: the last one used
 function setMode(m) {
-  const r = m === "select" ? null : redrawIdx;
-  mode = m; draft = null; redrawIdx = r; if (m !== "select") drawPref = m;
+  const r = m === "select" ? null : redrawKey;
+  mode = m; draft = null; redrawKey = r; if (m !== "select") drawPref = m;
   $("mSel").classList.toggle("on", m === "select"); $("mDraw").classList.toggle("on", m === "draw"); $("mTap").classList.toggle("on", m === "tap");
   hint(); renderSide(); draw();
 }
 function hint() {
   const how = mode === "draw" ? "drag around the object" : "tap points · tap the first point or Enter to close";
-  $("hint").textContent = mode === "select" ? "" : (redrawIdx != null ? "Redraw (keeps class): " : `New ${curCls}: `) + how + " · Esc cancels";
+  $("hint").textContent = mode === "select" ? "" : (redrawKey != null ? "Redraw (keeps class): " : `New ${curCls}: `) + how + " · Esc cancels";
   $("hint").style.display = mode === "select" ? "none" : "block";
 }
 function startRedraw() {
-  if (!sel || sel.kind !== "gt" || !gtOf(curImg())[sel.i]) return;
-  const i = sel.i; setMode(drawPref); redrawIdx = i; hint(); draw();
+  if (!selObj()) return;
+  const k = sel.key; setMode(drawPref); redrawKey = k; hint(); draw();
 }
 function setCat(c) {  // Select mode: reclass the selection (accept a selected prediction). Always: class for new shapes.
   curCls = c;
   if (mode === "select" && sel && sel.kind === "pr") return acceptPred(c);
-  if (!sel || sel.kind !== "gt" || (mode !== "select" && redrawIdx == null)) { hint(); renderSide(); return; }
+  if (!sel || sel.kind !== "gt" || (mode !== "select" && redrawKey == null)) { hint(); renderSide(); return; }
   const im = curImg(); pushUndo();
-  const e = ensureEdit(im), g = e.gt[sel.i]; g.c = c; record(im, e, g);
+  const e = ensureEdit(im), g = selEdit(e); if (!g) return; g.c = c; record(im, e, g);
   changed();
 }
 function deleteSel() {
   if (!sel || sel.kind !== "gt") return; pushUndo();
-  const e = ensureEdit(curImg()), g = e.gt.splice(sel.i, 1)[0];
+  const e = ensureEdit(curImg()), i = e.gt.indexOf(selEdit(e)); if (i < 0) return;
+  const g = e.gt.splice(i, 1)[0];
   if (g.src) setDec(e, g.src, g.src[0] === "n" ? "del" : "no"); else if (g.id != null) setDec(e, "g" + g.id, "del");
   sel = null; changed();
 }
@@ -597,7 +647,7 @@ function acceptPred(cls) {
   const e = ensureEdit(im); e.gt = e.gt.filter(g => g.src !== key);  // accepting twice must not duplicate it
   e.gt.push({id: null, c: cls, p: clone(p.p), src: key});
   setDec(e, key, "add:" + cls);
-  sel = {kind: "gt", i: e.gt.length - 1}; changed();
+  sel = {kind: "gt", key}; changed();
 }
 function rdp(pts, eps) {  // Ramer-Douglas-Peucker on [[x, y]] (from web_qc)
   if (pts.length < 3) return pts;
@@ -615,14 +665,14 @@ function finishShape(ring) {  // a closed outline from Draw or Vertex: a new lab
   if (!ring || ring.length < 6 || area(ring) * W * H < 20) { renderSide(); draw(); return; }
   const im = curImg(), p = [ring.map(v => Math.round(clamp01(v) * 1e5) / 1e5)];
   pushUndo(); const e = ensureEdit(im);
-  if (redrawIdx != null) {  // replace the outline; class, id and decision key stay
-    const i = redrawIdx, g = e.gt[i];
+  if (redrawKey != null) {  // replace the outline; class, id and decision key stay
+    const g = findKey(e.gt, redrawKey);
     if (g) { g.p = p; record(im, e, g); }
-    setMode("select"); sel = g ? {kind: "gt", i} : null; changed(); return;
+    setMode("select"); sel = g ? {kind: "gt", key: selKey(g)} : null; changed(); return;
   }
   const g = {id: null, c: curCls, p, src: newId()};
   e.gt.push(g); record(im, e, g);
-  sel = {kind: "gt", i: e.gt.length - 1}; changed();
+  sel = {kind: "gt", key: g.src}; changed();
 }
 const finishDraft = () => finishShape(draft);
 function markReviewed() {
@@ -631,18 +681,18 @@ function markReviewed() {
 }
 function hitTest(sx, sy) {
   const [x, y] = toImg(sx, sy), im = curImg(); let best = null, ba = Infinity;
-  if ($("showGt").checked) gtOf(im).forEach((g, k) => g.p.forEach(rg => { if (pip(x, y, rg)) { const a = area(rg); if (a < ba) { ba = a; best = {kind: "gt", i: k}; } } }));
+  if ($("showGt").checked) gtOf(im).forEach((g, k) => g.p.forEach(rg => { if (pip(x, y, rg)) { const a = area(rg); if (a < ba) { ba = a; best = {kind: "gt", key: selKey(g)}; } } }));
   if ($("showPr").checked) im.pr.forEach((p, k) => { if (p.s < conf()) return; p.p.forEach(rg => { if (pip(x, y, rg)) { const a = area(rg) * 1.001; if (a < ba) { ba = a; best = {kind: "pr", i: k}; } } }); });
   return best;
 }
 function nearVertex(sx, sy) {
-  if (!sel || sel.kind !== "gt") return null; const g = gtOf(curImg())[sel.i]; if (!g) return null;
+  const g = selObj(); if (!g) return null;
   let best = null, bd = 9;
   g.p.forEach((rg, r) => { for (let i = 0; i < rg.length; i += 2) { const [x, y] = toScr(rg[i], rg[i+1]); const d = Math.hypot(sx - x, sy - y); if (d < bd) { bd = d; best = {r, i}; } } });
   return best;
 }
 function nearEdge(sx, sy) {
-  if (!sel || sel.kind !== "gt") return null; const g = gtOf(curImg())[sel.i]; if (!g) return null;
+  const g = selObj(); if (!g) return null;
   let best = null, bd = 8;
   g.p.forEach((rg, r) => { for (let i = 0; i < rg.length; i += 2) { const j = (i + 2) % rg.length; const [ax, ay] = toScr(rg[i], rg[i+1]), [bx, by] = toScr(rg[j], rg[j+1]); const d = segDist(sx, sy, ax, ay, bx, by); if (d < bd) { bd = d; best = {r, i: j}; } } });
   return best;
@@ -656,7 +706,7 @@ const ptrs = new Map(); let drag = null, pinch = null;
 const pos = ev => { const r = cv.getBoundingClientRect(); return [ev.clientX - r.left, ev.clientY - r.top]; };
 function endVertexDrag(d) {
   const im = curImg();
-  if (d.moved) { const e = ensureEdit(im); if (e.gt[sel.i]) record(im, e, e.gt[sel.i]); changed(); }
+  if (d.moved) { const e = ensureEdit(im), g = selEdit(e); if (g) record(im, e, g); changed(); }
   else undoStacks[im.file].pop();
 }
 cv.addEventListener("pointerdown", ev => {
@@ -686,7 +736,8 @@ cv.addEventListener("pointermove", ev => {
   if (drag.type === "free") {
     if (Math.hypot(x - drag.lx, y - drag.ly) >= 2) { const [ix, iy] = toImg(x, y); draft.push(clamp01(ix), clamp01(iy)); drag.lx = x; drag.ly = y; draw(); }
   } else if (drag.type === "vertex") {
-    const [ix, iy] = toImg(x, y), rg = ensureEdit(curImg()).gt[sel.i].p[drag.v.r];
+    const g = selEdit(ensureEdit(curImg())), rg = g && g.p[drag.v.r], [ix, iy] = toImg(x, y);
+    if (!rg || drag.v.i >= rg.length) { drag = null; return; }  // the object went away under the drag (a pull)
     rg[drag.v.i] = clamp01(ix); rg[drag.v.i+1] = clamp01(iy); drag.moved = true; draw();
   } else if (drag.type === "pan") {
     if (Math.hypot(x - drag.x0, y - drag.y0) > 4) drag.moved = true;
@@ -716,12 +767,12 @@ cv.addEventListener("dblclick", ev => {
   if (mode !== "select" || !sel || sel.kind !== "gt") return;
   const [x, y] = pos(ev), v = nearVertex(x, y), im = curImg();
   if (v) {
-    const rg = gtOf(im)[sel.i].p[v.r];
-    if (rg.length > 6) { pushUndo(); const e = ensureEdit(im); e.gt[sel.i].p[v.r].splice(v.i, 2); record(im, e, e.gt[sel.i]); changed(); }
+    const rg = selObj().p[v.r];
+    if (rg.length > 6) { pushUndo(); const e = ensureEdit(im), g = selEdit(e); if (!g) return; g.p[v.r].splice(v.i, 2); record(im, e, g); changed(); }
     return;
   }
   const ed = nearEdge(x, y);
-  if (ed) { const [ix, iy] = toImg(x, y); pushUndo(); const e = ensureEdit(im); e.gt[sel.i].p[ed.r].splice(ed.i, 0, ix, iy); record(im, e, e.gt[sel.i]); changed(); }
+  if (ed) { const [ix, iy] = toImg(x, y); pushUndo(); const e = ensureEdit(im), g = selEdit(e); if (!g) return; g.p[ed.r].splice(ed.i, 0, clamp01(ix), clamp01(iy)); record(im, e, g); changed(); }
 });
 cv.addEventListener("wheel", ev => {
   ev.preventDefault(); const [x, y] = pos(ev), f = Math.exp(-ev.deltaY * 0.0015), s = Math.max(0.05, Math.min(40, view.s * f));
@@ -998,8 +1049,8 @@ function closeTri() {
     const b = stage.getBoundingClientRect(), span = Math.max((x1 - x0) * W, (y1 - y0) * H, 40) * 4;
     view.s = Math.min(b.width, b.height) / span;
     view.ox = b.width / 2 - (x0 + x1) / 2 * W * view.s; view.oy = b.height / 2 - (y0 + y1) / 2 * H * view.s;
-    sel = c.kind === "g" ? {kind: "gt", i: gtOf(curImg()).findIndex(g => g.id === c.id)} : {kind: "pr", i: c.k};
-    if (sel.i < 0) sel = null;
+    sel = c.kind === "g" ? {kind: "gt", key: c.key} : {kind: "pr", i: c.k};
+    if (sel.kind === "gt" && !selObj()) sel = null;
     renderSide(); draw();
   };
   if (imgReady) focus(); else img.addEventListener("load", () => setTimeout(focus, 0), {once: true});
@@ -1035,7 +1086,8 @@ function triRender() {
     bio.innerHTML = `<h2>${g.c}, <span>labeled</span></h2><p>${[model, ...why].join(" · ")}</p><small>⌀ ~${diam} px · ${sample} · ${im.split} set</small>`;
     $("aYes").title = `Keep ${g.c} (swipe right)`;
     CATS.forEach((cl, k) => {
-      const b = document.createElement("button"); b.style.setProperty("--c", catColor(cl)); b.className = cl === g.c ? "cur" : "";
+      const b = document.createElement("button"); b.style.setProperty("--c", catColor(cl));
+      b.className = [cl === g.c ? "cur" : "", isNewCls(cl) ? "newcls" : ""].join(" ").trim(); if (isNewCls(cl)) b.title = NEW_TIP;
       b.innerHTML = `${k < 9 ? k + 1 + ". " : ""}${cl}` + (pm && pm.c === cl && cl !== g.c ? "<small>model</small>" : cl === g.c ? "<small>now</small>" : "");
       b.onclick = () => react("yes", () => decide("keep", cl), cl === g.c ? `kept ${cl}` : `now ${cl}`);
       $("triCls").appendChild(b);
@@ -1280,6 +1332,7 @@ async function sync() {
   for (const file of [...dirty]) {
     try {
       const r = await fetch("api/edits?f=" + encodeURIComponent(file), {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(edits[file])});
+      if (r.status === 400) { err = true; banner(`The server rejected the edits for ${file}. Export them and tell the lab.`); continue; }
       if (!r.ok) { err = true; break; }
       const merged = (await r.json()).edit;  // server merged our record with everyone else's
       const local = edits[file]; edits[file] = mergeEdit(merged, local);
@@ -1324,7 +1377,7 @@ let startMode = null; try { startMode = localStorage.getItem("cryoev-review:mode
 { const m = new URLSearchParams(location.search).get("mode");  // a link with &mode=classes|cards|editor picks the view
   if (m === "classes" || m === "cls" || m === "cards") startMode = "tri"; else if (m === "editor") startMode = "editor"; }
 if (startMode === "tri" || (!startMode && window.matchMedia("(max-width: 700px)").matches)) openTri();
-window.__review = {D, CATS, effGt, mergeEdit, edits: () => edits, state: () => ({mode, sel, curCls, redrawIdx, cur, order, view: {...view}, W, H, imgReady, server, dirty: dirty.size,
+window.__review = {D, CATS, effGt, mergeEdit, pull, materialize, edits: () => edits, state: () => ({mode, sel, curCls, redrawKey, cur, order, view: {...view}, W, H, imgReady, server, dirty: dirty.size,
   tri: {mode: tri.mode, pos: tri.pos, queue: tri.queue}})};  // for annotation/tests
 })();
 </script>
