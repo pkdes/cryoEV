@@ -1,0 +1,1 @@
+{"schema": "grid/1", "id": "2602", "logged": "2026-10-30T12:00:00", "recorded_by": "backfill:registry/validate.py sample", "legacy_ids": [], "replaced_by": null, "prep_date": "2026-04-02", "project": null, "sample": "MDA-MB-231 (RM)", "grid_type": "UTCL grid - TedPella 01825", "replicate": 1, "imaged": ["20260420"]}

@@ -1,0 +1,140 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "cryoEV/registry/image/1",
+ "title": "Image (one raster; key = stem)",
+ "type": "object",
+ "properties": {
+  "schema": {
+   "const": "image/1"
+  },
+  "id": {
+   "type": "string",
+   "pattern": "^[^/\\\\\\s]+_[A-Za-z0-9]+$"
+  },
+  "rf_name": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "description": "Roboflow name, e.g. 0004_Jul30.jpg"
+  },
+  "output_name": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "description": "MANIFEST output_name for session tiles"
+  },
+  "session": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^\\d{8}(-\\d+)?$"
+  },
+  "session_date_basis": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "enum": [
+    "folder",
+    "tracker",
+    "inferred",
+    null
+   ]
+  },
+  "session_grid": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "description": "Scope cassette slot / grid number as in the stem or MANIFEST"
+  },
+  "grid": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^\\d{4,}$",
+   "description": "Inventory Grid# (tracker 'Cryo Grids')"
+  },
+  "montage": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "position": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "nm_per_px": {
+   "type": [
+    "number",
+    "null"
+   ]
+  },
+  "md5": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "source_file": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "rf_id": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^[A-Za-z0-9]{20}$"
+  },
+  "roboflow_project": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "duplicate_of": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^[^/\\\\\\s]+_[A-Za-z0-9]+$"
+  },
+  "logged": {
+   "type": "string",
+   "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?([+-]\\d{2}:\\d{2}|Z)?$",
+   "description": "Time this line was written. Last line per id is current."
+  },
+  "recorded_by": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "description": "Tool + git sha, or 'backfill:<importer> <sha>'"
+  },
+  "note": {
+   "type": [
+    "string",
+    "null"
+   ]
+  }
+ },
+ "required": [
+  "schema",
+  "id",
+  "logged",
+  "session",
+  "grid",
+  "rf_id"
+ ],
+ "additionalProperties": true
+}

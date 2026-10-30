@@ -1,0 +1,231 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "cryoEV/registry/dataset/1",
+ "title": "Dataset: frozen image list + label source + split",
+ "type": "object",
+ "properties": {
+  "schema": {
+   "const": "dataset/1"
+  },
+  "id": {
+   "type": "string",
+   "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+  },
+  "created": {
+   "type": "string",
+   "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?([+-]\\d{2}:\\d{2}|Z)?$"
+  },
+  "source": {
+   "type": "object",
+   "properties": {
+    "kind": {
+     "type": "string",
+     "enum": [
+      "label_version",
+      "roboflow_export"
+     ]
+    },
+    "id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "kind",
+    "id"
+   ],
+   "additionalProperties": true
+  },
+  "label_version": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^lv_\\d{8}_\\d{4}$"
+  },
+  "export": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^roboflow.+$"
+  },
+  "split": {
+   "type": "object",
+   "properties": {
+    "method": {
+     "type": "string"
+    },
+    "seed": {
+     "type": [
+      "integer",
+      "null"
+     ],
+     "minimum": 0
+    },
+    "ratios": {
+     "type": "array",
+     "items": {
+      "type": "number"
+     }
+    },
+    "file": {
+     "type": "string"
+    },
+    "sha256": {
+     "type": "string",
+     "pattern": "^[0-9a-f]{64}$"
+    }
+   },
+   "required": [
+    "method",
+    "file",
+    "sha256"
+   ],
+   "additionalProperties": true
+  },
+  "counts": {
+   "type": "object",
+   "properties": {
+    "train": {
+     "type": "object",
+     "properties": {
+      "images": {
+       "type": "integer",
+       "minimum": 0
+      },
+      "instances": {
+       "type": [
+        "integer",
+        "null"
+       ],
+       "minimum": 0
+      }
+     },
+     "required": [
+      "images"
+     ],
+     "additionalProperties": true
+    },
+    "valid": {
+     "type": "object",
+     "properties": {
+      "images": {
+       "type": "integer",
+       "minimum": 0
+      },
+      "instances": {
+       "type": [
+        "integer",
+        "null"
+       ],
+       "minimum": 0
+      }
+     },
+     "required": [
+      "images"
+     ],
+     "additionalProperties": true
+    },
+    "test": {
+     "type": "object",
+     "properties": {
+      "images": {
+       "type": "integer",
+       "minimum": 0
+      },
+      "instances": {
+       "type": [
+        "integer",
+        "null"
+       ],
+       "minimum": 0
+      }
+     },
+     "required": [
+      "images"
+     ],
+     "additionalProperties": true
+    }
+   },
+   "required": [
+    "train",
+    "valid"
+   ],
+   "additionalProperties": true
+  },
+  "classes": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "class_map": {
+   "type": "object",
+   "additionalProperties": {
+    "type": [
+     "string",
+     "null"
+    ]
+   }
+  },
+  "images_sha256": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{64}$",
+   "description": "sha256 of sorted '<split>\\t<stem>\\n' lines"
+  },
+  "dataset_dir": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "excluded_sessions": {
+   "type": "array",
+   "items": {
+    "type": "string",
+    "pattern": "^\\d{8}(-\\d+)?$"
+   },
+   "uniqueItems": true
+  },
+  "logged": {
+   "type": "string",
+   "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?([+-]\\d{2}:\\d{2}|Z)?$",
+   "description": "Time this line was written. Last line per id is current."
+  },
+  "recorded_by": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "description": "Tool + git sha, or 'backfill:<importer> <sha>'"
+  },
+  "note": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "status": {
+   "type": "string",
+   "enum": [
+    "frozen",
+    "bundled",
+    "trained",
+    "retired"
+   ]
+  }
+ },
+ "required": [
+  "schema",
+  "id",
+  "logged",
+  "created",
+  "source",
+  "split",
+  "counts",
+  "classes",
+  "images_sha256",
+  "status"
+ ],
+ "additionalProperties": true
+}
