@@ -19,7 +19,7 @@ python inference/inference_check.py log <batch_dir> --status reviewed --reviewer
 
 | Option | Default | Notes |
 |---|---|---|
-| `--out` | `<repo>/../CryoAI-laptop/inference_checks/` | Batch root. Refused if it lies inside the session (8-digit) folder |
+| `--out` | `<repo>/../CryoAI-laptop/inference_checks/` | Batch root. Refused (any depth) under `~/Desktop/Cryo-image-processing`, `~/Box`, or the tiles' session (8-digit) folder; also refused if a path would pass Windows' 260-character limit |
 | `--model` | `v5_evnonev_y8m_20261029` | Must match `--predictions-dir`: a path naming another registered model is refused |
 | `--n`, `--seed` | 24, 1 | Same seed + same tiles give the same sample |
 | `--manifest` | `<tiles>/MANIFEST.csv`, else `<tiles>_MANIFEST.csv` | `grid`, `montage` and `nm_per_px` columns; parsed from file names if missing |
@@ -28,6 +28,7 @@ python inference/inference_check.py log <batch_dir> --status reviewed --reviewer
 | `--classes` | `roboflow` | `roboflow`, `default` (`classes.yaml`) or a path |
 | `--conf` | the model's registered conf | `conf:` key in `models.yaml`, else "use conf X" in its note, else its best-F1 conf |
 | `--device` | `cuda` | Only used when there's no `--predictions-dir` |
+| `--link` | off | Hard-link images instead of copying. **Warning:** a hard link *is* the raw file, so editing a staged image in place changes the source data |
 
 **Sampling.** Greedy and seeded. Each pick is the tile that best balances, in order:
 1. any grid × defocus stratum not yet sampled;
@@ -41,12 +42,16 @@ Result:
 - grids get equal shares (a small grid gives all it has);
 - a montage gets a second tile only after every montage in its stratum has one.
 
-Only tiles that have a prediction file are eligible; `BATCH.json` counts the rest.
+Only tiles that have a prediction file are eligible; `BATCH.json` counts the rest. A warning is printed when the MANIFEST has no name column, or when grid / montage / position can't be found (sampled as `na`).
+
+**Failures.** If staging fails (e.g. `predict_models.py` errors), the new batch folder is removed and a `failed` line is logged.
+
+**Partial reviews.** `score` refuses a batch with 0 Done images. With some Done, it scores those, marks RESULT.md **partial** and logs `scored` with `partial: true`. Strata with no Done tile still get a row (Done = 0).
 
 **Batch folder** `<out>/<batch_id>/` (default id `<session>_<model>_<YYYYmmdd-HHMMSS>`):
 | Path | Contents |
 |---|---|
-| `images/` | Hard links to the tiles (copies if linking fails). Don't edit them in place: a hard link is the source file |
+| `images/` | Copies of the tiles (hard links with `--link`) |
 | `predictions/` | Copies of the sampled prediction files (`class conf x1 y1 …`) |
 | `p/` | `predict_models.py` output, only when the model was run here |
 | `sample.csv` | order, image, grid, montage, position, defocus_um, defocus_bin, stratum, n_pred, n_pred_conf<c>, source |
@@ -65,7 +70,7 @@ inner, Incomplete, Overlapping, VLDL, non-EV):
 - With `classes.yaml`, a v5 non-EV prediction is seeded and scored as EV, as before. So use the Roboflow file for multi-class models.
 
 ### `batches.jsonl` (append-only; one JSON object per line)
-Every line repeats the batch fields, so the **last line per `batch_id`** is the current record. Earlier lines are never rewritten.
+Every line repeats the batch fields, so the **last line per `batch_id`** is the current record. Earlier lines are never rewritten. If the file doesn't end in a newline (a cut-off line), one is added before appending; `list` skips unparseable lines with a warning.
 
 | Field | Meaning |
 |---|---|
@@ -77,11 +82,12 @@ Every line repeats the batch fields, so the **last line per `batch_id`** is the 
 | `predictions_dir` | Source of the predictions: the `--predictions-dir` given, or `<batch>/p/<model>/predictions` |
 | `n`, `seed` | Tiles staged, sampler seed |
 | `strata` | `{"grid=2/defocus_bin=dz1": 4, …}`: tiles per stratum |
-| `status` | `staged` (by `stage`), `reviewed` (by `log`), `scored` (by `score`) |
+| `status` | `staged` (by `stage`), `reviewed` (by `log`), `scored` (by `score`), `failed` (staging failed; `error` holds the reason) |
 | `reviewer` | Name given with `--reviewer`, or null |
 | `cryoEV_commit` | Commit that wrote **this line** (`-dirty` if tracked files were modified) |
 | `logged` | Time of this line |
-| `metrics` | `scored` only: `conf`, `n_done`, `precision`, `recall`, `f1`, `per_class` (reviewer's class → count) |
+| `partial`, `n_done` | `scored` only: true if fewer than `n` images were Done; Done count |
+| `metrics` | `scored` only: `conf`, `n_done`, `precision`, `recall`, `f1`, `per_class` (reviewer's class → count), `by_stratum` (sampled / n_done) |
 | `result`, `note` | `scored`: path of RESULT.md; `log --note`: free text |
 
 ## GPU job bundle for the shared desktop
@@ -97,14 +103,14 @@ python training/make_job_bundle.py --dataset-dir "<CryoAI>/training outputs/<dat
 
   It also lists what to send back: the run folder, the logs and the new `EXPERIMENT_LOG.csv` row. Nothing on the desktop is automated.
 - **Arguments.** Everything after `--` goes to `run_experiments.py`. Flags it doesn't define are refused, and `--dataset` is set by the bundle.
-  For `--weights`, a file tracked in the repo is used from the desktop's own checkout; any other file is packed into `weights/`.
+  For `--weights PATH` or `--weights=PATH`, a file tracked in the repo is used from the desktop's own checkout; any other file is packed into `weights/`. A folder is refused.
 - **`dataset.yaml` paths.** The absolute `path:` line (e.g. `C:/Users/ML-2619/...`) is commented out, and
   `train`/`val`/`test` become relative. With no `path:`, Ultralytics uses the yaml's own folder as the root. A relative
   `path:` would resolve against the working directory, so it is removed rather than made relative. `JOB.json` in
-  the zip lists the changes, the arguments and an md5 for every image and label.
+  the zip lists the changes, the arguments, the bundling PC's Ultralytics version and an md5 for every image and label. The README has the desktop check for Ultralytics 8.4.x, because 8.4 is the version that falls back to the yaml's folder.
 
 ## Tests
-`python -m unittest tests.test_inference_check -v` (no GPU, about 15 s):
+`python -m unittest tests.test_inference_check -v` (no GPU, about 35 s):
 - the sampler;
 - a real `stage` on 20261027, skipped if the session folder is absent;
 - `score` on a synthetic review with a known answer (`tests/qc_fixture.py`);

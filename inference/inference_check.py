@@ -55,7 +55,36 @@ DEFOCUS_COLUMNS = ("mdoc_defocus_um", "defocus_um", "defocus")
 NAME_COLUMNS = ("output_name", "image", "file_name", "filename", "name")
 LOG_FIELDS = ["batch_id", "created", "session", "tiles_dir", "model", "predictions_dir",
               "n", "seed", "strata", "status", "reviewer", "cryoEV_commit"]
-STATUSES = ("staged", "reviewed", "scored")
+STATUSES = ("staged", "reviewed", "scored", "failed")
+# Raw data and synced storage: a batch is never written under these (any depth).
+PROTECTED_ROOTS = (Path.home() / "Desktop" / "Cryo-image-processing", Path.home() / "Box")
+
+
+def warn(msg: str):
+    print(f"WARNING: {msg}", file=sys.stderr)
+
+
+def _under(path: Path, root: Path) -> bool:
+    p, r = os.path.normcase(str(path)), os.path.normcase(str(root))
+    return p == r or p.startswith(r.rstrip("\\/") + os.sep)
+
+
+def out_root_problem(root: Path, tiles_dir: Path, protected=PROTECTED_ROOTS) -> str | None:
+    """Why --out may not be used, or None. Refuses protected roots and the tiles' session folder."""
+    root = Path(os.path.abspath(root))
+    for p in protected:
+        if _under(root, Path(os.path.abspath(p))):
+            return f"--out {root} is under {p}, which is read-only; stage elsewhere"
+    tiles_dir = Path(os.path.abspath(tiles_dir))
+    session = next((p for p in [tiles_dir, *tiles_dir.parents] if re.match(r"\d{8}", p.name)), tiles_dir)
+    if _under(root, session):
+        return f"--out {root} is inside the session folder {session}; stage elsewhere"
+    return None
+
+
+def longest_output_path(bdir: Path, model: str, stems) -> int:
+    """Length of the longest path stage + predict_models will write (p/<model>/predictions/<stem>.txt)."""
+    return len(str(bdir / "p" / model / "predictions")) + max(len(s) for s in stems) + 5
 
 
 # ---------------------------------------------------------------- tile table
@@ -92,6 +121,10 @@ def tile_table(tiles_dir: Path, manifest: Path | None, field_table: Path | None)
         rows = read_csv(manifest)
         key = next((c for c in NAME_COLUMNS if rows and c in rows[0]), None)
         man = {r[key]: r for r in rows} if key else {}
+        if not key:
+            warn(f"{manifest.name} has none of the name columns {NAME_COLUMNS}; ignoring it")
+        elif not any(p.name in man for p in images):
+            warn(f"{manifest.name}: no {key} matches an image in {tiles_dir}; ignoring it")
     field = {}
     if field_table:
         for r in read_csv(field_table):
@@ -119,6 +152,13 @@ def tile_table(tiles_dir: Path, manifest: Path | None, field_table: Path | None)
             "defocus_um": defocus,
             "nm_per_px": _num(m.get("nm_per_px")),
         })
+    for what, bad in (("grid", lambda t: t["grid"] == "na"),
+                      ("montage", lambda t: t["montage"] == t["path"].stem),
+                      ("position", lambda t: t["position"] == "na")):
+        n = sum(map(bad, out))
+        if n:
+            warn(f"{n} of {len(out)} tile(s): {what} not in MANIFEST or file name "
+                 f"(e.g. {next(t['name'] for t in out if bad(t))}); sampled as unknown")
     return out
 
 
@@ -230,9 +270,32 @@ def append_log(root: Path, batch: dict, status: str, reviewer=None, **extra):
     line = {f: batch.get(f) for f in LOG_FIELDS}
     line.update(status=status, reviewer=reviewer, cryoEV_commit=git_commit(),
                 logged=time.strftime("%Y-%m-%dT%H:%M:%S"), **extra)
-    with open(root / "batches.jsonl", "a", encoding="utf-8") as f:
-        f.write(json.dumps(line) + "\n")
+    path = root / "batches.jsonl"
+    # A line cut short (crash, sync conflict) must not swallow the next one.
+    lead = ""
+    if path.exists() and path.stat().st_size:
+        with open(path, "rb") as f:
+            f.seek(-1, os.SEEK_END)
+            lead = "" if f.read(1) == b"\n" else "\n"
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(lead + json.dumps(line) + "\n")
     return line
+
+
+def read_log(path: Path) -> list:
+    """Parsed lines of batches.jsonl; unparseable lines are skipped with a warning."""
+    out = []
+    for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            r = json.loads(line)
+            r["batch_id"]
+        except (ValueError, KeyError, TypeError):
+            warn(f"{path.name} line {i} is not a valid record; skipped: {line[:80]!r}")
+            continue
+        out.append(r)
+    return out
 
 
 def link_or_copy(src: Path, dst: Path) -> str:
@@ -306,24 +369,43 @@ def cmd_stage(a):
     created = time.strftime("%Y-%m-%dT%H:%M:%S")
     batch_id = a.batch_id or f"{session}_{a.model}_{time.strftime('%Y%m%d-%H%M%S')}"
     root = a.out.resolve()
-    # Session folders are read-only data: never stage a batch inside one.
-    guard = next((p for p in [tiles_dir, *tiles_dir.parents] if re.match(r"\d{8}", p.name)), tiles_dir)
-    if root == guard or guard in root.parents:
-        raise SystemExit(f"--out {root} is inside the session folder {guard}; stage elsewhere")
+    problem = out_root_problem(root, tiles_dir)
+    if problem:
+        raise SystemExit(problem)
     bdir = root / batch_id
     if bdir.exists():
         raise SystemExit(f"{bdir} exists; pass another --batch-id")
     # Windows MAX_PATH (260) without long-path support: predict_models then fails mid-run.
-    stem = max(len(t["path"].stem) for t in picked)
-    longest = len(str(bdir / "p" / a.model / "predictions")) + stem + 6
+    longest = longest_output_path(bdir, a.model, [t["path"].stem for t in picked])
     if os.name == "nt" and longest > 259:
         raise SystemExit(f"output paths would reach {longest} characters (Windows limit 260): "
                          f"use a shorter --out or --batch-id")
-    (bdir / "images").mkdir(parents=True)
+    stub = {"batch_id": batch_id, "created": created, "session": session, "tiles_dir": str(tiles_dir),
+            "model": a.model, "predictions_dir": str(pred_src) if pred_src else None,
+            "n": len(picked), "seed": a.seed, "strata": strata}
+    root.mkdir(parents=True, exist_ok=True)
+    bdir.mkdir()   # did not exist (checked above): on failure everything under it is ours to remove
+    try:
+        return _stage_into(a, bdir, root, picked, tiles, levels, strata, all_strata, edges, conf,
+                           conf_src, classes, manifest, field_table, pred_src, n_missing, stub)
+    except BaseException as exc:
+        shutil.rmtree(bdir, ignore_errors=True)
+        append_log(root, stub, "failed", a.reviewer, error=f"{type(exc).__name__}: {exc}"[:500])
+        warn(f"staging failed; removed {bdir} and logged status 'failed'")
+        raise
+
+
+def _stage_into(a, bdir, root, picked, tiles, levels, strata, all_strata, edges, conf, conf_src,
+                classes, manifest, field_table, pred_src, n_missing, stub):
+    batch_id, created, session, tiles_dir = (stub[k] for k in ("batch_id", "created", "session", "tiles_dir"))
+    tiles_dir = Path(tiles_dir)
+    (bdir / "images").mkdir()
     (bdir / "predictions").mkdir()
     (bdir / "review").mkdir()
 
-    modes = Counter(link_or_copy(t["path"], bdir / "images" / t["name"]) for t in picked)
+    # Copies by default: a hard link IS the raw file, so an in-place edit would change the source.
+    put = link_or_copy if a.link else (lambda s, d: shutil.copy2(s, d) and "copied")
+    modes = Counter(put(t["path"], bdir / "images" / t["name"]) for t in picked)
     if pred_src:
         pred_mode = "existing"
         for t in picked:
@@ -396,15 +478,10 @@ def cmd_stage(a):
 # ---------------------------------------------------------------- score
 
 def read_docs(review: Path) -> list:
-    names = (review / "images_list.txt").read_text(encoding="utf-8").split()
-    docs = []
-    for nm in names:
-        p = review / (Path(nm).stem + ".json")
-        if p.exists():
-            d = json.loads(p.read_text(encoding="utf-8"))
-            if d.get("done"):
-                docs.append(d)
-    return docs
+    """Review JSONs marked Done, via web_qc's own loader (same images and order as the export)."""
+    sys.path.insert(0, str(REPO))
+    from annotation.web_qc.export import load_done
+    return load_done(review)
 
 
 def class_counts(docs: list, conf: float) -> tuple:
@@ -449,7 +526,8 @@ def write_result(bdir: Path, batch: dict, conf: float, iou: float, reviewer, cfg
          f"| Model | `{batch['model']}`, scored at conf {conf} ({batch['model_conf_source']}) |",
          f"| Sample | {batch['n']} of {batch['n_candidates']} tiles, seed {batch['seed']}, "
          f"{batch['n_montages']} montages; by {' > '.join(batch['levels'])} |",
-         f"| Reviewed (Done) | {len(docs)} of {batch['n']}" + (f", by {reviewer}" if reviewer else "") + " |",
+         f"| Reviewed (Done) | {len(docs)} of {batch['n']}" + (f", by {reviewer}" if reviewer else "")
+         + (" (**partial**: scores cover the Done tiles only)" if len(docs) < batch["n"] else "") + " |",
          f"| Reviewed down to | conf {floor:.2f} (outlines below were never judged) |",
          f"| Scored | {time.strftime('%Y-%m-%d %H:%M')}, cryoEV {git_commit()} |", ""]
 
@@ -473,19 +551,30 @@ def write_result(bdir: Path, batch: dict, conf: float, iou: float, reviewer, cfg
               f"{float(r['recall']):.3f} | {float(r['f1']):.3f} |" for r in pick]
         L.append("")
 
+    # Every sampled stratum gets a row, also those with no Done tile yet (n_done 0).
+    by = defaultdict(Counter)
+    for r in sample.values():
+        by[r["stratum"]]["sampled"] += 1
+    done_names = {d["image"] for d in docs}
+    for nm in done_names:
+        by[sample.get(nm, {}).get("stratum", "?")]["n_done"] += 1
     per_image = review / "metrics" / "per_image.csv"
     if per_image.exists() and per_image.stat().st_size:
-        by = defaultdict(Counter)
         for r in read_csv(per_image):
             s = sample.get(r["image"], {}).get("stratum", "?")
             by[s].update({k: int(r[k]) for k in ("tp", "fp", "fn")})
-            by[s]["tiles"] += 1
-        L += [f"## By stratum (conf >= {conf})", "", "| Stratum | Tiles | P | R | F1 | TP | FP | FN |",
-              "|---|---:|---:|---:|---:|---:|---:|---:|"]
-        for s, c in sorted(by.items()):
+    L += [f"## By stratum (conf >= {conf})", "",
+          "| Stratum | Sampled | Done | P | R | F1 | TP | FP | FN |",
+          "|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+    for s, c in sorted(by.items()):
+        if c["n_done"] and at:
             p, r, f = prf(c["tp"], c["fp"], c["fn"])
-            L.append(f"| {s} | {c['tiles']} | {p:.2f} | {r:.2f} | {f:.2f} | {c['tp']} | {c['fp']} | {c['fn']} |")
-        L.append("")
+            cells = f"{p:.2f} | {r:.2f} | {f:.2f} | {c['tp']} | {c['fp']} | {c['fn']}"
+        else:
+            cells = "– | – | – | – | – | –"
+        L.append(f"| {s} | {c['sampled']} | {c['n_done']} | {cells} |")
+    L.append("")
+    metrics["by_stratum"] = {s: {"sampled": c["sampled"], "n_done": c["n_done"]} for s, c in sorted(by.items())}
 
     truth, model = class_counts(docs, conf)
     L += ["## Per-class counts (Done tiles)", "", "Reviewer's classes (the corrected labels):", "",
@@ -518,6 +607,10 @@ def cmd_score(a):
     review = bdir / "review"
     if not (review / "images_list.txt").exists():
         raise SystemExit(f"no review in {review} yet. Review first:\n  {batch['commands']['review']}")
+    n_done = len(read_docs(review))
+    if not n_done:
+        raise SystemExit(f"no images marked Done in {review} yet (0 of {batch['n']}); "
+                         "press Done on reviewed images in web_qc, then score again")
     conf = a.conf if a.conf is not None else batch["model_conf"]
     cmd = [sys.executable, "-m", "annotation.web_qc.export", "--images-dir", str(bdir / "images"),
            "--predictions-dir", str(bdir / "predictions"), "--review-dir", str(review),
@@ -531,7 +624,11 @@ def cmd_score(a):
     from annotation.web_qc.server import load_classes
     reviewer = a.reviewer or batch.get("reviewer")
     metrics = write_result(bdir, batch, conf, a.iou, reviewer, load_classes(Path(batch["classes"])))
-    append_log(bdir.parent, batch, "scored", reviewer, metrics=metrics, result=str(bdir / "RESULT.md"))
+    partial = n_done < batch["n"]
+    append_log(bdir.parent, batch, "scored", reviewer, partial=partial, n_done=n_done,
+               metrics=metrics, result=str(bdir / "RESULT.md"))
+    if partial:
+        warn(f"partial: {n_done} of {batch['n']} images Done; logged as scored with partial=true")
     print(f"\n-> {bdir / 'RESULT.md'}")
 
 
@@ -545,15 +642,13 @@ def cmd_list(a):
     path = a.out / "batches.jsonl"
     if not path.exists():
         raise SystemExit(f"no {path}")
-    last = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            r = json.loads(line)
-            last[r["batch_id"]] = r
+    last = {r["batch_id"]: r for r in read_log(path)}
     for r in last.values():
         m = r.get("metrics") or {}
         f1 = f"F1 {m['f1']:.3f} @ {m['conf']}" if "f1" in m else ""
-        print(f"{r['batch_id']:<55} {r['status']:<9} n={r['n']:<4} {r.get('reviewer') or '':<10} {f1}")
+        part = f" ({r.get('n_done')}/{r.get('n')} done)" if r.get("partial") else ""
+        print(f"{r['batch_id']:<55} {r.get('status'):<9} n={r.get('n')!s:<4} "
+              f"{r.get('reviewer') or '':<10} {f1}{part}")
 
 
 def main():
@@ -581,6 +676,9 @@ def main():
     s.add_argument("--session", help="session name (default: first 8-digit folder name above --tiles)")
     s.add_argument("--batch-id")
     s.add_argument("--reviewer")
+    s.add_argument("--link", action="store_true",
+                   help="hard-link images instead of copying. WARNING: a hard link is the raw file; "
+                        "editing a staged image in place changes the source data")
     common(s)
     s.set_defaults(func=cmd_stage)
 

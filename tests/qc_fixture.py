@@ -39,13 +39,17 @@ OBJECTS = [
 DRAWN = (250, 230, 22)
 
 
-def make_fake_tiles(root: Path, n_images: int = 2):
-    """Write images/ and predictions/ under root; return both paths."""
+def make_fake_tiles(root: Path, n_images: int = 2, grid_per_image: bool = False):
+    """Write images/ and predictions/ under root; return both paths.
+
+    grid_per_image: image k is on grid k+1 (one stratum per image) instead of all on grid 1.
+    """
     images, preds = root / "images", root / "predictions"
     for d in (images, preds):
         d.mkdir(parents=True, exist_ok=True)
     for k in range(n_images):
-        name = f"g1_fake__grid1_{k + 1}_r0c{k}_t0{k}__nobar.png"
+        g = k + 1 if grid_per_image else 1
+        name = f"g{g}_fake__grid{g}_{k + 1}_r0c{k}_t0{k}__nobar.png"
         rng = np.random.default_rng(k)
         Image.fromarray(rng.integers(90, 160, (H, W), dtype=np.uint8)).save(images / name)
         (preds / (Path(name).stem + ".txt")).write_text(

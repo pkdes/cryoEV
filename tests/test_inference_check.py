@@ -187,6 +187,9 @@ class TestScore(unittest.TestCase):
             self.assertEqual([l["status"] for l in log], ["staged", "scored"])
             self.assertEqual(log[1]["reviewer"], "tester")
             self.assertAlmostEqual(log[1]["metrics"]["f1"], 0.5)
+            self.assertIs(log[1]["partial"], False)
+            self.assertEqual(log[1]["n_done"], 2)
+            self.assertFalse(any(os.path.samefile(p, images / p.name) for p in (b / "images").iterdir()))
 
     def test_default_classes_unchanged(self):
         """classes.yaml (no model_class_to_class): the non-EV outline is seeded and scored as EV."""
@@ -198,6 +201,149 @@ class TestScore(unittest.TestCase):
             at = {r["conf_cut"]: r for r in ic.read_csv(
                 Path(tmp) / "review/metrics/by_threshold.csv")}["0.5"]
             self.assertEqual((int(at["tp"]), int(at["fp"]), int(at["fn"])), (4, 2, 2))
+
+
+def stage_fake(tmp, *extra, grid_per_image=False, batch_id="fake"):
+    """Stage the fixture tiles into <tmp>/out/<batch_id>; return (batch dir, out root, completed process)."""
+    images, preds = make_fake_tiles(Path(tmp) / "src", grid_per_image=grid_per_image)
+    args = ["inference/inference_check.py", "stage", "--tiles", images, "--model", "v5_evnonev_y8m_20261029",
+            "--n", 2, "--out", Path(tmp) / "out", "--batch-id", batch_id, "--session", "fake", *extra]
+    if "--device" not in extra:
+        args += ["--predictions-dir", preds]
+    r = subprocess.run([sys.executable, *map(str, args)], cwd=REPO, capture_output=True, text=True)
+    return Path(tmp) / "out" / batch_id, Path(tmp) / "out", r
+
+
+def read_lines(out):
+    return (out / "batches.jsonl").read_text(encoding="utf-8").splitlines()
+
+
+class TestScorePartial(unittest.TestCase):
+    def test_zero_done_is_clean_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b, out, r = stage_fake(tmp)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            write_reviews(b / "images", b / "predictions", b / "review", ROBOFLOW)
+            for p in (b / "review").glob("*.json"):
+                d = json.loads(p.read_text(encoding="utf-8"))
+                d["done"] = False
+                p.write_text(json.dumps(d), encoding="utf-8")
+            r = subprocess.run([sys.executable, "inference/inference_check.py", "score", str(b)],
+                               cwd=REPO, capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("no images marked Done", r.stderr)
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertEqual([json.loads(l)["status"] for l in read_lines(out)], ["staged"])
+
+    def test_partial_batch_keeps_empty_strata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b, out, r = stage_fake(tmp, grid_per_image=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            write_reviews(b / "images", b / "predictions", b / "review", ROBOFLOW)
+            p = next((b / "review").glob("g2_*.json"))
+            d = json.loads(p.read_text(encoding="utf-8"))
+            d["done"] = False
+            p.write_text(json.dumps(d), encoding="utf-8")
+            run("inference/inference_check.py", "score", b)
+            last = json.loads(read_lines(out)[-1])
+            self.assertEqual((last["status"], last["partial"], last["n_done"], last["n"]), ("scored", True, 1, 2))
+            self.assertEqual(last["metrics"]["by_stratum"]["grid=2"], {"sampled": 1, "n_done": 0})
+            result = (b / "RESULT.md").read_text(encoding="utf-8")
+            self.assertIn("| grid=2 | 1 | 0 | – | – | – | – | – | – |", result)
+            self.assertIn("| grid=1 | 1 | 1 | 0.50 | 0.50 | 0.50 | 1 | 1 | 1 |", result)
+            self.assertIn("**partial**", result)
+
+
+class TestLogRobustness(unittest.TestCase):
+    def test_truncated_line_then_log_and_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b, out, r = stage_fake(tmp)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            log = out / "batches.jsonl"
+            raw = log.read_bytes()
+            log.write_bytes(raw[:-15])                       # cut the line short, newline lost
+            run("inference/inference_check.py", "log", b, "--status", "reviewed", "--reviewer", "amy")
+            lines = read_lines(out)
+            self.assertEqual(len(lines), 2)                  # new record on its own line
+            self.assertEqual(json.loads(lines[1])["status"], "reviewed")
+            r = subprocess.run([sys.executable, "inference/inference_check.py", "list", "--out", str(out)],
+                               cwd=REPO, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("line 1 is not a valid record", r.stderr)
+            self.assertRegex(r.stdout, r"fake\s+reviewed\s+n=2\s+amy")
+
+
+class TestGuards(unittest.TestCase):
+    def test_protected_roots_any_depth(self):
+        tiles = Path(tempfile.gettempdir()) / "tiles"
+        home = Path.home()
+        for bad in (home / "Box", home / "Box" / "lab" / "x",
+                    home / "Desktop" / "Cryo-image-processing",
+                    home / "Desktop" / "Cryo-image-processing" / "20261027" / "a" / "b",
+                    home / "Desktop" / "Cryo-image-processing" / "notes"):
+            self.assertIsNotNone(ic.out_root_problem(bad, tiles), bad)
+        if os.name == "nt":   # case-insensitive file system
+            self.assertIsNotNone(ic.out_root_problem(home / "desktop" / "CRYO-image-processing" / "x", tiles))
+        self.assertIsNone(ic.out_root_problem(home / "Boxes" / "x", tiles))       # prefix only, not under
+        self.assertIsNone(ic.out_root_problem(Path(tempfile.gettempdir()) / "ic", tiles))
+
+    def test_session_folder_and_custom_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tiles = Path(tmp) / "20261027" / "5. Model + labeling" / "model_input"
+            self.assertIn("session folder", ic.out_root_problem(Path(tmp) / "20261027" / "q", tiles))
+            self.assertIsNone(ic.out_root_problem(Path(tmp) / "elsewhere", tiles))
+            self.assertIsNotNone(ic.out_root_problem(Path(tmp) / "p" / "x", tiles, protected=[Path(tmp) / "p"]))
+
+    def test_refuses_protected_out_end_to_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path.home() / "Box" / "_inference_check_must_not_exist"
+            images, preds = make_fake_tiles(Path(tmp) / "src")
+            r = subprocess.run([sys.executable, "inference/inference_check.py", "stage", "--tiles", str(images),
+                                "--predictions-dir", str(preds), "--out", str(bad)],
+                               cwd=REPO, capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("read-only", r.stderr)
+            self.assertFalse(bad.exists())
+
+    def test_path_length_guard(self):
+        self.assertEqual(ic.longest_output_path(Path("C:/o/b"), "m", ["ab", "abcd"]),
+                         len(str(Path("C:/o/b/p/m/predictions"))) + 4 + 5)
+        if os.name != "nt":
+            self.skipTest("260-character limit applies on Windows only")
+        with tempfile.TemporaryDirectory() as tmp:
+            b, out, r = stage_fake(tmp, batch_id="b" * 200)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("Windows limit 260", r.stderr)
+            self.assertFalse(out.exists() and any(out.iterdir()))   # nothing created, nothing logged
+
+
+class TestManifestWarnings(unittest.TestCase):
+    def test_warns_on_unusable_manifest_and_names(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "plain_tile.png").write_bytes(b"x")
+            (d / "MANIFEST.csv").write_text("foo,grid\nbar,1\n", encoding="utf-8")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                t = ic.tile_table(d, d / "MANIFEST.csv", None)
+            msg = err.getvalue()
+            self.assertIn("none of the name columns", msg)
+            self.assertIn("grid not in MANIFEST or file name", msg)
+            self.assertEqual(t[0]["grid"], "na")
+
+
+class TestStageFailure(unittest.TestCase):
+    def test_predict_failure_removes_batch_and_logs_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b, out, r = stage_fake(tmp, "--device", "no_such_device")
+            self.assertNotEqual(r.returncode, 0)
+            self.assertFalse(b.exists())
+            lines = [json.loads(l) for l in read_lines(out)]
+            self.assertEqual([l["status"] for l in lines], ["failed"])
+            self.assertIn("CalledProcessError", lines[0]["error"])
+            self.assertEqual(sorted(p.name for p in out.iterdir()), ["batches.jsonl"])
 
 
 class TestJobBundle(unittest.TestCase):
@@ -251,6 +397,39 @@ class TestJobBundle(unittest.TestCase):
                                cwd=REPO, capture_output=True, text=True)
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("--epoch", r.stderr)
+
+    def _dataset(self, tmp):
+        ds = Path(tmp) / "d"
+        for sp in ("train", "val"):
+            (ds / "images" / sp).mkdir(parents=True)
+            (ds / "labels" / sp).mkdir(parents=True)
+            (ds / "images" / sp / "a.png").write_bytes(b"x")
+        (ds / "dataset.yaml").write_text("train: images/train\nval: images/val\nnames:\n  0: EV\n")
+        return ds
+
+    def test_weights_equals_form_is_packed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ds = self._dataset(tmp)
+            w = Path(tmp) / "w.pt"
+            w.write_bytes(b"weights")
+            run("training/make_job_bundle.py", "--dataset-dir", ds, "--out", Path(tmp) / "o",
+                "--", "--single-run", f"--weights={w}")
+            z = zipfile.ZipFile(next((Path(tmp) / "o").glob("*.zip")))
+            self.assertIn("d/weights/w.pt", z.namelist())
+            job = json.loads(z.read("d/JOB.json"))
+            self.assertEqual(job["run_experiments_args"][-2:], ["--weights", "../CryoAI/training outputs/d/weights/w.pt"])
+            self.assertIn("8.4.x", z.read("d/README.md").decode("utf-8"))
+            z.close()
+
+    def test_weights_directory_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ds = self._dataset(tmp)
+            r = subprocess.run([sys.executable, "training/make_job_bundle.py", "--dataset-dir", str(ds),
+                                "--out", str(Path(tmp) / "o"), "--", "--weights", str(Path(tmp))],
+                               cwd=REPO, capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("is a folder", r.stderr)
+            self.assertFalse(list((Path(tmp) / "o").glob("*.zip")))
 
 
 if __name__ == "__main__":

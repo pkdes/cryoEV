@@ -66,7 +66,9 @@ def mask(poly_px, w, h):
 
 
 def load_done(review_dir: Path):
-    order = (review_dir / "images_list.txt").read_text(encoding="utf-8").split()
+    # One name per line (as server.py writes it); .split() broke names containing spaces.
+    order = [l.strip() for l in (review_dir / "images_list.txt").read_text(encoding="utf-8").splitlines()
+             if l.strip()]
     docs = []
     for name in order:
         p = review_dir / (Path(name).stem + ".json")

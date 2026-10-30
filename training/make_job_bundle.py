@@ -117,7 +117,16 @@ def split_counts(root: Path) -> dict:
     return out
 
 
-def readme(name, zip_name, exp_args, changes, counts, commit, weights_note, created) -> str:
+def ultralytics_version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("ultralytics")
+    except Exception:   # not installed on the bundling PC
+        return "unknown"
+
+
+def readme(name, zip_name, exp_args, changes, counts, commit, weights_note, created,
+           ultra="unknown") -> str:
     args = " ".join(f'"{a}"' if " " in a else a for a in exp_args)
     rows = "\n".join(f"| {s} | {c['images']} | {c['labels']} |" for s, c in counts.items())
     chg = "\n".join(f"  - `{c}`" for c in changes) or "  - none needed"
@@ -146,7 +155,13 @@ The repo is `<parent>\\cryoEV`, next to the data folder `<parent>\\CryoAI`.
    git merge-base --is-ancestor {commit} HEAD; if ($?) {{ "ok" }} else {{ "commit {commit} missing" }}
    ```
    If it says missing, the commit hasn't been pushed yet: stop and ask.
-3. Train in the background, with a log you can follow:
+3. Check the Ultralytics version (bundled on {ultra}):
+   ```powershell
+   python -c "import ultralytics; print(ultralytics.__version__)"
+   ```
+   It must be 8.4.x. The rewritten `dataset.yaml` has no `path:` line and relies on 8.4's fallback
+   to the yaml's own folder; another version may look for the images elsewhere. If it isn't 8.4.x, stop and ask.
+4. Train in the background, with a log you can follow:
    ```powershell
    cd "<parent>\\cryoEV"
    Start-Process python -ArgumentList '-u training/run_experiments.py --dataset "{name}" {args}' `
@@ -187,6 +202,8 @@ def main():
             raise SystemExit(f"{root} has no {need}")
     name = a.dataset_name or root.name
     exp = a.exp_args[1:] if a.exp_args[:1] == ["--"] else a.exp_args
+    # --flag=value -> --flag value, so --weights=PATH is found (and packed) like --weights PATH.
+    exp = [y for x in exp for y in (x.split("=", 1) if x.startswith("--") and "=" in x else [x])]
     known = run_experiments_flags()
     flags = [x.split("=")[0] for x in exp if x.startswith("--")]
     bad = [f for f in flags if f not in known]
@@ -204,11 +221,15 @@ def main():
     extra, weights_note = {}, ""
     if "--weights" in exp:
         i = exp.index("--weights") + 1
+        if i >= len(exp) or exp[i].startswith("--"):
+            raise SystemExit("--weights needs a file path")
         w = Path(exp[i])
         w_abs = w if w.is_absolute() else (Path.cwd() / w)
+        if w_abs.is_dir():
+            raise SystemExit(f"--weights {w} is a folder; pass the .pt file")
         if tracked(w_abs):   # in the repo: the desktop's own copy is used
             exp[i] = w_abs.resolve().relative_to(REPO).as_posix()
-        elif w_abs.exists():
+        elif w_abs.is_file():
             extra[f"{name}/weights/{w.name}"] = w_abs
             exp[i] = f"../CryoAI/training outputs/{name}/weights/{w.name}"
             weights_note = (f"\n\n   `--weights` points at `weights\\{w.name}` inside this bundle "
@@ -231,10 +252,11 @@ def main():
             md5[arc.split("/", 1)[1]] = hashlib.md5(p.read_bytes()).hexdigest()
         counts = split_counts(root)
         commit = git_commit()
-        body = readme(name, zip_path.name, exp, changes, counts, commit, weights_note, created)
+        ultra = ultralytics_version()
+        body = readme(name, zip_path.name, exp, changes, counts, commit, weights_note, created, ultra)
         job = {"dataset_name": name, "source_dir": str(root), "created": created, "cryoEV_commit": commit,
                "run_experiments_args": ["--dataset", name] + exp, "dataset_yaml_changes": changes,
-               "splits": counts, "md5": md5}
+               "ultralytics_bundled_on": ultra, "splits": counts, "md5": md5}
         z.writestr(f"{name}/JOB.json", json.dumps(job, indent=1), compress_type=zipfile.ZIP_DEFLATED)
         z.writestr(f"{name}/README.md", body, compress_type=zipfile.ZIP_DEFLATED)
     readme_path = zip_path.with_name(zip_path.stem + "_README.md")
