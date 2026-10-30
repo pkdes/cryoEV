@@ -1,0 +1,30 @@
+# QC classes with the lab's Roboflow names, so web_qc exports import into Roboflow
+# without renaming. Select with --classes annotation/web_qc/classes_roboflow.yaml
+# (inference/inference_check.py uses it by default). classes.yaml stays the web_qc default.
+#
+# `id` is the class index in exported YOLO labels (these ids are NOT the model's ids).
+# `is_ev` = counted as a true EV in the metrics. It follows the training class scheme
+# (data_utils/prepare_all_layer_singleclass.py): EV, Low conf EV, MV, inner, Incomplete
+# and Overlapping all collapse to model class 0 "EV"; VLDL and non-EV are model class 1.
+classes:
+  - {id: 0, name: EV,          color: "#3fb950", is_ev: true}
+  - {id: 1, name: Low conf EV, color: "#d29922", is_ev: true}
+  - {id: 2, name: MV,          color: "#a371f7", is_ev: true}
+  - {id: 3, name: inner,       color: "#58a6ff", is_ev: true}
+  - {id: 4, name: Incomplete,  color: "#f0883e", is_ev: true}
+  - {id: 5, name: Overlapping, color: "#db61a2", is_ev: true}
+  - {id: 6, name: VLDL,        color: "#39c5cf", is_ev: false}
+  - {id: 7, name: non-EV,      color: "#8b949e", is_ev: false}
+
+# classify_roles() output -> initial class for model class 0 (EV) objects.
+role_to_class:
+  standalone: EV
+  multilayer: MV
+  inner-layer: inner
+
+# Optional. Model class ids listed here start as this class, skip role assignment,
+# and are left out of the EV P/R/F1 (they are not EV predictions). Ids not listed
+# (here: 0 = EV) get their class from role_to_class. Single-class models only write
+# id 0, so this changes nothing for them.
+model_class_to_class:
+  1: non-EV

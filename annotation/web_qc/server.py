@@ -53,7 +53,26 @@ def load_classes(path: Path) -> dict:
     names = [c["name"] for c in cfg["classes"]]
     for role, name in cfg["role_to_class"].items():
         assert name in names, f"role_to_class: unknown class {name!r}"
+    for mid, name in (cfg.get("model_class_to_class") or {}).items():
+        assert name in names, f"model_class_to_class: unknown class {name!r}"
     return cfg
+
+
+def fixed_model_classes(cfg: dict) -> dict:
+    """{model class id: class name} from the optional model_class_to_class key.
+
+    These ids are not EV predictions: they skip role assignment and EV scoring.
+    Empty for classes.yaml, so single-class behaviour is unchanged.
+    """
+    return {int(k): v for k, v in (cfg.get("model_class_to_class") or {}).items()}
+
+
+def read_prediction_classes(txt: Path) -> list:
+    """Model class id per prediction, aligned with read_predictions (same line filter)."""
+    if not txt.exists():
+        return []
+    rows = (line.split() for line in txt.read_text().splitlines())
+    return [int(float(p[0])) for p in rows if len(p) >= 8]
 
 
 def read_predictions(txt: Path, w: int, h: int):
@@ -67,12 +86,16 @@ def seed_objects(txt: Path, w: int, h: int, cfg: dict, role_conf: float) -> list
 
     Roles are assigned among objects at/above role_conf -- the same population
     analysis.add_layer_roles uses -- so the tool shows the calls the report
-    counted. Objects below it start as plain EV.
+    counted. Objects below it start as plain EV. With model_class_to_class in
+    the classes file, those model ids start as their mapped class instead and
+    take no part in role assignment (containment assumes EV-only polygons).
     """
     from analysis.add_layer_roles import roles_for
 
     polys, confs = read_predictions(txt, w, h)
-    kept = [i for i, c in enumerate(confs) if c >= role_conf]
+    fixed = fixed_model_classes(cfg)
+    mcls = read_prediction_classes(txt) if fixed else [0] * len(polys)
+    kept = [i for i, c in enumerate(confs) if c >= role_conf and mcls[i] not in fixed]
     masks = []
     for i in kept:
         m = np.zeros((h, w), np.uint8)
@@ -86,7 +109,10 @@ def seed_objects(txt: Path, w: int, h: int, cfg: dict, role_conf: float) -> list
     objs = []
     for i, (p, c) in enumerate(zip(polys, confs)):
         rl = role.get(i)
-        cls = cfg["role_to_class"].get(rl, cfg["role_to_class"]["standalone"])
+        if mcls[i] in fixed:
+            cls, rl = fixed[mcls[i]], f"model class {mcls[i]}"
+        else:
+            cls = cfg["role_to_class"].get(rl, cfg["role_to_class"]["standalone"])
         objs.append({
             "id": f"m{i}",
             "poly": [[round(float(x) / w, 6), round(float(y) / h, 6)] for x, y in p],

@@ -29,6 +29,11 @@ outlines the reviewer drew. Predictions are the ORIGINAL model polygons from
 the prediction files, so an edited outline is scored by IoU against the model's
 version, not against itself. Thresholds below the cut the reviewer worked at
 are not reported: outlines hidden below it were never judged.
+
+Multi-class models: model class ids listed under model_class_to_class in the
+classes file (classes_roboflow.yaml: 1 = non-EV) are not EV predictions, so
+they are left out of the EV scores, precision_by_conf and morphology_model.
+They still appear in confusion.csv. classes.yaml has no such key: unchanged.
 """
 
 from __future__ import annotations
@@ -49,7 +54,8 @@ from analysis.add_layer_roles import roles_for
 from analysis.morphology import analyze_instances, save_morphology_csv
 from annotation.metrics import _evaluate_predictions
 from annotation.web_qc import report
-from annotation.web_qc.server import HERE, load_classes, read_predictions
+from annotation.web_qc.server import (HERE, fixed_model_classes, load_classes,
+                                      read_prediction_classes, read_predictions)
 from training.train_yolo import load_predictions_yolo_format
 
 
@@ -146,6 +152,7 @@ def morphology(docs, cfg, pred_dir, reanalysis_dir, analysis_conf, pixel_size):
     """
     class_to_role = {v: k for k, v in cfg["role_to_class"].items()}
     is_ev = {c["name"]: bool(c["is_ev"]) for c in cfg["classes"]}
+    fixed = fixed_model_classes(cfg)
     reviewed, model = [], []
     for d in docs:
         w, h, stem = d["width"], d["height"], Path(d["image"]).stem
@@ -158,8 +165,8 @@ def morphology(docs, cfg, pred_dir, reanalysis_dir, analysis_conf, pixel_size):
             reviewed.append({**rec, "image": d["image"], "sample": sample,
                              "reviewer_class": c, "role": class_to_role.get(c, "standalone")})
 
-        masks, confs, _ = load_predictions_yolo_format(pred_dir / f"{stem}.txt", w, h)
-        kept = [i for i, c in enumerate(confs) if c >= analysis_conf]
+        masks, confs, mcls = load_predictions_yolo_format(pred_dir / f"{stem}.txt", w, h)
+        kept = [i for i, c in enumerate(confs) if c >= analysis_conf and mcls[i] not in fixed]
         km = [masks[i] for i in kept]
         role, layers = roles_for(km) if km else ({}, {})
         for rec in analyze_instances(km, confidences=[confs[i] for i in kept],
@@ -206,6 +213,7 @@ def morph_summary(rows):
 
 def score(docs, cfg, pred_dir, analysis_conf, iou):
     is_ev = {c["name"]: bool(c["is_ev"]) for c in cfg["classes"]}
+    fixed = fixed_model_classes(cfg)
     floor = max([d.get("conf_cut") or 0.0 for d in docs] + [0.0])
     cuts = [round(t, 2) for t in np.arange(0.05, 0.951, 0.05) if t >= floor - 1e-9]
     if analysis_conf not in cuts and analysis_conf >= floor:
@@ -215,7 +223,11 @@ def score(docs, cfg, pred_dir, analysis_conf, iou):
     bins, confusion = defaultdict(Counter), Counter()
     for d in docs:
         w, h = d["width"], d["height"]
-        polys, confs = read_predictions(pred_dir / (Path(d["image"]).stem + ".txt"), w, h)
+        txt = pred_dir / (Path(d["image"]).stem + ".txt")
+        polys, confs = read_predictions(txt, w, h)
+        mcls = read_prediction_classes(txt) if fixed else [0] * len(polys)
+        ev_pred = [k for k in range(len(polys)) if mcls[k] not in fixed]
+        polys, confs = [polys[k] for k in ev_pred], [confs[k] for k in ev_pred]
         truth = [mask([[x * w, y * h] for x, y in o["poly"]], w, h) for o in d["objects"]
                  if o["status"] == "accepted" and is_ev[o["cls"]]]
         pred_masks = [mask(p, w, h) for p in polys]
@@ -229,9 +241,10 @@ def score(docs, cfg, pred_dir, analysis_conf, iou):
             if o["source"] != "model" or o["status"] == "pending":
                 continue
             kept = o["status"] == "accepted" and is_ev[o["cls"]]
-            b = min(int(o["conf"] * 10), 9) / 10
-            bins[b]["n"] += 1
-            bins[b]["kept_as_ev"] += kept
+            if not fixed or mcls[int(o["id"][1:])] not in fixed:   # id "m<i>" = line i
+                b = min(int(o["conf"] * 10), 9) / 10
+                bins[b]["n"] += 1
+                bins[b]["kept_as_ev"] += kept
             confusion[(o["model_class"], o["cls"] if o["status"] == "accepted" else "rejected")] += 1
         n_drawn = sum(o["source"] == "human" and is_ev[o["cls"]] for o in d["objects"])
         if per_image and per_image[-1]["image"] == d["image"]:
