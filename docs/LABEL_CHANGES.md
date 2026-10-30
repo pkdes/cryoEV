@@ -55,10 +55,29 @@ ids/batches/datasets/runs contract) extends this file; it does not replace these
 | `t`, `rx` | Tool logical time / server receive time (ms, null if absent) |
 | `seed` | September seed key, or null |
 | `reviewed` | The image's reviewed flag |
-| `status` | `applied`, or `conflict` with `reason` (row also in `conflicts.csv`, nothing written for it) |
+| `status` | `applied`; `conflict` with `reason` (nothing written for it); or `duplicate-dropped` with `reason` (a same-class copy of an outline that is kept). Both are also in `conflicts.csv`. An applied row may carry a warning in `reason` |
 
 - Conflicts are not written: the same outline twice with different classes, a `g<id>` missing from the base,
-  a prediction index out of range, an outline that fails to clamp to a valid polygon.
+  a prediction index out of range (including `p-1`), an outline that fails to clamp to a valid polygon. A
+  conflict on a base label leaves it as in the base.
+- Same outline = mask IoU >= 0.9 at full resolution (`--dup-iou`). Outlines linked at that IoU form a group:
+  - classes differ: every change in the group is a conflict;
+  - same class, one label with an id (base or reshaped): it stays, each add/new is `duplicate-dropped`;
+  - same class, only adds/new: the earliest (`t`, then key order) stays, the rest are `duplicate-dropped`;
+  - same class, two labels with ids, one of them changed: the change is a conflict (a label is never dropped).
+- Pairs of base labels that already overlap at >= 0.9 are not flagged; `version.json` lists them as `base_duplicates`.
+- Near duplicate: an add/new over a label of another class at IoU >= 0.5 is applied, with a warning
+  (`conflicts.csv` `severity: warn`).
+- Outlines are compared numerically (within 1e-9, so `0` equals `0.0`): a decision that restates the outline is a `keep`.
+- `conflicts.csv` columns: `severity` (`conflict`, `dropped`, `warn`), `image`, `rf_id`, `file`, `dec_key`, `op`,
+  `reason`, `ann_old`, `cls_from`, `cls_to`, `who_raw`, `who`, `t`, `seed`.
+- Not logged (no label change, no verdict): `null` undos, and an `n<uid>`/`p<k>` removed again; counted in
+  `version.json` `skipped`. An old Editor-list item with no key is logged with `dec_key` `gt` (op `new`, or the
+  change it made to a label); its `seed` comes from the item.
+- The run refuses: a package whose labels differ from the base (per image the same ids; per label the same
+  class and an outline within 0.5 px), a `data.js` `source` that is neither `--base` nor a byte-identical copy,
+  duplicate image names, a record whose `pkg` is another package, an `--out-root` under Box or
+  Cryo-image-processing (any spelling: `data_utils/path_guard.py`), and an existing `lv_` folder.
 - A class not in the base categories (e.g. VLDL on a pre-lipo image) is added as a category and flagged in
   `version.json`. Pushing it to Roboflow needs the user's OK.
 - Rerunning on the same inputs gives the same `labels.coco.json` hash and no duplicate rows.

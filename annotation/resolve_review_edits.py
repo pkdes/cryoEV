@@ -86,8 +86,14 @@ def read_data_js(path):
     return json.loads(Path(path).read_text(encoding="utf-8").split("=", 1)[1].strip().rstrip(";"))
 
 
-def same_poly(a, b):
-    return json.dumps(a) == json.dumps(b)
+def same_poly(a, b, tol=1e-9):
+    """Same outline: same ring and vertex counts, coordinates equal within tol. Numeric, so 0 == 0.0 (comparing
+    json.dumps text called an edge-touching outline saved as 0 vs 0.0 a reshape)."""
+    try:
+        return (len(a) == len(b) and all(len(ra) == len(rb) for ra, rb in zip(a, b))
+                and all(abs(float(x) - float(y)) <= tol for ra, rb in zip(a, b) for x, y in zip(ra, rb)))
+    except (TypeError, ValueError):
+        return False
 
 
 def operations(im, e):

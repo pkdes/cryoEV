@@ -21,18 +21,25 @@ rules as effGt() in review_tool/index.html) and diffed against the package label
 
 Conflicts (status "conflict", also in conflicts.csv; nothing is written for them, so a base label keeps
 its base class and outline):
-  duplicate_outline      a changed/added outline overlaps another final outline at mask IoU >= --dup-iou
-                         (default 0.9, full-resolution masks). Both sides conflict when both are changes;
-                         the reason notes whether the classes differ.
+  duplicate_outline      outlines linked at mask IoU >= --dup-iou (0.9, full resolution) with different
+                         classes: every change in the group; or a change that makes two labels the same
   g_missing_from_base    a g<id> decision or list item whose id is not a base annotation of that image
-  pred_index_out_of_range  p<k> with k not in 0..len(pr)-1
+  pred_index_out_of_range  p<k> with k not in 0..len(pr)-1 (p-1 too, as in the page)
   invalid_polygon        an outline that, in pixels and clamped to the image, has a ring with < 3 distinct
                          points or zero area
-  image_not_in_package / image_not_in_base   a record whose file has no data.js / base COCO image
+  image_not_in_package   a record whose file has no data.js image
   duplicate_id           the same base id twice in one image's labels
+duplicate-dropped: a same-class copy of an outline that stays (a label with an id, else the earliest add/new by
+t, then key order); in conflicts.csv with severity "dropped". Base pairs that already overlap are not flagged
+(version.json base_duplicates). An add/new over another class's label at IoU >= 0.5 is applied with a warning
+(severity "warn"). Outlines are compared numerically (1e-9), so 0 and 0.0 are the same outline.
 
 Not logged (no label change, no review verdict): null (undone) decisions, n<uid>/p<k> "del" of an
 outline that was drawn/accepted and then removed again. Counted in version.json "skipped".
+
+Refused before anything is written: a package whose labels differ from the base (per image the same ids, per
+label the class and an outline within 0.5 px), a data.js source that is neither --base nor a byte-identical
+copy, duplicate image names, a record for another package.
 
 COCO output: images and categories as in the base (+ any class missing from the base, flagged in
 version.json); annotations sorted by id; base ids kept, new ids max(base id)+1, ... in base image order;
@@ -69,11 +76,12 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO))
-from review_server import _migrate, effective_labels, load_people  # noqa: E402
-from inference.inference_check import PROTECTED_ROOTS, _under  # noqa: E402
+from review_server import _migrate, _num, effective_labels, load_people  # noqa: E402
+from data_utils.path_guard import PROTECTED_ROOTS, normalize, protected_problem  # noqa: E402
 
 SCHEMA = "label_change/1"
 DUP_IOU = 0.9
+NEAR_IOU = 0.5  # an add/new over a label of another class at this IoU (below DUP_IOU) is applied with a warning
 PEOPLE = HERE / "people.json"
 CLASS_GROUPS = HERE / "class_groups.yaml"
 INTERNAL = ("u", "x", "lc", "seed", "src", "t")  # data.js / tool fields, never written to COCO
@@ -81,7 +89,7 @@ CHANGE_OPS = ("reclass", "reshape", "reclass+reshape", "add", "new")
 OPS = ("keep", "reclass", "reshape", "reclass+reshape", "delete", "add", "new", "reject")
 ROW_FIELDS = ["schema", "label_version", "base", "pkg", "image", "rf_id", "dec_key", "op", "ann_old", "ann_new",
               "cls_from", "cls_to", "who_raw", "who", "who_auth", "t", "rx", "seed", "reviewed", "status", "reason"]
-CONFLICT_FIELDS = ["image", "rf_id", "file", "dec_key", "op", "reason", "ann_old", "cls_from", "cls_to",
+CONFLICT_FIELDS = ["severity", "image", "rf_id", "file", "dec_key", "op", "reason", "ann_old", "cls_from", "cls_to",
                    "who_raw", "who", "t", "seed"]
 RF_SUFFIX = re.compile(r"\.rf\.[0-9a-f]+\.\w+$")
 
@@ -144,12 +152,9 @@ def load_records(edits_dir: Path) -> list:
 
 
 def out_root_problem(root: Path, protected=PROTECTED_ROOTS) -> str | None:
-    """Why --out-root may not be used, or None (inference_check's pattern: protected roots at any depth)."""
-    root = Path(os.path.abspath(root))
-    for p in protected:
-        if _under(root, Path(os.path.abspath(p))):
-            return f"--out-root {root} is under {p}, which is read-only; write label versions elsewhere"
-    return None
+    """Why --out-root may not be used, or None (data_utils/path_guard.py, shared with inference_check)."""
+    problem = protected_problem(root, protected)
+    return f"--out-root {problem}; write label versions elsewhere" if problem else None
 
 
 # ---------------------------------------------------------------- geometry
@@ -214,19 +219,66 @@ def mask_iou(a, b) -> float:
 
 # ---------------------------------------------------------------- one image
 
-def _same(a, b) -> bool:
-    return json.dumps(a) == json.dumps(b)  # exact, as resolve_review_edits.same_poly
+SAME_TOL = 1e-9  # normalized units: equal outlines up to float noise (0 vs 0.0 is equal)
+
+
+def _same(a, b, tol: float = SAME_TOL) -> bool:
+    """Two ring lists are the same outline: same ring and vertex counts, every coordinate within tol. Numeric, so
+    0 == 0.0 (a json.dumps comparison calls those different and logs an edge-touching keep as a reshape)."""
+    try:
+        return (len(a) == len(b) and all(len(ra) == len(rb) for ra, rb in zip(a, b))
+                and all(abs(float(x) - float(y)) <= tol for ra, rb in zip(a, b) for x, y in zip(ra, rb)))
+    except (TypeError, ValueError):
+        return False
 
 
 def _pred_index(key: str, im: dict):
-    try:
-        k = int(key[1:])
-    except ValueError:
+    """p<k> -> k if it names one of the image's predictions, else None. Like the page (im.pr[k] is undefined for
+    k < 0), "p-1" is out of range, although Python's pr[-1] would pick the last prediction."""
+    if not re.fullmatch(r"p\d+", key):
         return None
-    return k if 0 <= k < len(im.get("pr") or []) else None
+    k = int(key[1:])
+    return k if k < len(im.get("pr") or []) else None
 
 
-def image_ops(im: dict, rec: dict, base_anns: dict, w: int, h: int, dup_iou: float = DUP_IOU):
+def _union_find(n, edges):
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for i, j in edges:
+        parent[find(i)] = find(j)
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+    return sorted(groups.values())
+
+
+def base_duplicate_pairs(base_anns: dict, dup_iou: float = DUP_IOU, cache=None) -> dict:
+    """{(id_a, id_b): IoU} for base labels of one image that already overlap at >= dup_iou."""
+    ids = sorted(base_anns)
+    out = {}
+    for i, a in enumerate(ids):
+        for b in ids[i + 1:]:
+            v = _iou_cached(base_anns[a]["segmentation"], base_anns[b]["segmentation"], cache)
+            if v >= dup_iou:
+                out[(a, b)] = round(v, 3)
+    return out
+
+
+def _iou_cached(a, b, cache):
+    if cache is None:
+        return mask_iou(a, b)
+    k = (id(a), id(b)) if id(a) < id(b) else (id(b), id(a))
+    if k not in cache:
+        cache[k] = mask_iou(a, b)
+    return cache[k]
+
+
+def image_ops(im: dict, rec: dict, base_anns: dict, w: int, h: int, dup_iou: float = DUP_IOU, base_dups=(), cache=None):
     """One image's edit record -> (ops, skipped). base_anns: {id: COCO annotation} of this image only.
 
     Each op: {dec_key, op, ann_old, cls_from, cls_to, p (normalized, final), px (pixel, final), d (decision
@@ -303,6 +355,8 @@ def image_ops(im: dict, rec: dict, base_anns: dict, w: int, h: int, dup_iou: flo
     present_src = {f.get("src") for f in final if f.get("src")}
     for key, d in dec.items():
         v = d.get("v")
+        if key in present_src:  # its object came from a list item (logged as add/new), whatever the decision says
+            continue
         if key[0] == "g":
             try:
                 gid = int(key[1:])
@@ -320,8 +374,6 @@ def image_ops(im: dict, rec: dict, base_anns: dict, w: int, h: int, dup_iou: flo
             continue
         if not v:
             skipped["undone"] += 1
-            continue
-        if key in present_src:
             continue
         if key[0] == "p" and v == "no":
             k = _pred_index(key, im)
@@ -356,43 +408,122 @@ def image_ops(im: dict, rec: dict, base_anns: dict, w: int, h: int, dup_iou: flo
     def candidates():
         """Final outlines (pixel) on this image: (op or None, key, class, px). Base labels as in the base, with
         the non-conflict ops applied."""
-        cur = {aid: (None, f"g{aid}", a["category_name"], a["segmentation"]) for aid, a in base_anns.items()}
+        cur = {aid: (None, f"g{aid}", a["category_name"], a["segmentation"], aid) for aid, a in base_anns.items()}
         out = []
         for o in ops:
-            if o["conflict"]:
+            if o["conflict"] or o.get("dropped"):
                 continue
             if o["op"] == "delete":
                 cur.pop(o["ann_old"], None)
             elif o["op"] in ("reclass",):
-                cur[o["ann_old"]] = (o, o["dec_key"], o["cls_to"], base_anns[o["ann_old"]]["segmentation"])
+                cur[o["ann_old"]] = (o, o["dec_key"], o["cls_to"], base_anns[o["ann_old"]]["segmentation"], o["ann_old"])
             elif o["op"] in ("reshape", "reclass+reshape"):
-                cur[o["ann_old"]] = (o, o["dec_key"], o["cls_to"], o["px"])
+                cur[o["ann_old"]] = (o, o["dec_key"], o["cls_to"], o["px"], o["ann_old"])
             elif o["op"] in ("add", "new"):
-                out.append((o, o["dec_key"], o["cls_to"], o["px"]))
+                out.append((o, o["dec_key"], o["cls_to"], o["px"], None))
         return [cur[k] for k in sorted(cur)] + out
 
+    def when(o):
+        d, item = o["d"], o["item"] or {}
+        t = d.get("t") if d else item.get("t", e.get("gtT"))
+        return t if _num(t) else math.inf
+
+    # Duplicate outlines: clusters of final outlines linked at IoU >= dup_iou (pairs that already overlapped in the
+    # base are not links). Repeated until stable, since a reverted change brings its base outline back.
+    #   classes differ in a cluster         -> every change in it is a conflict
+    #   same class, one label with an id    -> it stays; each add/new is dropped (status duplicate-dropped)
+    #   same class, only adds/new           -> the earliest (t, then key order) stays; the rest are dropped
+    #   same class, two labels with ids     -> the changed ones are conflicts (a label is never dropped)
+    order = {id(o): k for k, o in enumerate(ops)}
     while True:
         cands = candidates()
-        hits = {}
+        edges, best = [], {}
         for i in range(len(cands)):
             for j in range(i + 1, len(cands)):
                 a, b = cands[i], cands[j]
                 if a[0] is None and b[0] is None:
                     continue  # two untouched base labels: not an edit
-                v = mask_iou(a[3], b[3])
+                if a[4] is not None and b[4] is not None and (min(a[4], b[4]), max(a[4], b[4])) in base_dups:
+                    continue  # already overlapped in the base: reported in version.json, not an edit's doing
+                v = _iou_cached(a[3], b[3], cache)
                 if v >= dup_iou:
-                    kind = "different class" if a[2] != b[2] else "same class"
-                    for x, y in ((a, b), (b, a)):
-                        if x[0] is not None and id(x[0]) not in hits:
-                            hits[id(x[0])] = (x[0], f"duplicate_outline: IoU {v:.3f} with {y[1]} ({y[2]}), {kind}")
-        if not hits:
+                    edges.append((i, j))
+                    for x, y in ((i, j), (j, i)):
+                        if v > best.get(x, (0,))[0]:
+                            best[x] = (v, y)
+        acted = False
+        for group in _union_find(len(cands), edges):
+            members = [cands[k] for k in group]
+            if len(group) < 2 or all(m[0] is None for m in members):
+                continue
+            def why(k, kind):
+                v, other = best[k]
+                return f"duplicate_outline: IoU {v:.3f} with {cands[other][1]} ({cands[other][2]}), {kind}"
+            if len({m[2] for m in members}) > 1:
+                for k in group:
+                    if cands[k][0] is not None:
+                        cands[k][0]["conflict"] = why(k, "different class")
+                        acted = True
+                continue
+            labeled = [k for k in group if cands[k][4] is not None]
+            added = sorted((k for k in group if cands[k][4] is None), key=lambda k: (when(cands[k][0]), order[id(cands[k][0])]))
+            if len(labeled) >= 2:
+                for k in labeled:
+                    if cands[k][0] is not None:
+                        cands[k][0]["conflict"] = why(k, "same class, two labels")
+                        acted = True
+            keep = labeled[0] if len(labeled) == 1 else None if labeled else added[0]
+            for k in added:
+                if k != keep:
+                    cands[k][0]["dropped"] = why(k, "same class") + f"; kept {cands[keep][1] if keep is not None else 'the labels'}"
+                    acted = True
+        if not acted:
             break
-        for o, reason in hits.values():
-            o["conflict"] = reason
+
+    # Near duplicates: an add/new over an existing label of another class at IoU >= NEAR_IOU is applied, with a warning
+    final_cands = candidates()
+    for c in final_cands:
+        o = c[0]
+        if o is None or o["op"] not in ("add", "new"):
+            continue
+        for x in final_cands:
+            if x[4] is not None and x[2] != c[2]:
+                v = _iou_cached(c[3], x[3], cache)
+                if v >= NEAR_IOU:
+                    o["warn"] = f"near_duplicate: IoU {v:.3f} with {x[1]} ({x[2]}), different class; applied"
+                    break
     return ops, skipped
 
 
 # ---------------------------------------------------------------- run
+
+DRIFT_PX = 0.5  # a package outline further than this from its base annotation means another base
+
+
+def _rings(a):
+    """A COCO annotation's polygon rings, as build_review_package.gt_items keeps them (>= 3 points)."""
+    return [s for s in a.get("segmentation") or [] if isinstance(s, list) and len(s) >= 6]
+
+
+def outline_offset_px(p, rings, w, h) -> float:
+    """Largest vertex offset (px) between a data.js outline p (normalized) and base rings (px); inf if the ring or
+    vertex counts differ."""
+    if len(p) != len(rings) or any(len(a) != len(b) for a, b in zip(p, rings)):
+        return math.inf
+    return max((abs(float(x) * (w if k % 2 == 0 else h) - float(y)) for a, b in zip(p, rings)
+                for k, (x, y) in enumerate(zip(a, b))), default=0.0)
+
+
+def check_source(source, base_path) -> str:
+    """data.js "source" vs --base: the same file, or a byte-identical copy of it; else refuse."""
+    if not source:
+        print("[WARN] data.js has no source: cannot check it names --base (the per-label check still runs)")
+        return "absent"
+    if normalize(source) == normalize(base_path):
+        return "same path"
+    if Path(source).is_file() and sha256_file(source) == sha256_file(base_path):
+        return "identical copy"
+    raise SystemExit(f"[ERROR] data.js was built from {source}, not --base {base_path} (and the files differ)")
 
 def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou: float = DUP_IOU):
     """Everything but writing: -> (coco_out, rows (without label_version), conflicts, info)."""
@@ -401,26 +532,45 @@ def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou
     who_of = roster_lookup(people)
     cat_id = {c["name"]: c["id"] for c in base["categories"]}
     cat_name = {c["id"]: c["name"] for c in base["categories"]}
+    for what, names in (("base file_name", [i["file_name"] for i in base["images"]]),
+                        ("base image stem", [(i.get("extra") or {}).get("name") or stem_of(i["file_name"]) for i in base["images"]]),
+                        ("package file", [im["file"] for im in data["images"]])):
+        dups = sorted(n for n, k in Counter(names).items() if k > 1)
+        if dups:
+            raise SystemExit(f"[ERROR] duplicate {what}: {dups[:5]}{' ...' if len(dups) > 5 else ''}; images must be unique")
     images_by_file = {i["file_name"]: i for i in base["images"]}
     anns_by_img = {}
     for a in base["annotations"]:
         anns_by_img.setdefault(a["image_id"], {})[a["id"]] = {**a, "category_name": cat_name.get(a["category_id"])}
     pkg_images = {im["file"]: im for im in data["images"]}
     base_name, pkg_id = Path(base_path).parent.name, data.get("id", "")
+    source_check = check_source(data.get("source"), base_path)
 
-    # The package must come from this base: every data.js label is a base annotation of the same image and class
+    # The package must come from this base: per image the same label ids, and per label the same class and outline
+    # (data.js p = base segmentation / (w, h), rounded; matched within DRIFT_PX)
     mismatched = []
     for im in data["images"]:
         b = images_by_file.get(im["file"])
         if b is None:
+            mismatched.append(f"{im['file']}: not in the base")
             continue
-        mine = anns_by_img.get(b["id"], {})
-        for g in im["gt"]:
-            a = mine.get(g["id"])
-            if a is not None and a["category_name"] != g["c"]:
-                mismatched.append(f"{im['file']} g{g['id']}: package {g['c']}, base {a['category_name']}")
         if (b["width"], b["height"]) != (im["w"], im["h"]):
             mismatched.append(f"{im['file']}: package {im['w']}x{im['h']}, base {b['width']}x{b['height']}")
+            continue
+        mine = {aid: a for aid, a in anns_by_img.get(b["id"], {}).items() if _rings(a)}  # what gt_items packages
+        pkg_ids = [g["id"] for g in im["gt"]]
+        if sorted(pkg_ids) != sorted(mine):
+            extra, missing = sorted(set(pkg_ids) - set(mine)), sorted(set(mine) - set(pkg_ids))
+            mismatched.append(f"{im['file']}: label ids differ (package only {extra[:5]}, base only {missing[:5]}"
+                              f"{', repeated ids' if len(pkg_ids) != len(set(pkg_ids)) else ''})")
+            continue
+        for g in im["gt"]:
+            a = mine[g["id"]]
+            if a["category_name"] != g["c"]:
+                mismatched.append(f"{im['file']} g{g['id']}: package {g['c']}, base {a['category_name']}")
+            off = outline_offset_px(g["p"], _rings(a), b["width"], b["height"])
+            if off > DRIFT_PX:
+                mismatched.append(f"{im['file']} g{g['id']}: package outline is {off:.1f} px from the base's")
     if mismatched:
         raise SystemExit("[ERROR] the package was not built from this base (or the base changed):\n  "
                          + "\n  ".join(mismatched[:10]) + (f"\n  ... {len(mismatched)} in all" if len(mismatched) > 10 else ""))
@@ -436,6 +586,8 @@ def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou
         by_file[rec["file"]] = (f, rec)
 
     rows, skipped, applied_images, n_unchanged = [], Counter(), 0, 0
+    cache = {}
+    base_dups = {i["id"]: base_duplicate_pairs(anns_by_img.get(i["id"], {}), dup_iou, cache) for i in base["images"]}
     per_image = {}  # base image id -> ops
     order = {i["file_name"]: k for k, i in enumerate(base["images"])}
     for file in sorted(by_file, key=lambda f: (order.get(f, len(order)), f)):
@@ -454,7 +606,7 @@ def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou
                          else "image_not_in_package"})
             continue
         applied_images += 1
-        ops, sk = image_ops(im, rec, anns_by_img.get(b["id"], {}), b["width"], b["height"], dup_iou)
+        ops, sk = image_ops(im, rec, anns_by_img.get(b["id"], {}), b["width"], b["height"], dup_iou, base_dups[b["id"]], cache)
         skipped.update(sk)
         per_image[b["id"]] = ops
         rx = rec.get("rx") or {}
@@ -479,7 +631,7 @@ def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou
         out_anns[a["id"]] = dict(a)
     for img in base["images"]:
         for o in per_image.get(img["id"], []):
-            if o["conflict"] or o["op"] in ("keep", "reject"):
+            if o["conflict"] or o.get("dropped") or o["op"] in ("keep", "reject"):
                 continue
             if o["op"] == "delete":
                 out_anns.pop(o["ann_old"], None)
@@ -515,18 +667,26 @@ def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou
         seed = (d.get("seed") if d else None) or (item.get("seed") if item else None)
         row = {"schema": SCHEMA, "label_version": None, "base": base_name, "pkg": pkg_id, "image": r["image"],
                "rf_id": r["rf_id"], "dec_key": r["dec_key"], "op": r["op"], "ann_old": r["ann_old"],
-               "ann_new": None if r["conflict"] else (r["_op"].get("ann_new") if r["op"] not in ("keep", "reject") else r["ann_old"]),
+               "ann_new": None if r["conflict"] or r.get("dropped") else (r["_op"].get("ann_new") if r["op"] not in ("keep", "reject") else r["ann_old"]),
                "cls_from": r["cls_from"], "cls_to": r["cls_to"], "who_raw": who_raw, "who": who_of(who_raw),
                "who_auth": None, "t": t, "rx": r["rx"], "seed": seed, "reviewed": r["reviewed"],
-               "status": "conflict" if r["conflict"] else "applied", "reason": r["conflict"]}
+               "status": "conflict" if r["conflict"] else "duplicate-dropped" if r.get("dropped") else "applied",
+               "reason": r["conflict"] or r.get("dropped") or r.get("warn")}
         out_rows.append(row)
-        if r["conflict"]:
-            conflicts.append({"file": r["file"], **{k: row[k] for k in CONFLICT_FIELDS if k in row}})
+        if row["reason"]:
+            sev = {"conflict": "conflict", "duplicate-dropped": "dropped"}.get(row["status"], "warn")
+            conflicts.append({"file": r["file"], "severity": sev, **{k: row[k] for k in CONFLICT_FIELDS if k in row}})
     counts = Counter(r["op"] for r in out_rows if r["status"] == "applied")
     info_out = {"n_records": len(records), "n_images_applied": applied_images, "n_records_without_changes": n_unchanged,
                 "counts_by_op": {k: counts.get(k, 0) for k in OPS},
                 "counts_conflict_by_op": dict(sorted(Counter(r["op"] for r in out_rows if r["status"] == "conflict").items())),
-                "n_conflicts": len(conflicts), "skipped": dict(sorted(skipped.items())),
+                "counts_dropped_by_op": dict(sorted(Counter(r["op"] for r in out_rows if r["status"] == "duplicate-dropped").items())),
+                "n_conflicts": sum(1 for c in conflicts if c["severity"] == "conflict"),
+                "n_dropped": sum(1 for c in conflicts if c["severity"] == "dropped"),
+                "n_warnings": sum(1 for c in conflicts if c["severity"] == "warn"),
+                "skipped": dict(sorted(skipped.items())), "source_check": source_check,
+                "base_duplicates": [{"image": (i.get("extra") or {}).get("name") or stem_of(i["file_name"]), "ids": list(k), "iou": v}
+                                    for i in base["images"] for k, v in sorted(base_dups[i["id"]].items())],
                 "new_categories": [{"id": cat_id[n], "name": n,
                                     "n_annotations": sum(1 for a in anns if a["category_id"] == cat_id[n]),
                                     "note": "not in the base categories; pushing it to Roboflow needs the user's OK"}
@@ -565,8 +725,10 @@ def main(argv=None):
 
     base, package = a.base.resolve(), a.package.resolve()
     edits_dir = (a.edits or package / "edits").resolve()
-    out_root = (a.out_root or base.parent.parent / "labels").resolve()
-    problem = out_root_problem(out_root)
+    raw_root = a.out_root or base.parent.parent / "labels"
+    problem = out_root_problem(raw_root)  # as typed (UNC, \\?\, trailing spaces), then resolved
+    out_root = raw_root.resolve() if not problem else raw_root
+    problem = problem or out_root_problem(out_root)
     if problem:
         raise SystemExit(f"[ERROR] {problem}")
     stamp = a.stamp or datetime.now().strftime("%Y%m%d_%H%M")
@@ -594,7 +756,9 @@ def main(argv=None):
                "n_records": info["n_records"], "n_images_applied": info["n_images_applied"],
                "n_records_without_changes": info["n_records_without_changes"],
                "counts_by_op": info["counts_by_op"], "counts_conflict_by_op": info["counts_conflict_by_op"],
-               "n_conflicts": info["n_conflicts"], "skipped": info["skipped"],
+               "n_conflicts": info["n_conflicts"], "counts_dropped_by_op": info["counts_dropped_by_op"],
+               "n_dropped": info["n_dropped"], "n_warnings": info["n_warnings"], "skipped": info["skipped"],
+               "source_check": info["source_check"], "base_duplicates": info["base_duplicates"],
                "new_categories": info["new_categories"], "new_categories_flag": bool(info["new_categories"]),
                "n_annotations_base": info["n_annotations_base"], "n_annotations_out": info["n_annotations_out"],
                "labels_sha256": hashlib.sha256(labels).hexdigest(), "dup_iou": a.dup_iou,
@@ -603,9 +767,11 @@ def main(argv=None):
     print(f"[OK] {info['n_records']} records, {info['n_images_applied']} images applied; "
           f"annotations {info['n_annotations_base']} -> {info['n_annotations_out']}")
     print("[OK] applied by op: " + ", ".join(f"{k} {v}" for k, v in info["counts_by_op"].items()))
-    print(f"[OK] conflicts: {info['n_conflicts']} {info['counts_conflict_by_op']}; skipped {info['skipped']}")
+    print(f"[OK] conflicts: {info['n_conflicts']} {info['counts_conflict_by_op']}; duplicate-dropped {info['n_dropped']} "
+          f"{info['counts_dropped_by_op']}; warnings {info['n_warnings']}; skipped {info['skipped']}")
+    print(f"[OK] data.js source: {info['source_check']}; base duplicates (not flagged): {len(info['base_duplicates'])}")
     for c in conflicts:
-        print(f"  [conflict] {c['image']} {c['dec_key']} {c['op']}: {c['reason']}")
+        print(f"  [{c['severity']}] {c['image']} {c['dec_key']} {c['op']}: {c['reason']}")
     if info["new_categories"]:
         print(f"[WARN] classes not in the base, added as categories: {[c['name'] for c in info['new_categories']]}")
     if a.dry_run:

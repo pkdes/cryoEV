@@ -11,6 +11,7 @@ import csv
 import hashlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -94,7 +95,7 @@ LIST_RESHAPE9 = [sq(208, 24, 64)]
 LIST_NEW = [sq(500, 400, 40)]
 
 
-def build_synthetic(root: Path):
+def build_synthetic(root: Path, extra=()):
     """base.coco.json, pkg/data.js, pkg/edits/*.json -> (base, pkg, edits)."""
     root.mkdir(parents=True, exist_ok=True)
     base = {"info": {"source": "synthetic"},
@@ -105,14 +106,14 @@ def build_synthetic(root: Path):
                        {"id": 3, "file_name": "c.png", "width": W, "height": H,
                         "extra": {"name": "c_png", "split": "test", "roboflow_id": "rfC"}}],
             "annotations": [{"id": i, "image_id": im, "category_id": c, "segmentation": rings, "iscrowd": 0}
-                            for i, im, c, rings in BASE_ANNS],
+                            for i, im, c, rings in [*BASE_ANNS, *extra]],
             "categories": [{"id": 1, "name": "EV"}, {"id": 2, "name": "Low conf EV"}, {"id": 3, "name": "MV"}]}
     (root / "base").mkdir(exist_ok=True)
     (root / "base" / "current.coco.json").write_text(json.dumps(base), encoding="utf-8")
     names = {c["id"]: c["name"] for c in base["categories"]}
     images = []
     for img in base["images"]:
-        gt = [{"id": i, "c": names[c], "p": [norm(r) for r in rings]} for i, im, c, rings in BASE_ANNS if im == img["id"]]
+        gt = [{"id": i, "c": names[c], "p": [norm(r) for r in rings]} for i, im, c, rings in [*BASE_ANNS, *extra] if im == img["id"]]
         pr = [{"s": 0.9, "c": "EV", "p": [norm(r)]} for r in (PR_A if img["id"] == 1 else [sq(10, 16, 80)] if img["id"] == 2 else [])]
         images.append({"file": img["file_name"], "split": "train", "w": W, "h": H, "src": f"images/{img['extra']['name']}.jpg",
                        "gt": gt, "pr": pr, "fg": 0, "fp": 0})
@@ -257,9 +258,14 @@ class SyntheticTests(unittest.TestCase):
         rec["edit"]["dec"]["p0"]["v"] = "add:EV"
         (self.edits / "b.png.json").write_text(json.dumps(rec), encoding="utf-8")
         _, out2, _ = run(self.base, self.pkg, self.edits, self.out_root, stamp="20990101_0001")
-        c2 = [c for c in read_out(out2)[2] if c["image"] == "b_png"]
-        self.assertEqual(len(c2), 1)
+        coco2, rows2, c2, ver2 = read_out(out2)
+        c2 = [c for c in c2 if c["image"] == "b_png"]
+        self.assertEqual([(c["severity"], c["dec_key"]) for c in c2], [("dropped", "p0")])  # the base label stays
         self.assertIn("same class", c2[0]["reason"])
+        r = next(r for r in rows2 if r["image"] == "b_png" and r["dec_key"] == "p0")
+        self.assertEqual((r["status"], r["ann_new"]), ("duplicate-dropped", None))
+        self.assertEqual(ver2["n_dropped"], 1)
+        self.assertEqual(sum(a["image_id"] == 2 for a in coco2["annotations"]), 3)  # 8, 9 and the list's new one
         self.assertEqual(ar.mask_iou(px([sq(10, 16, 80)]), px([sq(10, 16, 80)])), 1.0)
         self.assertLess(ar.mask_iou(px([sq(10, 16, 80)]), px([sq(18, 16, 80)])), 0.9)
 
@@ -319,6 +325,179 @@ class SyntheticTests(unittest.TestCase):
         self.assertFalse(self.out_root.exists())
 
 
+class QcFixTests(unittest.TestCase):
+    """QC round 1: numeric outline equality, base drift, path-guard bypasses, duplicate rules, minor cases."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="ar_qc_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.out_root = self.tmp / "labels"
+
+    def build(self, extra=()):
+        self.base, self.pkg, self.edits = build_synthetic(self.tmp / "in", extra)
+
+    def record(self, file, dec, **edit):
+        rec = {"file": file, "edit": {"dec": dec, "t": 1000, "modified": True, "reviewed": False, "reviewedT": 0, **edit}}
+        (self.edits / f"{file}.json").write_text(json.dumps(rec), encoding="utf-8")
+
+    def only(self, *files):
+        for f in self.edits.glob("*.json"):
+            if f.name[:-5] not in files:
+                f.unlink()
+
+    def test_zero_vs_zero_point_zero_is_the_same_outline(self):
+        self.assertTrue(ar._same([[0, 0.5, 1, 0.5, 1, 1]], [[0.0, 0.5, 1.0, 0.5, 1.0, 1.0]]))
+        self.assertFalse(ar._same([[0, 0.5, 1, 0.5, 1, 1]], [[0.0, 0.5, 1.0, 0.5, 1.0, 0.9]]))
+        self.assertFalse(ar._same([[0, 0.5, 1, 0.5, 1, 1]], [[0, 0.5, 1, 0.5, 1, 1, 0, 1]]))
+        spec = __import__("importlib.util").util.spec_from_file_location("rre", REPO / "annotation" / "resolve_review_edits.py")
+        rre = __import__("importlib.util").util.module_from_spec(spec)
+        spec.loader.exec_module(rre)
+        self.assertTrue(rre.same_poly([[0, 0.5, 1, 0.5, 1, 1]], [[0.0, 0.5, 1.0, 0.5, 1.0, 1.0]]))
+        self.assertFalse(rre.same_poly([[0, 0.5, 1, 0.5, 1, 1]], [[0.0, 0.5, 1.0, 0.5, 1.0, 0.9]]))
+        # end to end: a keep whose outline is the package's written as ints is a keep, with no segmentation change
+        self.build([(10, 3, 1, [[0.0, 0.0, 80.0, 0.0, 80.0, 80.0, 0.0, 80.0]])])
+        self.only("c.png")
+        self.record("c.png", {"g10": {"v": "keep:EV", "p": [[0, 0, 0.08, 0, 0.08, 0.1, 0, 0.1]], "t": 1000, "who": "Puj"}})
+        _, out, _ = run(self.base, self.pkg, self.edits, self.out_root)
+        coco, rows, _, _ = read_out(out)
+        self.assertEqual([(r["dec_key"], r["op"], r["ann_new"]) for r in rows], [("g10", "keep", 10)])
+        self.assertEqual(next(a for a in coco["annotations"] if a["id"] == 10)["segmentation"],
+                         [[0.0, 0.0, 80.0, 0.0, 80.0, 80.0, 0.0, 80.0]])
+
+    def test_swapped_outlines_and_foreign_source_refused(self):
+        self.build()
+        base = json.loads(self.base.read_text(encoding="utf-8"))
+        a1, a6 = (next(a for a in base["annotations"] if a["id"] == i) for i in (1, 6))  # both EV, same image
+        a1["segmentation"], a6["segmentation"] = a6["segmentation"], a1["segmentation"]
+        swapped = self.tmp / "swapped" / "current.coco.json"
+        swapped.parent.mkdir()
+        swapped.write_text(json.dumps(base), encoding="utf-8")
+        with self.assertRaises(SystemExit) as cm:
+            run(swapped, self.pkg, self.edits, self.out_root)
+        self.assertIn("not built from this base", str(cm.exception))
+        self.assertIn("g1", str(cm.exception))
+        base["annotations"] = [a for a in base["annotations"] if a["id"] != 7]  # a missing id
+        swapped.write_text(json.dumps(base), encoding="utf-8")
+        with self.assertRaises(SystemExit) as cm:
+            run(swapped, self.pkg, self.edits, self.out_root)
+        self.assertIn("label ids differ", str(cm.exception))
+        data = ar.read_data_js(self.pkg / "data.js")
+        other = self.tmp / "other.coco.json"
+        other.write_text("{}", encoding="utf-8")
+        for src, ok in ((str(other), False), (str(self.base), True), (str(self.base).upper(), True)):
+            data["source"] = src
+            (self.pkg / "data.js").write_text("window.REVIEW_DATA = " + json.dumps(data) + ";\n", encoding="utf-8")
+            if ok:
+                v = run(self.base, self.pkg, self.edits, self.out_root, extra=["--dry-run"])[0]
+                self.assertEqual(v["source_check"], "same path")
+            else:
+                with self.assertRaises(SystemExit) as cm:
+                    run(self.base, self.pkg, self.edits, self.out_root)
+                self.assertIn("not --base", str(cm.exception))
+        self.assertFalse(self.out_root.exists())
+
+    def test_duplicate_file_names_refused(self):
+        self.build()
+        base = json.loads(self.base.read_text(encoding="utf-8"))
+        base["images"].append({**base["images"][2], "id": 4})
+        self.base.write_text(json.dumps(base), encoding="utf-8")
+        with self.assertRaises(SystemExit) as cm:
+            run(self.base, self.pkg, self.edits, self.out_root)
+        self.assertIn("duplicate base file_name", str(cm.exception))
+        self.build()
+        data = ar.read_data_js(self.pkg / "data.js")
+        data["images"].append(data["images"][0])
+        (self.pkg / "data.js").write_text("window.REVIEW_DATA = " + json.dumps(data) + ";\n", encoding="utf-8")
+        with self.assertRaises(SystemExit) as cm:
+            run(self.base, self.pkg, self.edits, self.out_root)
+        self.assertIn("duplicate package file", str(cm.exception))
+
+    def test_duplicate_rules(self):
+        """Same class, two changes: keep the earliest (t, then key order), drop the other. Different classes: both
+        conflicts. A near copy over another class's label: applied with a warning. Base pairs: not flagged."""
+        self.build([(10, 3, 1, [sq(500, 504, 80)]), (11, 3, 1, [sq(501, 504, 80)])])  # a base duplicate pair
+        self.only("c.png")
+        n = lambda r: [norm(x) for x in r]
+        self.record("c.png", {
+            "nlate": {"v": "new:EV", "p": n([sq(96, 96, 80)]), "t": 900, "who": "Puj"},
+            "nearly": {"v": "new:EV", "p": n([sq(96, 96, 80)]), "t": 800, "who": "Puj"},
+            "nev": {"v": "new:EV", "p": n([sq(296, 96, 80)]), "t": 800, "who": "Puj"},
+            "nmv": {"v": "new:MV", "p": n([sq(296, 96, 80)]), "t": 900, "who": "Puj"},
+            "nnear": {"v": "new:MV", "p": n([sq(520, 504, 80)]), "t": 800, "who": "Puj"},
+            "g10": {"v": "keep:MV", "t": 800, "who": "Puj"}})
+        v, out, _ = run(self.base, self.pkg, self.edits, self.out_root)
+        coco, rows, conflicts, ver = read_out(out)
+        st = {r["dec_key"]: (r["op"], r["status"]) for r in rows}
+        self.assertEqual(st, {"nlate": ("new", "duplicate-dropped"), "nearly": ("new", "applied"),
+                              "nev": ("new", "conflict"), "nmv": ("new", "conflict"),
+                              "nnear": ("new", "applied"), "g10": ("reclass", "applied")})
+        sev = {c["dec_key"]: c["severity"] for c in conflicts}
+        self.assertEqual(sev, {"nlate": "dropped", "nev": "conflict", "nmv": "conflict", "nnear": "warn"})
+        self.assertIn("near_duplicate", next(c["reason"] for c in conflicts if c["dec_key"] == "nnear"))
+        self.assertIn("kept nearly", next(c["reason"] for c in conflicts if c["dec_key"] == "nlate"))
+        self.assertEqual((ver["n_conflicts"], ver["n_dropped"], ver["n_warnings"]), (2, 1, 1))
+        self.assertEqual([(d["image"], d["ids"]) for d in ver["base_duplicates"]], [("c_png", [10, 11])])
+        self.assertEqual(sum(a["image_id"] == 3 for a in coco["annotations"]), 2 + 2)  # 10, 11, nearly, nnear
+
+    def test_minor_cases(self):
+        self.build()
+        self.only("a.png", "b.png")
+        # p-1: Python's pr[-1] would be the last prediction; the page reads it as out of range, and so do we
+        self.record("a.png", {"p-1": {"v": "add:EV", "t": 1000, "who": "Puj"}})
+        # an old list item from an accepted prediction, whose decision was then undone: one add, not add + undone
+        self.record("b.png", {"p0": {"v": None, "t": 1000, "who": "Puj"}}, gtT=1,
+                    gt=[{"id": 8, "c": "EV", "p": [norm(sq(10, 16, 80))]}, {"id": 9, "c": "EV", "p": [norm(sq(200, 16, 80))]},
+                        {"id": None, "c": "EV", "p": [norm(sq(400, 400, 40))], "src": "p0"}])
+        self.assertEqual(len(rs.effective_labels(ar.read_data_js(self.pkg / "data.js")["images"][0],
+                                                 json.loads((self.edits / "a.png.json").read_text())["edit"])), 7 + 1)  # 7 labels + pr[-1]
+        v, out, _ = run(self.base, self.pkg, self.edits, self.out_root)
+        coco, rows, conflicts, ver = read_out(out)
+        self.assertEqual([(r["image"], r["dec_key"], r["op"], r["status"], r["reason"]) for r in rows],
+                         [("a_png", "p-1", "add", "conflict", "pred_index_out_of_range"),
+                          ("b_png", "p0", "add", "applied", None)])
+        self.assertEqual(ver["skipped"], {})
+
+    @unittest.skipUnless(os.name == "nt", "Windows path spellings")
+    def test_guard_bypasses(self):
+        sys.path.insert(0, str(REPO))
+        from data_utils import path_guard
+        from inference import inference_check as ic
+        h = str(Path.home())
+        tiles = Path(tempfile.gettempdir()) / "tiles"
+        bad = [h + "\\Box\\x", h + "\\Box \\x", h + "\\Box.\\x", h + "\\Box. .\\x", h + "\\Box \\", h + "/Box/x",
+               h.lower() + "\\BOX\\x", "\\\\?\\" + h + "\\Box\\x", "\\\\?\\" + h + "\\Box \\x",
+               "\\\\localhost\\C$" + h[2:] + "\\Box\\x", "\\\\127.0.0.1\\c$" + h[2:] + "\\Box\\x",
+               "\\\\?\\UNC\\localhost\\C$" + h[2:] + "\\Box\\x", "\\\\.\\C:" + h[2:] + "\\Box\\x",
+               h + "\\Box\\..\\Box\\x", h + "\\Desktop\\Cryo-image-processing \\x",
+               h + "\\Desktop\\Cryo-image-processing\\20261027\\a"]
+        for p in bad:
+            self.assertIsNotNone(ar.out_root_problem(Path(p)), p)
+            self.assertIsNotNone(ar.out_root_problem(p), p)
+            self.assertIsNotNone(ic.out_root_problem(Path(p), tiles), p)
+        for ok in (h + "\\Boxes\\x", h + "\\Box2", str(self.tmp / "labels")):
+            self.assertIsNone(ar.out_root_problem(Path(ok)), ok)
+            self.assertIsNone(ic.out_root_problem(Path(ok), tiles), ok)
+        # a junction into a protected folder is caught by realpath / samefile
+        prot, link = self.tmp / "prot", self.tmp / "link"
+        prot.mkdir()
+        try:
+            import _winapi
+            _winapi.CreateJunction(str(prot), str(link))
+        except (ImportError, OSError) as e:
+            self.skipTest(f"no junctions here: {e}")
+        self.addCleanup(os.rmdir, link)
+        self.assertIsNotNone(path_guard.protected_problem(link / "x" / "y", [prot]))
+        self.assertIsNotNone(path_guard.protected_problem(link, [prot]))
+        self.assertIsNone(path_guard.protected_problem(self.tmp / "elsewhere", [prot]))
+        self.assertIsNotNone(ic.out_root_problem(link / "x", tiles, protected=[prot]))
+        # end to end: nothing is created
+        self.build()
+        for p in ("\\\\localhost\\C$" + h[2:] + "\\Box\\_ar_must_not_exist", h + "\\Box \\_ar_must_not_exist"):
+            with self.assertRaises(SystemExit):
+                run(self.base, self.pkg, self.edits, p)
+        self.assertFalse((Path.home() / "Box" / "_ar_must_not_exist").exists())
+
+
 def assert_round_trip(tc, pkg, edits, pkg2, conflicts, rows):
     """data.js rebuilt from the output COCO (no edits) == effective_labels() of the applied edits, minus the
     conflicts, within 1 px. Base labels by id; added ones paired by class and position."""
@@ -358,10 +537,14 @@ def assert_round_trip(tc, pkg, edits, pkg2, conflicts, rows):
 
 # ---------------------------------------------------------------- real inputs (copied, read-only)
 
-def copy_package(src: Path, dst: Path, edits: Path = None, images=False):
+def copy_package(src: Path, dst: Path, edits: Path = None):
+    """data.js + edits to a temp folder. Long real file names can pass MAX_PATH under a deep temp root: skip then."""
     dst.mkdir(parents=True)
-    shutil.copy(src / "data.js", dst / "data.js")
-    shutil.copytree(edits or src / "edits", dst / "edits")
+    try:
+        shutil.copy(src / "data.js", dst / "data.js")
+        shutil.copytree(edits or src / "edits", dst / "edits")
+    except OSError as e:
+        raise unittest.SkipTest(f"copying the real package to {dst} failed (path too long?): {e}")
     return dst
 
 
@@ -382,22 +565,32 @@ class RealV2Tests(unittest.TestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def test_2_reproduces_resolution_applied_ready(self):
+        """resolution.csv lists 4 'reshape' rows (labels 606, 635, 636, 2966) whose old and new outlines are equal
+        numerically: the seeds wrote 0 where data.js has 0.0 (edge-touching vertices), and the old json.dumps
+        comparison called that a reshape. With a numeric comparison they are keep:<same class> + an unchanged
+        outline, so they are logged as keep and their segmentation is not rewritten."""
         with open(RESOLUTION, newline="", encoding="utf-8") as f:
             ready = [r for r in csv.DictReader(f) if r["status"] == "applied-ready"]
         want = Counter(r["op"] for r in ready)
         self.assertEqual(want, Counter({"add": 95, "reclass": 18, "delete": 5, "reshape": 4}))
+        fake = [r for r in ready if r["op"] == "reshape"]
+        self.assertTrue(all(ar._same(json.loads(r["old"]), json.loads(r["new"])) and r["from"] == r["to"] for r in fake))
+        self.assertTrue(all(r["old"] != r["new"] for r in fake))  # differ as text only
+        self.assertEqual(sorted(int(r["cur_id"]) for r in fake), [606, 635, 636, 2966])
         c = self.ver["counts_by_op"]
-        self.assertEqual((c["add"] + c["new"], c["reclass"], c["delete"], c["reshape"] + c["reclass+reshape"]),
-                         (95, 18, 5, 4))
-        self.assertEqual((c["keep"], c["reject"], self.ver["n_conflicts"]), (0, 0, 0))
+        self.assertEqual((c["add"] + c["new"], c["reclass"], c["delete"], c["reshape"], c["reclass+reshape"], c["keep"]),
+                         (95, 18, 5, 0, 0, 4))
+        self.assertEqual((c["reject"], self.ver["n_conflicts"], self.ver["n_dropped"], self.ver["n_warnings"]), (0, 0, 0, 0))
+        base = {a["id"]: a for a in json.loads(self.base.read_text(encoding="utf-8"))["annotations"]}
+        out = {a["id"]: a for a in self.coco["annotations"]}
+        for r in fake:  # not rewritten: the base segmentation, byte for byte
+            self.assertEqual(json.dumps(out[int(r["cur_id"])]["segmentation"]), json.dumps(base[int(r["cur_id"])]["segmentation"]))
         mine = {(r["image"], r["dec_key"]): r for r in self.rows}
         self.assertEqual(len(mine), len(self.rows))
         self.assertEqual(len(self.rows), len(ready))
         for r in ready:
             m = mine[(r["target_stem"], r["seed_key"])]
-            op = {"add": "new" if r["seed_key"].startswith("n") else "add"}.get(r["op"], r["op"])
-            if r["op"] == "reshape" and r["from"] != r["to"]:
-                op = "reclass+reshape"
+            op = {"add": "new" if r["seed_key"].startswith("n") else "add", "reshape": "keep"}.get(r["op"], r["op"])
             self.assertEqual((m["op"], m["cls_from"] or "", m["cls_to"] or ""), (op, r["from"], r["to"]), r["seed_key"])
             self.assertEqual(m["ann_old"], int(r["cur_id"]) if r["cur_id"] else None)
             self.assertTrue(m["seed"].startswith(f"september:{r['file']}:{r['key']}"), m["seed"])

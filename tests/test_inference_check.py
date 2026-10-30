@@ -287,6 +287,17 @@ class TestGuards(unittest.TestCase):
         self.assertIsNone(ic.out_root_problem(home / "Boxes" / "x", tiles))       # prefix only, not under
         self.assertIsNone(ic.out_root_problem(Path(tempfile.gettempdir()) / "ic", tiles))
 
+    @unittest.skipUnless(os.name == "nt", "Windows path spellings")
+    def test_spelling_bypasses_refused(self):
+        """Trailing space / dot, \\\\?\\ prefixes, UNC and admin shares (data_utils/path_guard.py)."""
+        tiles = Path(tempfile.gettempdir()) / "tiles"
+        h = str(Path.home())
+        for bad in (h + "\\Box \\x", h + "\\Box. .\\x", "\\\\?\\" + h + "\\Box\\x", "\\\\?\\" + h + "\\Box \\x",
+                    "\\\\localhost\\C$" + h[2:] + "\\Box\\x", "\\\\127.0.0.1\\c$" + h[2:] + "\\Box\\x",
+                    "\\\\?\\UNC\\localhost\\C$" + h[2:] + "\\Box\\x", "\\\\.\\C:" + h[2:] + "\\Box\\x",
+                    h + "\\Desktop\\Cryo-image-processing \\x"):
+            self.assertIsNotNone(ic.out_root_problem(Path(bad), tiles), bad)
+
     def test_session_folder_and_custom_roots(self):
         with tempfile.TemporaryDirectory() as tmp:
             tiles = Path(tmp) / "20261027" / "5. Model + labeling" / "model_input"
