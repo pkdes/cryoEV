@@ -20,7 +20,8 @@ One HTML page (`annotation/review_tool/index.html`) for reviewing labels against
    - **Keep the server local (preferred).** Run `tailscale serve --bg 8765` on the laptop, then open `https://<laptop>.<tailnet>.ts.net/?k=<key>` on the phone. Only tailnet devices can reach it, over HTTPS. Stop it with `tailscale serve reset`.
    - **Bind to the Tailscale address.** Restart with `--host <IP from tailscale ip -4>`, e.g. `--host 100.101.102.103`, and open `http://100.101.102.103:8765/?k=<key>` on the phone. Allow Python through Windows Firewall when asked.
    - Don't use `--host 0.0.0.0`: it also opens the port to the LAN. The server warns if you do.
-3. On the phone, add `&who=<name>` to the link (it names the reviewer) and `&mode=classes` (it opens class review). Example: `…/?k=<key>&who=Ann&mode=classes`. The `?k=` link sets a 30-day cookie.
+3. On the phone, open the link. Optional: `&mode=classes` opens class review, and `&who=<name>` names the reviewer without asking. Example: `…/?k=<key>&mode=classes`. The `?k=` link sets a 30-day cookie.
+   - The first visit asks **Who is reviewing?** (see [Reviewer name](#reviewer-name)). The name is then remembered on that device.
 4. Stop the server with Ctrl+C.
 
 ## Classes
@@ -46,6 +47,29 @@ The class list always follows the Roboflow names, with hotkeys **1–8**: `EV, L
 | 8 | – | – | **non-EV** |
 
 Most moved keys: cards 3 (was non-EV, now MV) and 5 (was inner); Editor 2, 3, 5 and 7.
+
+## Reviewer name
+- A picker lists the roster from `GET /api/people` (`annotation/people.json`). It is asked once per browser and kept in localStorage (`cryoev-review:who`).
+- **An edit is never saved without a name.** Any edit (Editor or cards) opens the picker first; once a name is picked, that edit goes through. "Not now" lets you look around without editing.
+- Saved `who` = the roster **id** (e.g. `pujan`), shown as the roster name. "Other…" takes free text, saved as typed.
+- If `/api/people` fails, or the page is opened from a folder or zip, the picker asks for a typed name (required).
+- `&who=<name>` in the link, or a name typed into the old prompt, becomes the roster id when it matches an id, name or alias (any case, e.g. `Puj` → `pujan`). Otherwise it is kept as given.
+- The current name shows in the Editor header and the cards' filter row (👤). Tap it to change.
+- Claims (`/api/claim?who=`) use the same value.
+
+## Deep links
+`?img=<file>&obj=<decision key>&mode=editor` opens the Editor with that image loaded and the object selected and centered. Opening it directly or from a bookmark works the same.
+- `obj` is a decision key: `g<id>`, `p<idx>` (a prediction, or the label it became once accepted) or `n<uid>`. `img` may also be the file's stem.
+- Each card's **Open in editor ↗** is such a link. It keeps the page's `k=` (so it also works on a device without the cookie) and drops `who=`. Tapping it opens the Editor in place, and Back returns to the same card. Long-press it to copy or bookmark it.
+- If the object is gone (deleted or undone), the Editor centres where it was and says so. A prediction is drawn even if the confidence slider was above its score (the slider is lowered to it).
+- The server's access-key check is unchanged: without `k=` or the cookie, the link gets 403.
+
+## September-carried decisions ("Sept")
+Display only. A decision with `seed` (`september:<v4 file>:<v4 key>`, written by `resolve_review_edits.py`) was carried over from the September review.
+- Editor: a small **Sept** tag above the label's outline (the header's "Sept" checkbox hides them), a line in the selection box, and a legend entry.
+- Queue: images with seeded decisions show **Sept n**.
+- Cards: a **Sept** tag in the header. Seeded objects already have a decision, so the queue normally skips them.
+- The tool never writes `seed`. A reviewer's new decision on that object has none, so its tag goes. Undoing that decision restores its value but not its `seed`.
 
 ## Editor (desktop)
 | Action | How |
@@ -88,14 +112,23 @@ The selection and the Redraw target follow the object's decision key, not its po
 When a prediction is selected, the selection box shows its class, `pr[k].c` (optional).
 
 ## Cards (phone)
-Narrow screens open the cards automatically. "Editor" goes back. The mode menu has two modes:
+Narrow screens open the cards automatically. "Editor" goes back.
+- **Header:** short image name (`<sample> · square<n> hole<m>`, else the file stem; full name on hover), "object n of m" for that image, "card p of N", and the order.
+- **Order:** images by most flags first (`fg + fp + fx`, ties in package order), the same rank as the queue. Within an image: as before (triage: unmatched predictions by confidence, then unmatched labels; class review: `x`, then `lc` / Low conf EV). Everyone starts at the top. Claims keep two reviewers off the same card. Previously each reviewer started at a hash-based offset.
+- **The object** has corner brackets and a thick outline with a dark halo. Other objects are drawn faint.
+- **auto-next** (default **off**, remembered in localStorage `cryoev-review:autoNext`). It applies to class picks: the class buttons, the triage class chips and keys `1`–`8`.
+  - Off: the card stays. The chosen class is highlighted, and a green "✓ class …" line shows the card's decision. **Next →** (or `N`, ↑, swipe up; in class review also swipe left) moves on, with no decision. A server pull doesn't move you off a card you just picked on.
+  - On: a pick moves to the next card, as before.
+  - Swipes, ✓ / ♥ / ✕ and "Save shape" always move on.
+
+The mode menu has two modes:
 - **flagged objects** (triage, as before):
   - Unmatched predictions: swipe right = add as EV, left = not an object.
   - Unmatched labels: right = keep, left = delete.
   - Up = later. Class chips. ✏️ reshapes the outline.
 - **class review** (no outline editing):
   - Shows one label with the model's class: the overlapping prediction with the best box IoU (≥ 0.3), so treat it as approximate.
-  - Tap a big class button: the label is set to that class and the next card opens.
+  - Tap a big class button: the label is set to that class. With auto-next on, the next card opens.
   - Swipe right or ✓ = keep the class. Swipe left / up or ↑ = next, with no decision.
   - Scope "class flags" = labels with `x`, then `lc` or class Low conf EV. Scope "all labels" = every label.
   - Keys: `1`–`8`, `Enter`/`→` keep, `←`/`↑`/`N` next, `Z` undo.
@@ -113,7 +146,7 @@ The tool runs on packages without the optional fields: those flags and counts ar
 edit = {dec: {key: {v, t, who, p?}}, gt?, gtT?, reviewed, reviewedT, modified, t}
 ```
 **Decisions** (`dec`): one per object.
-- `t` is ms since the epoch; `who` is the reviewer name.
+- `t` is ms since the epoch; `who` is the reviewer: a roster id from `people.json`, or a name typed under "Other" (older records: any free text).
 - `p` is the object's own outline (list of normalized rings). It is present whenever the object was reshaped or redrawn.
 
 | Key | Values | Meaning |
@@ -180,6 +213,7 @@ python -m unittest discover -s annotation/tests -v
   - reclass, accept, freehand, tap-vertex, redraw and vertex drag;
   - two reviewers: offline redraw vs a later Editor save; undo vs someone's newer decision; selection and Redraw through a pull;
   - class review at 400 px with touch;
+  - phone review (`PhoneReviewTests`, 400 px touch and 1280 px desktop): card header, flag order and object outline (U1); auto-next off by default, stays on a picked card through a pull, remembered when on (U2); deep links opened directly at both sizes, for a label, a prediction and a missing object, in-place open + Back, and 403 without the key (U3); name picker from `/api/people`, required before card and Editor edits, roster id saved and claimed, Other, alias mapping, typed fallback when `/api/people` fails (U5); Sept tags and their removal on a new decision (U7);
   - page labels == `effective_labels()`, on the fixture and on both real packages. Re-saving the September records changes no labels.
 - Real packages are copied to a temp folder and never written.
   - September v4, searched in order: `$CRYOEV_REVIEW_PACKAGE`, then `CryoAI/annotation review/cryoai_v4_review` beside the repo, then the Box copy.

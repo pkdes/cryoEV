@@ -71,14 +71,17 @@ class Base(unittest.TestCase):
         cls.pw.stop()
         cls.srv.close()
 
-    def open(self, query="&who=tester&mode=editor", **ctx):
+    def open(self, query="&who=tester&mode=editor", setup=None, url=None, **ctx):
+        """setup(context, page) runs before the page loads (init scripts, routes); url replaces srv.url + query."""
         context = self.browser.new_context(**ctx)
         self.addCleanup(context.close)
         page = context.new_page()
-        self.errors = []
+        self.errors = getattr(self, "errors", None) or []
         page.on("pageerror", lambda e: self.errors.append(str(e)))
         page.on("console", lambda m: m.type == "error" and "404" not in m.text and self.errors.append(m.text))
-        page.goto(self.srv.url + query)
+        if setup:
+            setup(context, page)
+        page.goto(url or self.srv.url + query)
         page.wait_for_function("window.__review && __review.state().server && __review.state().imgReady", timeout=15000)
         return page
 
@@ -394,6 +397,7 @@ class PhoneTests(Base):
         self.assertGreaterEqual(box["height"], 44)  # thumb-sized
         if SHOTS:
             page.screenshot(path=str(Path(SHOTS) / "phone_class_review.png"))
+        page.check("#autoNext")  # auto-advance on: a class tap moves on, the old behaviour (off is PhoneReviewTests)
         st = self.state(page)
         c0 = st["tri"]["queue"][st["tri"]["pos"]]
         page.tap("#triCls button:has-text('MV')")
@@ -421,6 +425,265 @@ class PhoneTests(Base):
         self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 400)
         if SHOTS:
             page.screenshot(path=str(Path(SHOTS) / "phone_triage.png"))
+
+
+class PhoneReviewTests(Base):
+    """U1 card header / order / outline, U2 auto-advance toggle, U3 deep link, U5 name picker, U7 Sept tags.
+    Own server, so the queue starts fresh."""
+    PHONE = PhoneTests.PHONE
+    DESK = {"viewport": {"width": 1280, "height": 800}}
+
+    def shot(self, page, name):
+        if SHOTS:
+            page.screenshot(path=str(Path(SHOTS) / name))
+
+    def card(self, page):
+        st = self.state(page)
+        return st["tri"]["queue"][st["tri"]["pos"]]
+
+    def file_of(self, c):
+        return self.srv.data["images"][c["i"]]["file"]
+
+    def wait_card(self, page):
+        page.wait_for_function("__review.state().tri.ready")
+
+    def test_u1_header_order_and_outline(self):
+        page = self.open("&who=hdr&mode=classes", **self.PHONE)
+        self.wait_card(page)
+        q = self.state(page)["tri"]["queue"]
+        # images in "most flags first" order (A 4, B 3, C 0, D 0), not package order (B, A, C, D)
+        self.assertEqual([self.file_of(c) for c in q], ["fixA_new.png"] * 3 + ["fixB_old.png"] + ["fixD_new.png"] * 3)
+        self.assertEqual(self.state(page)["tri"]["pos"], 0)  # no per-reviewer random start
+        self.assertEqual(page.inner_text("#thName"), "fixA_new")
+        self.assertEqual(page.inner_text("#thObj"), "object 1 of 3")
+        self.assertIn("card 1 of 7", page.inner_text("#thPos"))
+        self.assertIn("most flags first", page.inner_text("#thPos"))
+        self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 400)
+        self.shot(page, "u1_card_header_class_review.png")
+        # the card's object is outlined in its highlight colour: many more such pixels with outlines on than off
+        count = ("() => { const c = document.getElementById('tcv'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;"
+                 " let n = 0; for (let k = 0; k < d.length; k += 4) if (d[k] > 200 && d[k+1] < 150 && d[k+2] > 200) n++; return n; }")
+        on = page.evaluate(count)
+        page.tap("#triEye")
+        off = page.evaluate(count)
+        self.assertGreater(on, off * 1.5 + 50, (on, off))
+        page.tap("#triEye")
+        # next object of the same image, then the next image
+        page.tap("#aSkip"); page.wait_for_function("__review.state().tri.pos === 1")
+        self.assertEqual(page.inner_text("#thObj"), "object 2 of 3")
+        page.select_option("#triMode", "tri")
+        self.wait_card(page)
+        q = self.state(page)["tri"]["queue"]
+        self.assertEqual([self.file_of(c) for c in q], ["fixA_new.png"] * 2 + ["fixB_old.png"] * 3)
+        self.shot(page, "u1_card_header_triage.png")
+
+    def test_u2_auto_advance_off_by_default(self):
+        page = self.open("&who=adv&mode=classes", **self.PHONE)
+        self.wait_card(page)
+        self.assertFalse(page.is_checked("#autoNext"))
+        self.assertTrue(page.locator("#aNext").is_visible())
+        pos, c = self.state(page)["tri"]["pos"], self.card(page)
+        page.tap("#triCls button:has-text('Overlapping')")
+        time.sleep(0.4)
+        self.assertEqual(self.state(page)["tri"]["pos"], pos)  # the card stays
+        self.assertIn("class Overlapping", page.inner_text("#triPicked"))
+        self.assertIn("cur", page.locator("#triCls button", has_text="Overlapping").get_attribute("class"))
+        self.assertIn("on", page.locator("#aNext").get_attribute("class"))
+        self.synced(page)
+        self.assertEqual(self.saved_dec(self.file_of(c))[c["key"]]["v"], "keep:Overlapping")
+        page.evaluate("__review.pull()")  # a pull must not move it on either
+        self.assertEqual(self.state(page)["tri"]["pos"], pos)
+        self.shot(page, "u2_picked_card_stays.png")
+        page.tap("#triCls button:has-text('MV')")  # change of mind on the same card
+        self.synced(page)
+        self.assertEqual(self.saved_dec(self.file_of(c))[c["key"]]["v"], "keep:MV")
+        page.tap("#aNext")
+        page.wait_for_function(f"__review.state().tri.pos !== {pos}")
+        # on: remembered across a reload, and a class tap moves on
+        page.check("#autoNext")
+        self.assertEqual(page.evaluate("localStorage.getItem('cryoev-review:autoNext')"), "1")
+        page.reload()
+        page.wait_for_function("window.__review && __review.state().server && __review.state().tri.ready")
+        self.assertTrue(page.is_checked("#autoNext"))
+        self.assertTrue(page.locator("#aNext").is_hidden())
+        pos = self.state(page)["tri"]["pos"]
+        page.tap("#triCls button:has-text('EV') >> nth=0")
+        page.wait_for_function(f"__review.state().tri.pos !== {pos}")
+        page.uncheck("#autoNext")
+        self.assertEqual(page.evaluate("localStorage.getItem('cryoev-review:autoNext')"), "0")
+        self.check_js_equals_python(page)
+
+    def test_u3_deep_link_opens_editor_on_object(self):
+        page = self.open("&who=lnk&mode=cards", **self.PHONE)
+        self.wait_card(page)
+        c = self.card(page)
+        href = page.get_attribute("#triOpen", "href")
+        q = dict(p.split("=", 1) for p in href.split("?", 1)[1].split("&"))
+        self.assertEqual((q["k"], q["obj"], q["mode"]), (KEY, c["key"], "editor"))
+        self.assertEqual(q["img"].replace("%2E", "."), self.file_of(c).replace("%2E", "."))
+        self.assertNotIn("who", q)
+
+        def check_focus(p, file, key, kind="gt"):
+            p.wait_for_function("__review.state().server && __review.state().imgReady && __review.state().sel")
+            time.sleep(0.5)  # connect() re-opens the image after its first pull: the selection must survive
+            st = self.state(p)
+            self.assertTrue(p.locator("#tri").is_hidden())
+            self.assertEqual(p.evaluate("__review.D.images[__review.state().cur].file"), file)
+            self.assertEqual(st["sel"]["kind"], kind)
+            im = self.image(file)
+            ring = (next(g for g in im["gt"] if "g%d" % g["id"] == key)["p"][0] if kind == "gt"
+                    else im["pr"][int(key[1:])]["p"][0])
+            if kind == "gt":
+                self.assertEqual(st["sel"]["key"], key)
+            else:
+                self.assertEqual(st["sel"]["i"], int(key[1:]))
+            cx, cy = (min(ring[0::2]) + max(ring[0::2])) / 2, (min(ring[1::2]) + max(ring[1::2])) / 2
+            box = p.locator("#stage").bounding_box()
+            v = st["view"]
+            sx, sy = cx * st["W"] * v["s"] + v["ox"], cy * st["H"] * v["s"] + v["oy"]
+            self.assertLess(abs(sx - box["width"] / 2), 3)
+            self.assertLess(abs(sy - box["height"] / 2), 3)
+
+        # opened directly (a bookmark) in a fresh browser with no cookie: desktop, then phone width
+        d = self.open(url=href, **self.DESK)
+        check_focus(d, self.file_of(c), c["key"])
+        d.locator("#whoCancel").click()  # no name in this browser: the picker is up, the view is still usable
+        self.assertTrue(d.inner_text("#selBox").startswith("Label"))
+        ph = self.open(url=href, **self.PHONE)
+        check_focus(ph, self.file_of(c), c["key"])
+        ph.locator("#whoCancel").tap()
+        self.shot(ph, "u3_deep_link_editor_phone.png")
+        # a prediction key, and an unknown object
+        pred = href.replace("obj=" + c["key"], "obj=p1").replace("img=" + q["img"], "img=fixB_old.png")
+        check_focus(self.open(url=pred, **self.DESK), "fixB_old.png", "p1", kind="pr")
+        bad = self.open(url=href.replace("obj=" + c["key"], "obj=g999"), **self.DESK)
+        bad.wait_for_function("document.getElementById('hint').textContent.includes('not on this image')")
+        # in the same tab: opens in place, Back returns to the cards
+        page.tap("#triOpen")
+        check_focus(page, self.file_of(c), c["key"])
+        page.go_back()
+        page.wait_for_function("!document.getElementById('tri').hidden")
+        self.assertEqual(self.card(page)["key"], c["key"])
+        # the ?k= handling is intact: the deep link without a key and without a cookie is refused
+        anon = self.browser.new_context(); self.addCleanup(anon.close)
+        r = anon.new_page().goto(href.replace("k=" + KEY + "&", "").replace("&k=" + KEY, ""))
+        self.assertEqual(r.status, 403)
+
+    def test_u5_name_picker_required_before_edits(self):
+        page = self.open("&mode=classes", **self.PHONE)
+        self.wait_card(page)
+        page.wait_for_selector("#whoDlg:not([hidden])")
+        self.assertEqual(page.locator("#whoList button").all_inner_texts(), ["Pujan", "AU 1", "Other…"])  # people.json
+        self.shot(page, "u5_name_picker.png")
+        page.tap("#whoCancel")
+        c = self.card(page)
+        page.tap("#triCls button:has-text('VLDL')")
+        page.wait_for_selector("#whoDlg:not([hidden])")  # no name: asked again, nothing saved
+        self.assertIsNone(page.evaluate(f"(__review.edits()[{json.dumps(self.file_of(c))}] || {{dec: {{}}}}).dec[{json.dumps(c['key'])}] || null"))
+        page.locator("#whoList button", has_text="Pujan").tap()  # the pick that asked goes through with the name
+        self.synced(page)
+        d = self.saved_dec(self.file_of(c))[c["key"]]
+        self.assertEqual((d["v"], d["who"]), ("keep:VLDL", "pujan"))  # the roster id, not the display name
+        self.assertEqual(page.inner_text("#triWho"), "👤 Pujan")
+        # claims use the same id (the server may refuse it: other tests' reviewers can hold this card)
+        page.wait_for_function("performance.getEntriesByType('resource').some(e => e.name.includes('api/claim?') && e.name.includes('who=pujan'))")
+        page.reload()  # remembered: not asked again
+        page.wait_for_function("window.__review && __review.state().server && __review.state().tri.ready")
+        time.sleep(0.4)
+        self.assertTrue(page.locator("#whoDlg").is_hidden())
+        # change it from the menu: Other, saved as typed
+        page.tap("#triWho")
+        page.locator("#whoOtherBtn").tap()
+        self.assertTrue(page.locator("#whoSave").is_disabled())
+        page.fill("#whoText", "Zed Q")
+        page.tap("#whoSave")
+        self.assertEqual(self.state(page)["who"], "Zed Q")
+        c = self.card(page)
+        page.tap("#triCls button:has-text('inner')")
+        self.synced(page)
+        self.assertEqual(self.saved_dec(self.file_of(c))[c["key"]]["who"], "Zed Q")
+        # Editor at desktop size: header shows the name; an edit with no name asks first
+        ed = self.open("&mode=editor", **self.DESK)
+        ed.wait_for_selector("#whoDlg:not([hidden])")
+        ed.click("#whoCancel")
+        self.assertIn("set name", ed.inner_text("#whoBtn"))
+        self.go(ed, "fixC_old.png")
+        self.click_obj(ed, self.image("fixC_old.png")["gt"][0]["p"][0])
+        ed.keyboard.press("6")
+        ed.wait_for_selector("#whoDlg:not([hidden])")
+        ed.keyboard.press("2")  # hotkeys are off while the picker is open
+        self.assertNotIn("g301", self.saved_dec("fixC_old.png"))
+        ed.click("#whoList button:has-text('AU 1')")
+        self.assertEqual(self.obj(ed, "fixC_old.png", 301)["c"], "Overlapping")
+        self.synced(ed)
+        self.assertEqual((self.saved_dec("fixC_old.png")["g301"]["who"]), "au1")
+        self.assertEqual(ed.inner_text("#whoBtn"), "👤 AU 1")
+        self.check_js_equals_python(ed)
+
+    def test_u5_names_from_links_and_old_prompt_map_to_roster(self):
+        p = self.open("&who=Puj&mode=editor", **self.DESK)  # an alias in a personal link
+        p.wait_for_function("__review.state().who === 'pujan'")
+        old = self.open("&mode=editor", setup=lambda ctx, pg: ctx.add_init_script(
+            "localStorage.setItem('cryoev-review:who', 'Pujan')"), **self.DESK)  # typed into the old prompt
+        old.wait_for_function("__review.state().who === 'pujan'")
+        self.assertTrue(old.locator("#whoDlg").is_hidden())
+        t = self.open("&who=tester&mode=editor", **self.DESK)  # not on the roster: kept as given
+        time.sleep(0.5)
+        self.assertEqual(self.state(t)["who"], "tester")
+
+    def test_u5_free_text_when_people_unavailable(self):
+        page = self.open("&mode=classes", setup=lambda ctx, pg: pg.route("**/api/people*", lambda r: r.abort()), **self.PHONE)
+        self.wait_card(page)
+        page.wait_for_selector("#whoDlg:not([hidden])")
+        self.assertEqual(page.locator("#whoList button").count(), 0)
+        self.assertTrue(page.locator("#whoText").is_visible())
+        self.assertTrue(page.locator("#whoSave").is_disabled())
+        page.fill("#whoText", "   ")
+        self.assertTrue(page.locator("#whoSave").is_disabled())  # required
+        page.tap("#whoCancel")
+        c = self.card(page)
+        page.tap("#triCls button:has-text('MV')")
+        page.wait_for_selector("#whoDlg:not([hidden])")
+        page.fill("#whoText", "Fallback Fay")
+        page.tap("#whoSave")
+        self.synced(page)
+        self.assertEqual(self.saved_dec(self.file_of(c))[c["key"]]["who"], "Fallback Fay")
+        self.errors = [e for e in self.errors if "Failed to load resource" not in e]  # the aborted /api/people
+
+    def test_u7_september_tags(self):
+        f, t = "fixD_new.png", int(time.time() * 1000)
+        seed = {"v": "keep:Low conf EV", "t": t, "who": "Pujan", "seed": "september:old_fixD.png:g7"}
+        self.assertEqual(self.srv.put(f, {"t": t, "dec": {"g402": seed, "g403": dict(seed, seed="september:old_fixD.png:g8")}})[0], 200)
+        ed = self.open("&who=sept&mode=editor", **self.DESK)
+        row = ed.locator("#items .it", has=ed.locator(f'.nm[title="{f}"]'))
+        self.assertEqual(row.locator(".sept").inner_text(), "Sept 2")
+        self.assertIn("Sept", ed.inner_text("#flagLegend"))
+        self.go(ed, f)
+        self.click_obj(ed, self.image(f)["gt"][1]["p"][0])  # 402
+        self.assertIn("September", ed.inner_text("#selBox"))
+        ed.keyboard.press("1")  # a reviewer's own decision: no seed, so the tag goes
+        self.synced(ed)
+        d = self.saved_dec(f)["g402"]
+        self.assertEqual((d["v"], d["who"]), ("keep:EV", "sept"))
+        self.assertNotIn("seed", d)
+        self.assertEqual(self.saved_dec(f)["g403"]["seed"], "september:old_fixD.png:g8")  # the other one keeps it
+        self.assertEqual(row.locator(".sept").inner_text(), "Sept 1")
+        self.assertNotIn("September", ed.inner_text("#selBox"))
+        self.check_js_equals_python(ed)
+        # the phone card tags the seeded object (g403 is the last class-review card of fixD)
+        ph = self.open("&who=sept2&mode=classes", **self.PHONE)
+        self.wait_card(ph)
+        q = self.state(ph)["tri"]["queue"]
+        # decided cards (seeded ones too) are skipped by the queue, so jump to them directly
+        keys = [(self.file_of(c), c["key"]) for c in q]
+        ph.evaluate(f"__review.triGo({keys.index((f, 'g401'))})")
+        ph.wait_for_function("__review.state().tri.ready")
+        self.assertTrue(ph.locator("#thSept").is_hidden())
+        ph.evaluate(f"__review.triGo({keys.index((f, 'g403'))})")
+        ph.wait_for_function("__review.state().tri.ready")
+        self.assertEqual(self.card(ph)["key"], "g403")
+        self.assertTrue(ph.locator("#thSept").is_visible())
+        self.shot(ph, "u7_sept_tag_card.png")
 
 
 class RealPackageTests(Base):
