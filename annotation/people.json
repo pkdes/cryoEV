@@ -1,0 +1,7 @@
+{
+  "_note": "Reviewer roster. id is what the change log records as who; aliases are names already found in edit records. Add people here; never reuse an id. See docs/LABEL_CHANGES.md.",
+  "people": [
+    {"id": "pujan", "name": "Pujan", "aliases": ["Pujan", "Puj", "pujan", "September review"]},
+    {"id": "au1", "name": "AU 1", "aliases": []}
+  ]
+}

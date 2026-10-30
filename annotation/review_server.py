@@ -9,6 +9,7 @@ URL once (…/?k=<key>) and a cookie carries it from then on.
 Routes:
   GET  /, /data.js, /images/<name>   the package itself
   GET  /api/ping                     {"ok": true}
+  GET  /api/people                   the reviewer roster from annotation/people.json, for the name picker
   GET  /api/edits                    {file: edit record} for every saved image
   PUT  /api/edits?f=<file>           merge one image's record into the saved one (per-decision, newest
                                      wins; see merge_edits) and return the merged record
@@ -46,9 +47,12 @@ CLAIM_SECONDS = 90
 MAX_CLAIMS = 200      # active claims kept at most (one per reviewer is the norm); the soonest to expire go first
 SOCKET_TIMEOUT = 20   # seconds a connection may sit idle before the server drops it
 COORD_EPS = 1e-6      # normalized coordinates must lie in [0, 1], give or take float rounding
+RECORD_FMT = 1        # edits/<file>.json wrapper version: {file, pkg, fmt, edit, rx} (docs/LABEL_CHANGES.md)
+PEOPLE = Path(__file__).with_name("people.json")
 
 
-def make_handler(pkg: Path, key: str, valid_files: set):
+def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people: list = ()):
+    people = list(people)
     edits_dir = pkg / "edits"
     edits_dir.mkdir(exist_ok=True)
     lock = threading.Lock()
@@ -94,6 +98,8 @@ def make_handler(pkg: Path, key: str, valid_files: set):
             extra = {"Set-Cookie": f"{COOKIE}={key}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"} if "k" in q else None
             if url.path == "/api/ping":
                 return self._json(200, {"ok": True})
+            if url.path == "/api/people":
+                return self._json(200, {"people": people})
             if url.path == "/api/claims":
                 with lock:
                     return self._json(200, {"claims": active_claims(time.time())})
@@ -145,10 +151,13 @@ def make_handler(pkg: Path, key: str, valid_files: set):
                 return self._json(400, {"error": "bad edit"})
             target = edits_dir / f"{file}.json"
             with lock:
-                cur = json.loads(target.read_text(encoding="utf-8"))["edit"] if target.exists() else None
+                saved = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
+                cur = saved.get("edit")
                 merged = merge_edits(cur, edit)
+                rx = stamp_received(saved.get("rx") or {}, cur, merged, int(time.time() * 1000))
                 tmp = target.with_suffix(".tmp")
-                tmp.write_text(json.dumps({"file": file, "edit": merged}), encoding="utf-8")
+                tmp.write_text(json.dumps({"file": file, "pkg": pkg_id, "fmt": RECORD_FMT, "edit": merged, "rx": rx}),
+                               encoding="utf-8")
                 os.replace(tmp, target)
             return self._json(200, {"edit": merged})
 
@@ -258,6 +267,28 @@ def merge_edits(a, b):
     return out
 
 
+def stamp_received(rx: dict, cur, merged: dict, now_ms: int) -> dict:
+    """Server receive time (ms) per decision key, plus "gt" for the polygon list: set when a save changes that
+    entry. The record's own t values are the tool's logical clock (never earlier than the entry they replace),
+    so this is the wall time a change reached the server."""
+    rx = dict(rx)
+    old = _migrate(cur) if cur else {"dec": {}}
+    for k, d in merged["dec"].items():
+        if old["dec"].get(k) != d:
+            rx[k] = now_ms
+    if merged.get("gtT") and merged.get("gtT") != old.get("gtT"):
+        rx["gt"] = now_ms
+    return rx
+
+
+def load_people(path: Path = PEOPLE) -> list:
+    """The reviewer roster: [{id, name, aliases}], for the tool's name picker and the change log's who."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))["people"]
+    except (OSError, ValueError, KeyError):
+        return []
+
+
 def _dec_v(e, key):
     d = e["dec"].get(key)
     return d.get("v") if d else None
@@ -351,7 +382,7 @@ def main():
     key = args.key or (key_file.read_text().strip() if key_file.exists() else secrets.token_urlsafe(18))
     key_file.write_text(key)
 
-    srv = ThreadingHTTPServer((args.host, args.port), make_handler(pkg, key, valid))
+    srv = ThreadingHTTPServer((args.host, args.port), make_handler(pkg, key, valid, data.get("id", ""), load_people()))
     print(f"[OK] Serving {pkg.name}: {len(valid)} images, edits -> {pkg / 'edits'}", flush=True)
     # The key is printed once, in this link; request logs redact it. It is also in <package>/.review_key.
     shown = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host

@@ -144,6 +144,26 @@ class ServerAPI(unittest.TestCase):
         labels = rs.effective_labels(next(i for i in self.srv.data["images"] if i["file"] == f), self.saved(f))
         self.assertEqual(sorted((g["id"] or 0, g["c"]) for g in labels), [(0, "VLDL"), (201, "EV"), (202, "EV"), (203, "MV")])
 
+    def test_record_wrapper_and_receive_times(self):
+        f = "fixC_old.png"
+        path = self.srv.pkg / "edits" / f"{f}.json"
+        self.srv.put(f, {"t": 10, "modified": True, "dec": {"g301": {"v": "keep:EV", "t": 10, "who": "Puj"}}})
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual((rec["file"], rec["pkg"], rec["fmt"]), (f, self.srv.data.get("id", ""), rs.RECORD_FMT))
+        first = rec["rx"]["g301"]
+        self.assertGreater(first, 1.7e12)  # wall-clock ms, not the tool's logical t
+        time.sleep(0.01)
+        self.srv.put(f, {"t": 11, "dec": {"p0": {"v": "no", "t": 11, "who": "Puj"}}})  # g301 unchanged
+        rx = json.loads(path.read_text(encoding="utf-8"))["rx"]
+        self.assertEqual(rx["g301"], first)
+        self.assertGreaterEqual(rx["p0"], first)
+
+    def test_people(self):
+        code, body, _ = self.srv.request("GET", "/api/people")
+        self.assertEqual(code, 200)
+        self.assertEqual(body["people"], rs.load_people())
+        self.assertTrue(all({"id", "name", "aliases"} <= set(p) for p in body["people"]))
+
     def test_merge_two_edits_by_timestamp(self):
         f = "fixA_new.png"
         ring = make_fixture.ring(100, 100, 20)
