@@ -254,7 +254,7 @@ def git_commit() -> str:
 
 def guess_session(tiles_dir: Path) -> str:
     for part in [tiles_dir, *tiles_dir.parents]:
-        m = re.match(r"\d{8}", part.name)
+        m = re.match(r"\d{8}(?:-\d+)?(?!\d)", part.name)  # 20260827-2 is its own session
         if m:
             return m.group(0)
     return tiles_dir.name
