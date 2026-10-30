@@ -49,6 +49,8 @@ SOCKET_TIMEOUT = 20   # seconds a connection may sit idle before the server drop
 COORD_EPS = 1e-6      # normalized coordinates must lie in [0, 1], give or take float rounding
 RECORD_FMT = 1        # edits/<file>.json wrapper version: {file, pkg, fmt, edit, rx} (docs/LABEL_CHANGES.md)
 PEOPLE = Path(__file__).with_name("people.json")
+WHO_MAX = 40
+WHO_RE = re.compile(rf"[\w .\-]{{0,{WHO_MAX}}}")
 
 
 def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people: list = ()):
@@ -168,7 +170,9 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
                 return self._json(403, {"error": "access key required"})
             if url.path != "/api/claim":
                 return self._json(404, {"error": "not found"})
-            case, who = q.get("c", [""])[0][:600], q.get("who", ["anonymous"])[0][:40] or "anonymous"
+            case, who = q.get("c", [""])[0][:600], q.get("who", ["anonymous"])[0][:WHO_MAX] or "anonymous"
+            if not valid_who(who):
+                return self._json(400, {"error": "bad reviewer name"})
             now = time.time()
             with lock:
                 active_claims(now)
@@ -209,6 +213,11 @@ def _valid_item(g):
             and (g.get("t") is None or _num(g["t"])))
 
 
+def valid_who(who) -> bool:
+    """A reviewer name or roster id: letters, digits, space, '.', '_', '-' (no markup), at most WHO_MAX long."""
+    return isinstance(who, str) and WHO_RE.fullmatch(who) is not None
+
+
 def valid_edit(edit) -> bool:
     """Shape check for a PUT body: a dict with a numeric t, decisions under known keys, optional polygon list."""
     if not isinstance(edit, dict) or not _num(edit.get("t", 0)):
@@ -228,6 +237,8 @@ def valid_edit(edit) -> bool:
         if not isinstance(d, dict) or not isinstance(d.get("v"), (str, type(None))) or not _num(d.get("t", 0)):
             return False
         if d.get("p") is not None and not _valid_rings(d["p"]):
+            return False
+        if d.get("who") is not None and not valid_who(d["who"]):
             return False
         if (d.get("v") or "").startswith("new:") and d.get("p") is None:  # a drawn outline carries its polygon
             return False
