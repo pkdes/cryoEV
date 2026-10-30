@@ -449,7 +449,7 @@ class QcFixTests(unittest.TestCase):
                     gt=[{"id": 8, "c": "EV", "p": [norm(sq(10, 16, 80))]}, {"id": 9, "c": "EV", "p": [norm(sq(200, 16, 80))]},
                         {"id": None, "c": "EV", "p": [norm(sq(400, 400, 40))], "src": "p0"}])
         self.assertEqual(len(rs.effective_labels(ar.read_data_js(self.pkg / "data.js")["images"][0],
-                                                 json.loads((self.edits / "a.png.json").read_text())["edit"])), 7 + 1)  # 7 labels + pr[-1]
+                                                 json.loads((self.edits / "a.png.json").read_text())["edit"])), 7)  # 7 labels; p-1 is out of range in effective_labels too
         v, out, _ = run(self.base, self.pkg, self.edits, self.out_root)
         coco, rows, conflicts, ver = read_out(out)
         self.assertEqual([(r["image"], r["dec_key"], r["op"], r["status"], r["reason"]) for r in rows],
