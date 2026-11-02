@@ -466,6 +466,11 @@ class EditAcceptTests(Base):
         self.assertEqual(self.saved_dec(f)["p1"]["v"], "no")
         self.check_js_equals_python(page)
 
+
+class LiveDragTests(Base):
+    """Its own package/server: the drags below accept p1, which EditAcceptTests expects untouched."""
+    zoom_on = EditAcceptTests.zoom_on
+
     def test_drag_is_live(self):
         """The outline follows the cursor during a drag, also on a second drag, when the decision already holds a
         polygon (before 2026-11-02 that one showed the old outline until release)."""
