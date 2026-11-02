@@ -21,6 +21,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import make_fixture  # noqa: E402
 from test_review_server import KEY, LiveServer, load_data, real_package, rs  # noqa: E402
 
 try:
@@ -43,6 +44,11 @@ def launch(p):
     return None
 
 
+def toast_text(page):
+    """The Editor's "Accepted (edited) — Undo" message, whitespace-normalized (its parts are flex items)."""
+    return re.sub(r"\s*—\s*", " — ", page.inner_text("#edToast")).strip()
+
+
 def norm(labels):
     """Order-free comparable labels (the browser hands back 0 where the file says 0.0)."""
     return sorted((g.get("id") or 0, g.get("src") or "", g["c"], json.dumps([[float(v) for v in r] for r in g["p"]]))
@@ -59,7 +65,12 @@ class Base(unittest.TestCase):
         if cls.browser is None:
             cls.pw.stop()
             raise unittest.SkipTest("no Edge / Chrome for Playwright")
-        cls.srv = cls.make_server()
+        try:
+            cls.srv = cls.make_server()
+        except BaseException:  # e.g. SkipTest (package not found): stop Playwright, or every later class fails to start it
+            cls.browser.close()
+            cls.pw.stop()
+            raise
 
     @classmethod
     def make_server(cls):
@@ -111,8 +122,11 @@ class Base(unittest.TestCase):
         v = st["view"]
         return box["x"] + x * st["W"] * v["s"] + v["ox"], box["y"] + y * st["H"] * v["s"] + v["oy"]
 
+    def obj_list(self, page, file):
+        return page.evaluate(f"__review.effGt(__review.D.images.find(im => im.file === {json.dumps(file)}))")
+
     def obj(self, page, file, oid=None, src=None):
-        labels = page.evaluate(f"__review.effGt(__review.D.images.find(im => im.file === {json.dumps(file)}))")
+        labels = self.obj_list(page, file)
         return next((g for g in labels if (oid is not None and g["id"] == oid) or (src and g.get("src") == src)), None)
 
     def click_obj(self, page, ring):
@@ -218,6 +232,25 @@ class EditorTests(Base):
         txt = page.inner_text("#selBox")
         self.assertIn("Prediction EV", txt)
         self.assertIn("class disagrees", txt)
+        # U4: A accepts as the *predicted* class (EV), not the current class (MV, set with nothing selected); Z undoes
+        # it, label included (before U4, Editor undo left an accepted or deleted label in place)
+        page.keyboard.press("Escape")
+        page.keyboard.press("3")
+        self.assertEqual(self.state(page)["curCls"], "MV")
+        self.click_obj(page, self.image(f)["pr"][2]["p"][0])
+        self.assertIn("Accept as EV", page.inner_text("#accBtn"))
+        self.assertIn("Accept as MV", page.inner_text("#selBox"))  # the current class stays one click away
+        page.keyboard.press("a")
+        self.synced(page)
+        self.assertEqual(self.saved_dec(f)["p2"]["v"], "add:EV")
+        self.assertNotIn("p", self.saved_dec(f)["p2"])  # outline unchanged
+        self.assertEqual(self.obj(page, f, src="p2")["c"], "EV")
+        page.keyboard.press("z")
+        self.synced(page)
+        self.assertIsNone(self.saved_dec(f)["p2"]["v"])
+        self.assertIsNone(self.obj(page, f, src="p2"))
+        self.check_js_equals_python(page)
+        page.keyboard.press("1")  # back to the default class for the rest of the test
         # old format: no class, still works
         self.go(page, "fixB_old.png")
         self.click_obj(page, self.image("fixB_old.png")["pr"][1]["p"][0])
@@ -282,6 +315,211 @@ class EditorTests(Base):
         d = self.saved_dec(f)["g201"]
         self.assertEqual(d["v"], "keep:EV")
         self.assertGreater(d["p"][0][0], ring[0])
+        self.assertTrue(page.locator("#edToast").is_hidden())  # a label's vertex: no accept message
+        # U4: a prediction no one accepted (fixA p3, predicted VLDL) shows handles too; dragging one accepts it as
+        # its predicted class (not the current class, EV) with the edited outline
+        f = "fixA_new.png"
+        self.go(page, f)
+        page.uncheck("#showGt")
+        ring = self.image(f)["pr"][3]["p"][0]
+        self.click_obj(page, ring)
+        self.assertEqual(self.state(page)["sel"], {"kind": "pr", "i": 3})
+        self.assertNotIn("p3", self.saved_dec(f))
+        x, y = self.scr(page, ring[0], ring[1])
+        page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x + 25, y, steps=5); page.mouse.up()
+        self.assertEqual(self.state(page)["sel"], {"kind": "gt", "key": "p3"})
+        self.synced(page)
+        d = self.saved_dec(f)["p3"]
+        self.assertEqual(d["v"], "add:VLDL")
+        self.assertEqual(len(d["p"][0]), len(ring))
+        self.assertGreater(d["p"][0][0], ring[0])
+        self.assertEqual(d["p"][0][2:], ring[2:])
+        self.assertEqual(toast_text(page), "Accepted (edited) — Undo")
+        self.check_js_equals_python(page)
+
+
+class AcceptKeyTests(Base):
+    """U4: Accept / Reject on a prediction-only object (fixB p1: no label matches it; old format, no class).
+    Own server, so p1 starts undecided."""
+
+    def test_a_and_x_keys(self):
+        page = self.open()
+        f = "fixB_old.png"
+        self.go(page, f)
+        self.click_obj(page, self.image(f)["pr"][1]["p"][0])
+        self.assertEqual(self.state(page)["sel"], {"kind": "pr", "i": 1})
+        self.assertIn("Not decided: no label matches it", page.inner_text("#selBox"))
+        for b in ("#accBtn", "#rejBtn"):
+            self.assertTrue(page.locator(b).is_visible(), b)
+            self.assertGreaterEqual(page.locator(b).bounding_box()["height"], 40, b)  # big, not a link-sized button
+        page.keyboard.press("x")  # reject: "no"; the prediction stays selected and says so
+        self.synced(page)
+        self.assertEqual(self.saved_dec(f)["p1"]["v"], "no")
+        self.assertIn("Rejected: not an object", page.inner_text("#selBox"))
+        self.assertTrue(page.locator("#rejBtn").is_disabled())
+        self.assertIsNone(self.obj(page, f, src="p1"))
+        page.keyboard.press("a")  # accept: no predicted class in this package, so the current class (EV)
+        self.synced(page)
+        self.assertEqual(self.saved_dec(f)["p1"]["v"], "add:EV")
+        self.assertEqual(self.state(page)["sel"], {"kind": "gt", "key": "p1"})
+        self.check_js_equals_python(page)
+        page.keyboard.press("x")  # X on the accepted prediction rejects it again (as Del does)
+        self.synced(page)
+        self.assertEqual(self.saved_dec(f)["p1"]["v"], "no")
+        page.keyboard.press("r")  # R is still "reviewed + next", untouched by U4
+        self.synced(page)
+        self.assertTrue(self.srv.request("GET", "/api/edits")[1][f]["reviewed"])
+        self.check_js_equals_python(page)
+        # A / X with a label selected: no decision written
+        self.go(page, f)
+        n = len(self.saved_dec(f))
+        self.click_obj(page, self.image(f)["gt"][0]["p"][0])  # 201
+        page.keyboard.press("a"); page.keyboard.press("x")
+        time.sleep(0.4)
+        self.assertNotIn("g201", self.saved_dec(f))
+        self.assertEqual(len(self.saved_dec(f)), n)
+        # Z after Del brings the label back (Editor undo restores this tab's polygon list too)
+        page.keyboard.press("Delete")
+        self.assertIsNone(self.obj(page, f, 201))
+        page.keyboard.press("z")
+        self.assertEqual(self.obj(page, f, 201)["c"], "EV")
+        self.check_js_equals_python(page)
+
+
+class EditAcceptTests(Base):
+    """U4: a vertex edit on an unaccepted prediction accepts it (add:<cls> + p), with "Accepted (edited) — Undo"."""
+
+    def zoom_on(self, page, ring):
+        cx, cy = sum(ring[0::2]) / (len(ring) / 2), sum(ring[1::2]) / (len(ring) / 2)
+        page.mouse.move(*self.scr(page, cx, cy))
+        for _ in range(2):  # ~6x, so handles and edges are far apart
+            page.mouse.wheel(0, -600)
+            time.sleep(0.1)
+
+    def test_vertex_edit_accepts_and_undo(self):
+        page = self.open()
+        f = "fixB_old.png"
+        self.go(page, f)
+        ring = self.image(f)["pr"][1]["p"][0]
+        self.zoom_on(page, ring)
+        self.click_obj(page, ring)
+        self.assertEqual(self.state(page)["sel"], {"kind": "pr", "i": 1})
+        self.assertIn("accepts it with the edited outline", page.inner_text("#selBox"))
+        # a click on a handle without moving accepts nothing
+        x, y = self.scr(page, ring[0], ring[1])
+        page.mouse.click(x, y)
+        time.sleep(0.7)  # also keeps the drag below from counting as a double-click
+        self.assertNotIn("p1", self.saved_dec(f))
+        self.assertTrue(page.locator("#edToast").is_hidden())
+        # drag: accepted with the moved vertex
+        page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x + 25, y, steps=5); page.mouse.up()
+        self.synced(page)
+        d = self.saved_dec(f)["p1"]
+        self.assertEqual(d["v"], "add:EV")
+        self.assertGreater(d["p"][0][0], ring[0])
+        self.assertEqual(d["p"][0][2:], ring[2:])
+        self.assertTrue(page.locator("#edToast").is_visible())
+        self.assertEqual(toast_text(page), "Accepted (edited) — Undo")
+        self.check_js_equals_python(page)
+        # Undo in the message: the previous decision (none) again; the label is gone
+        page.click("#edToastUndo")
+        self.assertTrue(page.locator("#edToast").is_hidden())
+        self.synced(page)
+        self.assertIsNone(self.saved_dec(f)["p1"]["v"])
+        self.assertIsNone(self.obj(page, f, src="p1"))
+        self.check_js_equals_python(page)
+        # a rejected prediction: double-click a handle deletes that vertex and accepts it; Undo brings back "no"
+        self.click_obj(page, ring)
+        page.keyboard.press("x")
+        self.synced(page)
+        self.assertEqual(self.saved_dec(f)["p1"]["v"], "no")
+        x3, y3 = self.scr(page, ring[30], ring[31])  # upper half of the ring: the lower half is under the class chips
+        page.mouse.dblclick(x3, y3)
+        self.synced(page)
+        d = self.saved_dec(f)["p1"]
+        self.assertEqual((d["v"], len(d["p"][0])), ("add:EV", len(ring) - 2))
+        self.assertEqual(toast_text(page), "Accepted (edited) — Undo")
+        page.click("#edToastUndo")
+        self.synced(page)
+        self.assertEqual(self.saved_dec(f)["p1"]["v"], "no")
+        # double-click an edge adds a vertex and accepts; the message's Undo is stale after a later edit, Z still works
+        self.click_obj(page, ring)
+        mx, my = (ring[24] + ring[26]) / 2, (ring[25] + ring[27]) / 2
+        page.mouse.dblclick(*self.scr(page, mx, my))
+        self.synced(page)
+        d = self.saved_dec(f)["p1"]
+        self.assertEqual((d["v"], len(d["p"][0])), ("add:EV", len(ring) + 2))
+        self.assertTrue(page.locator("#edToast").is_visible())
+        page.keyboard.press("2")  # reclass: a later edit hides the message
+        self.assertTrue(page.locator("#edToast").is_hidden())
+        self.synced(page)
+        self.assertEqual(self.saved_dec(f)["p1"]["v"], "add:Low conf EV")
+        page.keyboard.press("z"); page.keyboard.press("z")
+        self.synced(page)
+        self.assertEqual(self.saved_dec(f)["p1"]["v"], "no")
+        self.check_js_equals_python(page)
+
+
+OLD_T = 1_700_000_000_000
+
+
+def write_old_records(pkg):
+    """The fixture plus edit records in the formats saved before U4, written straight to edits/ (not through a PUT,
+    which would migrate them): bare-string decisions, a polygon list without per-item t, add:+p, no, null, new:."""
+    data = make_fixture.build(pkg)
+    ims = {im["file"]: im for im in data["images"]}
+    a = ims["fixA_new.png"]
+    moved = [round(v + 0.01, 5) if k % 2 == 0 else v for k, v in enumerate(a["pr"][2]["p"][0])]
+    recs = {
+        "fixB_old.png": {"dec": {"p1": "add:MV", "g202": "del", "g201": "keep:inner"}, "t": OLD_T, "modified": True,
+                         "reviewed": False},
+        "fixA_new.png": {"dec": {"g103": {"v": "keep:EV", "t": OLD_T + 10, "who": "old"},
+                                 "p3": {"v": "no", "t": OLD_T + 10, "who": "old"},
+                                 "p2": {"v": "add:MV", "t": OLD_T + 10, "who": "", "p": [moved]}},
+                         "gt": [dict(g, c="MV") if g["id"] == 104 else g for g in a["gt"] if g["id"] != 105],
+                         "gtT": OLD_T + 5, "modified": True, "reviewed": True, "reviewedT": OLD_T + 20, "t": OLD_T + 20},
+        "fixC_old.png": {"dec": {"p0": {"v": None, "t": OLD_T, "who": "x"},
+                                 "nold1": {"v": "new:inner", "t": OLD_T, "who": "x", "p": [make_fixture.ring(60, 200, 15)]}},
+                         "t": OLD_T, "modified": True},
+    }
+    (pkg / "edits").mkdir(exist_ok=True)
+    for f, e in recs.items():
+        (pkg / "edits" / f"{f}.json").write_text(json.dumps({"file": f, "edit": e}), encoding="utf-8")
+
+
+class OldRecordTests(Base):
+    """U4 must not change the record format: records saved before it load and apply exactly as before, and opening,
+    selecting and showing them writes nothing."""
+
+    @classmethod
+    def make_server(cls):
+        return LiveServer(write_old_records)
+
+    def test_old_records_load_unchanged(self):
+        edits = self.srv.pkg / "edits"
+        before = {p.name: p.read_bytes() for p in edits.glob("*.json")}
+        self.assertEqual(len(before), 3)
+        page = self.open()
+        page.wait_for_function("__review.state().dirty === 0")
+        saved = self.srv.request("GET", "/api/edits")[1]
+        self.assertEqual(saved["fixB_old.png"]["dec"]["p1"], "add:MV")  # served raw: still the bare-string form
+        for im in self.srv.data["images"]:  # page == effective_labels() on the raw old records
+            if im["file"] in saved:
+                self.assertEqual(norm(self.obj_list(page, im["file"])), norm(rs.effective_labels(im, saved[im["file"]])), im["file"])
+        lab = {g.get("src") or g["id"]: g for g in self.obj_list(page, "fixA_new.png")}
+        self.assertEqual((lab[104]["c"], lab[103]["c"], lab["p2"]["c"]), ("MV", "EV", "MV"))
+        self.assertNotIn(105, lab)
+        self.assertNotIn("p3", lab)
+        # an old accepted / rejected prediction reads as decided: status shown, no handles, no auto-accept tip
+        page.uncheck("#showGt")
+        for f, i, txt in (("fixB_old.png", 1, "Accepted as MV"), ("fixA_new.png", 3, "Rejected: not an object")):
+            self.go(page, f)
+            self.click_obj(page, self.image(f)["pr"][i]["p"][0])
+            self.assertIn(txt, page.inner_text("#selBox"), f)
+            self.assertEqual(page.locator("#selBox .tip").count(), 0 if txt.startswith("Accepted") else 1, f)
+        time.sleep(1.0)
+        self.assertEqual(self.state(page)["dirty"], 0)
+        self.assertEqual({p.name: p.read_bytes() for p in edits.glob("*.json")}, before)  # byte-identical
         self.check_js_equals_python(page)
 
 
@@ -953,6 +1191,41 @@ class SeptCardTests(CardBase):
         d = self.saved_dec("fixD_new.png")["g403"]
         self.assertEqual((d["v"], d["who"], "seed" in d), ("keep:MV", "sept3", False))
         self.check_js_equals_python(ph)
+
+
+class AcceptCardTests(CardBase):
+    """U4 on the cards: a prediction-only card has big labelled Accept / Reject, with keys A and X."""
+
+    def test_prediction_card_accept_reject(self):
+        page = self.open("&who=acc&mode=cards", **self.PHONE)
+        self.wait_card(page)
+        f = "fixB_old.png"
+        self.go_card(page, f, "p1")
+        self.assertIn("pcard", page.get_attribute("#triActions", "class") or "")
+        self.assertEqual(page.inner_text("#aNope").strip(), "✕ Reject")
+        self.assertEqual(" ".join(page.inner_text("#aYes").split()), "✓ Accept as EV")  # no class in this package: EV
+        for b in ("#aYes", "#aNope"):
+            self.assertGreaterEqual(page.locator(b).bounding_box()["height"], 56, b)
+        self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 400)
+        self.shot(page, "u4_prediction_card.png")
+        pos = self.state(page)["tri"]["pos"]
+        page.keyboard.press("a")
+        page.wait_for_function(f"__review.state().tri.pos !== {pos}")
+        self.synced(page)
+        self.assertEqual(self.saved_dec(f)["p1"]["v"], "add:EV")
+        page.keyboard.press("z")  # rewind: back on p1, undecided
+        page.wait_for_function(f"__review.state().tri.pos === {pos}")
+        self.synced(page)
+        self.assertIsNone(self.saved_dec(f)["p1"]["v"])
+        page.keyboard.press("x")
+        page.wait_for_function(f"__review.state().tri.pos !== {pos}")
+        self.synced(page)
+        self.assertEqual(self.saved_dec(f)["p1"]["v"], "no")
+        # a label card keeps the round ♥ / ✕
+        self.go_card(page, "fixA_new.png", "g104")
+        self.assertNotIn("pcard", page.get_attribute("#triActions", "class") or "")
+        self.assertEqual((page.inner_text("#aYes").strip(), page.inner_text("#aNope").strip()), ("♥", "✕"))
+        self.check_js_equals_python(page)
 
 
 class RealPackageTests(Base):

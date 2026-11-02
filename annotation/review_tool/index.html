@@ -47,6 +47,14 @@ canvas{display:block;width:100%;height:100%}
 .help li{margin:2px 0;color:var(--mute)}
 #banner{position:absolute;left:8px;top:8px;right:8px;background:var(--warn);color:#fff;padding:6px 10px;border-radius:6px;display:none}
 #hint{position:absolute;left:8px;bottom:44px;background:rgba(0,0,0,.6);color:#fff;padding:4px 8px;border-radius:6px;font-size:12px;pointer-events:none}
+#edToast{position:absolute;left:50%;top:44px;transform:translateX(-50%);background:rgba(0,0,0,.82);color:#fff;padding:6px 8px 6px 12px;border-radius:8px;font-size:13px;display:flex;gap:8px;align-items:center;z-index:2}
+#edToast[hidden]{display:none}
+#edToast button{background:#fff;color:#000;border-color:#fff;font-weight:600;padding:2px 10px}
+#selBox .bigAct{flex:1 1 45%;min-height:42px;font-size:15px;font-weight:700;color:#fff;border-radius:8px}
+#accBtn{background:#16a34a;border-color:#16a34a}#rejBtn{background:#dc2626;border-color:#dc2626}
+#selBox .bigAct kbd{border-color:rgba(255,255,255,.6);margin-left:4px}
+#selBox .decst{width:100%;font-weight:600}#selBox .decst.no{color:#dc2626}#selBox .decst.add{color:#16a34a}
+#selBox .tip{width:100%;font-size:11.5px;color:var(--mute)}
 .legend span{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
 #menuBtn,#sideBtn{display:none}
 #tri{--hot:#fd267a;--hot2:#ff7854;position:fixed;top:0;left:0;width:100vw;height:100dvh;overflow:hidden;z-index:20;display:flex;flex-direction:column;background:var(--bg);padding:env(safe-area-inset-top,0px) 0 env(safe-area-inset-bottom,0px)}
@@ -89,6 +97,12 @@ canvas{display:block;width:100%;height:100%}
 #aNope,#aYes{width:64px;height:64px;font-size:30px}
 #aNope{color:#ef4444}#aYes{color:#22c55e}
 #aSkip{width:48px;height:48px;font-size:22px;color:#60a5fa}
+/* prediction-only cards: Accept / Reject are labelled pills, the primary actions */
+#triActions.pcard{gap:10px;flex-wrap:wrap}
+#triActions.pcard #aNope,#triActions.pcard #aYes{width:auto;min-width:104px;height:60px;border-radius:30px;padding:0 14px;font-size:18px;font-weight:700;flex-direction:column;line-height:1.1;color:#fff}
+#triActions.pcard #aYes{background:#16a34a;border-color:#16a34a}
+#triActions.pcard #aNope{background:#dc2626;border-color:#dc2626}
+#aYes small{font-size:11px;font-weight:500;opacity:.9}
 #triUndo{width:40px;height:40px;font-size:20px;color:#f59e0b}
 #triExit{border-radius:18px}
 #tri button{touch-action:manipulation}
@@ -175,7 +189,7 @@ canvas{display:block;width:100%;height:100%}
   </div>
   <div id="items"></div>
 </nav>
-<main id="stage"><canvas id="cv"></canvas><div id="banner"></div><div id="hint"></div><div id="chipBar" title="Class: a tap or 1–8 reclasses the selection and is used for new shapes"></div></main>
+<main id="stage"><canvas id="cv"></canvas><div id="banner"></div><div id="hint"></div><div id="edToast" role="status" hidden><span id="edToastMsg">Accepted (edited) —</span><button id="edToastUndo" title="Restore the previous decision (Z)">Undo</button></div><div id="chipBar" title="Class: a tap or 1–8 reclasses the selection and is used for new shapes"></div></main>
 <aside id="side">
   <div id="progress"></div>
   <h3>Selection</h3>
@@ -189,7 +203,8 @@ canvas{display:block;width:100%;height:100%}
     <li>Click a polygon to select (innermost wins)</li>
     <li>Drag a white handle to move a vertex</li>
     <li>Double-click a handle to delete it, an edge to add one</li>
-    <li><kbd>Del</kbd> delete label · <kbd>A</kbd> accept prediction (current class)</li>
+    <li>Selected prediction: <kbd>A</kbd> accept (as its predicted class) · <kbd>X</kbd> reject (not an object). Moving, adding or deleting one of its vertices accepts it too (Undo in the message, or <kbd>Z</kbd>)</li>
+    <li><kbd>Del</kbd> delete label</li>
     <li><kbd>D</kbd> freehand: drag around the object · <kbd>V</kbd> vertex: tap points, tap the first point or <kbd>Enter</kbd> to close · <kbd>Esc</kbd> cancel. In both, right/middle-drag or two fingers pan</li>
     <li><kbd>E</kbd> redraw the selected outline (keeps class and id)</li>
     <li><kbd>1</kbd>–<kbd>8</kbd> or a class chip: reclass the selection; also the class for new shapes</li>
@@ -411,6 +426,10 @@ function setDec(e, key, v, p) {
   const f = recFile.get(e); if (f) mine.add(f + "\n" + key + "\n" + t);
 }
 const decided = (im, key) => !!key && decV(edits[im.file], key) != null;
+// A prediction not accepted yet (undecided, or rejected): its vertices can be edited in the Editor, which accepts it.
+const prEditable = (im, i) => !!im.pr[i] && !/^add:/.test(decV(edits[im.file], "p" + i) || "");
+const predCls = p => p.c || curCls;  // Editor: accept as the predicted class; packages without pr[k].c use the current class
+const PRED_ONLY_DASH = [10, 4, 2, 4];  // dash-dot: prediction with no label, not decided yet
 function ownPoly(im, g) {  // g's outline if it differs from the package's, so its decision carries it
   const orig = g.src && g.src[0] === "p" ? (im.pr[+g.src.slice(1)] || {}).p : g.id != null ? (im.gt.find(o => o.id === g.id) || {}).p : null;
   return JSON.stringify(orig) === JSON.stringify(g.p) ? undefined : clone(g.p);
@@ -432,8 +451,9 @@ function materialize(im) {  // the Editor edits a concrete list: freeze the curr
     const d = e.dec[keyOf(g)];
     g.t = Math.max(typeof g.t === "number" ? g.t : legacyT, d ? d.t || 0 : 0);
   }
-  e.gt = list; e.gtT = Date.now(); return e;
+  e.gt = list; e.gtT = Date.now(); myGtT.add(e.gtT); return e;
 }
+const myGtT = new Set();  // gtT of the lists this tab made (materialize, undo): undo may put back its own list only
 const snapOf = e => JSON.stringify({gt: e.gt, gtT: e.gtT, dec: e.dec});
 function restoreSnap(im, snap) {  // undo: revert only entries this tab wrote since the snapshot; others' newer ones stay
   const s = JSON.parse(snap), e = ensureEdit(im);
@@ -448,7 +468,10 @@ function restoreSnap(im, snap) {  // undo: revert only entries this tab wrote si
       else setDec(e, k, null);
     } else setDec(e, k, null);
   }
-  if (s.gt && s.gtT !== e.gtT) { e.gt = s.gt; e.gtT = Date.now(); }
+  // The list as it was (an undone delete comes back, an undone accept goes), unless someone else's newer list has
+  // replaced this tab's since: then per-object t and the reverted decisions above decide. Strictly newer gtT, so the
+  // merge keeps it (a tie keeps the saved copy).
+  if (s.gt && (s.gtT === e.gtT || myGtT.has(e.gtT))) { e.gt = s.gt; e.gtT = Math.max(Date.now(), (e.gtT || 0) + 1); myGtT.add(e.gtT); }
 }
 function mergeEdit(a, b) {
   if (!a) return migrate(b); if (!b) return migrate(a);
@@ -474,7 +497,7 @@ function pushUndo() {  // every Editor change starts here; callers ask for a nam
   if (undoStacks[im.file].length > 100) undoStacks[im.file].shift();
 }
 function touch(file) { edits[file].t = Date.now(); dirty.add(file); persist(); scheduleSync(); }
-function changed() { const e = ensureEdit(curImg()); e.modified = true; touch(curImg().file); renderList(); renderSide(); draw(); }
+function changed() { hideToast(); const e = ensureEdit(curImg()); e.modified = true; touch(curImg().file); renderList(); renderSide(); draw(); }
 function undo() {
   const im = curImg(), st = undoStacks[im.file];
   if (!st || !st.length) return;
@@ -515,6 +538,10 @@ function path(ring) {
   ctx.closePath();
 }
 const conf = () => parseFloat($("conf").value);
+function handles(rings) {  // the white vertex handles of the selection
+  ctx.fillStyle = "#fff"; ctx.strokeStyle = "#000"; ctx.lineWidth = 1;
+  rings.forEach(rg => { for (let i = 0; i < rg.length; i += 2) { const [x, y] = toScr(rg[i], rg[i+1]); ctx.beginPath(); ctx.arc(x, y, 3.5, 0, 7); ctx.fill(); ctx.stroke(); } });
+}
 function draw() {
   const r = stage.getBoundingClientRect();
   ctx.clearRect(0, 0, r.width, r.height);
@@ -525,9 +552,10 @@ function draw() {
   if ($("showPr").checked) {
     im.pr.forEach((p, k) => {  // a flag stays drawn until someone decides on the object
       if (p.s < conf()) return;
-      const open = flags && !decided(im, "p" + k), miss = open && p.u, xd = open && p.x;
-      ctx.setLineDash(xd && !miss ? [2, 3] : [5, 4]);
-      ctx.lineWidth = miss || xd ? 2.5 : 1.3; ctx.strokeStyle = miss ? FLAG.pu : xd ? FLAG.x : "#22d3ee";
+      // prediction-only (no matching label) and undecided: dash-dot, so it reads as "waiting for Accept / Reject"
+      const und = !decided(im, "p" + k), only = und && p.u, open = flags && und, miss = open && p.u, xd = open && p.x;
+      ctx.setLineDash(only ? PRED_ONLY_DASH : xd ? [2, 3] : [5, 4]);
+      ctx.lineWidth = miss || xd ? 2.5 : only ? 1.8 : 1.3; ctx.strokeStyle = miss ? FLAG.pu : xd ? FLAG.x : "#22d3ee";
       p.p.forEach(rg => { path(rg); ctx.stroke(); });
       if (sel && sel.kind === "pr" && sel.i === k) { ctx.fillStyle = "rgba(250,204,21,.25)"; p.p.forEach(rg => { path(rg); ctx.fill(); }); }
     });
@@ -558,10 +586,10 @@ function draw() {
     if (g) {
       ctx.fillStyle = "rgba(39,100,197,.28)"; g.p.forEach(rg => { path(rg); ctx.fill(); });
       ctx.lineWidth = 2.2; ctx.strokeStyle = "#fff"; g.p.forEach(rg => { path(rg); ctx.stroke(); });
-      ctx.fillStyle = "#fff"; ctx.strokeStyle = "#000"; ctx.lineWidth = 1;
-      g.p.forEach(rg => { for (let i = 0; i < rg.length; i += 2) { const [x, y] = toScr(rg[i], rg[i+1]); ctx.beginPath(); ctx.arc(x, y, 3.5, 0, 7); ctx.fill(); ctx.stroke(); } });
+      handles(g.p);
     }
   }
+  if (sel && sel.kind === "pr" && $("showPr").checked && prEditable(im, sel.i)) handles(im.pr[sel.i].p);  // editing them accepts it
   if (draft && draft.length) {
     ctx.strokeStyle = redrawKey != null ? "#fff" : catColor(curCls); ctx.lineWidth = 1.8; ctx.beginPath();
     for (let i = 0; i < draft.length; i += 2) { const [x, y] = toScr(draft[i], draft[i+1]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
@@ -642,11 +670,18 @@ function renderSide() {
     rd.onclick = startRedraw;
     box.append(s, del, rd);
   } else {
-    const p = im.pr[sel.i];
-    box.innerHTML = `<div>Prediction${p.c ? ` <b style="color:${catColor(p.c)}">${esc(p.c)}</b>` : ""}, confidence ${p.s.toFixed(2)}${flagText(p, true)}</div>`;
-    const acc = document.createElement("button"); acc.textContent = `Accept as ${curCls}`; acc.onclick = () => acceptPred();
-    box.append(acc);
-    if (p.c && p.c !== curCls) { const b = document.createElement("button"); b.textContent = `Accept as ${p.c}`; b.onclick = () => acceptPred(p.c); box.append(b); }
+    const p = im.pr[sel.i], d = e && e.dec && e.dec["p" + sel.i], v = (d && d.v) || "", pc = predCls(p);
+    const by = d && d.who ? ` · ${esc(dispName(d.who))}` : "";
+    const st = v === "no" ? `<div class="decst no">Rejected: not an object${by}</div>`
+      : v.startsWith("add:") ? `<div class="decst add">Accepted as ${esc(v.slice(4))}${by}</div>`
+      : `<div class="decst">Not decided${p.u ? ": no label matches it" : ""}</div>`;
+    box.innerHTML = `<div>Prediction${p.c ? ` <b style="color:${catColor(p.c)}">${esc(p.c)}</b>` : ""}, confidence ${p.s.toFixed(2)}${flagText(p, true)}</div>` + st;
+    const big = (id, html, title, fn) => { const b = document.createElement("button"); b.id = id; b.className = "bigAct"; b.innerHTML = html; b.title = title; b.onclick = fn; return b; };
+    const acc = big("accBtn", `✓ Accept as ${esc(pc)}<kbd>A</kbd>`, `Add it as a ${pc} label (A)`, () => acceptPred(pc));
+    const rej = big("rejBtn", `✕ Reject<kbd>X</kbd>`, "Not an object (X)", rejectPred); rej.disabled = v === "no";
+    box.append(acc, rej);
+    if (pc !== curCls) { const b = document.createElement("button"); b.textContent = `Accept as ${curCls}`; b.onclick = () => acceptPred(curCls); box.append(b); }
+    if (prEditable(im, sel.i)) box.insertAdjacentHTML("beforeend", `<div class="tip">Or drag a white handle (double-click: add / delete one): that accepts it with the edited outline.</div>`);
   }
 }
 function legend() {
@@ -654,7 +689,8 @@ function legend() {
   const sw = st => `<span class="sw"><i style="border-top:${st}"></i></span>`;
   $("flagLegend").innerHTML = [
     [sw("1.5px dashed #22d3ee"), "prediction"],
-    [sw(`2.5px dashed ${FLAG.pu}`), "prediction with no label (possible miss)"],
+    [`<span class="sw"><i style="border-top:0;height:3px;background:repeating-linear-gradient(90deg,${FLAG.pu} 0 8px,transparent 8px 11px,${FLAG.pu} 11px 13px,transparent 13px 16px)"></i></span>`,
+      "dash-dot: prediction with no label, undecided (possible miss). Select it: Accept (A) or Reject (X); editing its outline accepts it"],
     [sw(`6px solid ${FLAG.gu}`), "label with no prediction (check it)"],
     [sw(`5px dotted ${FLAG.x}`), "class disagrees with the matched object (label halo, dotted prediction)"],
     [sw(`4px dashed ${FLAG.lc}`), "Low conf EV label: confirm the class"],
@@ -676,7 +712,7 @@ function renderChips() {
 // ---------- actions ----------
 function go(i) {
   if (i < 0 || i >= D.images.length) return;
-  cur = i; sel = null; draft = null; imgReady = false;
+  cur = i; sel = null; draft = null; imgReady = false; hideToast();
   const im = curImg();
   img = new Image(); img.onload = () => { W = img.naturalWidth; H = img.naturalHeight; imgReady = true; fit(); };
   img.onerror = () => banner(`Could not load ${im.src}. Keep the images/ folder next to index.html.`);
@@ -720,15 +756,42 @@ function deleteSel() {
   if (g.src) setDec(e, g.src, g.src[0] === "n" ? "del" : "no"); else if (g.id != null) setDec(e, "g" + g.id, "del");
   sel = null; changed();
 }
-function acceptPred(cls) {
+function acceptPred(cls) {  // A / "Accept": no class given = the predicted class (else the current class)
   if (!sel || sel.kind !== "pr" || !needWho(() => acceptPred(cls))) return;
-  cls = cls || curCls;
-  const im = curImg(), key = "p" + sel.i, p = im.pr[sel.i]; pushUndo();
+  const im = curImg(), key = "p" + sel.i, p = im.pr[sel.i]; cls = cls || predCls(p); pushUndo();
   const e = ensureEdit(im); e.gt = e.gt.filter(g => g.src !== key);  // accepting twice must not duplicate it
   e.gt.push({id: null, c: cls, p: clone(p.p), src: key});
   setDec(e, key, "add:" + cls);
   sel = {kind: "gt", key}; changed();
 }
+function rejectPred() {  // X / "Reject": a selected prediction is not an object; an accepted one is rejected again (as Del)
+  if (!sel || mode !== "select") return;
+  if (sel.kind === "gt") { if (sel.key[0] === "p") deleteSel(); return; }
+  if (sel.kind !== "pr" || !needWho(rejectPred)) return;
+  const im = curImg(), key = "p" + sel.i; pushUndo();
+  const e = ensureEdit(im); e.gt = e.gt.filter(g => g.src !== key);
+  setDec(e, key, "no"); changed();
+}
+// A vertex edit on an unaccepted prediction accepts it first, as its predicted class, in the same undo step; the
+// caller then edits the new label's outline and record() writes add:<cls> + p.
+function acceptForEdit(i) {
+  const im = curImg(), key = "p" + i, cls = predCls(im.pr[i]); pushUndo();
+  const e = ensureEdit(im); e.gt = e.gt.filter(g => g.src !== key);
+  const g = {id: null, c: cls, p: clone(im.pr[i].p), src: key}; e.gt.push(g);
+  setDec(e, key, "add:" + cls);  // so the label shows while it is dragged, even over an earlier "no"
+  sel = {kind: "gt", key}; return {e, g};
+}
+let toastFor = null, edToastT = null;  // {file, n}: the undo step the "Accepted (edited)" message can revert
+function hideToast() { $("edToast").hidden = true; toastFor = null; clearTimeout(edToastT); }
+function editToast() {
+  const f = curImg().file; toastFor = {file: f, n: (undoStacks[f] || []).length};
+  $("edToast").hidden = false; clearTimeout(edToastT); edToastT = setTimeout(hideToast, 8000);
+}
+$("edToastUndo").onclick = () => {  // only while that accept is still the latest step on this image
+  const t = toastFor, st = t && undoStacks[t.file];
+  if (t && curImg().file === t.file && st && st.length === t.n) undo();
+  hideToast();
+};
 function rdp(pts, eps) {  // Ramer-Douglas-Peucker on [[x, y]] (from web_qc)
   if (pts.length < 3) return pts;
   let dmax = 0, k = 0; const a = pts[0], b = pts[pts.length - 1];
@@ -767,14 +830,18 @@ function hitTest(sx, sy) {
   if ($("showPr").checked) im.pr.forEach((p, k) => { if (p.s < conf()) return; p.p.forEach(rg => { if (pip(x, y, rg)) { const a = area(rg) * 1.001; if (a < ba) { ba = a; best = {kind: "pr", i: k}; } } }); });
   return best;
 }
+function selRings() {  // the outline whose handles are shown: the selected label, or a selected unaccepted prediction
+  if (sel && sel.kind === "pr") { const im = curImg(); return $("showPr").checked && prEditable(im, sel.i) ? im.pr[sel.i].p : null; }
+  const g = selObj(); return g ? g.p : null;
+}
 function nearVertex(sx, sy) {
-  const g = selObj(); if (!g) return null;
+  const g = {p: selRings()}; if (!g.p) return null;
   let best = null, bd = 9;
   g.p.forEach((rg, r) => { for (let i = 0; i < rg.length; i += 2) { const [x, y] = toScr(rg[i], rg[i+1]); const d = Math.hypot(sx - x, sy - y); if (d < bd) { bd = d; best = {r, i}; } } });
   return best;
 }
 function nearEdge(sx, sy) {
-  const g = selObj(); if (!g) return null;
+  const g = {p: selRings()}; if (!g.p) return null;
   let best = null, bd = 8;
   g.p.forEach((rg, r) => { for (let i = 0; i < rg.length; i += 2) { const j = (i + 2) % rg.length; const [ax, ay] = toScr(rg[i], rg[i+1]), [bx, by] = toScr(rg[j], rg[j+1]); const d = segDist(sx, sy, ax, ay, bx, by); if (d < bd) { bd = d; best = {r, i: j}; } } });
   return best;
@@ -788,8 +855,8 @@ const ptrs = new Map(); let drag = null, pinch = null;
 const pos = ev => { const r = cv.getBoundingClientRect(); return [ev.clientX - r.left, ev.clientY - r.top]; };
 function endVertexDrag(d) {
   const im = curImg();
-  if (d.moved) { const e = ensureEdit(im), g = selEdit(e); if (g) record(im, e, g); changed(); }
-  else undoStacks[im.file].pop();
+  if (d.moved) { const e = ensureEdit(im), g = selEdit(e); if (g) record(im, e, g); changed(); if (d.accepted) editToast(); }
+  else if (d.pr == null) undoStacks[im.file].pop();  // a prediction's drag pushes its undo step only once it moves
 }
 cv.addEventListener("pointerdown", ev => {
   cv.setPointerCapture(ev.pointerId); const [x, y] = pos(ev); ptrs.set(ev.pointerId, [x, y]);
@@ -802,7 +869,11 @@ cv.addEventListener("pointerdown", ev => {
   const panBtn = ev.pointerType === "mouse" && (ev.button === 1 || ev.button === 2 || ev.altKey);
   if (mode === "draw" && !panBtn) { const [ix, iy] = toImg(x, y); draft = [clamp01(ix), clamp01(iy)]; drag = {type: "free", lx: x, ly: y}; return; }
   const v = mode === "select" && !panBtn ? nearVertex(x, y) : null;
-  if (v) { if (!needWho()) return; pushUndo(); drag = {type: "vertex", v, moved: false}; return; }
+  if (v) {
+    if (!needWho()) return;
+    if (sel.kind === "pr") { drag = {type: "vertex", v, moved: false, pr: sel.i, x0: x, y0: y}; return; }  // accepted on the first move
+    pushUndo(); drag = {type: "vertex", v, moved: false}; return;
+  }
   drag = {type: "pan", x0: x, y0: y, ox: view.ox, oy: view.oy, moved: false};
 });
 cv.addEventListener("pointermove", ev => {
@@ -818,6 +889,10 @@ cv.addEventListener("pointermove", ev => {
   if (drag.type === "free") {
     if (Math.hypot(x - drag.lx, y - drag.ly) >= 2) { const [ix, iy] = toImg(x, y); draft.push(clamp01(ix), clamp01(iy)); drag.lx = x; drag.ly = y; draw(); }
   } else if (drag.type === "vertex") {
+    if (drag.pr != null && !drag.accepted) {  // an unaccepted prediction: a real move (> 3 px) accepts it
+      if (Math.hypot(x - drag.x0, y - drag.y0) <= 3) return;
+      acceptForEdit(drag.pr); drag.accepted = true;
+    }
     const g = selEdit(ensureEdit(curImg())), rg = g && g.p[drag.v.r], [ix, iy] = toImg(x, y);
     if (!rg || drag.v.i >= rg.length) { drag = null; return; }  // the object went away under the drag (a pull)
     rg[drag.v.i] = clamp01(ix); rg[drag.v.i+1] = clamp01(iy); drag.moved = true; draw();
@@ -846,16 +921,17 @@ cv.addEventListener("pointerup", endPtr);
 cv.addEventListener("pointercancel", endPtr);
 cv.addEventListener("pointerleave", () => { hover = null; if (mode === "tap") draw(); });
 cv.addEventListener("dblclick", ev => {
-  if (mode !== "select" || !sel || sel.kind !== "gt") return;
-  const [x, y] = pos(ev), v = nearVertex(x, y), im = curImg();
+  if (mode !== "select" || !sel || (sel.kind !== "gt" && !selRings())) return;
+  const [x, y] = pos(ev), v = nearVertex(x, y), im = curImg(), pr = sel.kind === "pr" ? sel.i : null;
   if ((v || nearEdge(x, y)) && !needWho()) return;
+  const begin = () => { if (pr != null) return acceptForEdit(pr); pushUndo(); const e = ensureEdit(im); return {e, g: selEdit(e)}; };
+  const done = (e, g) => { record(im, e, g); changed(); if (pr != null) editToast(); };  // a prediction: accepted (edited)
   if (v) {
-    const rg = selObj().p[v.r];
-    if (rg.length > 6) { pushUndo(); const e = ensureEdit(im), g = selEdit(e); if (!g) return; g.p[v.r].splice(v.i, 2); record(im, e, g); changed(); }
+    if (selRings()[v.r].length > 6) { const {e, g} = begin(); if (!g) return; g.p[v.r].splice(v.i, 2); done(e, g); }
     return;
   }
   const ed = nearEdge(x, y);
-  if (ed) { const [ix, iy] = toImg(x, y); pushUndo(); const e = ensureEdit(im), g = selEdit(e); if (!g) return; g.p[ed.r].splice(ed.i, 0, clamp01(ix), clamp01(iy)); record(im, e, g); changed(); }
+  if (ed) { const [ix, iy] = toImg(x, y), {e, g} = begin(); if (!g) return; g.p[ed.r].splice(ed.i, 0, clamp01(ix), clamp01(iy)); done(e, g); }
 });
 cv.addEventListener("wheel", ev => {
   ev.preventDefault(); const [x, y] = pos(ev), f = Math.exp(-ev.deltaY * 0.0015), s = Math.max(0.05, Math.min(40, view.s * f));
@@ -879,6 +955,7 @@ document.addEventListener("keydown", ev => {
   else if (k === "s" || k === "S") setMode("select");
   else if (k === "e" || k === "E") startRedraw();
   else if (k === "a" || k === "A") acceptPred();
+  else if (k === "x" || k === "X") rejectPred();
   else if (k === "r" || k === "R") markReviewed();
   else if (k === "f" || k === "F") fit();
   else if (k === "t" || k === "T") { $("showPr").checked = !$("showPr").checked; draw(); }
@@ -1123,6 +1200,7 @@ function cardObj(c) {  // the card's object as it stands, {c, p}: the label it i
   return {c: String(d.v || "").replace(/^new:/, ""), p: d.p || [[]]};
 }
 function caseRing(c) { return cardObj(c).p[0]; }
+const cardPredCls = c => D.images[c.i].pr[c.k].c || "EV";  // a prediction card's Accept: its predicted class, EV when the package has none
 function ringBox(r) {
   let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
   for (let k = 0; k < r.length; k += 2) { x0 = Math.min(x0, r[k]); x1 = Math.max(x1, r[k]); y0 = Math.min(y0, r[k+1]); y1 = Math.max(y1, r[k+1]); }
@@ -1162,6 +1240,11 @@ function triRender() {
   ["aNope", "aSkip", "aYes", "aNext"].forEach(id => $(id).disabled = !c);
   $("aNext").hidden = autoNext(); $("aNext").classList.toggle("on", !!c && decided(D.images[c.i], c.key));
   triHeader(c);
+  // a prediction-only card (not September's, not picked on yet): Accept / Reject are labelled pills, the primary actions
+  const big = !clsMode() && !!c && c.kind === "p" && !seedOf(D.images[c.i].file, c.key) && !pickedHere(c);
+  $("triActions").classList.toggle("pcard", big);
+  $("aYes").innerHTML = big ? `✓ Accept<small>as ${esc(cardPredCls(c))}</small>` : clsMode() ? "✓" : "♥";
+  $("aNope").innerHTML = big ? "✕ Reject" : "✕";
   if (!c) {
     bio.innerHTML = `<h2>${brand().empty}</h2>` + (clsMode() ? "<p>No labels left to check here. Pick “all labels”, or open the Editor.</p>"
       : "<p>Lower the confidence filter to meet more vesicles, or open the Editor.</p>");
@@ -1194,11 +1277,12 @@ function triRender() {
       $("triCls").appendChild(b);
     });
   } else if (c.kind === "p") {
-    const p = im.pr[c.k], conf = p.s.toFixed(2);
+    const p = im.pr[c.k], conf = p.s.toFixed(2), pc = cardPredCls(c);
     bio.innerHTML = `<h2>Vesicle?, <span>${conf}</span></h2>${pickedLine(im, c)}<p>${makeBio(im, c, {conf, cls: "EV", sample: esc(sample), diam, frac, nested: nestedCount(im, c, caseRing(c), parseFloat($("triConf").value))})}</p>` +
       `<small>⌀ ~${diam} px · ${esc(sample)} · ${esc(im.split)} set${p.c ? ` · model: ${esc(p.c)}` : ""}</small>`;
-    $("aYes").title = sept ? "Swipe right: confirm the September decision" : "Swipe right: add as EV"; $("aNope").title = "Swipe left: not a vesicle";
-    CATS.filter(cl => cl !== "EV").forEach(cl => chip(cl, decV(edits[im.file], c.key) === "add:" + cl ? "on" : "", () => tri.adj ? saveAdjust(cl) : pick("add", cl, `added as ${cl}`)));
+    $("aYes").title = sept ? "Swipe right: confirm the September decision" : `Accept: add as ${pc} (A, Enter, →, swipe right)`;
+    $("aNope").title = "Reject: not a vesicle (X, ←, swipe left)";
+    CATS.filter(cl => cl !== pc).forEach(cl => chip(cl, decV(edits[im.file], c.key) === "add:" + cl ? "on" : "", () => tri.adj ? saveAdjust(cl) : pick("add", cl, `added as ${cl}`)));
   } else {
     const g = cardObj(c), act = c.kind === "n" ? "new" : "keep";
     bio.innerHTML = `<h2>${esc(g.c)}, <span>labeled</span></h2>${pickedLine(im, c)}<p>${makeBio(im, c, {conf: "", cls: esc(g.c), sample: esc(sample), diam, frac, nested: nestedCount(im, c, caseRing(c), 0)})}</p>` +
@@ -1271,7 +1355,7 @@ function swipeYes() {
   const c = tri.queue[tri.pos]; if (!c) return;
   if (pickedHere(c)) return advance();
   if (seedOf(D.images[c.i].file, c.key)) return confirmSept(c);
-  if (c.kind === "p") decide("add", "EV"); else decide(c.kind === "n" ? "new" : "keep", cardObj(c).c);
+  if (c.kind === "p") decide("add", cardPredCls(c)); else decide(c.kind === "n" ? "new" : "keep", cardObj(c).c);
 }
 function swipeNo() { const c = tri.queue[tri.pos]; if (!c) return; if (clsMode() || pickedHere(c)) advance(); else decide(c.kind === "p" ? "no" : "del"); }
 function confirmSept(c) {  // ✓ on a September card: the same decision again, fresh (no seed), credited to this reviewer
@@ -1372,7 +1456,7 @@ function endAdjust() { tri.adj = null; updAdjBar(); triDraw(); }
 function saveAdjust(cls) {
   const c = tri.queue[tri.pos], a = tri.adj; if (!c || !a || !needWho(() => saveAdjust(cls))) return;
   const poly = [a.ring.map(v => Math.round(v * 1e5) / 1e5)];
-  const cl = cls || (c.kind === "p" ? "EV" : (effGt(D.images[c.i]).find(g => g.id === c.id) || {}).c);
+  const cl = cls || (c.kind === "p" ? cardPredCls(c) : (effGt(D.images[c.i]).find(g => g.id === c.id) || {}).c);
   tri.adj = null; updAdjBar();
   react("yes", () => decide(c.kind === "p" ? "add" : "keep", cl, poly), c.kind === "p" ? `added as ${cl}, reshaped` : `${cl}, reshaped`);
 }
@@ -1410,7 +1494,7 @@ function react(kind, act, sub) {
   if (kind !== "skip" && act !== advance && !(kind === "nope" && clsMode()) && !needWho(() => react(kind, act, sub))) return;
   setStamp(kind, c); stamp.style.opacity = 1;
   const w = card.getBoundingClientRect().width;
-  if (kind === "yes") { flyOff(w * 1.5, 0, act); if (!pickedHere(c)) toast(c.kind === "p" ? brand().match : brand().keep, sub || (c.kind === "p" ? "added as EV" : "label kept")); }
+  if (kind === "yes") { flyOff(w * 1.5, 0, act); if (!pickedHere(c)) toast(c.kind === "p" ? brand().match : brand().keep, sub || (c.kind === "p" ? "added as " + esc(cardPredCls(c)) : "label kept")); }
   else if (kind === "nope") flyOff(-w * 1.5, 0, act);
   else flyOff(0, -1200, act);
 }
@@ -1443,7 +1527,7 @@ tcv.addEventListener("pointerup", ev => {
   if (!wasDrag) { tri.zoom = (tri.zoom + 1) % ZOOMS.length; triDraw(); return; }
   if (dy < -90 && Math.abs(dy) > Math.abs(dx)) flyOff(dx, -1200, advance);
   else if ((dx > 90 || (dx < -90 && !clsMode())) && !needWho()) cardReset(true);
-  else if (dx > 90) { const c = tri.queue[tri.pos]; flyOff(card.getBoundingClientRect().width * 1.5, dy, swipeYes); if (c && !pickedHere(c)) toast(c.kind === "p" ? brand().match : brand().keep, c.kind === "p" ? "added as EV" : "label kept"); }
+  else if (dx > 90) { const c = tri.queue[tri.pos]; flyOff(card.getBoundingClientRect().width * 1.5, dy, swipeYes); if (c && !pickedHere(c)) toast(c.kind === "p" ? brand().match : brand().keep, c.kind === "p" ? "added as " + esc(cardPredCls(c)) : "label kept"); }
   else if (dx < -90) flyOff(-card.getBoundingClientRect().width * 1.5, dy, swipeNo);  // class review: next
   else cardReset(true);
 });
@@ -1465,7 +1549,7 @@ function triKey(ev) {
     const cl = CATS[+k - 1];
     pick(c.kind === "p" ? "add" : "keep", cl, c.kind === "p" ? `added as ${cl}` : `now ${cl}`);
   }
-  else if (k === "ArrowRight" || k === "Enter") react("yes", swipeYes);
+  else if (k === "ArrowRight" || k === "Enter" || k === "a" || k === "A") react("yes", swipeYes);  // A: accept
   else if (!cm && (k === "ArrowLeft" || k === "x" || k === "X" || k === "Delete")) react("nope", swipeNo);
   else if (k === "ArrowUp" || k === "s" || k === "S" || k === "n" || k === "N" || (cm && k === "ArrowLeft")) react("skip", advance);
   else if (k === "z" || k === "Z") triUndo();
