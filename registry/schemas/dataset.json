@@ -241,6 +241,73 @@
     "null"
    ],
    "description": "why images_sha256 is null"
+  },
+  "inputs": {
+   "type": "array",
+   "description": "What this record was made from: child -> parent links (TRACKING_CONTRACT.md, v2 addendum)",
+   "items": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "entity": {
+      "type": "string"
+     },
+     "role": {
+      "enum": [
+       "base",
+       "edits",
+       "predictions",
+       "train_data",
+       "init_weights",
+       "images",
+       "source",
+       "replaces"
+      ]
+     }
+    },
+    "required": [
+     "id",
+     "role"
+    ]
+   }
+  },
+  "image_list": {
+   "type": [
+    "object",
+    "null"
+   ],
+   "properties": {
+    "file": {
+     "type": "string"
+    },
+    "sha256": {
+     "type": [
+      "string",
+      "null"
+     ],
+     "pattern": "^[0-9a-f]{64}$"
+    }
+   },
+   "required": [
+    "file"
+   ],
+   "description": "per-image split membership (stem, split) used for training"
+  },
+  "counts_trained": {
+   "type": [
+    "object",
+    "null"
+   ],
+   "description": "per-split counts the model actually trained on (split file); may include sessions left out of the registry"
+  },
+  "counts_listed": {
+   "type": [
+    "object",
+    "null"
+   ],
+   "description": "per-split counts of images that are in the registry"
   }
  },
  "required": [

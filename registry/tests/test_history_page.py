@@ -111,7 +111,7 @@ class HistoryPage(unittest.TestCase):
         for text in ("Registry history", "Queue / status board", "History tree", "Search id", "prefers-color-scheme"):
             self.assertIn(text, self.html_s)
         self.assertEqual(self.m_s["stats"]["label_change_rows"], 1)
-        self.assertEqual(len(self.m_s["recs"]), 13)
+        self.assertEqual(len(self.m_s["recs"]), 15)  # 13 entity samples + 2 job samples (job/1)
         # samples: pull -> lv; export -> dataset -> run -> model -> inference check; package under model
         S = self.m_s["sections"]
         self.assertEqual(find_node(S, "model|v5_evnonev_y8m_20261029")[-3:],

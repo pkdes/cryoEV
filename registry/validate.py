@@ -36,7 +36,7 @@ from data_utils.path_guard import protected_problem  # noqa: E402
 PROTECTED = [Path(r"C:\Users\pujan\Box"), Path(r"C:\Users\pujan\Desktop\Cryo-image-processing")]
 EXCLUDED_SESSIONS = {"20261012"}
 ENTITIES = ["image", "session", "grid", "roboflow_image", "pull", "roboflow_export", "label_version",
-            "review_package", "inference_check", "dataset", "job_bundle", "run", "model"]
+            "review_package", "inference_check", "dataset", "job_bundle", "run", "model", "job"]
 N_EXAMPLES = 3
 
 

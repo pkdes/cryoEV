@@ -101,6 +101,37 @@
    },
    "uniqueItems": true,
    "description": "legacy / alternative ids that resolve to this model"
+  },
+  "inputs": {
+   "type": "array",
+   "description": "What this record was made from: child -> parent links (TRACKING_CONTRACT.md, v2 addendum)",
+   "items": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "entity": {
+      "type": "string"
+     },
+     "role": {
+      "enum": [
+       "base",
+       "edits",
+       "predictions",
+       "train_data",
+       "init_weights",
+       "images",
+       "source",
+       "replaces"
+      ]
+     }
+    },
+    "required": [
+     "id",
+     "role"
+    ]
+   }
   }
  },
  "required": [

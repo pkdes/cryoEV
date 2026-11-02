@@ -162,3 +162,16 @@ Answered on 2026-10-30, see the Registry section: 1 (per-entity files), 2 (sessi
 - One static HTML file (inline CSS/JS, no network): status board by lane (table above), history tree (pull → label versions → datasets → job bundles → runs → models; review packages under the label version they produced, else their model/base; inference checks under their model), detail with status history on tap, entity/status filters, id search.
 - Reads child → parent links only and derives children (a label version is superseded when another one has `supersedes: <id>`, or by its status). Current = last line per id in file order. Partial status lines keep earlier fields. `*_gap` fields and `copy_of` are shown.
 - Has its own JSONL reader. It can switch to `registry.current()` / `history(id)` later. The output path is checked with `data_utils/path_guard.py`. Tests: `registry/tests/test_history_page.py`.
+
+## v2 addendum (2026-11-02): jobs and inputs
+- **`job/1`**: one batch of images with a type and a state (schema `registry/schemas/job.json`, samples `registry/samples/job.jsonl`).
+  - Id: `job_<YYYYMMDD>_<slug>` (`ids.job_id`). It never equals another record's id, because `registry.current()` keys by bare id.
+  - `type`: annotate / revise / train / check. `where`: app / roboflow / desktop / laptop.
+  - `status`: ready → in_progress → done, plus blocked (`blocked_reason`) and cancelled. Use the existing `registry.py set-status`.
+  - `progress` {done, total, unit}, `n_images`, `image_list` {file, sha256}, `package` (for app jobs), `who`, `inputs`, `outputs`.
+  - Batches are split or merged by need. For now that means a new job with `inputs` role `replaces` → the old job, and the old job marked cancelled.
+- **`inputs: [{id, role, entity?}]`** on model, dataset and label_version. Roles: `base`, `edits`, `predictions`, `train_data`, `init_weights`, `images`, `source`, `replaces`. It is child → parent, so a record can have several parents (a DAG).
+- **Dataset**:
+  - `image_list` = per-image (stem, split) membership as trained (from the split file's `split` column, without `DROPPED-duplicate` rows);
+  - `counts_trained` = what the model trained on;
+  - `counts_listed` = the images in the registry. They differ when a session is left out (20261012 lipo).

@@ -19,6 +19,7 @@ PATTERNS = {
     "model": r"^[A-Za-z0-9][A-Za-z0-9_]*$",
     "model_new": r"^v\d+_[a-z0-9]+(_[a-z0-9]+)*_\d{8}$",
     "person": r"^[a-z0-9_]+$",
+    "job": r"^job_\d{8}_[a-z0-9][a-z0-9_]*$",  # never equal to another record id: registry.current() keys by bare id
 }
 _RX = {k: re.compile(v) for k, v in PATTERNS.items()}
 PART = re.compile(r"^(?P<parent>.+)_part(?P<n>\d+)$")
@@ -76,3 +77,9 @@ def package_parent(pkg_id):
 
 def session_of_ic(batch_id):
     return batch_id.split("_", 1)[0] if is_id("ic", batch_id) else None
+
+
+def job_id(date_yyyymmdd, name):
+    """`job_<YYYYMMDD>_<slug>`: lowercase, runs of other characters -> `_`."""
+    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "job"
+    return f"job_{date_yyyymmdd}_{slug}"

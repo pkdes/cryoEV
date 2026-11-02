@@ -110,6 +110,37 @@
     "null"
    ],
    "description": "owner file the registry pointer derives from at read time"
+  },
+  "inputs": {
+   "type": "array",
+   "description": "What this record was made from: child -> parent links (TRACKING_CONTRACT.md, v2 addendum)",
+   "items": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "entity": {
+      "type": "string"
+     },
+     "role": {
+      "enum": [
+       "base",
+       "edits",
+       "predictions",
+       "train_data",
+       "init_weights",
+       "images",
+       "source",
+       "replaces"
+      ]
+     }
+    },
+    "required": [
+     "id",
+     "role"
+    ]
+   }
   }
  },
  "required": [

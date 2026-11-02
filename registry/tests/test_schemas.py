@@ -11,7 +11,7 @@ import ids  # noqa: E402
 from schema_check import UnsupportedKeyword, check_record, errors, load_schemas  # noqa: E402
 
 ENTITIES = ["image", "session", "grid", "roboflow_image", "pull", "roboflow_export", "label_version",
-            "review_package", "inference_check", "dataset", "job_bundle", "run", "model"]
+            "review_package", "inference_check", "dataset", "job_bundle", "run", "model", "job"]
 
 
 def samples():
