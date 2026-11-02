@@ -159,7 +159,8 @@ Answered on 2026-10-30, see the Registry section: 1 (per-entity files), 2 (sessi
 
 ## History page (piece 7)
 - `python registry/history_page.py [--registry FILE_OR_DIR ...] [--out FILE]`. Defaults: every `*.jsonl` in `CryoAI-laptop/registry/` (one file per entity, as `registry.py` writes) → `CryoAI-laptop/registry/history.html`. Try it with `--registry registry/samples`.
-- One static HTML file (inline CSS/JS, no network): status board by lane (table above), history tree (pull → label versions → datasets → job bundles → runs → models; review packages under the label version they produced, else their model/base; inference checks under their model), detail with status history on tap, entity/status filters, id search.
+- v2 (2026-11-02): the status board is replaced by a **Queue** (one lane per job type: Annotate, Revise, Train, Check; cards blocked → in_progress → ready, done/cancelled under "Done (n)"; each card: name, status, n images, progress bar `done/total unit`, who, where, inputs → outputs, blocked reason, next action). Tapping a model (tree, production line, "Models" strip, queue links) opens a **Model page** above its detail: badge, dataset → source, per-split trained vs listed ("unknown" when missing), the image list (read from `image_list.file` next to the registry and embedded at build time; images not in the registry are counted, not named), init model, scores (inference checks). Pointer records get their owner file's fields, as `registry.current()` does.
+- One static HTML file (inline CSS/JS, no network): history tree (pull → label versions → datasets → job bundles → runs → models; review packages under the label version they produced, else their model/base; inference checks under their model), detail with status history on tap, entity/status filters, id search.
 - Reads child → parent links only and derives children (a label version is superseded when another one has `supersedes: <id>`, or by its status). Current = last line per id in file order. Partial status lines keep earlier fields. `*_gap` fields and `copy_of` are shown.
 - Has its own JSONL reader. It can switch to `registry.current()` / `history(id)` later. The output path is checked with `data_utils/path_guard.py`. Tests: `registry/tests/test_history_page.py`.
 
@@ -175,3 +176,12 @@ Answered on 2026-10-30, see the Registry section: 1 (per-entity files), 2 (sessi
   - `image_list` = per-image (stem, split) membership as trained (from the split file's `split` column, without `DROPPED-duplicate` rows);
   - `counts_trained` = what the model trained on;
   - `counts_listed` = the images in the registry. They differ when a session is left out (20261012 lipo).
+- **Importer (v2, `registry/importers.py`):**
+  - Dataset membership comes from the split file's `split` column (never `source_split`, never `roboflow_image.split`), minus `DROPPED-*` rows; with no split file, from the export's split folders.
+  - The list is written to `<registry>/lists/<dataset>.tsv` (`stem\tsplit`, sorted; rewritten only when it changes). `not_listed` gives the reason counts (`excluded_session`, `not_in_registry`), never the excluded ids.
+  - No local data: `image_list`, `counts_trained` and `counts_listed` are null, and `counts.*.images` is null with `counts_gap` ("unknown", never 0).
+  - `inputs`: label_version gets `base` (version.json `base`) and `edits` (`pkg`); dataset gets `source`; model gets `train_data` and `init_weights` (`init_from`).
+  - One revise job per top-level review package (no `_partN`, no `SANDBOX_*`). Its id is `ids.job_id(<built date>, <package>)`, with `where: app`, `package`, `port` 8766. `progress.done` counts `edits/*.json` whose `edit.reviewed` is true (wrapper or bare form), out of `n_images`.
+  - The job status is `in_progress` if any record has decisions or `reviewed`, else `ready`. The package's `applied` status is never mapped to done. An explicit set-status line (with its `blocked_reason`) is kept.
+- **CLI:** `registry.py job new --type … --where … --name … (--images LISTFILE | --session YYYYMMDD) [--who] [--total]` writes a ready job and copies the list to `<registry>/lists/<job id>.txt` (image keys). It refuses an id that any record already uses.
+  - `set-status <job> blocked --reason …` is how a job is blocked; leaving `blocked` drops the reason.

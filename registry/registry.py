@@ -5,7 +5,13 @@
     python registry/registry.py import [--dry-run]
     python registry/registry.py list [--entity model] [--status production]
     python registry/registry.py show <id>
-    python registry/registry.py set-status <id> <status> --who <people.json id> [--note ...]
+    python registry/registry.py set-status <id> <status> --who <people.json id> [--note ...] [--reason ...]
+    python registry/registry.py job new --type {annotate,revise,train,check} --where {app,roboflow,desktop,laptop}
+                                        --name NAME (--images LISTFILE | --session YYYYMMDD) [--who ID] [--total N]
+
+Jobs (contract v2 addendum): `job new` writes a `job/1` line with status ready, n_images, progress {0, n} and
+image_list {file, sha256} (the list is copied to <root>/lists/<job id>.txt). Its id must not equal any existing
+record id. Status changes go through set-status (ready -> in_progress -> done; blocked needs --reason; cancelled).
 
 API (piece 7 reads through these): append(record), current() -> {id: record}, history(id) -> [record, ...].
 inference_check and label_version are pointer records (`owner` = batches.jsonl / version.json): the registry
@@ -14,6 +20,7 @@ file at read time. Explicit status lines (`status_by`, from set-status) beat der
 Writes go through data_utils.path_guard (never under Box or Cryo-image-processing). Session 20261012 is refused.
 """
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -24,6 +31,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO))
+import ids  # noqa: E402
 from data_utils.path_guard import protected_problem  # noqa: E402
 from schema_check import check_record, load_schemas  # noqa: E402
 from validate import ENTITIES, EXCLUDED_SESSIONS, find_sibling, read_json  # noqa: E402
@@ -160,6 +168,8 @@ def _check(rec, root, via_set_status=False):
         raise RegistryError("refused: excluded session (counted only, no records)")
     if rec.get("status_by") and rec["status_by"] not in roster():
         raise RegistryError(f"refused: status_by {rec['status_by']!r} is not in people.json")
+    if e == "job" and rec.get("who") is not None and rec["who"] not in roster():
+        raise RegistryError(f"refused: job who {rec['who']!r} is not in people.json")
     if e == "model" and full.get("status") == "production":
         prev = current("model", root).get(rec["id"], {})
         kept = prev.get("status") == "production" and prev.get("status_by") == PRODUCTION_WHO \
@@ -190,7 +200,9 @@ def append(record, root=None, _via_set_status=False):
     return line
 
 
-def set_status(id, status, who, note=None, root=None):
+def set_status(id, status, who, note=None, root=None, reason=None):
+    """Explicit status line (wins over derived ones). Jobs: ready / in_progress / done / blocked (needs a
+    reason: `reason` or `note`) / cancelled; leaving `blocked` drops blocked_reason."""
     if who not in roster():
         raise RegistryError(f"refused: --who {who!r} is not in people.json")
     cur = current(root=root).get(id)
@@ -204,7 +216,83 @@ def set_status(id, status, who, note=None, root=None):
     rec.update(status=status, status_by=who, logged=now(), recorded_by="registry.py set-status")
     if note:
         rec["note"] = note
+    if e == "job":
+        if status == "blocked":
+            rec["blocked_reason"] = reason or note or rec.get("blocked_reason")
+            if not rec["blocked_reason"]:
+                raise RegistryError("refused: a blocked job needs --reason")
+        else:
+            rec.pop("blocked_reason", None)
+    elif reason:
+        raise RegistryError("refused: --reason is only for jobs")
     return append(rec, root, _via_set_status=True)
+
+
+# ---------------------------------------------------------------- jobs (contract v2 addendum)
+JOB_TYPES = ("annotate", "revise", "train", "check")
+JOB_WHERE = ("app", "roboflow", "desktop", "laptop")
+JOB_UNITS = {"annotate": "images labeled", "revise": "images reviewed", "train": "images", "check": "images checked"}
+LISTS = "lists"
+
+
+def read_image_list(path):
+    """Image list file -> image keys in order (first tab-separated field; blank and # lines skipped)."""
+    out, seen = [], set()
+    for line in Path(path).read_text(encoding="utf-8-sig").splitlines():
+        stem = line.split("\t")[0].strip()
+        if not stem or stem.startswith("#"):
+            continue
+        key = ids.image_key(stem)
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def new_job(type, where, name, images=None, session=None, who=None, total=None, root=None, date=None, note=None):
+    """Append a `job/1` line (status ready) with its image list copied to <root>/lists/<job id>.txt."""
+    root = Path(root or default_root())
+    if type not in JOB_TYPES or where not in JOB_WHERE:
+        raise RegistryError(f"refused: --type must be one of {JOB_TYPES}, --where one of {JOB_WHERE}")
+    if (images is None) == (session is None):
+        raise RegistryError("refused: give exactly one of --images LISTFILE or --session YYYYMMDD")
+    if who is not None and who not in roster():
+        raise RegistryError(f"refused: --who {who!r} is not in people.json")
+    cur = current(root=root)
+    if images is not None:
+        stems = read_image_list(images)
+        src = str(images)
+    else:
+        if not ids.is_id("session", session):
+            raise RegistryError(f"refused: --session {session!r} is not YYYYMMDD[-N]")
+        if session[:8] in EXCLUDED_SESSIONS:
+            raise RegistryError("refused: excluded session (counted only, no records)")
+        stems = sorted(k for k, v in cur.items() if v.get("schema") == "image/1" and v.get("session") == session)
+        src = session
+    if not stems:
+        raise RegistryError(f"refused: no images in {src}")
+    jid = ids.job_id(date or datetime.now().strftime("%Y%m%d"), name)
+    if jid in cur:
+        raise RegistryError(f"refused: id {jid} is already used by {cur[jid].get('schema')} (pick another --name)")
+    text = "".join(s + "\n" for s in stems)
+    rel = f"{LISTS}/{jid}.txt"
+    rec = {"schema": "job/1", "id": jid, "logged": now(), "recorded_by": "registry.py job new", "name": name,
+           "type": type, "where": where, "status": "ready", "n_images": len(stems),
+           "image_list": {"file": rel, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()},
+           "progress": {"done": 0, "total": len(stems) if total is None else int(total), "unit": JOB_UNITS[type]},
+           "who": who, "inputs": [{"id": session, "role": "images", "entity": "session"}] if session else [],
+           "outputs": []}
+    if note:
+        rec["note"] = note
+    _check(rec, root)                                   # validate before anything is written
+    path = root / rel
+    _guard(root)
+    _guard(path)
+    if path.exists() and path.read_bytes() != text.encode("utf-8"):
+        raise RegistryError(f"refused: {path} exists with other content")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(text.encode("utf-8"))
+    return append(rec, root)
 
 
 def _lines_last(root, entity, id):
@@ -232,6 +320,18 @@ def main(argv=None):
     ss.add_argument("status")
     ss.add_argument("--who", required=True)
     ss.add_argument("--note")
+    ss.add_argument("--reason", help="blocked_reason (jobs set to blocked)")
+    jb = sub.add_parser("job").add_subparsers(dest="jcmd", required=True)
+    jn = jb.add_parser("new", help="new job (status ready)")
+    jn.add_argument("--type", required=True, choices=JOB_TYPES)
+    jn.add_argument("--where", required=True, choices=JOB_WHERE)
+    jn.add_argument("--name", required=True)
+    g = jn.add_mutually_exclusive_group(required=True)
+    g.add_argument("--images", type=Path, help="list file: one image key/name per line (first tab field)")
+    g.add_argument("--session", help="YYYYMMDD: every registry image of that session")
+    jn.add_argument("--who", help="people.json id")
+    jn.add_argument("--total", type=int, help="progress total (default: n images)")
+    jn.add_argument("--note")
     a = ap.parse_args(argv)
     root = a.root or default_root()
     try:
@@ -251,8 +351,12 @@ def main(argv=None):
             print(json.dumps(h[-1], indent=1, ensure_ascii=False, default=str))
             print(f"({len(h)} line(s); statuses: {' -> '.join(str(x.get('status')) for x in h)})")
         elif a.cmd == "set-status":
-            line = set_status(a.id, a.status, a.who, a.note, root)
+            line = set_status(a.id, a.status, a.who, a.note, root, reason=a.reason)
             print(f"appended: {line['id']} status={line.get('status')} by {line.get('status_by')}")
+        elif a.cmd == "job":
+            line = new_job(a.type, a.where, a.name, images=a.images, session=a.session, who=a.who,
+                           total=a.total, root=root, note=a.note)
+            print(f"appended: {line['id']} ({line['type']}, {line['n_images']} images, list {line['image_list']['file']})")
     except RegistryError as e:
         print(e, file=sys.stderr)
         return 2

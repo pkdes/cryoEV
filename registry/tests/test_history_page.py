@@ -108,8 +108,17 @@ class HistoryPage(unittest.TestCase):
                 rec = json.loads(line)
                 if "id" in rec:
                     self.assertIn(hp.safe_json(rec["id"])[1:-1], self.html_s, rec["id"])
-        for text in ("Registry history", "Queue / status board", "History tree", "Search id", "prefers-color-scheme"):
+        for text in ("Registry history", "<h2>Queue</h2>", "History tree", "Search id", "prefers-color-scheme"):
             self.assertIn(text, self.html_s)
+        self.assertNotIn("status board", self.html_s)
+        q = {L["type"]: L for L in self.m_s["queue"]}               # samples: 1 revise in_progress, 1 annotate blocked
+        self.assertEqual([L["title"] for L in self.m_s["queue"]], ["Annotate", "Revise", "Train", "Check"])
+        self.assertEqual(q["revise"]["open"], ["job|job_20261102_prelipo_v5f5_review_v2"])
+        self.assertEqual(q["annotate"]["open"], ["job|job_20261102_annotate_20261027_blind"])
+        card = self.m_s["recs"]["job|job_20261102_annotate_20261027_blind"]["job"]
+        self.assertEqual((card["next"], card["blocked"]), ("tiles not uploaded yet", "tiles not uploaded yet"))
+        self.assertEqual(self.m_s["recs"]["job|job_20261102_prelipo_v5f5_review_v2"]["job"]["next"],
+                         "Review in app (port 8766)")
         self.assertEqual(self.m_s["stats"]["label_change_rows"], 1)
         self.assertEqual(len(self.m_s["recs"]), 15)  # 13 entity samples + 2 job samples (job/1)
         # samples: pull -> lv; export -> dataset -> run -> model -> inference check; package under model
@@ -236,8 +245,10 @@ class Browser(unittest.TestCase):
                 self.assertIn(f"label_version|{self.ids['OLD']}", vis)
                 self.assertNotIn(f"model|{self.ids['MOD']}", vis)
                 page.fill("#fq", "")
+                page.select_option("#fe", "job")
+                self.assertEqual(page.eval_on_selector_all("#queue .card:not(.hide)", "els => els.length"), 2)
                 page.select_option("#fe", "model")
-                self.assertEqual(page.eval_on_selector_all("#board li:not(.hide)", "els => els.length"), 2)
+                self.assertEqual(page.eval_on_selector_all("#queue .card:not(.hide)", "els => els.length"), 0)
             finally:
                 ctx.close()
 

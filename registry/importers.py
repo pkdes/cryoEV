@@ -5,7 +5,17 @@ only when it is new or differs from the current one (ignoring logged / recorded_
 Image keys: legacy keys (pull / tracking CSVs) stay; session tiles only in a MANIFEST are `<session>__<key>`;
 generic upload copies (`blind_NN`) are `<session>_<key>` with `copy_of` when a *selection_PRIVATE.csv maps it.
 An existing image key that arrives with a different session, or a stem claimed by a second Roboflow id, is
-reported and not written. Session 20261012 is counted (`excluded`) and gets no records. Reads only.
+reported and not written. Session 20261012 is counted (`excluded`) and gets no records. Reads only, except
+the per-dataset image lists it writes next to the registry (`<root>/lists/<dataset>.tsv`, only when changed).
+
+v2 (jobs and inputs, TRACKING_CONTRACT.md addendum):
+- dataset membership = the split file's `split` column (NOT `source_split`, NOT Roboflow's split), without
+  `DROPPED-*` rows -> `image_list` {file, sha256}, `counts_trained` (all rows, incl. excluded sessions) and
+  `counts_listed` (rows whose image is in the registry). No data -> null ("unknown"), never 0.
+- `inputs` on label_version (base, edits), dataset (source), model (train_data, init_weights).
+- one revise `job/1` per top-level review package (no `_partN`, no SANDBOX): progress = edit records with
+  `edit.reviewed` true / n_images; status in_progress if any record has decisions or reviewed, else ready.
+  A package's `applied` status never makes its job done (only an explicit set-status line does).
 """
 import hashlib
 import re
@@ -25,6 +35,62 @@ LEGACY_MODELS = {"allLayer_run14_20260713": "v0_alllayer_y8n_20260713",   # lega
                  "yifei_202512": "v0_yifei_y8n_20251201"}                 # (day unknown: 01)
 PRODUCTION = ("v5_evnonev_y8m_20261029", "pujan")
 IGNORE = {"logged", "recorded_by"}
+DROPPED = "DROPPED"                      # split_assignment.csv `split` values like DROPPED-duplicate: not trained
+SPLIT_ORDER = {"train": 0, "valid": 1, "test": 2}
+LISTS = "lists"                          # <registry>/lists/<dataset>.tsv  (stem \t split)
+APP_PORT = 8766                          # review app port for the real review (NEXT_ITERATION.md)
+
+
+def split_membership(csv_path):
+    """split_assignment.csv -> [(image key, split, batch)] as TRAINED: the `split` column (not `source_split`),
+    `DROPPED-*` rows left out."""
+    out = []
+    for r in read_csv(csv_path):
+        split = (r.get("split") or "").strip()
+        if not split or split.upper().startswith(DROPPED) or not r.get("image"):
+            continue
+        out.append((ids.image_key(r["image"]), split, r.get("batch") or ""))
+    return out
+
+
+def list_text(pairs):
+    """{(stem, split)} -> sorted `stem\tsplit` lines (split order, then stem)."""
+    rows = sorted(set(pairs), key=lambda x: (SPLIT_ORDER.get(x[1], 9), x[1], x[0]))
+    return "".join(f"{stem}\t{split}\n" for stem, split in rows)
+
+
+def split_counts(pairs):
+    c = Counter(split for _, split in set(pairs))
+    return {k: c[k] for k in sorted(c, key=lambda k: (SPLIT_ORDER.get(k, 9), k))}
+
+
+def edit_body(o):
+    """Edit record -> the edit itself: wrapper {file, pkg, fmt, edit, rx} or the old bare form."""
+    if isinstance(o, dict) and isinstance(o.get("edit"), dict):
+        return o["edit"]
+    return o if isinstance(o, dict) else {}
+
+
+def package_progress(edits_dir):
+    """edits/*.json -> (n records, n with edit.reviewed true, n with decisions or reviewed, `who` names)."""
+    n = reviewed = touched = 0
+    who = set()
+    files = sorted(Path(edits_dir).glob("*.json")) if Path(edits_dir).is_dir() else []
+    for f in files:
+        try:
+            e = edit_body(read_json(f))
+        except (ValueError, OSError):
+            continue
+        n += 1
+        dec = e.get("dec") or e.get("decisions") or {}
+        if e.get("reviewed") is True:
+            reviewed += 1
+        if dec or e.get("reviewed"):
+            touched += 1
+        for d in (dec.values() if isinstance(dec, dict) else dec if isinstance(dec, list) else []):
+            if isinstance(d, dict) and d.get("who"):
+                who.add(d["who"])
+    return n, reviewed, touched, who
 
 
 def git_sha():
@@ -74,6 +140,7 @@ class Importer:
         self.refused = Counter()
         self.examples = defaultdict(list)
         self.excluded = Counter()
+        self.lists = {}                     # registry-relative path -> text (written by write())
 
     def refuse(self, why, ident):
         self.refused[why] += 1
@@ -101,6 +168,40 @@ class Importer:
         self.label_versions()
         self.inference_checks()
         return self
+
+    def registry_image_ids(self):
+        if not hasattr(self, "_img_ids"):
+            self._img_ids = {r["id"] for e, r in self.out if e == "image"} | set(registry.current("image", self.root))
+        return self._img_ids
+
+    def membership(self, did, exp, sf):
+        """Dataset -> image_list / counts_trained / counts_listed (null = unknown, never 0)."""
+        d = self.cache / "training images" / exp if exp else None
+        rows, method = None, None
+        if sf:
+            rows, method = split_membership(sf), "split file `split` column, DROPPED-* rows left out"
+        elif d and any((d / s / "_annotations.coco.json").exists() for s in SPLIT_ORDER):
+            rows, method = [], "export split folders"
+            for split in SPLIT_ORDER:
+                f = d / split / "_annotations.coco.json"
+                if f.exists():
+                    rows += [(ids.image_key(im["file_name"]), split, "") for im in read_json(f)["images"]]
+        if rows is None:
+            return {"image_list": None, "counts_trained": None, "counts_listed": None,
+                    "image_list_gap": "no split file and no local COCO for the source export (unknown, not 0)"}
+        pairs = {(stem, split) for stem, split, _ in rows}
+        text = list_text(pairs)
+        rel = f"{LISTS}/{did}.tsv"
+        self.lists[rel] = text
+        known = self.registry_image_ids()
+        excl = {stem for stem, _, b in rows if b[:8] in EXCLUDED_SESSIONS or self.s.is_excluded_stem(stem)}
+        missing = {stem for stem, _ in pairs if stem not in known}
+        why = Counter("excluded_session" if stem in excl else "not_in_registry" for stem in missing)
+        return {"image_list": {"file": rel, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                               "method": method, "n": len(pairs)},
+                "counts_trained": split_counts(pairs),
+                "counts_listed": split_counts({p for p in pairs if p[0] in known}),
+                "not_listed": dict(sorted(why.items())) or None}      # reason -> n (no excluded ids written)
 
     def pulls_and_rf_images(self):
         for pid, p in sorted(self.s.pulls.items()):
@@ -219,13 +320,16 @@ class Importer:
             if m:
                 created = f"{m[1]}-{m[2]}-{m[3]}T00:00:00"
             img_sha = self.export_stems.get(exp)
+            mem = self.membership(did, exp, sf)
+            counts = er.get("counts") or {"train": {"images": None}, "valid": {"images": None}}   # unknown, never 0
             self.add("dataset", id=did, created=created or "1970-01-01T00:00:00",
                      source={"kind": "roboflow_export", "id": exp or "unknown"}, export=exp, label_version=None,
+                     inputs=[{"id": exp, "role": "source", "entity": "roboflow_export"}] if exp else None,
                      split={"method": "export split folders" if not sf else "split_assignment.csv",
                             "file": str(sf) if sf else "", "sha256": sha256_file(sf) if sf else None,
                             "sha256_gap": None if sf else "no split file (export split folders)"},
-                     counts=er.get("counts") or {"train": {"images": 0}, "valid": {"images": 0}},
-                     classes=er.get("classes") or [], images_sha256=img_sha,
+                     counts=counts, counts_gap=None if er.get("counts") else "source export COCO not local (unknown)",
+                     classes=er.get("classes") or [], images_sha256=img_sha, **mem,
                      images_sha256_gap=None if img_sha else "source export COCO not local",
                      status="trained" if d["runs"] else "frozen",
                      note="created = date in the dataset name (time unknown)")
@@ -250,7 +354,11 @@ class Importer:
             w = next((p / mid / "best.pt" for p in wroot if (p / mid / "best.pt").exists()), None)
             init = re.search(r"fine-tuned from (\w+)", m.get("arch") or "")
             canon = LEGACY_MODELS.get(mid, mid)
+            init_id = LEGACY_MODELS.get(init.group(1), init.group(1)) if init else None
+            inputs = ([{"id": ds, "role": "train_data", "entity": "dataset"}] if ds else []) + \
+                     ([{"id": init_id, "role": "init_weights", "entity": "model"}] if init_id else [])
             self.add("model", id=canon, aliases=[mid] if canon != mid else None, run=run, dataset=ds,
+                     inputs=inputs or None,
                      weights=m.get("weights") or "", imgsz=int(m.get("imgsz") or 0),
                      weights_sha256=sha256_file(w) if w else None,
                      init_from=init.group(1) if init else None, status="registered",
@@ -274,11 +382,40 @@ class Importer:
                 edits = list((e["path"] / "edits").glob("*.json")) if (e["path"] / "edits").is_dir() else []
                 parent = ids.package_parent(pid)
                 status = "applied" if pid in lv_pkgs else "in_review" if edits else "built"
+                base_kind = "pull" if e["base"].startswith("roboflow_pull_") else "export"
+                n_images = len(d.get("images") or [])
                 self.add("review_package", id=pid, path=str(e["path"]), kind="part" if parent else "review",
-                         parent=parent, base=e["base"], base_kind="pull" if e["base"].startswith("roboflow_pull_") else "export",
+                         parent=parent, base=e["base"], base_kind=base_kind,
                          model=model, run=run if ids.is_id("run", run) else None, flag_conf=d.get("flag_conf"),
-                         n_images=len(d.get("images") or []), built=d.get("created"),
+                         n_images=n_images, built=d.get("created"),
                          n_edit_records=len(edits), status=status)
+                if not parent:                                  # parts are worked inside their parent's job
+                    self.revise_job(pid, e, d, model, base_kind, n_images, lv_pkgs.get(pid, []))
+
+    def revise_job(self, pid, e, d, model, base_kind, n_images, outputs):
+        """One `job/1` (revise, app) per top-level review package. Status from edits/ only: never done from
+        the package being `applied` (an explicit set-status line is kept by write())."""
+        built = _date_id(d.get("created"))
+        if not built:
+            self.refuse("job: review package has no built date", pid)
+            return
+        n, reviewed, touched, names = package_progress(e["path"] / "edits")
+        alias = {}
+        try:
+            for p in read_json(registry.PEOPLE)["people"]:
+                for a in [p["id"], *(p.get("aliases") or [])]:
+                    alias[a] = p["id"]
+        except (OSError, ValueError, KeyError):
+            pass
+        who = {alias.get(x) for x in names}
+        inputs = [{"id": e["base"], "role": "base", "entity": "pull" if base_kind == "pull" else "roboflow_export"}]
+        if model:
+            inputs.append({"id": LEGACY_MODELS.get(model, model), "role": "predictions", "entity": "model"})
+        self.add("job", id=ids.job_id(built, pid), name=f"Revise {pid}", type="revise", where="app",
+                 package=pid, n_images=n_images, status="in_progress" if touched else "ready",
+                 progress={"done": reviewed, "total": n_images, "unit": "images reviewed"},
+                 who=next(iter(who)) if len(who) == 1 and None not in who else None,
+                 inputs=inputs, outputs=sorted(outputs), port=APP_PORT, n_edit_records=n)
 
     def label_versions(self):
         for d in sorted((self.laptop / "labels").glob("lv_*")):
@@ -288,7 +425,14 @@ class Importer:
                 continue
             sup = next((old for old, new in SUPERSEDED.items() if new == d.name), None)
             superseded = d.name in SUPERSEDED or (d / "SUPERSEDED.md").exists()
-            self.add("label_version", id=d.name, owner=str(vj), supersedes=sup,
+            v = read_json(vj)
+            inputs = []
+            if v.get("base"):
+                inputs.append({"id": v["base"], "role": "base",
+                               "entity": "pull" if str(v["base"]).startswith("roboflow_pull_") else "roboflow_export"})
+            if v.get("pkg"):
+                inputs.append({"id": v["pkg"], "role": "edits", "entity": "review_package"})
+            self.add("label_version", id=d.name, owner=str(vj), supersedes=sup, inputs=inputs or None,
                      status="superseded" if superseded else "created")
 
     def inference_checks(self):
@@ -305,7 +449,26 @@ class Importer:
             self.add("inference_check", id=bid, owner=f"{bj}#{bid}")
 
     # ------------------------------------------------------------ write
+    def write_lists(self, dry_run=False):
+        """Image lists next to the registry; (re)written only when the text changed. -> n files to write."""
+        n = 0
+        for rel, text in sorted(self.lists.items()):
+            path = self.root / rel
+            if path.exists() and path.read_bytes() == text.encode("utf-8"):
+                continue
+            n += 1
+            if dry_run:
+                continue
+            registry._guard(self.root)
+            registry._guard(path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_bytes(text.encode("utf-8"))
+            tmp.replace(path)
+        return n
+
     def write(self, dry_run=False):
+        lists_written = self.write_lists(dry_run)
         cur = registry.current(root=self.root)
         appended = Counter()
         img_session = {k: v.get("session") for k, v in cur.items() if v.get("schema") == "image/1"}
@@ -330,6 +493,8 @@ class Importer:
                 rec = dict(rec, status=old.get("status"), status_by=old["status_by"])
                 if old.get("note") and not rec.get("note"):
                     rec["note"] = old["note"]
+                if old.get("blocked_reason") and not rec.get("blocked_reason"):     # job: blocked by hand
+                    rec["blocked_reason"] = old["blocked_reason"]
             if old is not None:
                 full = registry.derive(entity, rec)
                 if {k: v for k, v in full.items() if k not in IGNORE} == \
@@ -347,6 +512,8 @@ class Importer:
                 img_session[rid] = rec.get("session")
             if entity == "roboflow_image":
                 stem_rf[rec["stem"]] = rid
+        if lists_written:
+            appended["(image list files)"] += lists_written
         prod_id, who = PRODUCTION
         cur = registry.current(root=self.root)
         if not dry_run and prod_id in cur and cur[prod_id].get("status") != "production":
@@ -355,7 +522,8 @@ class Importer:
         return appended
 
 
-REQUIRED_NULL = {"image": ("session", "grid"), "model": ("run",), "dataset": ("images_sha256",),
+REQUIRED_NULL = {"image": ("session", "grid"), "model": ("run",),
+                 "dataset": ("images_sha256", "image_list", "counts_trained", "counts_listed"),
                  "review_package": (), "label_version": ()}
 
 
