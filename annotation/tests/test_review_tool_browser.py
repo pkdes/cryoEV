@@ -1272,7 +1272,7 @@ class RealPackageTests(Base):
             self.assertEqual(strip(rs.effective_labels(data[f], saved2[f])), strip(js[f]), f)
 
 
-PRELIPO_REL = Path("review") / "prelipo_v5F5_review"
+PRELIPO_REL = Path("archive") / "superseded_20261102" / "review" / "prelipo_v5F5_review"  # v1, archived 2026-11-02
 
 
 def prelipo_package():

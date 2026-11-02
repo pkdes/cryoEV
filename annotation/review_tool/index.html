@@ -954,8 +954,8 @@ document.addEventListener("keydown", ev => {
   else if (k === "v" || k === "V") setMode(mode === "tap" ? "select" : "tap");
   else if (k === "s" || k === "S") setMode("select");
   else if (k === "e" || k === "E") startRedraw();
-  else if (k === "a" || k === "A") acceptPred();
-  else if (k === "x" || k === "X") rejectPred();
+  else if ((k === "a" || k === "A") && !(ev.ctrlKey || ev.metaKey)) acceptPred();  // not Ctrl+A / Ctrl+X
+  else if ((k === "x" || k === "X") && !(ev.ctrlKey || ev.metaKey)) rejectPred();
   else if (k === "r" || k === "R") markReviewed();
   else if (k === "f" || k === "F") fit();
   else if (k === "t" || k === "T") { $("showPr").checked = !$("showPr").checked; draw(); }
@@ -1549,6 +1549,7 @@ function triKey(ev) {
     const cl = CATS[+k - 1];
     pick(c.kind === "p" ? "add" : "keep", cl, c.kind === "p" ? `added as ${cl}` : `now ${cl}`);
   }
+  else if (ev.ctrlKey || ev.metaKey) return;  // leave Ctrl+A / Ctrl+X to the browser
   else if (k === "ArrowRight" || k === "Enter" || k === "a" || k === "A") react("yes", swipeYes);  // A: accept
   else if (!cm && (k === "ArrowLeft" || k === "x" || k === "X" || k === "Delete")) react("nope", swipeNo);
   else if (k === "ArrowUp" || k === "s" || k === "S" || k === "n" || k === "N" || (cm && k === "ArrowLeft")) react("skip", advance);

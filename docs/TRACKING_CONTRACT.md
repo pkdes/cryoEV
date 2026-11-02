@@ -113,7 +113,7 @@ Registry style follows `batches.jsonl` ([INFERENCE_CHECK.md](INFERENCE_CHECK.md)
 
 ## Lipo/VLDL (session 20261012)
 - It belongs to another session/project. Its images are in the v5 exports and S1 (`split_assignment.csv` batch `20261012 …`), and its own session folder exists.
-- The contract covers them like any session, but **nothing about them is written** here, in samples or in reports. The validator skips them and only counts `excluded`.
+- The contract covers them like any session, but **nothing about them is written** here, in samples or in reports. The validator skips them and only counts `excluded`. Exception: a dataset's `image_list` file (`<registry>/lists/`, in the data folder, never in the repo) lists every image it trained on, these included; the page shows only their count.
 
 ## Registry (v1.1, `registry/registry.py`)
 - **One file per entity:** `CryoAI-laptop/registry/<entity>.jsonl` (local, not Box). Writes go through `data_utils/path_guard.py`.

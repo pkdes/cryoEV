@@ -33,7 +33,7 @@ import review_server as rs  # noqa: E402
 LAPTOP = next((p / "CryoAI-laptop" for p in REPO.parents if (p / "CryoAI-laptop").is_dir()), None)
 REAL_BASE = LAPTOP / "roboflow_pull_20261029_1811" / "current.coco.json" if LAPTOP else None
 REAL_V2 = LAPTOP / "review" / "prelipo_v5F5_review_v2" if LAPTOP else None
-REAL_V1 = LAPTOP / "review" / "SANDBOX_prelipo_v5F5_review" if LAPTOP else None
+REAL_V1 = LAPTOP / "archive" / "superseded_20261102" / "review" / "SANDBOX_prelipo_v5F5_review" if LAPTOP else None  # v1, archived 2026-11-02
 SMOKE_EDITS = LAPTOP / "fixtures" / "sandbox_v1_smoketest_20261030" / "edits" if LAPTOP else None
 RESOLUTION = LAPTOP / "september_edits" / "v2" / "resolution.csv" if LAPTOP else None
 MDA = "MDA-MB-231_RM_square237_hole31"
