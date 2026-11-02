@@ -26,6 +26,12 @@ Status 2026-11-02:
 - The legacy model ids are confirmed as above.
 - The v1 review packages, the v1 sandbox and the control scratch were moved to `CryoAI-laptop/archive/superseded_20261102/` and marked `superseded` in the registry. Their edits were automatic September seed copies only.
 
+Iteration 2 shipped 2026-11-02 (local commits, not pushed):
+- **Job queue + model page:** `job/1`; revise jobs from packages; dataset image lists. v5 F5 trained on 114/26/39.
+- **Review tool U4:** Accept/Reject, vertex edit accepts, live drag, right-click deletes a point, click on the outline adds one. Accept uses the predicted class (user OK). Live in both v2 packages; backup `index.before_20261102.html`.
+- `cryoai_v4_review` stays an in-progress revise job (user).
+- **Next:** the user's UI mockups (marked-up screenshots or sketches); phase 2 lineage graph + image lookup; the producers logging their own lines; paths to config.
+
 Decided:
 - datasets may be built straight from a local `lv_*` (no Roboflow push first);
 - only the user promotes a model (v5 F5 = production).
