@@ -213,12 +213,12 @@ From review to training data (2026-10-30, iteration 1 of the HITL platform):
 
 | Step | Tool | Doc |
 |---|---|---|
-| Review (pick your name; phone cards include September edits) | `annotation/review_server.py` | [REVIEW_TOOL.md](docs/REVIEW_TOOL.md) |
+| Review (pick your name; phone cards include September edits). A prediction with no label: big **Accept** / **Reject** (keys A / X), or edit its outline to accept it. Points: drag (live), click the outline to add one, right-click to delete (phone: double-tap) | `annotation/review_server.py` | [REVIEW_TOOL.md](docs/REVIEW_TOOL.md) |
 | Edits → new label version `lv_*` + change log | `python annotation/apply_review_edits.py --base <pull> --package <pkg> --out-root <CryoAI-laptop>/labels` | [LABEL_CHANGES.md](docs/LABEL_CHANGES.md) |
-| Tracking registry (ids, links, statuses) + history page | `python registry/registry.py import`, `python registry/history_page.py` | [TRACKING_CONTRACT.md](docs/TRACKING_CONTRACT.md) |
+| Tracking registry + history page: **job queue** (annotate / revise / train / check) and a **model page** (which images trained, validated and tested each model) | `python registry/registry.py import`, `python registry/history_page.py`; new job: `registry.py job new --type annotate --where roboflow --name ... --images <list>`; status: `registry.py set-status <id> <status> --who <id>` | [TRACKING_CONTRACT.md](docs/TRACKING_CONTRACT.md) |
 | Inference check of a model on a new session | `inference/inference_check.py stage`, then `score` | [INFERENCE_CHECK.md](docs/INFERENCE_CHECK.md) |
 
-Next iteration (job queue, model page, lineage graph): [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md).
+What shipped and what's next (lineage graph, image lookup): [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md).
 
 ## Reference: human-in-the-loop annotation (not in active use)
 
