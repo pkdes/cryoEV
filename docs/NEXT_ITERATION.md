@@ -13,14 +13,18 @@ See README "Label review in the browser".
 |---|---|
 | User | Real review of `prelipo_v5F5_review_v2` (laptop server on port 8766, so it can run next to the sandbox on the default 8765) |
 | User OK | Roboflow push of the reviewed label version: re-pull and drift diff against the base pull, then a one-image round trip |
-| User OK | Copy `CryoAI-laptop/` outputs to Box (after a Box Drive restart) |
-| User | Confirm the canonical legacy model ids `v0_alllayer_y8n_20260713` and `v0_yifei_y8n_20251201`. The version number and Yifei's day were guessed; the old ids are aliases |
 | Build | Job queue + model page (spec below, phase 1), then the lineage graph + image lookup (phase 2) |
 | Build | Review tool UI: U4 (big Accept/Reject on prediction-only objects; editing vertices accepts) + the user's tweaks |
 | Build | The 6 "suggested changes to files owned by others" in [TRACKING_CONTRACT.md](TRACKING_CONTRACT.md): `inference_check/1` lines, `supersedes` in version.json, data.js `id`/`base`/`model`/`parent`, a `job_bundle/1` line + `bundle_id`, `run.json`, `models.yaml` keys |
 | Build | Move the hardcoded `C:\Users\pujan\…` defaults to config/env (the repo is a public fork) |
 | Data gaps | JOB.json date format not parsed; grid `replaced_by` for 19 renumbered grids; 28 pre-manifest sessions not in the master CSV |
 | Later | AU remote access (Cloudflare Tunnel + Access), SAM, process-raw jobs, the paused 20261027 sampling report |
+
+Status 2026-11-02:
+- `lv_20261030_0909` = 122 September carry-over changes on 28 of the 170 images (81 accepted predictions, 14 drawn, 18 reclass, 5 delete, 4 confirmed). It is **not pushed**. The push waits for the real review.
+- No Box copy for now (user).
+- The legacy model ids are confirmed as above.
+- The v1 review packages, the v1 sandbox and the control scratch were moved to `CryoAI-laptop/archive/superseded_20261102/` and marked `superseded` in the registry. Their edits were automatic September seed copies only.
 
 Decided:
 - datasets may be built straight from a local `lv_*` (no Roboflow push first);
