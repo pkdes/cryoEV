@@ -84,13 +84,17 @@ Display only. A decision with `seed` (`september:<v4 file>:<v4 key>`, written by
 | Action | How |
 |---|---|
 | Reclass the selection | `1`–`8`, or a class chip under the image. This also sets the **current class** for new shapes |
-| Accept a selected prediction | `A` (current class), a class key, or "Accept as `<predicted class>`" |
+| Accept a selected prediction | `A` or the green **Accept as `<predicted class>`** button: its predicted class (`pr[k].c`; packages without it: the current class). A class key accepts it as that class |
+| Reject a selected prediction | `X` or the red **Reject** button: writes `no`. `X` on an accepted prediction rejects it again (as `Del`) |
+| Edit a prediction's outline | Drag a handle, or double-click a handle / an edge, on a selected prediction that isn't accepted (undecided or rejected). That **accepts** it: `add:<predicted class>` + `p` = the edited outline, in one undo step. A message "Accepted (edited) — Undo" offers to undo it (also `Z`) |
 | New shape, freehand | `D`, then drag around the object. The stroke is simplified (RDP, about 1 screen px) |
 | New shape, tap-vertex | `V`, then tap points. Tap the first point, press `Enter` or press "Close shape" to finish. `Z` removes the last point |
 | Redraw the selected outline | `E` or "Redraw outline", then draw with `D` or `V`. Class, id and decision key are kept |
 | Move / add / delete a vertex | Drag a handle / double-click an edge / double-click a handle |
 | Pan / zoom | Drag empty space. In Draw / Vertex: right, middle or Alt-drag, or two fingers. Wheel / pinch; `F` fits |
 | Other | `Del` delete · `Z` undo · `R` reviewed + next · `N`/`P` next/prev · `T` predictions · `H` all outlines · `Esc` cancel |
+
+A selected prediction shows its state (not decided / accepted as … / rejected, with who) and big **Accept** / **Reject** buttons under it. U4 (2026-11-02) changed `A`: it used to accept as the current class; it now uses the predicted class, and "Accept as `<current class>`" is a second button when the two differ.
 
 Class keys depend on the mode:
 - **Select:** the key reclasses the selection (or accepts a selected prediction as that class) and sets the current class.
@@ -113,7 +117,7 @@ The selection and the Redraw target follow the object's decision key, not its po
 
 | Flag | Drawn as | Field |
 |---|---|---|
-| Prediction with no label | Thick yellow dashes | `pr[k].u` |
+| Prediction with no label, undecided | Thick yellow **dash-dot**. The dash-dot pattern stays with Flags off (thin, cyan) until the prediction has a decision | `pr[k].u` |
 | Label with no prediction | Magenta halo | `gt[i].u` |
 | Class disagrees with the matched object | Orange dotted halo (labels), orange dots (predictions) | `x: true` (optional) |
 | Low conf EV to confirm | White dashed halo | `gt[i].lc: true` (optional) |
@@ -133,7 +137,7 @@ Narrow screens open the cards automatically. "Editor" goes back.
 
 The mode menu has two modes:
 - **flagged objects** (triage, as before):
-  - Unmatched predictions: swipe right = add as EV, left = not an object.
+  - Unmatched predictions: big green **✓ Accept as `<class>`** and red **✕ Reject** buttons replace ♥ / ✕. Accept (also `A`, `Enter`, →, swipe right) = add as its predicted class (EV when the package has no `pr[k].c`; before U4 always EV). Reject (also `X`, ←, swipe left) = not an object. The class chips offer the other classes; ✏️ + Save shape adds it as the predicted class with the new outline. September-seeded and already-picked cards keep the round buttons.
   - Unmatched labels: right = keep, left = delete.
   - Up = later. Class chips. ✏️ reshapes the outline.
 - **class review** (no outline editing):
@@ -141,7 +145,8 @@ The mode menu has two modes:
   - Tap a big class button: the label is set to that class. With auto-next on, the next card opens.
   - Swipe right or ✓ = keep the class. Swipe left / up or ↑ = next, with no decision.
   - Scope "class flags" = labels with `x`, then `lc` or class Low conf EV. Scope "all labels" = every label.
-  - Keys: `1`–`8`, `Enter`/`→` keep, `←`/`↑`/`N` next, `Z` undo.
+  - Keys: `1`–`8`, `Enter`/`→`/`A` keep, `←`/`↑`/`N` next, `Z` undo.
+- Triage keys: `1`–`8` class, `A`/`Enter`/`→` accept or keep, `X`/`←`/`Del` reject or delete, `↑`/`S`/`N` later, `E` reshape (in reshape: `R` redraw, `Enter` save, `Esc` cancel), `Z` rewind, `Space` zoom, `O`/`H` outlines, `Esc` Editor.
 
 ## `data.js` (from build_review_package.py)
 `window.REVIEW_DATA = {id, source, run, created, categories: [...], images: [...]}`. Each image:
@@ -192,6 +197,7 @@ edit = {dec: {key: {v, t, who, p?}}, gt?, gtT?, reviewed, reviewedT, modified, t
 **Undo** (Editor `Z`, card ↺) reverts only entries this browser tab wrote since the step being undone.
 - If someone else's decision arrived in between, on any key, it stays.
 - A label with no decision before the step gets `null` when it was the package's version, or else an explicit `keep:<class>` (+ `p`) restating how it stood. A stale full list elsewhere can't bring the undone change back.
+- The polygon list goes back to the step's copy too (with a strictly newer `gtT`), unless another reviewer's newer list has replaced this tab's since. Before U4 it never did, so `Z` after an Editor delete or accept changed the decision but left the label as it was.
 
 **Validation** (`review_server.valid_edit`). A PUT gets a 400 and is never stored when it has:
 - `NaN`/`Infinity`;
@@ -221,6 +227,7 @@ python -m unittest discover -s annotation/tests -v
   - class order, and the new-class mark (fixture, and R1's pre-lipo package);
   - queue sort (`flc` excluded from the rank) and filters;
   - reclass, accept, freehand, tap-vertex, redraw and vertex drag;
+  - U4: `A`/`X` and the big buttons in the Editor and on prediction cards; a vertex drag / delete / add on an unaccepted prediction writes `add:<cls>` + `p`, with the message's Undo and `Z`; `Z` after `Del`; records saved before U4 (bare strings, a list without per-item `t`, `add:`+`p`, `no`, `null`, `new:`) load byte-identical and apply as `effective_labels()`;
   - two reviewers: offline redraw vs a later Editor save; undo vs someone's newer decision; selection and Redraw through a pull;
   - class review at 400 px with touch;
   - QC fixes (`QcFixTests`): a swipe / ♥ / ✕ / Enter after a pick only moves on (M1); markup in who / seed / class / claims renders as text (M3); Other limited to the server's characters; a retry dropped when the card changed; no claims without a name; blank-who offline entries named before upload; a deep link stripped after it opens;
