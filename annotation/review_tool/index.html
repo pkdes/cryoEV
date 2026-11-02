@@ -202,7 +202,7 @@ canvas{display:block;width:100%;height:100%}
     <li>Drag empty space to pan; wheel or pinch to zoom; <kbd>F</kbd> fit</li>
     <li>Click a polygon to select (innermost wins)</li>
     <li>Drag a white handle to move a vertex</li>
-    <li>Double-click a handle to delete it, an edge to add one</li>
+    <li>Click the outline to add a point; right-click a point (phone: double-tap) to delete it</li>
     <li>Selected prediction: <kbd>A</kbd> accept (as its predicted class) · <kbd>X</kbd> reject (not an object). Moving, adding or deleting one of its vertices accepts it too (Undo in the message, or <kbd>Z</kbd>)</li>
     <li><kbd>Del</kbd> delete label</li>
     <li><kbd>D</kbd> freehand: drag around the object · <kbd>V</kbd> vertex: tap points, tap the first point or <kbd>Enter</kbd> to close · <kbd>Esc</kbd> cancel. In both, right/middle-drag or two fingers pan</li>
@@ -403,7 +403,13 @@ function effGt(im) {  // labels as they stand: base list + everyone's decisions 
   }
   return out;
 }
-function gtOf(im) { return effGt(im); }
+let dragLive = null;  // {file, key, p}: the outline under a vertex drag, drawn live until the drag is recorded
+function gtOf(im) {
+  const out = effGt(im);
+  if (!dragLive || dragLive.file !== im.file) return out;
+  const hit = findKey(out, dragLive.key);
+  return hit ? out.map(g => g === hit ? {...g, p: dragLive.p} : g) : out;
+}
 const recFile = new WeakMap();  // edit record -> its image file, for setDec's bookkeeping
 const mine = new Set();         // "<file>\n<key>\n<t>" of every entry this tab wrote: the only ones its undo may revert
 function ensureEdit(im) {
@@ -681,7 +687,7 @@ function renderSide() {
     const rej = big("rejBtn", `✕ Reject<kbd>X</kbd>`, "Not an object (X)", rejectPred); rej.disabled = v === "no";
     box.append(acc, rej);
     if (pc !== curCls) { const b = document.createElement("button"); b.textContent = `Accept as ${curCls}`; b.onclick = () => acceptPred(curCls); box.append(b); }
-    if (prEditable(im, sel.i)) box.insertAdjacentHTML("beforeend", `<div class="tip">Or drag a white handle (double-click: add / delete one): that accepts it with the edited outline.</div>`);
+    if (prEditable(im, sel.i)) box.insertAdjacentHTML("beforeend", `<div class="tip">Or drag a white handle (click the outline: add a point; right-click a point: delete it): that accepts it with the edited outline.</div>`);
   }
 }
 function legend() {
@@ -854,7 +860,7 @@ function nearEdge(sx, sy) {
 const ptrs = new Map(); let drag = null, pinch = null;
 const pos = ev => { const r = cv.getBoundingClientRect(); return [ev.clientX - r.left, ev.clientY - r.top]; };
 function endVertexDrag(d) {
-  const im = curImg();
+  const im = curImg(); dragLive = null;
   if (d.moved) { const e = ensureEdit(im), g = selEdit(e); if (g) record(im, e, g); changed(); if (d.accepted) editToast(); }
   else if (d.pr == null) undoStacks[im.file].pop();  // a prediction's drag pushes its undo step only once it moves
 }
@@ -866,6 +872,9 @@ cv.addEventListener("pointerdown", ev => {
     const [a, b] = [...ptrs.values()]; pinch = {d: Math.hypot(a[0]-b[0], a[1]-b[1]), mx: (a[0]+b[0])/2, my: (a[1]+b[1])/2, s: view.s, ox: view.ox, oy: view.oy}; drag = null; return;
   }
   if (ptrs.size > 2) return;
+  if (ev.pointerType === "mouse" && ev.button === 2 && mode === "select" && sel && selRings()) {
+    const v = nearVertex(x, y); if (v) { ptrs.delete(ev.pointerId); removeVertex(v); return; }
+  }
   const panBtn = ev.pointerType === "mouse" && (ev.button === 1 || ev.button === 2 || ev.altKey);
   if (mode === "draw" && !panBtn) { const [ix, iy] = toImg(x, y); draft = [clamp01(ix), clamp01(iy)]; drag = {type: "free", lx: x, ly: y}; return; }
   const v = mode === "select" && !panBtn ? nearVertex(x, y) : null;
@@ -895,7 +904,8 @@ cv.addEventListener("pointermove", ev => {
     }
     const g = selEdit(ensureEdit(curImg())), rg = g && g.p[drag.v.r], [ix, iy] = toImg(x, y);
     if (!rg || drag.v.i >= rg.length) { drag = null; return; }  // the object went away under the drag (a pull)
-    rg[drag.v.i] = clamp01(ix); rg[drag.v.i+1] = clamp01(iy); drag.moved = true; draw();
+    rg[drag.v.i] = clamp01(ix); rg[drag.v.i+1] = clamp01(iy); drag.moved = true;
+    dragLive = {file: curImg().file, key: sel.key, p: g.p}; draw();
   } else if (drag.type === "pan") {
     if (Math.hypot(x - drag.x0, y - drag.y0) > 4) drag.moved = true;
     if (drag.moved) { view.ox = drag.ox + x - drag.x0; view.oy = drag.oy + y - drag.y0; draw(); }
@@ -914,24 +924,31 @@ function endPtr(ev) {
     if (draft && draft.length >= 6) { const [fx, fy] = toScr(draft[0], draft[1]); if (Math.hypot(x - fx, y - fy) < (ev.pointerType === "touch" ? 18 : 10)) return finishDraft(); }
     (draft = draft || []).push(clamp01(ix), clamp01(iy)); renderSide(); draw(); return;
   }
-  if (nearEdge(x, y)) return; // clicking the selected outline keeps it selected (double-click adds a vertex)
+  const ed = mode === "select" && sel ? nearEdge(x, y) : null;
+  if (ed) return insertVertex(x, y, ed);  // a click on the selected outline adds a point there
   sel = hitTest(x, y); renderSide(); draw();
 }
 cv.addEventListener("pointerup", endPtr);
 cv.addEventListener("pointercancel", endPtr);
 cv.addEventListener("pointerleave", () => { hover = null; if (mode === "tap") draw(); });
-cv.addEventListener("dblclick", ev => {
-  if (mode !== "select" || !sel || (sel.kind !== "gt" && !selRings())) return;
-  const [x, y] = pos(ev), v = nearVertex(x, y), im = curImg(), pr = sel.kind === "pr" ? sel.i : null;
-  if ((v || nearEdge(x, y)) && !needWho()) return;
-  const begin = () => { if (pr != null) return acceptForEdit(pr); pushUndo(); const e = ensureEdit(im); return {e, g: selEdit(e)}; };
-  const done = (e, g) => { record(im, e, g); changed(); if (pr != null) editToast(); };  // a prediction: accepted (edited)
-  if (v) {
-    if (selRings()[v.r].length > 6) { const {e, g} = begin(); if (!g) return; g.p[v.r].splice(v.i, 2); done(e, g); }
-    return;
-  }
-  const ed = nearEdge(x, y);
-  if (ed) { const [ix, iy] = toImg(x, y), {e, g} = begin(); if (!g) return; g.p[ed.r].splice(ed.i, 0, clamp01(ix), clamp01(iy)); done(e, g); }
+// Vertex edits on the selected outline: right-click (or double-tap) a point removes it, a click on the outline adds one.
+function editRings(fn) {
+  if (!needWho()) return;
+  const im = curImg(), pr = sel.kind === "pr" ? sel.i : null;
+  const {e, g} = pr != null ? acceptForEdit(pr) : (pushUndo(), (() => { const e = ensureEdit(im); return {e, g: selEdit(e)}; })());
+  if (!g) return;
+  fn(g); record(im, e, g); changed(); if (pr != null) editToast();  // a prediction: accepted (edited)
+}
+function removeVertex(v) {
+  if (!v || selRings()[v.r].length <= 6) return false;  // keep at least a triangle
+  editRings(g => g.p[v.r].splice(v.i, 2)); return true;
+}
+function insertVertex(x, y, ed) {
+  const [ix, iy] = toImg(x, y); editRings(g => g.p[ed.r].splice(ed.i, 0, clamp01(ix), clamp01(iy)));
+}
+cv.addEventListener("dblclick", ev => {  // touch has no right-click: double-tap a point removes it
+  if (mode !== "select" || !sel || !selRings()) return;
+  const [x, y] = pos(ev); removeVertex(nearVertex(x, y));
 });
 cv.addEventListener("wheel", ev => {
   ev.preventDefault(); const [x, y] = pos(ev), f = Math.exp(-ev.deltaY * 0.0015), s = Math.max(0.05, Math.min(40, view.s * f));
@@ -1752,7 +1769,7 @@ let startMode = null; try { startMode = localStorage.getItem("cryoev-review:mode
   if (m === "classes" || m === "cls" || m === "cards") startMode = "tri"; else if (m === "editor") startMode = "editor"; }
 if (deep) startMode = "editor";  // a deep link always opens the Editor on its object
 if (startMode === "tri" || (!startMode && window.matchMedia("(max-width: 700px)").matches)) openTri();
-window.__review = {D, CATS, effGt, mergeEdit, pull, materialize, edits: () => edits, triGo: n => { tri.pos = n; tri.zoom = 0; tri.picked = null; triRender(); }, render: () => { renderList(); renderSide(); draw(); if (!$("tri").hidden) triRender(); }, state: () => ({mode, sel, curCls, redrawKey, cur, order, view: {...view}, W, H, imgReady, server, dirty: dirty.size,
+window.__review = {D, CATS, effGt, gtOf, mergeEdit, pull, materialize, edits: () => edits, triGo: n => { tri.pos = n; tri.zoom = 0; tri.picked = null; triRender(); }, render: () => { renderList(); renderSide(); draw(); if (!$("tri").hidden) triRender(); }, state: () => ({mode, sel, curCls, redrawKey, cur, order, view: {...view}, W, H, imgReady, server, dirty: dirty.size,
   who: me(), tri: {mode: tri.mode, pos: tri.pos, queue: tri.queue, ready: tri.ready, picked: tri.picked || null}})};  // for annotation/tests
 })();
 </script>

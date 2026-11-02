@@ -497,7 +497,7 @@ h1{font-size:1.25rem;margin:4px 0}h2{font-size:1.05rem;margin:18px 0 8px}
 .filters select,.filters input{font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);min-height:40px}
 .filters input{flex:1 1 180px;min-width:0}
 .models{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline;margin:4px 0}
-.queue{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px}
+.queue{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
 .qlane{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px;min-width:0}
 .qlane h3{margin:0 0 6px;font-size:1rem;display:flex;justify-content:space-between;gap:6px;align-items:baseline}
 .qlane .n{color:var(--mut);font-size:.8rem;font-weight:400}
@@ -737,10 +737,10 @@ def render_html(model: dict) -> str:
 <input id="fq" type="search" placeholder="Search id" aria-label="Search id">
 </div></header>
 <main>
-<h2>Queue</h2>
-<div class="queue" id="queue"></div>
 <div class="layout">
-<div><h2>History tree</h2><div id="tree"></div></div>
+<div><h2>Queue</h2>
+<div class="queue" id="queue"></div>
+<h2>History tree</h2><div id="tree"></div></div>
 <aside id="detail" class="hidden"><div class="note">Tap a record for its detail.</div></aside>
 </div>
 </main>

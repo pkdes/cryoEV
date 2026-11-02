@@ -86,11 +86,11 @@ Display only. A decision with `seed` (`september:<v4 file>:<v4 key>`, written by
 | Reclass the selection | `1`–`8`, or a class chip under the image. This also sets the **current class** for new shapes |
 | Accept a selected prediction | `A` or the green **Accept as `<predicted class>`** button: its predicted class (`pr[k].c`; packages without it: the current class). A class key accepts it as that class |
 | Reject a selected prediction | `X` or the red **Reject** button: writes `no`. `X` on an accepted prediction rejects it again (as `Del`) |
-| Edit a prediction's outline | Drag a handle, or double-click a handle / an edge, on a selected prediction that isn't accepted (undecided or rejected). That **accepts** it: `add:<predicted class>` + `p` = the edited outline, in one undo step. A message "Accepted (edited) — Undo" offers to undo it (also `Z`) |
+| Edit a prediction's outline | Drag a handle, click its outline (adds a point) or right-click a handle (deletes it), on a selected prediction that isn't accepted (undecided or rejected). That **accepts** it: `add:<predicted class>` + `p` = the edited outline, in one undo step. A message "Accepted (edited) — Undo" offers to undo it (also `Z`) |
 | New shape, freehand | `D`, then drag around the object. The stroke is simplified (RDP, about 1 screen px) |
 | New shape, tap-vertex | `V`, then tap points. Tap the first point, press `Enter` or press "Close shape" to finish. `Z` removes the last point |
 | Redraw the selected outline | `E` or "Redraw outline", then draw with `D` or `V`. Class, id and decision key are kept |
-| Move / add / delete a vertex | Drag a handle / double-click an edge / double-click a handle |
+| Move / add / delete a vertex | Drag a handle (the outline follows live) / click the selected outline / right-click a handle (phone: double-tap) |
 | Pan / zoom | Drag empty space. In Draw / Vertex: right, middle or Alt-drag, or two fingers. Wheel / pinch; `F` fits |
 | Other | `Del` delete · `Z` undo · `R` reviewed + next · `N`/`P` next/prev · `T` predictions · `H` all outlines · `Esc` cancel |
 

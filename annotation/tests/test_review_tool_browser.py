@@ -129,6 +129,11 @@ class Base(unittest.TestCase):
         labels = self.obj_list(page, file)
         return next((g for g in labels if (oid is not None and g["id"] == oid) or (src and g.get("src") == src)), None)
 
+    def drawn(self, page, file, src):
+        """The outline the canvas draws for `src` (gtOf, which includes a vertex drag in progress)."""
+        labels = page.evaluate(f"__review.gtOf(__review.D.images.find(im => im.file === {json.dumps(file)}))")
+        return next(g["p"] for g in labels if g.get("src") == src)
+
     def click_obj(self, page, ring):
         cx, cy = sum(ring[0::2]) / (len(ring) / 2), sum(ring[1::2]) / (len(ring) / 2)
         page.mouse.click(*self.scr(page, cx, cy))
@@ -412,7 +417,9 @@ class EditAcceptTests(Base):
         self.assertNotIn("p1", self.saved_dec(f))
         self.assertTrue(page.locator("#edToast").is_hidden())
         # drag: accepted with the moved vertex
-        page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x + 25, y, steps=5); page.mouse.up()
+        page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x + 25, y, steps=5)
+        self.assertGreater(self.drawn(page, f, "p1")[0][0], ring[0])  # mid-drag: the drawn outline follows the cursor
+        page.mouse.up()
         self.synced(page)
         d = self.saved_dec(f)["p1"]
         self.assertEqual(d["v"], "add:EV")
@@ -428,13 +435,13 @@ class EditAcceptTests(Base):
         self.assertIsNone(self.saved_dec(f)["p1"]["v"])
         self.assertIsNone(self.obj(page, f, src="p1"))
         self.check_js_equals_python(page)
-        # a rejected prediction: double-click a handle deletes that vertex and accepts it; Undo brings back "no"
+        # a rejected prediction: right-click a handle deletes that vertex and accepts it; Undo brings back "no"
         self.click_obj(page, ring)
         page.keyboard.press("x")
         self.synced(page)
         self.assertEqual(self.saved_dec(f)["p1"]["v"], "no")
         x3, y3 = self.scr(page, ring[30], ring[31])  # upper half of the ring: the lower half is under the class chips
-        page.mouse.dblclick(x3, y3)
+        page.mouse.click(x3, y3, button="right")
         self.synced(page)
         d = self.saved_dec(f)["p1"]
         self.assertEqual((d["v"], len(d["p"][0])), ("add:EV", len(ring) - 2))
@@ -442,10 +449,10 @@ class EditAcceptTests(Base):
         page.click("#edToastUndo")
         self.synced(page)
         self.assertEqual(self.saved_dec(f)["p1"]["v"], "no")
-        # double-click an edge adds a vertex and accepts; the message's Undo is stale after a later edit, Z still works
+        # a click on the selected outline adds a vertex and accepts; the message's Undo is stale after a later edit, Z still works
         self.click_obj(page, ring)
         mx, my = (ring[24] + ring[26]) / 2, (ring[25] + ring[27]) / 2
-        page.mouse.dblclick(*self.scr(page, mx, my))
+        page.mouse.click(*self.scr(page, mx, my))
         self.synced(page)
         d = self.saved_dec(f)["p1"]
         self.assertEqual((d["v"], len(d["p"][0])), ("add:EV", len(ring) + 2))
@@ -457,6 +464,25 @@ class EditAcceptTests(Base):
         page.keyboard.press("z"); page.keyboard.press("z")
         self.synced(page)
         self.assertEqual(self.saved_dec(f)["p1"]["v"], "no")
+        self.check_js_equals_python(page)
+
+    def test_drag_is_live(self):
+        """The outline follows the cursor during a drag, also on a second drag, when the decision already holds a
+        polygon (before 2026-11-02 that one showed the old outline until release)."""
+        page = self.open()
+        f = "fixB_old.png"
+        self.go(page, f)
+        ring = self.image(f)["pr"][1]["p"][0]
+        self.zoom_on(page, ring)
+        self.click_obj(page, ring)
+        for k in range(2):
+            p0 = self.drawn(page, f, "p1")[0] if k else ring
+            xy = self.scr(page, p0[0], p0[1])
+            page.mouse.move(*xy); page.mouse.down(); page.mouse.move(xy[0], xy[1] - 20, steps=5)
+            self.assertLess(self.drawn(page, f, "p1")[0][1], p0[1], f"drag {k + 1} not live")
+            page.mouse.up()
+            self.synced(page)
+            time.sleep(0.7)
         self.check_js_equals_python(page)
 
 
