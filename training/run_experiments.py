@@ -15,6 +15,7 @@ import sys
 import json
 import csv
 import time
+import platform
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -233,6 +234,70 @@ def generate_campaign_summary(all_results: List[Dict], output_file: Path):
     print(f"[OK] Summary saved to {output_file}")
 
 
+def classify_error(e: BaseException) -> str:
+    """'oom' for CUDA out of memory, numpy ArrayMemoryError / MemoryError and WinError 1455 (page file
+    too small, often wrapped in a DataLoader RuntimeError); else 'error'."""
+    text = f"{type(e).__name__}: {e}".lower()
+    if isinstance(e, MemoryError) or getattr(e, 'winerror', None) == 1455:
+        return 'oom'
+    if any(s in text for s in ('out of memory', 'arraymemoryerror', 'winerror 1455', 'paging file is too small')):
+        return 'oom'
+    return 'error'
+
+
+def git_commit():
+    """Short HEAD sha of this repo, or None."""
+    try:
+        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=Path(__file__).resolve().parent.parent,
+                              capture_output=True, text=True, timeout=10).stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def bundle_id_of(dataset_root: Path):
+    """bundle_id from the dataset's JOB.json (make_job_bundle.py), or None."""
+    try:
+        return json.loads((dataset_root / "JOB.json").read_text(encoding="utf-8")).get("bundle_id")
+    except (OSError, ValueError):
+        return None
+
+
+RUN_STATUS = {'completed': 'finished', 'oom': 'oom'}     # anything else -> 'error'
+
+
+def write_run_json(run_dir: Path, result: Dict, config: Dict, ended: str) -> Path:
+    """Owner file `run.json` (run/1) in the run folder; the registry importer reads it."""
+    try:
+        from importlib.metadata import version
+        ultra = version("ultralytics")
+    except Exception:
+        ultra = None
+    bundle = bundle_id_of(DATASET_ROOT)
+    keys = ('patience', 'workers', 'optimizer', 'augmentations', 'overlap_mask', 'mask_ratio', 'cache', 'cls',
+            'lr0', 'time')
+    rec = {
+        'schema': 'run/1', 'id': run_dir.name, 'dataset': DATASET_ID,
+        'bundle_id': bundle, 'job_bundle': bundle, 'cryoEV_commit': git_commit(),
+        'machine': platform.node() or None, 'ultralytics': ultra,
+        'config': {'arch': f"yolov{config['model_version']}{config.get('model_size', 'n')}-seg",
+                   'imgsz': config['imgsz'], 'batch': result['batch_size'], 'epochs': config['epochs'],
+                   'rect': config.get('rect'), 'weights_init': config.get('weights'),
+                   **{k: config[k] for k in keys if config.get(k) is not None}},
+        'status': RUN_STATUS.get(result['status'], 'error'), 'error': result['error'],
+        'started': result['timestamp'], 'ended': ended,
+        'metrics': {k: result[k] for k in ('mask_map50', 'mask_map50_95', 'box_map50', 'box_map50_95')},
+        'best_epoch': result.get('best_epoch'), 'training_time_sec': round(result['training_time_sec'], 1),
+        'experiment_log_timestamp': result['timestamp'],
+    }
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / "run.json"
+    tmp = path.with_name("run.json.tmp")
+    tmp.write_text(json.dumps(rec, indent=1, default=str), encoding="utf-8")
+    tmp.replace(path)
+    print(f"[OK] run.json: {rec['status']} -> {path}")
+    return path
+
+
 def probe_batch(model_size: str, batch: int, epochs: int, limit_gb: float):
     """Short training run at this model size/batch; returns peak reserved GB, or None if it didn't fit."""
     import torch
@@ -282,7 +347,7 @@ def main():
     if not DATASET_YAML.exists():
         print(f"[x] Dataset YAML not found at {DATASET_YAML}")
         send_notification("Campaign Setup Error", f"Missing dataset YAML")
-        return
+        return []
 
     print(f"[OK] Dataset: {DATASET_YAML}")
     print(f"[OK] {len(EXPERIMENTS)} experiments remaining\n")
@@ -466,14 +531,21 @@ def main():
                 result['status'] = 'oom'
             else:
                 result['error'] = str(e)
-                result['status'] = 'error'
+                result['status'] = classify_error(e)   # WinError 1455 in a DataLoader worker -> oom
             notify_error(run_num, str(e)[:200])
         except Exception as e:
-            result['error'] = str(e)
-            result['status'] = 'error'
+            result['error'] = f"{type(e).__name__}: {e}" if classify_error(e) == 'oom' else str(e)
+            result['status'] = classify_error(e)       # ArrayMemoryError / MemoryError / WinError 1455 -> oom
             notify_error(run_num, str(e)[:200])
 
         all_results.append(result)
+        # run.json in the run folder (Ultralytics' save_dir; on an early failure, the planned folder)
+        run_dir = Path(result['best_model_path']).parent.parent if result['best_model_path'] \
+            else PROJECT_ROOT / experiment_name
+        try:
+            write_run_json(run_dir, result, config, datetime.now().isoformat())
+        except OSError as rj_e:
+            print(f"  [WARN] run.json not written: {rj_e}")
         log_experiment_result(result, OUTPUT_LOG)
 
         print(f"  Metrics: SEGmAP50={result['mask_map50']:.4f}, SEGmAP50-95={result['mask_map50_95']:.4f}")
@@ -499,6 +571,7 @@ def main():
 
     notify_completion(total_runs=len(all_results), completed=completed, failed=failed, duration_hours=total_hours)
     send_notification("Sweep Complete", f"{completed} OK, {failed} failed. Review results in {DATASET_ROOT / 'CAMPAIGN_RESULTS_BRIEF.md'}")
+    return all_results
 
 
 if __name__ == '__main__':
@@ -517,6 +590,9 @@ if __name__ == '__main__':
     parser.add_argument("--time", type=float, help="Hard training-time cap in hours (Ultralytics 'time'; overrides epochs)")
     parser.add_argument("--weights", help="Fine-tune from this .pt instead of the COCO-pretrained weights")
     parser.add_argument("--run-num", type=int, help="--single-run override for the Run_N suffix")
+    parser.add_argument("--imgsz", type=int, help="--single-run override (default 1440)")
+    parser.add_argument("--workers", type=int, help="--single-run override for dataloader workers (default 8)")
+    parser.add_argument("--no-notify", action="store_true", help="No toast or ntfy push (jobs/run_job.py sends its own)")
     parser.add_argument("--rect", type=int, choices=[0, 1],
                         help="--single-run override; 0 = square letterbox, which is what lets mosaic/mixup run "
                              "(Ultralytics zeroes both when rect=True)")
@@ -554,10 +630,11 @@ if __name__ == '__main__':
                                        ('run_num', cli_args.run_num),
                                        ('rect', None if cli_args.rect is None else bool(cli_args.rect)),
                                        ('cache', cli_args.cache), ('cls', cli_args.cls),
-                                       ('lr0', cli_args.lr0)] if v is not None}
+                                       ('lr0', cli_args.lr0), ('imgsz', cli_args.imgsz),
+                                       ('workers', cli_args.workers)] if v is not None}
         cfg = {**BEST_CONFIG, **overrides}
         if overrides:
-            cfg['name'] = (f"y8{cfg['model_size']} 1440/b{cfg['batch_size']} AdamW rect (Run14 recipe)"
+            cfg['name'] = (f"y8{cfg['model_size']} {cfg['imgsz']}/b{cfg['batch_size']} AdamW rect (Run14 recipe)"
                            + (f", fine-tuned from {Path(cfg['weights']).parent.name}" if cfg.get('weights') else "")
                            + (f", time cap {cfg['time']} h" if cfg.get('time') else "")
                            + ("" if cfg['rect'] else ", rect=False (mosaic/mixup on)")
@@ -569,4 +646,9 @@ if __name__ == '__main__':
         if not EXPERIMENTS:
             sys.exit("[x] No queued model fits the memory limit at any batch size")
 
-    main()
+    if cli_args.no_notify:
+        notify_completion = notify_error = notify_progress = send_notification = lambda *a, **k: None
+
+    results = main()
+    if cli_args.single_run and not (results and results[0]['status'] == 'completed'):
+        sys.exit(f"[x] single run ended {results[0]['status'] if results else 'without running'}")

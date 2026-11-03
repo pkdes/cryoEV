@@ -2,8 +2,9 @@
 """
 Package a prepared YOLO dataset as a training job for the shared GPU desktop.
 
-Writes <out>/<dataset>__job_<timestamp>.zip and, next to it, <same>_README.md: the exact
-commands for whoever runs it there, and what to send back. Nothing on the desktop is automated.
+Writes <out>/<dataset>__job_<timestamp>.zip and, next to it, <same>_README.md (the exact commands
+for whoever runs it by hand, and what to send back) and <zip>.md5 (md5 of the zip). JOB.json in the
+zip carries `bundle_id` (= the zip stem). To queue it for jobs/run_job.py instead, see docs/JOBS.md.
 
     python training/make_job_bundle.py --dataset-dir <folder with dataset.yaml, images/, labels/> \
         [--out <dir>] [--dataset-name NAME] -- --single-run --model-size m --batch 8 --rect 0 ...
@@ -42,6 +43,14 @@ STORED = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".pt", ".zip"}   # already c
 def run_experiments_flags() -> set:
     src = (REPO / "training" / "run_experiments.py").read_text(encoding="utf-8")
     return set(re.findall(r'add_argument\(\s*"(--[\w-]+)"', src))
+
+
+def md5_file(path: Path) -> str:
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def git_commit() -> str:
@@ -261,16 +270,21 @@ def main():
         commit = git_commit()
         ultra = ultralytics_version()
         body = readme(name, zip_path.name, exp, changes, counts, commit, weights_note, created, ultra)
-        job = {"dataset_name": name, "source_dir": str(root), "created": created, "cryoEV_commit": commit,
+        job = {"bundle_id": zip_path.stem,
+               "dataset_name": name, "source_dir": str(root), "created": created, "cryoEV_commit": commit,
                "run_experiments_args": ["--dataset", name] + exp, "dataset_yaml_changes": changes,
                "ultralytics_bundled_on": ultra, "splits": counts, "md5": md5}
         z.writestr(f"{name}/JOB.json", json.dumps(job, indent=1), compress_type=zipfile.ZIP_DEFLATED)
         z.writestr(f"{name}/README.md", body, compress_type=zipfile.ZIP_DEFLATED)
     readme_path = zip_path.with_name(zip_path.stem + "_README.md")
     readme_path.write_text(body, encoding="utf-8")
+    zip_md5 = md5_file(zip_path)
+    md5_path = zip_path.with_name(zip_path.name + ".md5")          # sidecar: jobs/sync.py and run_job.py check it
+    md5_path.write_text(f"{zip_md5}  {zip_path.name}\n", encoding="utf-8")
 
     print(f"{zip_path}  ({zip_path.stat().st_size / 1e6:.1f} MB, {len(files)} files)")
     print(f"{readme_path}")
+    print(f"{md5_path}  (md5 {zip_md5})")
     for c in changes:
         print(f"  dataset.yaml {c}")
     print("  run on desktop: python training/run_experiments.py --dataset "
