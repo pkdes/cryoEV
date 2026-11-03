@@ -123,12 +123,53 @@ class RunJobTests(T.TempRoots, unittest.TestCase):
         self.assertEqual(self.run_job(gpu=T.DESKTOP_GPU), 0)
         self.assertEqual(self.done(q2.name)["status"], "done")
         # control 2: y8n at 320 runs on the laptop GPU; the default imgsz (1440) does not
-        q3 = self.push("job_20261102_t3", args=["--model-size", "n", "--imgsz", "320"], stamp="20261102-120004")
+        q3 = self.push("job_20261102_t3", args=["--model-size", "n", "--imgsz", "320", "--workers", "2"],
+                       stamp="20261102-120004")
         self.assertEqual(self.run_job(gpu=T.LAPTOP_GPU), 0)
         self.assertEqual(self.done(q3.name)["status"], "done")
-        q4 = self.push("job_20261102_t4", args=["--model-size", "n"], stamp="20261102-120005")
+        q4 = self.push("job_20261102_t4", args=["--model-size", "n", "--workers", "2"], stamp="20261102-120005")
         self.assertEqual(self.run_job(gpu=T.LAPTOP_GPU), 1)
         self.assertIn("imgsz 1440", self.done(q4.name)["reason"])
+
+    def test_allow_big_on_small_gpu(self):
+        big = ["--model-size", "m", "--imgsz", "640", "--workers", "2"]
+        q = self.push(args=big)                                       # no --time: refused even with --allow-big
+        self.assertEqual(self.run_job("--allow-big", gpu=T.LAPTOP_GPU), 1)
+        self.assertIn("--time cap", self.done(q.name)["reason"])
+        q2 = self.push("job_20261102_t2", args=[*big, "--time", "0.5"], stamp="20261102-120003")
+        self.assertEqual(self.run_job(gpu=T.LAPTOP_GPU), 1)          # control: without the flag, desktop only
+        self.assertIn("desktop only", self.done(q2.name)["reason"])
+        q3 = self.push("job_20261102_t3", args=[*big, "--time", "0.5"], stamp="20261102-120004")
+        self.assertEqual(self.run_job("--allow-big", gpu=T.LAPTOP_GPU), 0)
+        self.assertEqual((self.done(q3.name)["status"], self.done(q3.name)["allow_big"]), ("done", True))
+        q4 = self.push("job_20261102_t4", args=["--model-size", "n", "--imgsz", "320"], stamp="20261102-120005")
+        self.assertEqual(self.run_job(gpu=T.LAPTOP_GPU), 1)          # default 8 workers on the laptop
+        self.assertIn("--workers 8 (default)", self.done(q4.name)["reason"])
+        self.assertIsNone(self.done(q4.name)["allow_big"])
+
+    def test_laptop_refuses_battery_and_network_queue_untouched(self):
+        q = self.push(args=["--model-size", "n", "--imgsz", "320", "--workers", "2"])
+        self.assertEqual(self.run_job(gpu=T.LAPTOP_GPU, on_battery=True), 2)
+        self.assertFalse((self.share / C.D / q.name).exists(), "a refused start leaves the job queued")
+        with mock.patch.object(run_job, "is_network_path", lambda p: True):
+            self.assertEqual(self.run_job(gpu=T.LAPTOP_GPU), 2)
+            self.assertFalse((self.share / C.D / q.name).exists())
+            self.assertEqual(self.run_job(gpu=T.DESKTOP_GPU), 0)      # control: the desktop runs its own share
+        self.assertEqual(self.done(q.name)["status"], "done")
+        self.assertTrue(run_job.is_network_path("\\\\desk\\cj"))
+        self.assertFalse(run_job.is_network_path(self.share))
+
+    def test_low_disk_is_blocked(self):
+        q = self.push()
+        self.assertEqual(self.run_job(free_gb=5), 1)
+        self.assertIn("disk: 5.0 GB free", self.done(q.name)["reason"])
+
+    def test_hooks_need_the_testing_guard(self):
+        env = T.hooks_env(commit="deadbeefcafe")
+        with mock.patch.dict(os.environ, {run_job.HOOKS_ENV: env[run_job.HOOKS_ENV]}):
+            self.assertNotEqual(run_job.repo_commit(), "deadbeefcafe")   # production ignores the hooks
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(run_job.repo_commit(), "deadbeefcafe")
 
     def test_md5_mismatch_is_blocked(self):
         q = self.push()

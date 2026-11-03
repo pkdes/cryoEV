@@ -5,6 +5,7 @@
     python jobs/sync.py pull --share \\\\desktop\\cj [--who pujan]
     python jobs/sync.py status --share \\\\desktop\\cj
     python jobs/sync.py retry <job id> --share \\\\desktop\\cj
+    python jobs/sync.py local <job id> --bundle <zip> [--allow-big]      (train on this machine)
 
 push: the job must be a `train` job in the registry (`registry.py job new --type train --where desktop ...`).
   Copies the zip (+ .md5) to q/.incoming/<job>/, checks the copy's md5, writes job.json, renames the folder to
@@ -14,6 +15,7 @@ pull: for each d/<job>/ with DONE.json not pulled yet, copies runs/<run>/ to <Cr
   (`registry.py import`) and `registry.py set-status <job> done|blocked --reason`, then logs the pull in
   <CryoAI-laptop>/jobs/pulled.jsonl. Pulling again adds nothing.
 retry: moves d/<job>/ to d/.retired/<job>_<time>/ so the runner picks the job again (nothing is deleted).
+local: push to a folder on this machine (default C:\\cj_local), run jobs/run_job.py on it, then pull.
 Copies use robocopy /E /Z /R:2 /W:5 when the share is a UNC path (never /MIR, /PURGE or /MOV*; exit >= 8 =
 failure), shutil for a local folder. The registry is written only through registry.py, and only by pull.
 """
@@ -41,6 +43,7 @@ from data_utils.path_guard import protected_problem  # noqa: E402
 REGISTRY_PY = REPO / "registry" / "registry.py"
 LEDGER = Path("jobs") / "pulled.jsonl"          # under <CryoAI-laptop>
 PULL_TMP = ".pull_tmp"                           # <CryoAI>/training outputs/<dataset>/.pull_tmp/<run> while copying
+LOCAL_QUEUE = Path("C:/cj_local")                # `local`: the laptop's own queue (short: Windows path limit)
 
 
 class SyncError(RuntimeError):
@@ -187,7 +190,8 @@ def pull(share, who="pujan", copier="auto"):
             if target == "blocked":
                 args += ["--reason", reason[:300]]
             else:
-                args += ["--note", f"run {done.get('run')} ({done.get('machine')})"]
+                args += ["--note", f"run {done.get('run')} ({done.get('machine')}"
+                                   + (", --allow-big" if done.get("allow_big") else "") + ")"]
             try:
                 registry_cmd(*args)
             except SyncError as e:
@@ -250,9 +254,35 @@ def retry(job_id, share, force=False):
     return dst
 
 
+# ---------------------------------------------------------------- local (the laptop trains its own job)
+def local(job_id, bundle, queue=LOCAL_QUEUE, allow_big=False, who="pujan", runner_argv=None):
+    """push to a local queue folder, run jobs/run_job.py on it for this job, pull. -> pull() output ([] when
+    the runner refused to start). The same code paths as the desktop; only the folder is local."""
+    from run_job import is_network_path
+    queue = Path(queue)
+    if is_network_path(queue):
+        raise SyncError(f"{queue} is a network folder; `local` uses a folder on this machine (default {LOCAL_QUEUE})")
+    (queue / C.Q).mkdir(parents=True, exist_ok=True)
+    push(job_id, bundle, queue, copier="shutil")
+    argv = (runner_argv or [sys.executable, str(HERE / "run_job.py")]) + ["--queue-dir", str(queue), "--job", job_id]
+    if allow_big:
+        argv.append("--allow-big")
+    rc = subprocess.run(argv, cwd=REPO).returncode
+    if rc in (2, 3):
+        raise SyncError(f"run_job.py exit {rc} ({'refused at start' if rc == 2 else 'another runner holds the lock'});"
+                        f" {job_id} stays queued in {queue}: fix it, then `run_job.py --queue-dir {queue}` and `pull`")
+    return pull(queue, who, copier="shutil")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    lp = sub.add_parser("local")
+    lp.add_argument("job_id")
+    lp.add_argument("--bundle", required=True, type=Path, help="zip from training/make_job_bundle.py")
+    lp.add_argument("--queue", type=Path, default=LOCAL_QUEUE, help=f"local queue folder (default {LOCAL_QUEUE})")
+    lp.add_argument("--allow-big", action="store_true", help="y8m/l/x or imgsz > 640 on a small GPU (needs --time)")
+    lp.add_argument("--who", default="pujan", help="people.json id for the set-status lines")
     for name in ("push", "pull", "status", "retry"):
         p = sub.add_parser(name)
         if name in ("push", "retry"):
@@ -268,7 +298,9 @@ def main(argv=None):
             p.add_argument("--force", action="store_true", help="also retry a done job that was never pulled")
     a = ap.parse_args(argv)
     try:
-        if a.cmd == "push":
+        if a.cmd == "local":
+            local(a.job_id, a.bundle, a.queue, a.allow_big, a.who)
+        elif a.cmd == "push":
             print(f"[push] queued {push(a.job_id, a.bundle, a.share, a.copier)}")
         elif a.cmd == "pull":
             pull(a.share, a.who, a.copier)

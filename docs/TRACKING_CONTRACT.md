@@ -9,7 +9,7 @@ Registry style follows `batches.jsonl` ([INFERENCE_CHECK.md](INFERENCE_CHECK.md)
 
 - Schemas: `registry/schemas/<entity>.json` (draft 2020-12). Samples: `registry/samples/<entity>.jsonl`.
 - Checker: `python registry/validate.py [--jsonl f ...] [--report out.json] [--verbose]`.
-  - It is read-only and refuses a `--report` path under `C:\Users\pujan\Box\` or `Cryo-image-processing\`.
+  - It is read-only and refuses a `--report` path under a protected root (`data_utils/config.protected_roots()`: Box and the processing datasets).
   - Tests: `python -m unittest discover -s registry/tests`.
 - Every entity record carries `schema: "<entity>/1"`, `id` and `logged` (ISO time of the line). Optional: `recorded_by` (`<tool> <git sha>` or `backfill:<importer> <sha>`), `note`.
   `label_change/1` is the existing `changes.jsonl` row. It is unchanged and has no envelope.
@@ -119,6 +119,8 @@ Registry style follows `batches.jsonl` ([INFERENCE_CHECK.md](INFERENCE_CHECK.md)
 - **One file per entity:** `CryoAI-laptop/registry/<entity>.jsonl` (local, not Box). Writes go through `data_utils/path_guard.py`.
 - **Last means file order**, not `logged`. `current()` → `{id: record}`, `history(id)` → lines oldest first.
 - **Single writer.** Owner logs (`inference_checks/batches.jsonl`, `labels/lv_*/version.json`) stay the source of truth and are read by the importers, not copied.
+- **Write lock.** `registry.append` holds an OS lock on `<registry>/.registry.lock` for each line's check + write (waits up to 30 s), so a job pull can't interleave with a manual import or set-status.
+- **Export counts leave out excluded sessions.** A `roboflow_export` record's `counts` skip images from `EXCLUDED_SESSIONS` (`validate.py`, today 20261012), so v5 S1 shows 103/23/34 while its dataset trained on 114/26/39.
   `inference_check` and `label_version` lines are pointers (`owner` = `<batches.jsonl>#<batch_id>` / `<version.json>`) plus status lines.
   The rest of the record is derived from the owner file at read time.
 - **Explicit beats derived.** A `set-status` line (with `status_by`, a `people.json` id) wins over any derived status, and the importers keep it.

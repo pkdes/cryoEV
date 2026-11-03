@@ -399,7 +399,8 @@ def _graph_sub(ent, rec) -> str:
 
 def graph_model(current, recs, find, sort_key) -> dict:
     """{cols, nodes: [[key, col, hist 0/1, part_of node index or -1, sub]], edges: [[from, to, role]]}.
-    hist = hidden by default (superseded / abandoned / cancelled / retired, or a label version with a successor)."""
+    hist = hidden by default (superseded / abandoned / cancelled / retired, a label version with a successor, or a
+    Roboflow export with no child in the graph; an ancestor of anything shown has a child, so it stays)."""
     keys = [k for k, r in current.items() if k.split("|", 1)[0] in GRAPH_COL
             and (not k.startswith("job|") or r.get("type") in GRAPH_JOBS)]
     keys.sort(key=lambda k: (GRAPH_COL[k.split("|", 1)[0]], sort_key(k)))
@@ -441,10 +442,12 @@ def graph_model(current, recs, find, sort_key) -> dict:
         if ent == "job":
             for x in rec.get("outputs") or []:
                 add(k, resolve(x), "output")
+    parents = {a for a, _ in edges}
     nodes = []
     for k in keys:
         rec, ent = current[k], k.split("|", 1)[0]
         hist = rec.get("status") in HIST_STATUSES or bool(recs[k].get("dim"))
+        hist = hist or (ent == "roboflow_export" and idx[k] not in parents)     # an export nothing was built from
         part = idx.get(find("review_package", rec.get("parent"))) if ent == "review_package" else None
         nodes.append([k, GRAPH_COL[ent], int(hist), -1 if part is None else part, _graph_sub(ent, rec)])
     return {"cols": list(GRAPH_COLS), "nodes": nodes,
@@ -979,7 +982,7 @@ var gh=document.getElementById('ghist'),gboxes=[];
 var BW=184,BH=74,GAP=60,VG=12,PAD=30,HEAD=30,LANE=7;
 var SHORT={roboflow_export:'export',review_package:'package',label_version:'label version',prediction_set:'predictions'};
 var nHist=G.nodes.filter(function(n){return n[2];}).length;
-document.getElementById('ghistl').textContent='Show history (+'+nHist+' superseded/cancelled)';
+document.getElementById('ghistl').textContent='Show history (+'+nHist+' superseded, cancelled or unused)';
 function gbox(i,p){var n=G.nodes[i],k=n[0],r=R[k];
   var b=el('button','gnode'+(n[3]>=0?' part':'')+(r.prod?' prodn':'')+(n[2]?' dim':''));b.type='button';b.dataset.k=k;b.title=r.e+': '+r.id;
   b.style.left=p.x+'px';b.style.top=p.y+'px';b.style.width=p.w+'px';b.style.height=BH+'px';

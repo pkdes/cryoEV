@@ -41,6 +41,20 @@ class TestRegistry(unittest.TestCase):
         registry.append(dict(sample("run"), status="failed"), root=self.root)
         self.assertEqual(registry.current(root=self.root)[sample("run")["id"]]["status"], "failed")
 
+    def test_append_waits_for_the_write_lock(self):
+        from unittest import mock
+        registry.append(sample("run"), root=self.root)                   # creates the folder and the lock file
+        held = registry.acquire_lock(self.root / registry.LOCK)          # another writer
+        try:
+            with mock.patch.object(registry, "LOCK_WAIT", 1.0):
+                with self.assertRaisesRegex(registry.RegistryError, "registry busy"):
+                    registry.append(sample("pull"), root=self.root)
+            self.assertFalse((self.root / "pull.jsonl").exists())
+        finally:
+            held.close()
+        registry.append(sample("pull"), root=self.root)                   # control: free again, it writes
+        self.assertTrue((self.root / "pull.jsonl").exists())
+
     def test_invalid_record_refused(self):
         bad = dict(sample("run"))
         del bad["dataset"]

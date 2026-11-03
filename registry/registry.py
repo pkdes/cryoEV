@@ -32,6 +32,7 @@ REPO = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO))
 import ids  # noqa: E402
+from data_utils.oslock import acquire_lock  # noqa: E402
 from data_utils.path_guard import protected_problem  # noqa: E402
 from schema_check import check_record, load_schemas  # noqa: E402
 from data_utils import config  # noqa: E402
@@ -41,6 +42,7 @@ PEOPLE = REPO / "annotation" / "people.json"
 POINTER = {"inference_check", "label_version"}
 ENVELOPE = {"schema", "id", "logged", "recorded_by", "note", "owner", "status_by"}
 PRODUCTION_WHO = "pujan"
+LOCK, LOCK_WAIT = ".registry.lock", 30.0          # OS write lock in the registry folder (append holds it per line)
 _SCHEMAS = None
 
 
@@ -182,20 +184,26 @@ def append(record, root=None, _via_set_status=False):
     root = Path(root or default_root())
     rec = dict(record)
     rec.setdefault("logged", now())
-    e = _check(rec, root, _via_set_status)
-    path = root / f"{e}.jsonl"
     _guard(root)
-    _guard(path)
     root.mkdir(parents=True, exist_ok=True)
-    line = compact(e, rec)
-    lead = ""
-    if path.exists() and path.stat().st_size:          # a line cut short must not swallow the next one
-        with open(path, "rb") as f:
-            f.seek(-1, os.SEEK_END)
-            lead = "" if f.read(1) == b"\n" else "\n"
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(lead + json.dumps(line, ensure_ascii=False) + "\n")
-    return line
+    lock = acquire_lock(root / LOCK, LOCK_WAIT)        # check (e.g. id in use) + write: one writer at a time
+    if lock is None:
+        raise RegistryError(f"registry busy: another process held {root / LOCK} for {LOCK_WAIT:.0f} s")
+    try:
+        e = _check(rec, root, _via_set_status)
+        path = root / f"{e}.jsonl"
+        _guard(path)
+        line = compact(e, rec)
+        lead = ""
+        if path.exists() and path.stat().st_size:      # a line cut short must not swallow the next one
+            with open(path, "rb") as f:
+                f.seek(-1, os.SEEK_END)
+                lead = "" if f.read(1) == b"\n" else "\n"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(lead + json.dumps(line, ensure_ascii=False) + "\n")
+        return line
+    finally:
+        lock.close()
 
 
 def set_status(id, status, who, note=None, root=None, reason=None):

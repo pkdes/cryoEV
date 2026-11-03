@@ -173,6 +173,29 @@ class SyncTests(T.TempRoots, unittest.TestCase):
         self.assertEqual(out[0]["status"], "done")
         self.assertEqual(registry.current(root=self.reg)[JOB]["status"], "done")
 
+    def test_local_push_run_pull(self):
+        lq = self.tmp / "lq"
+        with self.assertRaisesRegex(sync.SyncError, "network folder"):
+            sync.local(JOB, self.zp, "\\\\desk\\cj")
+        with mock.patch.dict(os.environ, T.hooks_env(gpu=T.LAPTOP_GPU, on_battery=True)):    # refused at start
+            with self.assertRaisesRegex(sync.SyncError, "exit 2"):
+                sync.local(JOB, self.zp, lq)
+        self.assertEqual(sync.status(lq), [(JOB, "queued")])                                 # still queued
+        self.assertFalse((self.lap / "jobs" / "pulled.jsonl").exists())                     # nothing pulled
+        os.environ.update(T.hooks_env(gpu=T.DESKTOP_GPU))
+        rc = sync.subprocess.run([sys.executable, str(T.JOBS / "run_job.py"), "--queue-dir", str(lq)]).returncode
+        self.assertEqual(rc, 0)
+        out = sync.pull(lq, copier="shutil")
+        self.assertEqual(out[0]["status"], "done")
+        self.assertEqual(registry.current(root=self.reg)[JOB]["status"], "done")
+        # one command, from scratch: a second job end to end
+        registry.new_job("train", "laptop", "t2", images=self.tmp / "imgs.txt", who="pujan", root=self.reg,
+                         date="20261102")
+        zp2 = T.make_bundle(self.tmp / "b3", args=["--model-size", "n", "--imgsz", "320"], stamp="20261102-120009")
+        out = sync.local("job_20261102_t2", zp2, lq)
+        self.assertEqual(out[0]["status"], "done")
+        self.assertEqual(registry.current(root=self.reg)["job_20261102_t2"]["status"], "done")
+
     def test_status_lists_jobs(self):
         sync.push(JOB, self.zp, self.share, copier="shutil")
         self.assertEqual(sync.status(self.share), [(JOB, "queued")])

@@ -25,12 +25,33 @@ python jobs/run_job.py --queue-dir C:\cj
 ```
 - **Runner checks.** It checks the zip md5 (job.json and the `.md5` sidecar), that the repo commit equals JOB.json's `cryoEV_commit`, Ultralytics 8.4.x, and that the longest unzipped path is under 240 characters.
   It also checks that no other process is on the GPU: any python process, or one using ≥ 256 MB. Graphics apps listed with no memory are ignored.
-  On a GPU under 8 GB it only runs y8n/s at imgsz ≤ 640. Anything else is blocked "desktop only".
+  It needs free disk ≥ 10 GB + 3× the zip, and keeps the machine awake while the job runs.
 - A failed check or run ends **blocked** with a reason. A job is **done** only when the run's `run.json` says `finished` **and** the trainer exited 0 (a later step can fail after `run.json` is written).
 - The GPU-busy check runs before the old `work\<job>\` is cleared, so an orphaned trainer's files are never deleted under it. If a final rename fails (antivirus, an open Explorer window), it is retried; if it still fails, the runner exits non-zero and the results stay in `d\.tmp_<job>\`.
 - One ntfy push at the end, only if `CRYOEV_NTFY_TOPIC` is set.
-- **Exit codes.** `run_job.py`: 0 = done or nothing ready, 1 = blocked, 3 = the lock is held. `sync.py`: 2 = refused or failed.
-- **Laptop smoke test.** A y8n imgsz 320 job runs here too: `--where laptop`, then `run_job.py --queue-dir <local folder>` and `sync.py ... --share <local folder>`. The real test is `jobs/tests/test_smoke.py`; its docstring has the env vars.
+- **Exit codes.** `run_job.py`: 0 = done or nothing ready, 1 = blocked, 2 = refused at start (queue untouched), 3 = the lock is held. `sync.py`: 2 = refused or failed.
+- **Smoke test.** `jobs/tests/test_smoke.py` (real GPU, y8n at 320). The fixture is `<CryoAI-laptop>\fixtures\smoke\` (`tiny\` + `yolov8n-seg.pt`):
+  `set CRYOEV_JOBS_SMOKE_DATA=...\fixtures\smoke\tiny` and `set CRYOEV_JOBS_SMOKE_WEIGHTS=...\fixtures\smoke\yolov8n-seg.pt`.
+
+## Training on the laptop
+When the desktop isn't available. Same bundle, runner and pull; the queue is a local folder (`C:\cj_local`).
+```powershell
+python registry/registry.py job new --type train --where laptop --name v5_y8s_640 --images <list.txt> --who pujan
+python training/make_job_bundle.py --dataset-dir <prepared dataset> -- --single-run --model-size s --imgsz 640 --batch 4 --workers 2 --rect 0
+python jobs/sync.py local job_20261103_v5_y8s_640 --bundle <zip>              # push + run + pull, one command
+```
+Rules on a GPU under 8 GB (the laptop: RTX 3050 Ti, 4 GB, 15 GB RAM):
+
+| Rule | Why |
+|---|---|
+| `--workers` ≤ 2 in the bundle, or blocked | More workers exhaust the page file (WinError 1455) |
+| y8m/l/x or imgsz > 640: blocked "desktop only", unless `--allow-big` **and** the bundle sets `--time <hours>` | Too big for 4 GB; `--time` caps a run that spills into system RAM |
+| Refuses (exit 2, job stays queued): a network queue folder, or running on battery | The laptop never takes the desktop's jobs |
+| `--allow-big` is recorded in DONE.json and the registry note | Visible on the history page |
+
+- **Set once:** NVIDIA Control Panel → Manage 3D settings → Program settings → python.exe → "CUDA - Sysmem Fallback Policy" = "Prefer No Sysmem Fallback". Without it, too big runs 10–50× slower instead of failing "oom".
+- **Comparing with v5 F5:** v5 F5 is y8m, imgsz 1440, batch 8, `rect` off, from v4_y8m weights (`models/models.yaml`). Pass `--rect 0` to match. A 640 model isn't directly comparable; compare on the test split (val is inflated).
+- **What fits:** see the table below (measured, 3-epoch runs on v5 S1).
 - **Tests.** `python -m unittest discover -s jobs/tests` uses temp roots and a fake trainer, so no GPU is needed.
 
 ## Queue folder

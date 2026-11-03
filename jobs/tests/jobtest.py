@@ -23,11 +23,11 @@ LAPTOP_GPU = {"total_mb": 4096, "apps": []}
 YAML = "names:\n  0: EV\ntrain: images/train\nval: images/val\n"
 
 
-def hooks_env(train_cmd=FAKE, gpu=DESKTOP_GPU, ultralytics="8.4.94", **extra):
-    h = {"gpu": gpu, "ultralytics": ultralytics, **extra}
+def hooks_env(train_cmd=FAKE, gpu=DESKTOP_GPU, ultralytics="8.4.94", on_battery=False, free_gb=100, **extra):
+    h = {"gpu": gpu, "ultralytics": ultralytics, "on_battery": on_battery, "free_gb": free_gb, **extra}
     if train_cmd:
         h["train_cmd"] = train_cmd
-    return {run_job.HOOKS_ENV: json.dumps(h)}
+    return {run_job.HOOKS_ENV: json.dumps(h), run_job.TESTING_ENV: "1"}
 
 
 def make_bundle(out_dir, name="ds_tiny", args=(), commit=None, yaml=True, files=None, stamp="20261102-120000"):
@@ -63,7 +63,7 @@ class TempRoots:
         self.share = self.tmp / "s"
         (self.share / C.Q).mkdir(parents=True)
         self.bundles = self.tmp / "b"
-        env = {k: v for k, v in os.environ.items() if k not in ("CRYOEV_NTFY_TOPIC", run_job.HOOKS_ENV)}
+        env = {k: v for k, v in os.environ.items() if k not in ("CRYOEV_NTFY_TOPIC", run_job.HOOKS_ENV, run_job.TESTING_ENV)}
         self.env = mock.patch.dict(os.environ, env, clear=True)
         self.env.start()
 

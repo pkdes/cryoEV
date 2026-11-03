@@ -217,7 +217,8 @@ class GraphLookup(unittest.TestCase):
         (reg / "lists" / "job_20990103_annotate_b.txt").write_text("img_b_png\n", encoding="utf-8")
         recs = {
             "pull": [{"schema": "pull/1", "id": "roboflow_pull_20990101_0000"}],
-            "roboflow_export": [{"schema": "roboflow_export/1", "id": "roboflow - 20990101 x"}],
+            "roboflow_export": [{"schema": "roboflow_export/1", "id": "roboflow - 20990101 x"},
+                                {"schema": "roboflow_export/1", "id": "roboflow - 20980101 unused"}],
             "label_version": [
                 {"schema": "label_version/1", "id": "lv_20990101_0900", "status": "created",
                  "inputs": [{"id": "roboflow_pull_20990101_0000", "role": "base", "entity": "pull"}]},
@@ -271,7 +272,8 @@ class GraphLookup(unittest.TestCase):
         self.assertFalse(any(c == "review_package|pkg_old_part1" for _, c, _ in edges))   # parts sit under their package
         hidden = {k for k, n in nodes.items() if n[2]}
         self.assertEqual(hidden, {"label_version|lv_20990101_0900", "review_package|pkg_old",
-                                  "review_package|pkg_old_part1", "job|job_20990103_annotate_b"})
+                                  "review_package|pkg_old_part1", "job|job_20990103_annotate_b",
+                                  "roboflow_export|roboflow - 20980101 unused"})          # nothing built from it
         keys = [n[0] for n in self.m["graph"]["nodes"]]
         self.assertEqual(nodes["review_package|pkg_old_part1"][3], keys.index("review_package|pkg_old"))
         self.assertTrue(nodes["dataset|ds_1"][4].startswith("1/1/1 train/valid/test"))
@@ -321,6 +323,22 @@ class RealRegistryKnownAnswers(unittest.TestCase):
         self.assertTrue(self.m["recs"][self.V5]["prod"])
         self.assertEqual([self.nodes[k][2] for k in (self.EXP, self.DS, self.V5)], [0, 0, 0])
 
+    def test_production_ancestors_shown(self):
+        """Every ancestor of the production model is shown by default (v4 0924 via v4_y8m's init weights)."""
+        par = {}
+        for p, c, _ in self.edges:
+            par.setdefault(c, []).append(p)
+        anc, todo = set(), [self.V5]
+        while todo:
+            for p in par.get(todo.pop(), []):
+                if p not in anc:
+                    anc.add(p)
+                    todo.append(p)
+        self.assertIn("roboflow_export|roboflow - 20260924 cryoai v4", anc)
+        self.assertEqual([k for k in anc if self.nodes[k][2]], [])
+        unused = {k for k, n in self.nodes.items() if n[2] and k.startswith("roboflow_export|")}
+        self.assertTrue(unused and not unused & anc)
+
     def test_revise_back_edge(self):
         for e in ((self.V5, self.PKG2, "predictions"), (self.PKG2, self.LV, "edits"),
                   (self.V5, self.JOB2, "predictions"), (self.JOB2, self.LV, "output")):
@@ -339,7 +357,9 @@ class RealRegistryKnownAnswers(unittest.TestCase):
         stem, split = rows[0].split("\t")[:2]
         self.assertEqual(lookup_refs(self.m, stem)[self.DS], split)
         changed = [n for n, _ in self.m["lk"]["i"] if self.LV in (lookup_refs(self.m, n) or {})]
-        self.assertEqual(len(changed), 28)                          # version.json n_images_applied
+        applied = json.loads((REAL.parent / "labels" / self.LV.split("|")[1] / "version.json")
+                             .read_text(encoding="utf-8"))["n_images_applied"]
+        self.assertEqual(len(changed), applied)                     # version.json n_images_applied (28 today)
         self.assertIsInstance(lookup_refs(self.m, changed[0])[self.LV], int)
         fake = "zz_no_such_image_20991231_png"                      # control: a made-up name
         self.assertIsNone(lookup_refs(self.m, fake))
