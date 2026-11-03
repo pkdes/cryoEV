@@ -97,7 +97,7 @@ To add a model, put `best.pt` in `models/<model_id>/` and add an entry to `model
 |:-:|---|---|
 | 0 | `data_utils/make_balanced_split.py` | Optional. Re-splits a Roboflow export so each acquisition session (from the filename) is spread across train/val/test, and keeps duplicate copies of one micrograph in one split. `--history <old export>` allows an old image in test only if it was in that export's test, so older models stay a leak-free baseline. `--propose` writes the report only |
 | 1 | `data_utils/prepare_all_layer_singleclass.py` | Roboflow COCO export → YOLO labels. `--class-scheme`: `ev` (default; all layer categories → "EV"), `ev_nonev` (+ "non-EV" = VLDL + non-EV), `ev_nonev_undet` (+ "Undetermined" = Low conf EV). Raises an error on unknown categories |
-| 2 | `training/run_experiments.py` | Training campaign; `--single-run` uses the known-best config, overridable with `--model-size --batch --epochs --patience --time --rect 0/1 --cache --cls --lr0 --run-num` and `--weights` (fine-tune). Class names come from `dataset.yaml`. Writes metrics, overlays and the prediction files (`--eval-splits`, `--predictions-only`) |
+| 2 | `training/run_experiments.py` | Training campaign; `--single-run` uses the known-best config, overridable with `--model-size --batch --imgsz --workers --epochs --patience --time --rect 0/1 --cache --cls --lr0 --run-num` and `--weights` (fine-tune); writes `run.json` (true status: finished/error/oom) into the run folder and exits non-zero when the single run fails; `--no-notify`. Class names come from `dataset.yaml`. Writes metrics, overlays and the prediction files (`--eval-splits`, `--predictions-only`) |
 | 3 | `analysis/multilayer_containment.py` | Validates the containment geometry on ground truth. Home of `classify_roles()` |
 | 4 | `analysis/multilayer_role_analysis.py` | Multilayer / inner-layer / standalone roles, predicted vs. ground truth. For comparable numbers: `--splits test --fixed 0.99,0.75 --no-overlays --out-dir <dir>`. Multi-class: `--ev-classes 0` (or `0,2`), `--gt-exclude VLDL --keep-empty-gt`, optional `--fair`, `--group-csv` |
 | 5 | `analysis/layer_count_stats.py` | Layer-count distributions, predicted vs. ground truth |
@@ -130,6 +130,7 @@ python analysis/multilayer_role_analysis.py --dataset roboflow_20260824_cryoai_v
     --source-name "roboflow - 20260824 cryoai v3" --model-run-dir "<run folder name>"
 ```
 Each run appends a row to `CryoAI/EXPERIMENT_LOG.csv`. Long runs should go in the background with output logged to a file.
+To train on the A6000 desktop through the job queue (`make_job_bundle.py` → `jobs/sync.py push` → `jobs/run_job.py` → `jobs/sync.py pull`), see [`docs/JOBS.md`](docs/JOBS.md).
 
 Multi-class (EV / non-EV), re-split by session, fine-tuned from a registered model (full schedule; see the gotchas on `--time` and v4-init early stopping):
 ```bash

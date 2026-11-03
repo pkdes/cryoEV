@@ -16,6 +16,8 @@ v2 (jobs and inputs, TRACKING_CONTRACT.md addendum):
 - one revise `job/1` per top-level review package (no `_partN`, no SANDBOX): progress = edit records with
   `edit.reviewed` true / n_images; status in_progress if any record has decisions or reviewed, else ready.
   A package's `applied` status never makes its job done (only an explicit set-status line does).
+- a run folder with its own `run.json` (run_experiments.py, 2026-11-02) gives status (finished; error/oom ->
+  failed, with a note), job_bundle and config as written; older run folders are derived as before.
 """
 import hashlib
 import re
@@ -124,6 +126,11 @@ def _num(v):
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _iso(t):
+    """ISO time to seconds (schema pattern), or None."""
+    return str(t)[:19] if t and re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", str(t)) else None
 
 
 def _date_id(d):
@@ -335,6 +342,10 @@ class Importer:
                      status="trained" if d["runs"] else "frozen",
                      note="created = date in the dataset name (time unknown)")
         for rid, r in sorted(s.runs.items()):
+            rj = self.run_json(r["dataset"], rid) if r["dataset"] else None
+            if rj:
+                self.add("run", **rj)
+                continue
             cfg = ids.parse_run(rid)
             if not cfg or not r["dataset"]:
                 self.refuse("run: config not parseable / no dataset", rid)
@@ -344,6 +355,31 @@ class Importer:
                              "batch": cfg["batch"], "epochs": cfg["epochs"]},
                      status="finished" if r["model"] else "running",
                      note=None if r["local"] else "run folder not in the local cache")
+
+    def run_json(self, dataset, rid):
+        """Run fields from the run folder's own run.json (written by run_experiments.py), or None.
+        Its status finished/error/oom maps to finished/failed; config and job_bundle are taken as written."""
+        p = self.cache / "training outputs" / dataset / "runs" / rid / "run.json" if self.cache else None
+        if not p or not p.is_file():
+            return None
+        try:
+            j = read_json(p)
+        except (ValueError, OSError):
+            self.refuse("run: run.json unreadable", rid)
+            return None
+        bundle = j.get("job_bundle") or j.get("bundle_id")
+        bundle = bundle if ids.is_id("bundle", bundle) else None
+        st = j.get("status")
+        keep = ("arch", "imgsz", "batch", "epochs", "patience", "rect", "weights_init")
+        return {"id": rid, "dataset": dataset, "job_bundle": bundle,
+                "job_bundle_gap": None if bundle else "no bundle id in run.json",
+                "config": {k: v for k, v in (j.get("config") or {}).items() if k in keep},
+                "status": "finished" if st == "finished" else "failed",
+                "machine": j.get("machine"), "cryoEV_commit": j.get("cryoEV_commit"),
+                "ultralytics": j.get("ultralytics"), "started": _iso(j.get("started")),
+                "finished": _iso(j.get("ended")), "experiment_log_timestamp": j.get("experiment_log_timestamp"),
+                "metrics": {k: v for k, v in (j.get("metrics") or {}).items() if isinstance(v, (int, float))} or None,
+                "note": None if st == "finished" else f"run.json status {st}: {str(j.get('error') or '')[:200]}"}
 
     def models(self):
         wroot = [REPO / "models", (find_sibling("cryoEV") or REPO) / "models"]
