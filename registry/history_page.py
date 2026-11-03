@@ -14,7 +14,14 @@ self-contained static HTML file: inline CSS/JS, no external URLs. The page has
   production/candidate badge, dataset -> source, per-split trained vs listed counts ("unknown" when missing),
   the image list (read from the dataset's image_list file next to the registry and embedded at build time),
   init model and scores (inference checks);
-- filters by entity/status, and id search.
+- filters by entity/status, and id search;
+- a Lineage graph tab: columns Roboflow labels (exports, pulls) -> local labels (lv_*, prediction sets) ->
+  datasets -> models -> review/revise (packages, revise/annotate jobs); SVG edges parent -> child from `inputs[]`
+  (legacy fields when absent); model -> package/job -> label version is the dashed back-edge. Superseded /
+  abandoned / cancelled / retired records are hidden until "Show history" (then dimmed); production is starred;
+- an Image lookup tab: image name or substring -> datasets + split (lists/*.tsv), label versions that changed it
+  (the lv's changes.jsonl next to its version.json, else the registry's label_change rows), review packages
+  (their data.js) and jobs (package or image_list), Roboflow image + split, session / grid. ONE embedded index.
 Pointer records (`owner` = version.json / batches.jsonl#id) get the owner file's fields underneath, as
 registry.current() does.
 
@@ -38,8 +45,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 sys.path.insert(0, str(REPO))
+if str(HERE) not in sys.path:
+    sys.path.insert(1, str(HERE))
 from data_utils import config  # noqa: E402
 from data_utils.path_guard import protected_problem  # noqa: E402
+from ids import image_key  # noqa: E402  (pure helper, no I/O)
 
 # Default registry: config.registry_root() (one <entity>.jsonl per entity; every *.jsonl in it is read),
 # resolved in main() so importing this module never needs the data folders. Default page: <registry>/history.html
@@ -90,9 +100,10 @@ def input_files(paths) -> list[Path]:
     return out
 
 
-def read_registry(paths):
+def read_registry(paths, changes: list | None = None):
     """-> (current {key: rec}, history {key: [rec, ...]}, stats). key = '<entity>|<id>'.
-    current[key] is the merged view (earlier fields overlaid by later lines); its status is the last line's."""
+    current[key] is the merged view (earlier fields overlaid by later lines); its status is the last line's.
+    label_change rows are not records; with `changes` given, (label_version, image) of each row is appended."""
     history: dict[str, list[dict]] = {}
     order: list[str] = []
     stats = {"lines": 0, "bad_json": 0, "no_id": 0, "label_change_rows": 0}
@@ -114,6 +125,8 @@ def read_registry(paths):
                 ent = entity_of(rec)
                 if ent == "label_change":
                     stats["label_change_rows"] += 1
+                    if changes is not None:
+                        changes.append((rec.get("label_version"), rec.get("image")))
                     continue
                 rid = rec.get("id", rec.get("batch_id"))
                 if rid is None or ent is None:
@@ -182,7 +195,7 @@ def _ids_in(v):
         yield v["id"]
 
 
-def build_model(current: dict, history: dict, stats: dict, sources) -> dict:
+def build_model(current: dict, history: dict, stats: dict, sources, changes=None) -> dict:
     by_id: dict[str, list[str]] = {}
     for key, rec in current.items():
         by_id.setdefault(rec["id"], []).append(key)
@@ -335,7 +348,216 @@ def build_model(current: dict, history: dict, stats: dict, sources) -> dict:
         "recs": recs, "sections": sections,
         "production": [k for k, r in recs.items() if r["prod"]],
         "queue": queue, "other_jobs": other_jobs, "models": models, "lists": lists,
+        "graph": graph_model(current, recs, find, sort_key),
+        "lk": lookup_index(current, roots, changes or []),
     }
+
+
+# ---------------------------------------------------------------- lineage graph
+# Columns label sets -> datasets -> models, plus a revise column. Edges are parent -> child from `inputs[]`
+# (legacy fields when a record has none). Review packages and revise/annotate jobs sit right of the models:
+# model -> package/job (predictions) and package/job -> label version (edits / outputs) is the back-edge.
+
+GRAPH_COLS = ("Roboflow labels", "Local labels", "Datasets", "Models", "Review / revise")
+GRAPH_COL = {"roboflow_export": 0, "pull": 0, "label_version": 1, "prediction_set": 1, "dataset": 2, "model": 3,
+             "review_package": 4, "job": 4}
+GRAPH_JOBS = ("revise", "annotate")
+HIST_STATUSES = {"superseded", "abandoned", "cancelled", "retired"}
+
+
+def _split_counts(rec) -> str | None:
+    ct = rec.get("counts_trained") if isinstance(rec.get("counts_trained"), dict) else None
+    if ct is None and isinstance(rec.get("counts"), dict):
+        ct = {s: v.get("images") for s, v in rec["counts"].items() if isinstance(v, dict)}
+    if not ct:
+        return None
+    names = [s for s in SPLITS if s in ct] + sorted(set(ct) - set(SPLITS))
+    if all(ct[s] is None for s in names):
+        return "counts unknown"
+    return "/".join("?" if ct[s] is None else str(ct[s]) for s in names) + " " + "/".join(names)
+
+
+def _graph_sub(ent, rec) -> str:
+    if ent == "dataset":
+        return _split_counts(rec) or ""
+    if ent == "roboflow_export":
+        c = _split_counts(rec)
+        return c or (rec.get("note") or "")
+    if ent in ("pull", "review_package"):
+        n = rec.get("n_images")
+        return (f"{n} images" if n is not None else "") + (f" · {rec['kind']}" if rec.get("kind") == "part" else "")
+    if ent == "label_version":
+        n = rec.get("n_images_applied")
+        return f"{n} images changed" if n is not None else ""
+    if ent == "job":
+        p = rec.get("progress") if isinstance(rec.get("progress"), dict) else {}
+        return f"{rec.get('type')} · {p.get('done', '?')}/{p.get('total', '?')} {p.get('unit') or ''}".strip()
+    if ent == "model":
+        return f"init {rec['init_from']}" if rec.get("init_from") else ""
+    return ""
+
+
+def graph_model(current, recs, find, sort_key) -> dict:
+    """{cols, nodes: [[key, col, hist 0/1, part_of node index or -1, sub]], edges: [[from, to, role]]}.
+    hist = hidden by default (superseded / abandoned / cancelled / retired, or a label version with a successor)."""
+    keys = [k for k, r in current.items() if k.split("|", 1)[0] in GRAPH_COL
+            and (not k.startswith("job|") or r.get("type") in GRAPH_JOBS)]
+    keys.sort(key=lambda k: (GRAPH_COL[k.split("|", 1)[0]], sort_key(k)))
+    idx = {k: i for i, k in enumerate(keys)}
+    edges: dict = {}
+
+    def add(parent, child, role):
+        if parent in idx and child in idx and parent != child:
+            edges.setdefault((idx[parent], idx[child]), role)
+
+    def resolve(x):
+        rid, ent = (x.get("id"), x.get("entity")) if isinstance(x, dict) else (x, None)
+        if not isinstance(rid, str):
+            return None
+        return (find(ent, rid) if ent else None) or next((f for f in (find(e, rid) for e in ENTITY_GUESS) if f), None)
+
+    for k in keys:
+        rec, ent = current[k], k.split("|", 1)[0]
+        ins = [x for x in rec.get("inputs") or [] if isinstance(x, dict)]
+        for x in ins:
+            if GRAPH_COL[ent] == 4 and x.get("role") == "base":
+                continue        # the revise column's base (pull/export) would cross every column; the lv shows it
+            add(resolve(x), k, x.get("role") or "input")
+        if not ins:             # legacy fields (records written before inputs[])
+            if ent == "dataset":
+                s = rec.get("source") if isinstance(rec.get("source"), dict) else {}
+                add(find(s.get("kind") or "", s.get("id")) or find("label_version", rec.get("label_version"))
+                    or find("roboflow_export", rec.get("export")), k, "source")
+            elif ent == "model":
+                add(find("dataset", rec.get("dataset")), k, "train_data")
+                add(find("model", rec.get("init_from")), k, "init_weights")
+            elif ent == "label_version":
+                add(find("pull", rec.get("base")) or find("roboflow_export", rec.get("base")), k, "base")
+                add(find("review_package", rec.get("pkg")), k, "edits")
+        if ent == "roboflow_export":
+            add(find("roboflow_export", rec.get("derived_from")), k, "derived_from")
+        if ent == "review_package" and not find("review_package", rec.get("parent")):
+            add(find("model", rec.get("model")), k, "predictions")
+        if ent == "job":
+            for x in rec.get("outputs") or []:
+                add(k, resolve(x), "output")
+    nodes = []
+    for k in keys:
+        rec, ent = current[k], k.split("|", 1)[0]
+        hist = rec.get("status") in HIST_STATUSES or bool(recs[k].get("dim"))
+        part = idx.get(find("review_package", rec.get("parent"))) if ent == "review_package" else None
+        nodes.append([k, GRAPH_COL[ent], int(hist), -1 if part is None else part, _graph_sub(ent, rec)])
+    return {"cols": list(GRAPH_COLS), "nodes": nodes,
+            "edges": [[a, b, role] for (a, b), role in edges.items()]}
+
+
+# ---------------------------------------------------------------- image lookup
+# ONE index: image key -> refs into a shared entity-key list. ref = n (entity index) or [n, note]
+# (split for a dataset / Roboflow image, number of change rows for a label version).
+# Only images that are records (image/1, or a roboflow_image stem) are indexed, as on the model page;
+# other names from lists and logs are counted, never shown.
+
+def read_change_log(owner) -> list | None:
+    """<label version folder>/changes.jsonl next to the owner version.json -> [image, ...] (one per row), or None."""
+    if not owner:
+        return None
+    f = Path(str(owner).partition("#")[0]).parent / "changes.jsonl"
+    if not f.is_file():
+        return None
+    out = []
+    with open(f, encoding="utf-8") as fh:
+        for line in fh:
+            try:
+                o = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(o, dict) and isinstance(o.get("image"), str):
+                out.append(o["image"])
+    return out
+
+
+def package_images(rec, roots) -> list | None:
+    """Image keys of a review package, from <package path>/data.js (window.REVIEW_DATA = {...}), or None."""
+    p = rec.get("path")
+    if not p:
+        return None
+    cands = [Path(p)] if Path(p).is_absolute() else [b / p for r in roots for b in (r, r.parent, r.parent.parent)]
+    f = next((c / "data.js" for c in cands if (c / "data.js").is_file()), None)
+    if f is None:
+        return None
+    try:
+        text = f.read_text(encoding="utf-8")
+        obj, _ = json.JSONDecoder().raw_decode(text, text.index("{"))
+    except (OSError, ValueError):
+        return None
+    return [image_key(im["file"]) for im in obj.get("images") or [] if isinstance(im, dict) and im.get("file")]
+
+
+def lookup_index(current, roots, changes) -> dict:
+    """-> {"e": [entity key, ...], "i": [[image key, [ref, ...]], ...] sorted, "hidden": n, "sources": {...}}."""
+    known = {rec["id"] for k, rec in current.items() if k.startswith("image|")}
+    rf_of = {}
+    for k, rec in current.items():
+        if k.startswith("roboflow_image|") and isinstance(rec.get("stem"), str):
+            rf_of.setdefault(image_key(rec["stem"]), []).append(k)
+    known |= set(rf_of)
+    ents, eidx, img, hidden = [], {}, {name: [] for name in known}, set()
+    used = {"change_log": [], "label_change_rows": [], "package_data_js": [], "no_image_list": []}
+
+    def add(name, k, note=None):
+        if name not in known:
+            hidden.add(name)
+            return
+        if k not in eidx:
+            eidx[k] = len(ents)
+            ents.append(k)
+        ref = eidx[k] if note is None else [eidx[k], note]
+        if ref not in img[name]:
+            img[name].append(ref)
+
+    for name, ks in rf_of.items():
+        for k in ks:
+            add(name, k, current[k].get("split") or "")
+    for k, rec in current.items():
+        if k.startswith("dataset|") and isinstance(rec.get("image_list"), dict):
+            for stem, split in read_list_file(rec["image_list"], roots)["rows"] or []:
+                add(stem, k, split or "?")
+    reg_rows: dict = {}
+    for lv, im in changes:
+        if isinstance(lv, str) and isinstance(im, str):
+            reg_rows.setdefault(lv, []).append(im)
+    for k, rec in current.items():
+        if not k.startswith("label_version|"):
+            continue
+        rows = read_change_log(rec.get("owner"))
+        used["change_log" if rows else "label_change_rows"].append(rec["id"])
+        if not rows:
+            rows = reg_rows.get(rec["id"], [])
+        n: dict = {}
+        for im in rows:
+            n[im] = n.get(im, 0) + 1
+        for im, c in n.items():
+            add(image_key(im), k, c)
+    pkg_imgs: dict = {}
+    for k, rec in current.items():
+        if k.startswith("review_package|"):
+            got = package_images(rec, roots)
+            if got is None:
+                used["no_image_list"].append(rec["id"])
+                continue
+            used["package_data_js"].append(rec["id"])
+            pkg_imgs[rec["id"]] = got
+            for name in got:
+                add(name, k)
+    for k, rec in current.items():
+        if not k.startswith("job|"):
+            continue
+        names = list(pkg_imgs.get(rec.get("package"), []))
+        if isinstance(rec.get("image_list"), dict):
+            names += [stem for stem, _ in read_list_file(rec["image_list"], roots)["rows"] or []]
+        for name in names:
+            add(image_key(name), k)
+    return {"e": ents, "i": [[name, img[name]] for name in sorted(img)], "hidden": len(hidden), "sources": used}
 
 
 def next_action(rec: dict) -> str:
@@ -553,6 +775,32 @@ section.sec>details>summary{font-weight:600;cursor:pointer}
 #detail table{border-collapse:collapse;width:100%;font-size:.85rem;table-layout:auto}#detail td,#detail th{border-top:1px solid var(--line);padding:3px 4px;text-align:left;vertical-align:top;overflow-wrap:anywhere}
 #detail pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:.78rem;background:var(--bg);padding:8px;border-radius:8px}
 .lnk{font:inherit;color:var(--acc);background:none;border:0;padding:2px 0;cursor:pointer;text-align:left;overflow-wrap:anywhere;word-break:break-all}
+.layout>div{min-width:0}
+.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:18px 0 10px}
+.tab{font:inherit;font-weight:600;padding:6px 14px;min-height:38px;border:1px solid var(--line);border-radius:999px;background:var(--card);color:var(--fg);cursor:pointer}
+.tab.on{background:var(--accbg);color:var(--acc);border-color:transparent}
+.gbar{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center;margin:0 0 8px}
+.gbar label{display:inline-flex;gap:6px;align-items:center;min-height:36px;cursor:pointer}
+.gwrap{overflow-x:auto;overflow-y:hidden;max-width:100%;border:1px solid var(--line);border-radius:10px;background:var(--card)}
+.gcanvas{position:relative}
+.gcanvas svg{position:absolute;left:0;top:0}
+.ghead{position:absolute;top:6px;font-size:.75rem;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.03em;white-space:nowrap}
+.gnode{position:absolute;font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:4px 7px;text-align:left;cursor:pointer;overflow:hidden;display:flex;flex-direction:column;gap:2px}
+.gnode:hover,.gnode:focus{border-color:var(--acc)}
+.gnode.part{background:var(--card)}
+.gnode.prodn{border:2px solid var(--prod)}
+.gnode.dim{border-style:dashed}
+.gnode .gl1{display:flex;gap:4px;align-items:baseline;white-space:nowrap;overflow:hidden}
+.gnode .gid{font-family:ui-monospace,Consolas,monospace;font-size:.72rem;line-height:1.25;word-break:break-all;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.gnode .gsub{font-size:.7rem;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ge{fill:none;stroke:var(--mut);stroke-width:1.4}
+.ge.back{stroke:var(--acc);stroke-dasharray:6 4}
+.ga{fill:var(--mut)}.ga.back{fill:var(--acc)}
+.gdim{opacity:.35}
+.lcard{border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:8px 0;background:var(--card);min-width:0}
+.lcard .lname{font-family:ui-monospace,Consolas,monospace;font-size:.85rem;font-weight:600;word-break:break-all}
+.lrow{font-size:.85rem;margin-top:4px;overflow-wrap:anywhere}
+.lrow>b{color:var(--mut);font-weight:600;margin-right:4px}
 """
 
 JS = r"""
@@ -651,6 +899,7 @@ function apply(){
   Array.prototype.forEach.call(tree.querySelectorAll('section.sec'),function(sec){var any=false;
     Array.prototype.forEach.call(sec.querySelector('.tree>ul').children,function(li){if(walk(li))any=true;});
     sec.classList.toggle('hide',active&&!any);if(active&&any)sec.querySelector('details').open=true;});
+  if(gboxes)markGraph();
 }
 [fe,fs].forEach(function(x){x.addEventListener('change',apply);});fq.addEventListener('input',apply);
 // detail
@@ -711,10 +960,101 @@ function show(k){var r=R[k];D.textContent='';D.classList.remove('hidden');
   r.hist.forEach(function(x){var tr=el('tr');[x.logged,x.status,x.by,x.fields].forEach(function(v){tr.appendChild(el('td',null,v==null?'':v));});h.appendChild(tr);});
   D.appendChild(h);
   var dd=el('details');dd.appendChild(el('summary',null,'All fields (merged current record)'));dd.appendChild(el('pre',null,JSON.stringify(r.raw,null,1)));D.appendChild(dd);
-  Array.prototype.forEach.call(document.querySelectorAll('.rec.sel'),function(x){x.classList.remove('sel');});
-  Array.prototype.forEach.call(document.querySelectorAll('.rec'),function(x){if(x.dataset.k===k)x.classList.add('sel');});
+  Array.prototype.forEach.call(document.querySelectorAll('.sel'),function(x){x.classList.remove('sel');});
+  Array.prototype.forEach.call(document.querySelectorAll('.rec,.gnode'),function(x){if(x.dataset.k===k)x.classList.add('sel');});
   if(window.matchMedia('(min-width:900px)').matches)D.scrollTop=0;
 }
+// tabs
+var panes=['tree','graph','lookup'];
+function tab(p){panes.forEach(function(n){document.getElementById(n).classList.toggle('hide',n!==p);
+  var t=document.getElementById('t-'+n);t.classList.toggle('on',n===p);t.setAttribute('aria-selected',String(n===p));});}
+panes.forEach(function(n){document.getElementById('t-'+n).addEventListener('click',function(){tab(n);});});
+// lineage graph: columns, boxes as buttons over an SVG edge layer (positions computed here)
+var G=M.graph,gc=document.getElementById('gcanvas'),gsvg=document.getElementById('gsvg'),NS=gsvg.namespaceURI;
+var gh=document.getElementById('ghist'),gboxes=[];
+var BW=184,BH=74,GAP=60,VG=12,PAD=30,HEAD=30,LANE=7;
+var SHORT={roboflow_export:'export',review_package:'package',label_version:'label version',prediction_set:'predictions'};
+var nHist=G.nodes.filter(function(n){return n[2];}).length;
+document.getElementById('ghistl').textContent='Show history (+'+nHist+' superseded/cancelled)';
+function gbox(i,p){var n=G.nodes[i],k=n[0],r=R[k];
+  var b=el('button','gnode'+(n[3]>=0?' part':'')+(r.prod?' prodn':'')+(n[2]?' dim':''));b.type='button';b.dataset.k=k;b.title=r.e+': '+r.id;
+  b.style.left=p.x+'px';b.style.top=p.y+'px';b.style.width=p.w+'px';b.style.height=BH+'px';
+  var l1=el('div','gl1');l1.appendChild(el('span','tag',SHORT[r.e]||r.e));
+  if(r.prod)l1.appendChild(el('span','st prod','★ production'));else if(r.s!=null)l1.appendChild(el('span','st',String(r.s).replace('_',' ')));
+  b.appendChild(l1);b.appendChild(el('div','gid',r.id));if(n[4])b.appendChild(el('div','gsub',n[4]));
+  b.addEventListener('click',function(){show(k);});return b;}
+function svgEl(t,cls){var e=document.createElementNS(NS,t);if(cls)e.setAttribute('class',cls);return e;}
+function arrow(x,y,dir){return 'M'+x+','+y+'L'+(x-8*dir)+','+(y-4.5)+'L'+(x-8*dir)+','+(y+4.5)+'Z';}
+function drawGraph(){
+  var hist=gh.checked,ncol=G.cols.length;
+  gboxes.forEach(function(b){b.remove();});gboxes=[];while(gsvg.firstChild)gsvg.removeChild(gsvg.firstChild);
+  var vis=G.nodes.map(function(n){return hist||!n[2];});
+  var cols=[],kids={},parents={},pos={},maxr=0;for(var c=0;c<ncol;c++)cols.push([]);
+  G.nodes.forEach(function(n,i){if(!vis[i])return;if(n[3]>=0&&vis[n[3]]){(kids[n[3]]=kids[n[3]]||[]).push(i);return;}cols[n[1]].push(i);});
+  G.edges.forEach(function(e){(parents[e[1]]=parents[e[1]]||[]).push(e[0]);});
+  var back=G.edges.filter(function(e){return vis[e[0]]&&vis[e[1]]&&G.nodes[e[0]][1]>G.nodes[e[1]][1];});
+  var top=HEAD+back.length*LANE+(back.length?10:0);
+  var ch={};G.edges.forEach(function(e){(ch[e[0]]=ch[e[0]]||[]).push(e[1]);});
+  function mean(ks){return ks.length?ks.reduce(function(a,k){return a+pos[k].r;},0)/ks.length:1e9;}
+  function byParents(c){return function(i){return mean((parents[i]||[]).filter(function(p){return pos[p]&&pos[p].c<c;}));};}
+  function place(c,score){   // order by score (mean row of linked boxes), then build order; parts follow their package
+    var o=cols[c].map(function(i,j){return [score(i),j,i];});o.sort(function(a,b){return a[0]-b[0]||a[1]-b[1];});
+    var r=0,x=PAD+c*(BW+GAP);
+    o.forEach(function(t){pos[t[2]]={c:c,r:r,x:x,w:BW,y:top+r*(BH+VG)};r++;
+      (kids[t[2]]||[]).forEach(function(j){pos[j]={c:c,r:r,x:x+18,w:BW-18,y:top+r*(BH+VG)};r++;});});
+    return r;}
+  cols.forEach(function(list,c){place(c,byParents(c));});
+  place(0,function(i){return mean((ch[i]||[]).filter(function(k){return pos[k]&&pos[k].c>0;}));});  // 2nd pass: sources near their children
+  for(var c2=1;c2<ncol;c2++)place(c2,byParents(c2));
+  cols.forEach(function(list,c){maxr=Math.max(maxr,list.length+list.reduce(function(a,i){return a+(kids[i]||[]).length;},0));});
+  var W=2*PAD+ncol*BW+(ncol-1)*GAP+back.length*LANE+10,H=top+maxr*(BH+VG)+PAD;
+  gc.style.width=W+'px';gc.style.height=H+'px';gsvg.setAttribute('width',W);gsvg.setAttribute('height',H);
+  G.cols.forEach(function(t,c){var h=el('div','ghead',t);h.style.left=(PAD+c*(BW+GAP))+'px';gc.appendChild(h);gboxes.push(h);});
+  var same={},bl=0;
+  G.edges.forEach(function(e){var a=pos[e[0]],b=pos[e[1]];if(!a||!b)return;
+    var ay=a.y+BH/2,by=b.y+BH/2,d,dir,ex,cls='ge';
+    if(a.c<b.c){var x1=a.x+a.w,x2=b.x,m=(x1+x2)/2;d='M'+x1+','+ay+'C'+m+','+ay+' '+m+','+by+' '+x2+','+by;dir=1;ex=x2;}
+    else if(a.c===b.c){var n=same[a.c]=(same[a.c]||0)+1,lx=PAD+a.c*(BW+GAP)-8-n*LANE;
+      d='M'+a.x+','+ay+'H'+lx+'V'+by+'H'+b.x;dir=1;ex=b.x;}
+    else{var lane=bl++,band=HEAD+4+lane*LANE,rx=PAD+ncol*BW+(ncol-1)*GAP+6+lane*LANE,tx=b.x+b.w+10+lane*LANE;
+      d='M'+(a.x+a.w)+','+ay+'H'+rx+'V'+band+'H'+tx+'V'+by+'H'+(b.x+b.w);dir=-1;ex=b.x+b.w;cls+=' back';}
+    var g=svgEl('g',(G.nodes[e[0]][2]||G.nodes[e[1]][2])?'gdim':null);
+    var t=svgEl('title');t.textContent=R[G.nodes[e[0]][0]].id+' → '+R[G.nodes[e[1]][0]].id+' ('+e[2]+')';g.appendChild(t);
+    var p=svgEl('path',cls);p.setAttribute('d',d);g.appendChild(p);
+    var h=svgEl('path',cls.replace('ge','ga'));h.setAttribute('d',arrow(ex,by,dir));g.appendChild(h);gsvg.appendChild(g);});
+  G.nodes.forEach(function(n,i){if(pos[i]){var b=gbox(i,pos[i]);gc.appendChild(b);gboxes.push(b);}});
+  markGraph();}
+function markGraph(){var active=!!(fe.value||fs.value||fq.value.trim());
+  gboxes.forEach(function(b){if(b.dataset.k)b.classList.toggle('ctx',active&&!match(b.dataset.k));});}
+gh.addEventListener('change',drawGraph);
+// image lookup: one embedded index (image -> refs into M.lk.e)
+var LK=M.lk,lq=document.getElementById('lq'),lres=document.getElementById('lres');
+var GROUPS=[['dataset','Datasets (split)'],['label_version','Label versions that changed it (change rows)'],
+  ['review_package','Review packages'],['job','Jobs'],['roboflow_image','Roboflow image (split)']];
+function norm(q){return q.replace(/\.(png|jpe?g|tiff?)$/i,'_$1').replace(/[\s-]+/g,'-').toLowerCase();}
+function imgCard(x){var name=x[0],c=el('div','lcard');c.dataset.name=name;var ik=R['image|'+name]?'image|'+name:null;
+  var h=el('div','lname');h.appendChild(link(name,ik));c.appendChild(h);
+  var im=ik?R[ik].raw:null,row=el('div','lrow');row.appendChild(el('b',null,'Session'));
+  row.appendChild(document.createTextNode(im?((im.session||'?')+' · grid '+(im.grid||'?')+(im.session_grid?' (session grid '+im.session_grid+')':'')):'no image record (Roboflow only)'));
+  c.appendChild(row);
+  GROUPS.forEach(function(g){var refs=x[1].filter(function(f){return LK.e[Array.isArray(f)?f[0]:f].split('|')[0]===g[0];});
+    if(!refs.length&&g[0]==='roboflow_image')return;
+    var r=el('div','lrow');r.appendChild(el('b',null,g[1]));
+    if(!refs.length)r.appendChild(el('span','note','none'));
+    refs.forEach(function(f,i){var k=LK.e[Array.isArray(f)?f[0]:f];if(i)r.appendChild(document.createTextNode(', '));
+      r.appendChild(link(R[k].id,k));if(R[k].dim||R[k].s==='superseded'||R[k].s==='cancelled')r.appendChild(el('span','note',' ['+R[k].s+']'));
+      if(Array.isArray(f))r.appendChild(el('span','note',' ('+f[1]+')'));});
+    c.appendChild(r);});
+  return c;}
+function lookup(){var q=lq.value.trim();lres.textContent='';
+  if(!q){lres.appendChild(el('div','note',LK.i.length+' images indexed'+(LK.hidden?' (+'+LK.hidden+' names in lists/logs not in the registry, not shown)':'')+'. Type an image name or part of it.'));return;}
+  var ql=q.toLowerCase(),qn=norm(q);
+  var hits=LK.i.filter(function(x){var n=x[0].toLowerCase();return n.indexOf(ql)>=0||n.indexOf(qn)>=0;});
+  if(!hits.length){lres.appendChild(el('div','why','No match for “'+q+'”.'));return;}
+  lres.appendChild(el('div','note',hits.length+' match'+(hits.length===1?'':'es')+(hits.length>50?', showing the first 50':'')));
+  hits.slice(0,50).forEach(function(x){lres.appendChild(imgCard(x));});}
+lq.addEventListener('input',lookup);
+drawGraph();lookup();
 apply();
 })();
 """
@@ -740,7 +1080,21 @@ def render_html(model: dict) -> str:
 <div class="layout">
 <div><h2>Queue</h2>
 <div class="queue" id="queue"></div>
-<h2>History tree</h2><div id="tree"></div></div>
+<div class="tabs" role="tablist">
+<button type="button" class="tab on" role="tab" id="t-tree" data-p="tree" aria-selected="true">History tree</button>
+<button type="button" class="tab" role="tab" id="t-graph" data-p="graph" aria-selected="false">Lineage graph</button>
+<button type="button" class="tab" role="tab" id="t-lookup" data-p="lookup" aria-selected="false">Image lookup</button>
+</div>
+<div id="tree" class="pane"></div>
+<div id="graph" class="pane hide">
+<div class="gbar"><label><input type="checkbox" id="ghist"> <span id="ghistl">Show history</span></label>
+<span class="note">Arrows: parent → child (inputs). Dashed blue: model predictions → review/revise → label version. ★ = production.</span></div>
+<div class="gwrap" id="gwrap"><div class="gcanvas" id="gcanvas"><svg id="gsvg" aria-hidden="true"></svg></div></div>
+</div>
+<div id="lookup" class="pane hide">
+<div class="filters"><input id="lq" type="search" placeholder="Image name or part of it" aria-label="Image name"></div>
+<div id="lres"></div>
+</div></div>
 <aside id="detail" class="hidden"><div class="note">Tap a record for its detail.</div></aside>
 </div>
 </main>
@@ -760,8 +1114,9 @@ def build(paths, out) -> dict:
     files = input_files(paths)
     if any(out.resolve() == f.resolve() for f in files):
         raise SystemExit(f"refusing to write: {out} is an input file")
-    current, history, stats = read_registry(files)
-    model = build_model(current, history, stats, [str(p) for p in paths])
+    changes: list = []
+    current, history, stats = read_registry(files, changes)
+    model = build_model(current, history, stats, [str(p) for p in paths], changes)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(out.name + ".tmp")
     tmp.write_text(render_html(model), encoding="utf-8")
