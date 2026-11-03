@@ -57,7 +57,9 @@ class ConfigTests(unittest.TestCase):
                     f()
                 self.assertIsNone(f(required=False))
             self.assertIsNone(config.processing_root())
-            self.assertEqual(config.protected_roots(), (Path.home() / "Box",))
+            # the standard processing location stays protected even when it isn't found (e.g. another clone)
+            self.assertEqual(config.protected_roots(),
+                             (Path.home() / "Desktop" / config.PROCESSING, Path.home() / "Box"))
         with mock.patch.dict(os.environ, clean_env(CRYOEV_LAPTOP_ROOT=str(self.tmp / "missing")), clear=True):
             with self.assertRaises(config.ConfigError):
                 config.laptop_root()

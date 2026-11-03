@@ -24,8 +24,9 @@ class ConfigError(RuntimeError):
 
 
 def find_sibling(name, start=None):
-    """First `<ancestor>/<name>` folder above `start` (default the repo; the checkout may be a nested worktree)."""
-    start = Path(start) if start else REPO
+    """First `<ancestor>/<name>` folder above `start` (default: above the repo, never inside it, so a stray
+    `<repo>/CryoAI` can't win and get committed; the checkout may be a nested worktree)."""
+    start = Path(start) if start else REPO.parent
     for p in [start, *start.parents]:
         if (p / name).is_dir():
             return p / name
@@ -70,5 +71,5 @@ def registry_root(required=True) -> Path | None:
 
 def protected_roots() -> tuple:
     """Never written: the processing datasets (env and found copies) and Box."""
-    roots = [p for p in (processing_root(), find_sibling(PROCESSING)) if p]
+    roots = [p for p in (processing_root(), find_sibling(PROCESSING), Path.home() / "Desktop" / PROCESSING) if p]
     return tuple(dict.fromkeys(roots)) + (Path.home() / "Box",)

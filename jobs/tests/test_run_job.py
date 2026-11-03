@@ -75,6 +75,14 @@ class RunJobTests(T.TempRoots, unittest.TestCase):
         self.assertEqual(self.done(q.name)["status"], "blocked")
         self.assertEqual(C.read_json(self.share / C.D / q.name / C.STATUS)["exit_code"], 0)
 
+    def test_finished_run_json_but_nonzero_exit_is_blocked(self):
+        q = self.push()
+        with mock.patch.dict(os.environ, {"FAKE_TRAINER": "finished_exit1"}):
+            self.assertEqual(self.run_job(), 1)
+        done = self.done(q.name)
+        self.assertEqual((done["status"], done["run_status"]), ("blocked", "finished"))
+        self.assertIn("exit 1 after a finished run.json", done["reason"])
+
     def test_missing_yaml_is_blocked_fake(self):
         q = self.push(yaml=False)
         self.assertEqual(self.run_job(), 1)

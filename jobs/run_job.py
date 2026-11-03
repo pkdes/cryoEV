@@ -231,6 +231,19 @@ def pick(root: Path, only=None):
     return min(ready, key=lambda d: ((d / C.READY).stat().st_mtime, d.name)) if ready else None
 
 
+def rename_retry(src: Path, dst: Path, tries=6):
+    """Path.rename, retried with backoff: antivirus, the indexer or an open Explorer window can hold a folder
+    for a moment on Windows. Gives up with SystemExit (results stay in `src`), never deletes."""
+    for i in range(tries):
+        try:
+            return src.rename(dst)
+        except OSError as e:
+            if i == tries - 1:
+                raise SystemExit(f"[jobs] could not rename {src} -> {dst}: {e}. Results are kept in {src}; "
+                                 f"rename it by hand (see docs/JOBS.md, recovery).")
+            time.sleep(2 ** i)
+
+
 def run_one(root: Path, qdir: Path) -> dict:
     job_id = qdir.name
     work, dd = root / C.WORK / job_id, root / C.D
@@ -238,19 +251,19 @@ def run_one(root: Path, qdir: Path) -> dict:
     dd.mkdir(parents=True, exist_ok=True)
     if tmp.exists():                                   # a killed earlier attempt: set aside, never deleted
         stale = dd / f".tmp_{job_id}.stale_{time.strftime('%Y%m%d-%H%M%S')}"
-        tmp.rename(stale)
+        rename_retry(tmp, stale)
         print(f"[jobs] stale {tmp.name} renamed to {stale.name}")
     tmp.mkdir()
     st = {"schema": "job_status/1", "job": job_id, "status": "running", "machine": platform.node(),
           "started": C.now(), "queue_dir": str(root)}
     C.write_json(tmp / C.STATUS, st)
-    if work.exists():                                  # our own scratch from an earlier attempt
-        shutil.rmtree(work)
-    work.mkdir(parents=True)
     log = work / "train.log"
     runs = []
     try:
-        spec, job, zp, names = check_job(qdir, work, st)
+        spec, job, zp, names = check_job(qdir, work, st)   # GPU-busy first: an orphaned trainer may own work/
+        if work.exists():                              # our own scratch from an earlier attempt
+            shutil.rmtree(work)
+        work.mkdir(parents=True)
         print(f"[jobs] {job_id}: checks passed; unzipping {zp.name}")
         with zipfile.ZipFile(zp) as z:
             z.extractall(work / "training outputs")
@@ -273,6 +286,8 @@ def run_one(root: Path, qdir: Path) -> dict:
         st["run"], st["run_status"] = rjs[-1].parent.name, rj.get("status")
         if rj.get("status") != "finished":
             raise Blocked(f"run {rj.get('status')}: {str(rj.get('error') or '')[:300]}")
+        if rc != 0:                                    # e.g. the summary step failed after run.json was written
+            raise Blocked(f"exit {rc} after a finished run.json; see train.log")
         st.update(status="done", reason=None)
     except Blocked as e:
         st.update(status="blocked", reason=str(e))
@@ -291,7 +306,7 @@ def run_one(root: Path, qdir: Path) -> dict:
         st.update(status="blocked", reason=f"result copy failed: {e}")
     st.update(ended=C.now(), runs=[rd.name for rd in runs])
     C.write_json(tmp / C.STATUS, st)
-    tmp.rename(final)
+    rename_retry(tmp, final)
     done = {k: st.get(k) for k in ("job", "status", "reason", "dataset", "bundle_id", "run", "run_status",
                                    "runs", "machine", "ended")}
     C.write_json(final / C.DONE, done)                  # last: the laptop pulls only folders with DONE.json

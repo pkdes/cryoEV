@@ -116,6 +116,15 @@ class SyncTests(T.TempRoots, unittest.TestCase):
             self.run_job()
         return sync.pull(self.share, copier="shutil")
 
+    def test_retry_refuses_done_job_not_pulled(self):
+        sync.push(JOB, self.zp, self.share, copier="shutil")
+        self.assertEqual(self.run_job(), 0)
+        with self.assertRaises(sync.SyncError):
+            sync.retry(JOB, self.share)
+        self.assertTrue((self.share / C.D / JOB).is_dir(), "a done, unpulled result is not moved")
+        sync.retry(JOB, self.share, force=True)
+        self.assertFalse((self.share / C.D / JOB).exists())
+
     def test_pull_twice_adds_nothing(self):
         out = self.run_and_pull()
         self.assertEqual(out[0]["status"], "done")
@@ -154,6 +163,8 @@ class SyncTests(T.TempRoots, unittest.TestCase):
         run = out[0]["copied"][0]
         self.assertEqual(cur[run]["status"], "failed")
         self.assertIn("run.json status error", cur[run]["note"])
+        with self.assertRaises(sync.SyncError):          # not a job id (e.g. the runner's live .tmp_ folder)
+            sync.retry(f".tmp_{JOB}", self.share)
         sync.retry(JOB, self.share)
         self.assertFalse((self.share / C.D / JOB).exists())
         self.assertEqual(len(list((self.share / C.D / C.RETIRED).iterdir())), 1)

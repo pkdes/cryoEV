@@ -26,7 +26,8 @@ python jobs/run_job.py --queue-dir C:\cj
 - **Runner checks.** It checks the zip md5 (job.json and the `.md5` sidecar), that the repo commit equals JOB.json's `cryoEV_commit`, Ultralytics 8.4.x, and that the longest unzipped path is under 240 characters.
   It also checks that no other process is on the GPU: any python process, or one using ≥ 256 MB. Graphics apps listed with no memory are ignored.
   On a GPU under 8 GB it only runs y8n/s at imgsz ≤ 640. Anything else is blocked "desktop only".
-- A failed check or run ends **blocked** with a reason. The status comes from the run's `run.json`, never from the exit code.
+- A failed check or run ends **blocked** with a reason. A job is **done** only when the run's `run.json` says `finished` **and** the trainer exited 0 (a later step can fail after `run.json` is written).
+- The GPU-busy check runs before the old `work\<job>\` is cleared, so an orphaned trainer's files are never deleted under it. If a final rename fails (antivirus, an open Explorer window), it is retried; if it still fails, the runner exits non-zero and the results stay in `d\.tmp_<job>\`.
 - One ntfy push at the end, only if `CRYOEV_NTFY_TOPIC` is set.
 - **Exit codes.** `run_job.py`: 0 = done or nothing ready, 1 = blocked, 3 = the lock is held. `sync.py`: 2 = refused or failed.
 - **Laptop smoke test.** A y8n imgsz 320 job runs here too: `--where laptop`, then `run_job.py --queue-dir <local folder>` and `sync.py ... --share <local folder>`. The real test is `jobs/tests/test_smoke.py`; its docstring has the env vars.

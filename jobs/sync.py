@@ -228,11 +228,21 @@ def status(share):
     return rows
 
 
-def retry(job_id, share):
+def retry(job_id, share, force=False):
+    """Move d/<job> aside so the runner picks the job again. Refuses a bad id (e.g. a live .tmp_ folder)
+    and a done job that was never pulled (its run would never be imported) unless force."""
+    import ids
     share = Path(share)
+    if not ids.is_id("job", job_id):
+        raise SyncError(f"{job_id!r} is not a job id")
     src = share / C.D / job_id
     if not src.is_dir():
         raise SyncError(f"no d/{job_id} to retry")
+    done = src / C.DONE
+    if not force and done.is_file() and C.read_json(done).get("status") == "done":
+        pulled = {j for j, _ in ledger(ledger_path())} if config.laptop_root(required=False) else set()
+        if job_id not in pulled:
+            raise SyncError(f"{job_id} is done but not pulled yet; pull it first (or --force)")
     dst = share / C.D / C.RETIRED / f"{job_id}_{time.strftime('%Y%m%d-%H%M%S')}"
     dst.parent.mkdir(parents=True, exist_ok=True)
     src.rename(dst)
@@ -254,6 +264,8 @@ def main(argv=None):
             p.add_argument("--bundle", required=True, type=Path, help="zip from training/make_job_bundle.py")
         if name == "pull":
             p.add_argument("--who", default="pujan", help="people.json id for the set-status lines")
+        if name == "retry":
+            p.add_argument("--force", action="store_true", help="also retry a done job that was never pulled")
     a = ap.parse_args(argv)
     try:
         if a.cmd == "push":
@@ -263,7 +275,7 @@ def main(argv=None):
         elif a.cmd == "status":
             status(a.share)
         else:
-            retry(a.job_id, a.share)
+            retry(a.job_id, a.share, a.force)
     except (SyncError, config.ConfigError, OSError) as e:
         print(f"[{a.cmd}] {e}", file=sys.stderr)
         return 2

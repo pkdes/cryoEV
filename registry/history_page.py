@@ -465,14 +465,18 @@ def read_change_log(owner) -> list | None:
     if not f.is_file():
         return None
     out = []
-    with open(f, encoding="utf-8") as fh:
-        for line in fh:
-            try:
-                o = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(o, dict) and isinstance(o.get("image"), str):
-                out.append(o["image"])
+    try:
+        with open(f, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    o = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(o, dict) and isinstance(o.get("image"), str):
+                    out.append(o["image"])
+    except (OSError, UnicodeDecodeError) as e:      # one unreadable log must not stop the page build
+        print(f"[history] skipped {f}: {e}", file=sys.stderr)
+        return None
     return out
 
 

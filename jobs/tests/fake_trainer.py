@@ -1,6 +1,7 @@
 """Stand-in for training/run_experiments.py in the job tests (no GPU). Same CLI and output layout.
 
 FAKE_TRAINER = finished (default) | error (run.json error, exit 1) | error_exit0 (run.json error, exit 0)
+               | finished_exit1 (run.json finished, exit 1: a later step failed)
 FAKE_SLEEP   = seconds to sleep after writing <work>/fake_started.txt (pid), before any output
 Like the real script: no dataset.yaml -> exit 1 with no run.json.
 """
@@ -34,7 +35,7 @@ try:
     bundle = json.loads((ds / "JOB.json").read_text(encoding="utf-8")).get("bundle_id")
 except OSError:
     bundle = None
-status = "finished" if mode == "finished" else "error"
+status = "finished" if mode.startswith("finished") else "error"
 started = datetime.now().isoformat()
 (run / "run.json").write_text(json.dumps({
     "schema": "run/1", "id": name, "dataset": a.dataset, "bundle_id": bundle, "job_bundle": bundle,
@@ -45,4 +46,4 @@ started = datetime.now().isoformat()
     "started": started, "ended": datetime.now().isoformat(),
     "metrics": {"mask_map50_95": 0.1}}), encoding="utf-8")
 print(f"fake run {name}: {status}")
-sys.exit(1 if mode == "error" else 0)
+sys.exit(1 if mode in ("error", "finished_exit1") else 0)
