@@ -18,7 +18,9 @@ import ntpath
 import os
 from pathlib import Path
 
-PROTECTED_ROOTS = (Path.home() / "Desktop" / "Cryo-image-processing", Path.home() / "Box")
+from data_utils.config import protected_roots
+
+PROTECTED_ROOTS = protected_roots()  # (Cryo-image-processing (env and found copies), ~/Box)
 
 
 def _strip_prefix(s: str) -> tuple[str, str | None]:

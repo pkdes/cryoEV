@@ -59,8 +59,10 @@ from tqdm import tqdm
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "training"))
 from train_yolo import match_objects_hungarian  # noqa: E402
+sys.path.insert(0, str(REPO))
+from data_utils import config  # noqa: E402
 
-ROOT = REPO.parent / "CryoAI"
+ROOT = config.cryoai_root(required=False)  # best-effort (None when not found); main() resolves it
 TEMPLATE = Path(__file__).resolve().parent / "review_tool" / "index.html"
 SPLIT_MAP = {"train": "train", "valid": "val", "test": "test"}  # coco split -> yolo split
 NOT_MATCHED = {"non-EV", "items-nfaR"}  # dropped from training, so never flagged (single-class mode)
@@ -160,8 +162,9 @@ def gt_items(anns, cat_names, w, h):
 
 def run_layout_inputs(args):
     """(file, split, w, h, anns, cat_names, image_path, pred_path) from the training-run layout."""
-    source_root = ROOT / "training images" / args.source_name
-    run_dir = ROOT / "training outputs" / args.dataset / "runs" / args.model_run_dir
+    root = config.cryoai_root()
+    source_root = root / "training images" / args.source_name
+    run_dir = root / "training outputs" / args.dataset / "runs" / args.model_run_dir
     for coco_split, yolo_split in SPLIT_MAP.items():
         coco_path = source_root / coco_split / "_annotations.coco.json"
         if not coco_path.exists():
@@ -246,7 +249,7 @@ def main():
         inputs = run_layout_inputs(args)
     name = args.output_name or (args.out_dir.name if args.out_dir else
                                 f"{args.source_name.replace(' ', '_')}_review_{datetime.now():%Y%m%d}")
-    out = args.out_dir or ROOT / "annotation review" / name
+    out = args.out_dir or config.cryoai_root() / "annotation review" / name
     (out / "images").mkdir(parents=True, exist_ok=True)
     pred_classes = [c.strip() for c in args.pred_classes.split(",")]
     groups = load_class_groups(args.class_groups) if args.class_aware else None

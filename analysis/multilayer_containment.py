@@ -18,15 +18,19 @@ Containment rule: polygon B is "contained in" polygon A if
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from collections import defaultdict
 
 import cv2
 import numpy as np
 
-ROOT = Path(__file__).parent.parent.parent / "CryoAI"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from data_utils import config  # noqa: E402
+
+ROOT = config.cryoai_root(required=False)  # best-effort (None when not found); main() resolves it
 DEFAULT_SOURCE_NAME = "roboflow - 20260713 all layer label"
-SOURCE_ROOT = ROOT / "training images" / DEFAULT_SOURCE_NAME
+SOURCE_ROOT = ROOT / "training images" / DEFAULT_SOURCE_NAME if ROOT else None
 SPLITS = ["train", "valid"]
 
 CONTAINMENT_THRESHOLD = 0.9
@@ -293,7 +297,7 @@ def main():
     parser.add_argument("--source-name", default=DEFAULT_SOURCE_NAME,
                          help="Folder name under 'training images/' holding the raw Roboflow COCO export")
     args = parser.parse_args()
-    source_root = ROOT / "training images" / args.source_name
+    source_root = config.cryoai_root() / "training images" / args.source_name
 
     splits = ["train", "valid"]
     if (source_root / "test" / "_annotations.coco.json").exists():

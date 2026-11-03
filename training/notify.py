@@ -2,16 +2,18 @@
 Cross-platform notification utility for campaign completion.
 Sends Windows toast notifications (local) AND ntfy.sh push notifications (mobile).
 
-ntfy topic: cryoev-training-carney2026
+ntfy topic: $CRYOEV_NTFY_TOPIC (keep it secret: anyone who knows it can read the pushes).
+Unset = no push, toast only. Set once with: setx CRYOEV_NTFY_TOPIC <random string>
 """
 
+import os
 import subprocess
 import urllib.request
 import json
 import platform
 from datetime import datetime
 
-NTFY_TOPIC = "cryoev-training-carney2026"
+NTFY_TOPIC_ENV = "CRYOEV_NTFY_TOPIC"
 
 _SUMMARY_SCRIPT = """
 param(
@@ -34,10 +36,13 @@ try {
 
 
 def _send_ntfy(title: str, message: str, priority: int = 3):
-    """Send push notification to phone via ntfy.sh."""
+    """Send push notification to phone via ntfy.sh. Skipped silently when $CRYOEV_NTFY_TOPIC is unset."""
+    topic = os.environ.get(NTFY_TOPIC_ENV, "").strip()
+    if not topic:
+        return
     try:
         data = json.dumps({
-            "topic": NTFY_TOPIC,
+            "topic": topic,
             "title": title,
             "message": message,
             "priority": priority,

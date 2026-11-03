@@ -35,13 +35,17 @@ import json
 import random
 import re
 import shutil
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-ROOT = Path(__file__).parent.parent.parent / "CryoAI"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from data_utils import config  # noqa: E402
+
+ROOT = config.cryoai_root(required=False)  # best-effort (None when not found); main() resolves it
 SPLITS = ["train", "valid", "test"]
 
 # (regex on the original filename, session label, sub-batch group in the regex or None)
@@ -190,8 +194,9 @@ def main():
     ap.add_argument("--group-montage", action="store_true", help="Keep all tiles of a montage in one split")
     args = ap.parse_args()
     ratios = [float(x) for x in args.ratios.split(",")]
-    src = ROOT / "training images" / args.source_name
-    out = ROOT / "training images" / args.output_name
+    root = config.cryoai_root()
+    src = root / "training images" / args.source_name
+    out = root / "training images" / args.output_name
 
     recs, cocos = load_export(src)
     for r in recs:
@@ -200,7 +205,7 @@ def main():
 
     hist_split = {}
     if args.history:
-        hrecs, _ = load_export(ROOT / "training images" / args.history)
+        hrecs, _ = load_export(root / "training images" / args.history)
         for r in hrecs:
             hist_split.setdefault(identity_key(r["name"]), set()).add(r["src_split"])
 
@@ -252,7 +257,7 @@ def main():
         batch_rows.append((batch, sum(u["n"] for u in units), len(units), fill, n_ok))
 
     # Report.
-    out_report = out if not args.propose else ROOT / "secondary analyses" / "split_proposals" / args.output_name
+    out_report = out if not args.propose else root / "secondary analyses" / "split_proposals" / args.output_name
     out_report.mkdir(parents=True, exist_ok=True)
     with open(out_report / "split_assignment.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)

@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 from pathlib import Path
 
-# Same convention as data_utils/prepare_all_layer_singleclass.py
-ROOT = Path(__file__).parent.parent.parent / "CryoAI"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from data_utils import config  # noqa: E402
+
+# CryoAI-only workflow: raises when CryoAI is not found ($CRYOEV_CRYOAI_ROOT)
+ROOT = config.cryoai_root()
 OUT = ROOT / "embedding outputs"
 QC = OUT / "qc"
 CROPS = OUT / "crops"

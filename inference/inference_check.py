@@ -49,7 +49,6 @@ REGISTRY = REPO / "models" / "models.yaml"
 CLASSES = {"roboflow": REPO / "annotation" / "web_qc" / "classes_roboflow.yaml",
            "default": REPO / "annotation" / "web_qc" / "classes.yaml"}
 DEFAULT_MODEL = "v5_evnonev_y8m_20261029"
-DEFAULT_OUT = REPO.parent / "CryoAI-laptop" / "inference_checks"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}   # as web_qc.server
 DEFOCUS_COLUMNS = ("mdoc_defocus_um", "defocus_um", "defocus")
 NAME_COLUMNS = ("output_name", "image", "file_name", "filename", "name")
@@ -59,6 +58,7 @@ STATUSES = ("staged", "reviewed", "scored", "failed")
 sys.path.insert(0, str(REPO))
 # Raw data and synced storage: a batch is never written under these (any depth). The check (prefixes, UNC,
 # trailing spaces, links) lives in data_utils/path_guard.py, shared with annotation/apply_review_edits.py.
+from data_utils import config  # noqa: E402
 from data_utils.path_guard import PROTECTED_ROOTS, protected_problem  # noqa: E402
 
 
@@ -658,7 +658,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def common(p):
-        p.add_argument("--out", type=Path, default=DEFAULT_OUT, help=f"batch root (default {DEFAULT_OUT})")
+        p.add_argument("--out", type=Path, help="batch root (default <CryoAI-laptop>/inference_checks)")
 
     s = sub.add_parser("stage", help="sample tiles and stage a review batch")
     s.add_argument("--tiles", required=True, type=Path, help="folder of model-input tiles (8-bit PNG/JPG)")
@@ -706,6 +706,11 @@ def main():
     s.set_defaults(func=cmd_list)
 
     a = ap.parse_args()
+    if a.out is None:
+        try:
+            a.out = config.laptop_root() / "inference_checks"
+        except config.ConfigError as e:
+            raise SystemExit(f"{e} (or pass --out)")
     a.func(a)
 
 

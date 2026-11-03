@@ -34,7 +34,8 @@ sys.path.insert(0, str(REPO))
 import ids  # noqa: E402
 from data_utils.path_guard import protected_problem  # noqa: E402
 from schema_check import check_record, load_schemas  # noqa: E402
-from validate import ENTITIES, EXCLUDED_SESSIONS, find_sibling, read_json  # noqa: E402
+from data_utils import config  # noqa: E402
+from validate import ENTITIES, EXCLUDED_SESSIONS, read_json  # noqa: E402
 
 PEOPLE = REPO / "annotation" / "people.json"
 POINTER = {"inference_check", "label_version"}
@@ -48,11 +49,8 @@ class RegistryError(ValueError):
 
 
 def default_root():
-    env = os.environ.get("CRYOEV_REGISTRY")
-    if env:
-        return Path(env)
-    lap = find_sibling("CryoAI-laptop", REPO)
-    return (lap or Path(r"C:\Users\pujan\Desktop\cryoEV pujrog\CryoAI-laptop")) / "registry"
+    """$CRYOEV_REGISTRY, else <CryoAI-laptop>/registry; raises config.ConfigError when neither is found."""
+    return config.registry_root()
 
 
 def schemas():
@@ -333,7 +331,11 @@ def main(argv=None):
     jn.add_argument("--total", type=int, help="progress total (default: n images)")
     jn.add_argument("--note")
     a = ap.parse_args(argv)
-    root = a.root or default_root()
+    try:
+        root = a.root or default_root()
+    except config.ConfigError as e:
+        print(f"{e} (or pass --root)", file=sys.stderr)
+        return 2
     try:
         if a.cmd == "import":
             import importers

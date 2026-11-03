@@ -31,7 +31,10 @@ from train_yolo import (
 )
 from notify import notify_completion, notify_error, notify_progress, send_notification
 
-CRYOAI_ROOT = Path(__file__).parent.parent.parent / "CryoAI"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from data_utils import config  # noqa: E402
+
+CRYOAI_ROOT = config.cryoai_root()  # raises when CryoAI is not found ($CRYOEV_CRYOAI_ROOT)
 
 # Dataset (single-class EV, all layers collapsed; existing Roboflow split preserved).
 # Overridden by --dataset in the __main__ block below.

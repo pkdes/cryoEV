@@ -21,13 +21,17 @@ import argparse
 import csv
 import json
 import re
+import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
 import yaml
 
-CRYOAI = Path(__file__).resolve().parent.parent.parent / "CryoAI"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from data_utils import config  # noqa: E402
+
+CRYOAI = config.cryoai_root()  # CryoAI-only script: raises when CryoAI is not found ($CRYOEV_CRYOAI_ROOT)
 OUT_ROOT = CRYOAI / "training outputs"
 IMG_ROOT = CRYOAI / "training images"
 IMG_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
@@ -97,7 +101,7 @@ HEADLINE = {"single": {"EV": "native", "standalone": "role"},
 
 
 def rebase(p):
-    """Map a path recorded on another machine (C:/Users/pujan/...) onto this CryoAI folder."""
+    """Map a path recorded on another machine (C:/Users/<name>/...) onto this CryoAI folder."""
     s = str(p).replace("\\", "/")
     for anchor in ("training outputs/", "training images/"):
         if anchor in s:

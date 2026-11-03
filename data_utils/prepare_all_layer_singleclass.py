@@ -19,8 +19,12 @@ train/valid _annotations.coco.json):
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from collections import defaultdict
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from data_utils import config  # noqa: E402
 
 # Mapped by category NAME, not numeric COCO id -- ids aren't guaranteed
 # stable across Roboflow export versions, names are.
@@ -46,7 +50,7 @@ CLASS_SCHEMES = {
 }
 CLASS_SCHEMES["ev"][0]["VLDL"] = None   # single-class: VLDL dropped like non-EV
 
-ROOT = Path(__file__).parent.parent.parent / "CryoAI"
+ROOT = config.cryoai_root(required=False)  # best-effort (None when not found); main() resolves it
 DEFAULT_SOURCE_NAME = "roboflow - 20260713 all layer label"
 DEFAULT_OUTPUT_NAME = "roboflow_20260713_all_layer_singleclass"
 
@@ -159,8 +163,9 @@ def main():
     CATEGORY_NAME_TO_CLASS, CLASS_NAMES = CLASS_SCHEMES[args.class_scheme]
     print(f"Class scheme: {args.class_scheme} -> {CLASS_NAMES}")
 
-    source_root = ROOT / "training images" / args.source_name
-    output_root = ROOT / "training outputs" / args.output_name
+    root = config.cryoai_root()
+    source_root = root / "training images" / args.source_name
+    output_root = root / "training outputs" / args.output_name
 
     # Roboflow split name -> YOLO split name. "test" is included automatically
     # if the export has one (the 20260713 export didn't; newer ones may).

@@ -32,7 +32,9 @@ from pathlib import Path
 import yaml
 
 REPO = Path(__file__).resolve().parent.parent
-DEFAULT_OUT = REPO.parent / "CryoAI-laptop" / "job_bundles"
+sys.path.insert(0, str(REPO))
+from data_utils import config  # noqa: E402
+
 SPLIT_KEYS = ("train", "val", "test")
 STORED = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".pt", ".zip"}   # already compressed
 
@@ -191,10 +193,15 @@ def main():
     ap.add_argument("--dataset-dir", required=True, type=Path,
                     help="prepared YOLO dataset: dataset.yaml, images/<split>/, labels/<split>/")
     ap.add_argument("--dataset-name", help="folder name on the desktop (default: --dataset-dir's name)")
-    ap.add_argument("--out", type=Path, default=DEFAULT_OUT, help=f"default {DEFAULT_OUT}")
+    ap.add_argument("--out", type=Path, help="default <CryoAI-laptop>/job_bundles")
     ap.add_argument("exp_args", nargs=argparse.REMAINDER,
                     help="after --: arguments for training/run_experiments.py")
     a = ap.parse_args()
+    if a.out is None:
+        try:
+            a.out = config.laptop_root() / "job_bundles"
+        except config.ConfigError as e:
+            raise SystemExit(f"{e} (or pass --out)")
 
     root = a.dataset_dir.resolve()
     for need in ("dataset.yaml", "images", "labels"):

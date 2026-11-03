@@ -71,6 +71,10 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from analysis.ev_variance_components import (load_per_image,  # noqa: E402
                                              variance_components)
+from data_utils import config  # noqa: E402
+
+# 0727 control inputs, relative to the processing root (config.processing_root())
+CONTROL_0727 = Path("20260727/processed/yolo_out/accept/v3_run1_20260824")
 
 # nested data: {square: {position: [field values]}}
 Nested = Dict[str, Dict[str, List[float]]]
@@ -318,13 +322,17 @@ def main() -> None:
     ap.add_argument("--n-boot", type=int, default=2000)
     ap.add_argument("--n-perm", type=int, default=5000)
     ap.add_argument("--seed", type=int, default=20261027)
-    ap.add_argument("--control-0727-per-image", type=Path, default=Path(
-        r"C:\Users\pujan\Desktop\Cryo-image-processing\20260727\processed\yolo_out\accept"
-        r"\v3_run1_20260824\morphology\per_image_summary.csv"))
-    ap.add_argument("--control-0727-reference", type=Path, default=Path(
-        r"C:\Users\pujan\Desktop\Cryo-image-processing\20260727\processed\yolo_out\accept"
-        r"\v3_run1_20260824\variance\variance_components.csv"))
+    ap.add_argument("--control-0727-per-image", type=Path,
+                    help=f"default <Cryo-image-processing>/{CONTROL_0727.as_posix()}/morphology/per_image_summary.csv")
+    ap.add_argument("--control-0727-reference", type=Path,
+                    help=f"default <Cryo-image-processing>/{CONTROL_0727.as_posix()}/variance/variance_components.csv")
     args = ap.parse_args()
+    if args.control_0727_per_image is None or args.control_0727_reference is None:
+        proc = config.processing_root()
+        if proc is None:
+            ap.error("Cryo-image-processing not found: set CRYOEV_PROCESSING_ROOT or pass both --control-0727-* files")
+        args.control_0727_per_image = args.control_0727_per_image or proc / CONTROL_0727 / "morphology" / "per_image_summary.csv"
+        args.control_0727_reference = args.control_0727_reference or proc / CONTROL_0727 / "variance" / "variance_components.csv"
     rng = np.random.default_rng(args.seed)
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)

@@ -38,11 +38,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 sys.path.insert(0, str(REPO))
+from data_utils import config  # noqa: E402
 from data_utils.path_guard import protected_problem  # noqa: E402
 
-REAL_DIR = Path.home() / "Desktop" / "cryoEV pujrog" / "CryoAI-laptop" / "registry"
-DEFAULT_REGISTRY = REAL_DIR  # one <entity>.jsonl per entity (registry.py); every *.jsonl in it is read
-DEFAULT_OUT = REAL_DIR / "history.html"
+# Default registry: config.registry_root() (one <entity>.jsonl per entity; every *.jsonl in it is read),
+# resolved in main() so importing this module never needs the data folders. Default page: <registry>/history.html
 
 # Page lanes, from the contract's "Statuses (queue and history view)" table.
 LANES = [
@@ -771,11 +771,17 @@ def build(paths, out) -> dict:
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--registry", action="append", help=f"JSONL file or folder of *.jsonl (repeatable). "
-                    f"Default: {DEFAULT_REGISTRY}")
-    ap.add_argument("--out", default=str(DEFAULT_OUT))
+    ap.add_argument("--registry", action="append", help="JSONL file or folder of *.jsonl (repeatable). "
+                    "Default: $CRYOEV_REGISTRY, else <CryoAI-laptop>/registry")
+    ap.add_argument("--out", help="default <registry>/history.html")
     a = ap.parse_args(argv)
-    paths = a.registry or [str(DEFAULT_REGISTRY)]
+    if not a.registry or not a.out:
+        try:
+            reg = config.registry_root()
+        except config.ConfigError as e:
+            raise SystemExit(f"{e} (or pass --registry and --out)")
+    paths = a.registry or [str(reg)]
+    a.out = a.out or str(reg / "history.html")
     missing = [p for p in paths if not Path(p).exists()]
     if missing:
         raise SystemExit(f"not found: {', '.join(missing)} (try --registry registry/samples)")

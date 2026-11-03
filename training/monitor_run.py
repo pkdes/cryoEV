@@ -7,11 +7,14 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import sys
 import yaml
 import subprocess
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from data_utils import config  # noqa: E402
 
-DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parent.parent.parent / "CryoAI" / "training outputs"
+# Default --output-root: <CryoAI>/training outputs, resolved in __main__ (config.cryoai_root()).
 
 
 def get_gpu_info():
@@ -282,11 +285,14 @@ def monitor(output_root: Path, interval: int, run_dir: Path | None = None, conti
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Live monitor for YOLO training runs (follows an entire sweep by default).")
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT, help="Training output root containing LATEST_RUN.txt")
+    parser.add_argument("--output-root", type=Path, default=None,
+                        help="Training output root containing LATEST_RUN.txt (default <CryoAI>/training outputs)")
     parser.add_argument("--run-dir", type=Path, default=None, help="Optional explicit run directory to monitor (implies --once)")
     parser.add_argument("--interval", type=int, default=5, help="Refresh interval in seconds")
     parser.add_argument("--once", action="store_true", help="Exit when the current run finishes instead of waiting for the next run in a sweep")
     args = parser.parse_args()
+    if args.output_root is None and args.run_dir is None:
+        args.output_root = config.cryoai_root() / "training outputs"
     try:
         monitor(args.output_root, args.interval, args.run_dir, continuous=not args.once)
     except KeyboardInterrupt:

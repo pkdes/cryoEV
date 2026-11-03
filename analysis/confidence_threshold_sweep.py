@@ -24,7 +24,10 @@ from train_yolo import load_predictions_yolo_format, mask_iou_matrix
 sys.path.insert(0, str(Path(__file__).parent))
 from multilayer_containment import load_image_annotations
 
-ROOT = Path(__file__).parent.parent.parent / "CryoAI"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from data_utils import config  # noqa: E402
+
+ROOT = config.cryoai_root(required=False)  # best-effort (None when not found); main() resolves it
 
 GT_EXCLUDE = {"non-EV", "items-nfaR"}
 MATCH_IOU = 0.5
@@ -93,8 +96,9 @@ def main():
                          help="Run folder name under '<dataset>/runs/' whose cached predictions to sweep")
     args = parser.parse_args()
 
-    source_root = ROOT / "training images" / args.source_name
-    dataset_root = ROOT / "training outputs" / args.dataset
+    root = config.cryoai_root()
+    source_root = root / "training images" / args.source_name
+    dataset_root = root / "training outputs" / args.dataset
     run_dir = dataset_root / "runs" / args.model_run_dir
     out_dir = dataset_root / "runs" / args.model_run_dir  # per run, so sweeps of different runs don't overwrite each other
     out_dir.mkdir(parents=True, exist_ok=True)

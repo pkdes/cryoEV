@@ -42,7 +42,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 from multilayer_containment import load_image_annotations, classify_roles, pairwise_overlaps
 from evaluate_coco_export import NON_EV_CATS, drop_ignored, original_stem
 
-ROOT = Path(__file__).parent.parent.parent / "CryoAI"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from data_utils import config  # noqa: E402
+
+ROOT = config.cryoai_root()  # CryoAI-only script: raises when CryoAI is not found ($CRYOEV_CRYOAI_ROOT)
 
 # All overridden by CLI args in the __main__ block below; module-level
 # defaults here match the original 20260713 campaign for backward compat.

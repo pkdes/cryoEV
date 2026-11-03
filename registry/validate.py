@@ -3,7 +3,7 @@
 Scans the real artifact folders, reports per entity how many artifacts could be identified (id in
 contract format) and linked (every required link resolves), and lists what is missing. Validates
 JSONL files against registry/schemas. Writes nothing except the optional --report file, which is
-refused under C:\\Users\\pujan\\Box\\ and C:\\Users\\pujan\\Desktop\\Cryo-image-processing\\.
+refused under Box and Cryo-image-processing (data_utils/config.py protected_roots).
 
     python registry/validate.py                       # default roots (siblings of the cryoEV checkout)
     python registry/validate.py --jsonl some.jsonl --report C:/tmp/tracking_report.json
@@ -31,9 +31,11 @@ from schema_check import check_record, load_schemas  # noqa: E402
 
 REPO = HERE.parent
 sys.path.insert(0, str(REPO))
+from data_utils import config  # noqa: E402
+from data_utils.config import find_sibling  # noqa: E402,F401  (re-exported for importers, registry, tests)
 from data_utils.path_guard import protected_problem  # noqa: E402
 
-PROTECTED = [Path(r"C:\Users\pujan\Box"), Path(r"C:\Users\pujan\Desktop\Cryo-image-processing")]
+PROTECTED = list(config.protected_roots())  # processing datasets, Box
 EXCLUDED_SESSIONS = {"20261012"}
 ENTITIES = ["image", "session", "grid", "roboflow_image", "pull", "roboflow_export", "label_version",
             "review_package", "inference_check", "dataset", "job_bundle", "run", "model", "job"]
@@ -41,14 +43,6 @@ N_EXAMPLES = 3
 
 
 # ---------------------------------------------------------------- helpers
-def find_sibling(name, start=REPO):
-    """First `<ancestor>/<name>` folder above `start` (the checkout may be a nested worktree)."""
-    for p in [start, *start.parents]:
-        if (p / name).is_dir():
-            return p / name
-    return None
-
-
 def sha256_file(path):
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -701,9 +695,9 @@ def print_summary(rep, out=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--laptop", type=Path, default=find_sibling("CryoAI-laptop"))
-    ap.add_argument("--cache", type=Path, default=find_sibling("CryoAI"))
-    ap.add_argument("--processing", type=Path, default=Path(r"C:\Users\pujan\Desktop\Cryo-image-processing"))
+    ap.add_argument("--laptop", type=Path, default=config.laptop_root(required=False))
+    ap.add_argument("--cache", type=Path, default=config.cryoai_root(required=False))
+    ap.add_argument("--processing", type=Path, default=config.processing_root())
     ap.add_argument("--repo", type=Path, default=REPO, help="cryoEV checkout holding models/models.yaml")
     ap.add_argument("--jsonl", type=Path, nargs="*", default=[], help="extra JSONL files to validate")
     ap.add_argument("--report", type=Path, help="write the full JSON report here (refused under protected roots)")

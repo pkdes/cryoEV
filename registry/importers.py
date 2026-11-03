@@ -27,8 +27,9 @@ import ids
 import registry
 from validate import (EXCLUDED_SESSIONS, REPO, Scan, find_sibling, read_csv, read_datajs, read_json,
                       read_jsonl, sha256_file)
+from validate import config  # data_utils.config (validate puts the repo on sys.path)
 
-PROCESSING = Path(r"C:\Users\pujan\Desktop\Cryo-image-processing")
+PROCESSING = config.processing_root()   # optional: None when not found
 GENERIC = re.compile(r"^(blind|label|labeling)_\d+_[A-Za-z0-9]+$")
 SUPERSEDED = {"lv_20261030_0846": "lv_20261030_0909"}          # old -> new (SUPERSEDED.md)
 LEGACY_MODELS = {"allLayer_run14_20260713": "v0_alllayer_y8n_20260713",   # legacy id -> canonical id
@@ -132,8 +133,8 @@ def _date_id(d):
 class Importer:
     def __init__(self, root, laptop=None, cache=None, processing=PROCESSING):
         self.root = Path(root)
-        self.laptop = Path(laptop) if laptop else find_sibling("CryoAI-laptop")
-        self.cache = Path(cache) if cache else find_sibling("CryoAI")
+        self.laptop = Path(laptop) if laptop else config.laptop_root(required=False)
+        self.cache = Path(cache) if cache else config.cryoai_root(required=False)
         self.proc = Path(processing) if processing else None
         self.tag = f"backfill:importers {git_sha()}"
         self.out = []                       # (entity, record)

@@ -215,7 +215,7 @@ class TestRealArtifacts(unittest.TestCase):
         lap = validate.find_sibling("CryoAI-laptop")
         watch = [p for p in lap.rglob("*") if p.is_file() and p.suffix in (".json", ".jsonl", ".csv", ".js")]
         before = {p: p.stat().st_mtime_ns for p in watch}
-        rep = validate.Scan(lap, validate.find_sibling("CryoAI"), validate.PROTECTED[1]).run().summary()
+        rep = validate.Scan(lap, validate.find_sibling("CryoAI"), validate.config.processing_root()).run().summary()
         self.assertEqual(before, {p: p.stat().st_mtime_ns for p in watch})
         self.assertGreaterEqual(rep["entities"]["pull"]["linked"], 1)
         self.assertGreaterEqual(rep["entities"]["label_version"]["found"], 1)
