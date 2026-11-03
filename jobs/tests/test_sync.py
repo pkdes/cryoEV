@@ -175,6 +175,8 @@ class SyncTests(T.TempRoots, unittest.TestCase):
 
     def test_local_push_run_pull(self):
         lq = self.tmp / "lq"
+        with self.assertRaisesRegex(sync.SyncError, "needs --max-hours"):
+            sync.local(JOB, self.zp, lq, allow_big=True)
         with self.assertRaisesRegex(sync.SyncError, "network folder"):
             sync.local(JOB, self.zp, "\\\\desk\\cj")
         with mock.patch.dict(os.environ, T.hooks_env(gpu=T.LAPTOP_GPU, on_battery=True)):    # refused at start

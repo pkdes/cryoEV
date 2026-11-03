@@ -2,6 +2,7 @@
 
 FAKE_TRAINER = finished (default) | error (run.json error, exit 1) | error_exit0 (run.json error, exit 0)
                | finished_exit1 (run.json finished, exit 1: a later step failed)
+               | hang (a run folder with weights/last.pt, then sleeps 600 s: for the time cap)
 FAKE_SLEEP   = seconds to sleep after writing <work>/fake_started.txt (pid), before any output
 Like the real script: no dataset.yaml -> exit 1 with no run.json.
 """
@@ -29,6 +30,10 @@ name = (f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}_y8{a.model_size or 'n'}_{
         f"{a.batch or 24}b_{a.epochs or 300}ep_Run_{a.run_num or 1}")
 run = ds / "runs" / name
 (run / "weights").mkdir(parents=True)
+if mode == "hang":
+    (run / "weights" / "last.pt").write_bytes(b"fake partial weights")
+    print(f"fake run {name}: training...", flush=True)
+    time.sleep(600)
 (run / "weights" / "best.pt").write_bytes(b"fake weights")
 (run / "results.csv").write_text("epoch,metrics/mAP50-95(M)\n1,0.1\n", encoding="utf-8")
 try:

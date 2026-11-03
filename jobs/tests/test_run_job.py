@@ -133,19 +133,32 @@ class RunJobTests(T.TempRoots, unittest.TestCase):
 
     def test_allow_big_on_small_gpu(self):
         big = ["--model-size", "m", "--imgsz", "640", "--workers", "2"]
-        q = self.push(args=big)                                       # no --time: refused even with --allow-big
-        self.assertEqual(self.run_job("--allow-big", gpu=T.LAPTOP_GPU), 1)
-        self.assertIn("--time cap", self.done(q.name)["reason"])
-        q2 = self.push("job_20261102_t2", args=[*big, "--time", "0.5"], stamp="20261102-120003")
-        self.assertEqual(self.run_job(gpu=T.LAPTOP_GPU), 1)          # control: without the flag, desktop only
-        self.assertIn("desktop only", self.done(q2.name)["reason"])
-        q3 = self.push("job_20261102_t3", args=[*big, "--time", "0.5"], stamp="20261102-120004")
-        self.assertEqual(self.run_job("--allow-big", gpu=T.LAPTOP_GPU), 0)
-        self.assertEqual((self.done(q3.name)["status"], self.done(q3.name)["allow_big"]), ("done", True))
+        q = self.push(args=big)
+        self.assertEqual(self.run_job("--allow-big", gpu=T.LAPTOP_GPU), 2)          # no --max-hours: refused
+        self.assertFalse((self.share / C.D / q.name).exists(), "refused at start: still queued")
+        self.assertEqual(self.run_job(gpu=T.LAPTOP_GPU), 1)                        # control: no flag, desktop only
+        self.assertIn("desktop only", self.done(q.name)["reason"])
+        q3 = self.push("job_20261102_t3", args=big, stamp="20261102-120004")
+        self.assertEqual(self.run_job("--allow-big", "--max-hours", "1", gpu=T.LAPTOP_GPU), 0)
+        d = self.done(q3.name)
+        self.assertEqual((d["status"], d["allow_big"], d["max_hours"], d["time_capped"]), ("done", True, 1.0, None))
         q4 = self.push("job_20261102_t4", args=["--model-size", "n", "--imgsz", "320"], stamp="20261102-120005")
-        self.assertEqual(self.run_job(gpu=T.LAPTOP_GPU), 1)          # default 8 workers on the laptop
+        self.assertEqual(self.run_job(gpu=T.LAPTOP_GPU), 1)                        # default 8 workers on the laptop
         self.assertIn("--workers 8 (default)", self.done(q4.name)["reason"])
         self.assertIsNone(self.done(q4.name)["allow_big"])
+
+    def test_max_hours_stops_the_trainer(self):
+        q = self.push()
+        t0 = time.time()
+        with mock.patch.dict(os.environ, {"FAKE_TRAINER": "hang"}):
+            self.assertEqual(self.run_job("--max-hours", "0.001"), 1)               # 3.6 s
+        self.assertLess(time.time() - t0, 60, "the trainer was stopped, not waited for (it sleeps 600 s)")
+        d = self.done(q.name)
+        self.assertTrue(d["time_capped"])
+        self.assertIn("time_cap", d["reason"])
+        run = self.share / C.D / q.name / "runs" / d["run"]
+        self.assertTrue((run / "weights" / "last.pt").is_file(), "partial run kept")
+        self.assertEqual(C.read_json(run / "run.json")["status"], "time_cap")
 
     def test_laptop_refuses_battery_and_network_queue_untouched(self):
         q = self.push(args=["--model-size", "n", "--imgsz", "320", "--workers", "2"])

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Run the oldest ready training job from a queue folder (on the GPU desktop; on the laptop for smoke tests).
 
-    python jobs/run_job.py --queue-dir C:\\cj [--job <job id>] [--wait SECONDS]
+    python jobs/run_job.py --queue-dir C:\\cj [--job <job id>] [--wait SECONDS] [--max-hours H] [--allow-big]
 
 Picks the oldest <queue>/q/<job>/ that has READY and no <queue>/d/<job>/, then:
   1. checks: zip md5 (job.json and the .md5 sidecar), repo commit == JOB.json commit, Ultralytics 8.4.x,
      longest extracted path < 240 characters, free disk >= 10 GB + 3x the zip, GPU not busy; on a GPU < 8 GB
-     (the laptop): --workers <= 2, and no y8m/l/x or imgsz > 640 unless --allow-big and the bundle sets --time.
+     (the laptop): --workers <= 2, and no y8m/l/x or imgsz > 640 unless --allow-big (with --max-hours).
      The laptop also refuses (exit 2, queue untouched) a network queue folder and running on battery;
   2. unzips into <queue>/work/<job>/ and runs training/run_experiments.py --single-run --no-notify with the
      bundle's args (CRYOEV_CRYOAI_ROOT = the work folder);
@@ -230,10 +230,7 @@ def check_job(qdir: Path, work: Path, st: dict, allow_big=False) -> tuple:
             if not allow_big:
                 raise Blocked(f"desktop only: y8{size} at imgsz {imgsz} on a {gpu['total_mb'] / 1024:.0f} GB GPU "
                               f"(here: y8n/s at imgsz <= {MAX_LAPTOP_IMGSZ}, or run_job.py --allow-big)")
-            if "--time" not in args:
-                raise Blocked("--allow-big needs a --time cap (hours) in the bundle's args: a model too big for "
-                              "this GPU can spill into system RAM and run 10-50x slower instead of failing")
-            st["allow_big"] = True
+            st["allow_big"] = True                     # main() made --allow-big come with --max-hours
         w = arg_value(args, "--workers")
         if w is None or not str(w).isdigit() or int(w) > SMALL_MAX_WORKERS:
             raise Blocked(f"--workers {w or '8 (default)'} on a {gpu['total_mb'] / 1024:.0f} GB GPU machine: "
@@ -286,7 +283,15 @@ def rename_retry(src: Path, dst: Path, tries=6):
             time.sleep(2 ** i)
 
 
-def run_one(root: Path, qdir: Path, allow_big=False) -> dict:
+def kill_tree(p):
+    """The trainer and its dataloader workers."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"], capture_output=True)
+    else:
+        p.kill()
+
+
+def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
     job_id = qdir.name
     work, dd = root / C.WORK / job_id, root / C.D
     tmp, final = dd / f".tmp_{job_id}", dd / job_id
@@ -297,7 +302,7 @@ def run_one(root: Path, qdir: Path, allow_big=False) -> dict:
         print(f"[jobs] stale {tmp.name} renamed to {stale.name}")
     tmp.mkdir()
     st = {"schema": "job_status/1", "job": job_id, "status": "running", "machine": platform.node(),
-          "started": C.now(), "queue_dir": str(root)}
+          "started": C.now(), "queue_dir": str(root), "max_hours": max_hours}
     C.write_json(tmp / C.STATUS, st)
     log = work / "train.log"
     runs = []
@@ -317,12 +322,26 @@ def run_one(root: Path, qdir: Path, allow_big=False) -> dict:
         print(f"[jobs] {job_id}: training: {' '.join(argv[2:])}  (log {log})", flush=True)
         env = {**os.environ, "CRYOEV_CRYOAI_ROOT": str(work), "PYTHONIOENCODING": "utf-8"}
         with open(log, "wb") as lf:
-            rc = subprocess.run(argv, cwd=REPO, env=env, stdout=lf, stderr=subprocess.STDOUT).returncode
+            p = subprocess.Popen(argv, cwd=REPO, env=env, stdout=lf, stderr=subprocess.STDOUT)
+            try:
+                rc = p.wait(timeout=max_hours * 3600 if max_hours else None)
+            except subprocess.TimeoutExpired:
+                kill_tree(p)
+                rc = p.wait()
+                st["time_capped"] = True
         st["exit_code"] = rc
-        rjs = sorted((work / "training outputs" / st["dataset"] / "runs").glob("*/run.json"),
-                     key=lambda p: p.stat().st_mtime)
+        run_root = work / "training outputs" / st["dataset"] / "runs"
+        if st.get("time_capped"):                      # the trainer never wrote run.json: say why, keep last.pt
+            for rd in (d for d in run_root.glob("*") if d.is_dir() and not (d / "run.json").exists()):
+                C.write_json(rd / "run.json", {
+                    "schema": "run/1", "id": rd.name, "dataset": st["dataset"], "status": "time_cap",
+                    "error": f"stopped by run_job.py after --max-hours {max_hours:g} (partial run: weights/last.pt)",
+                    "bundle_id": st.get("bundle_id"), "job_bundle": st.get("bundle_id"),
+                    "cryoEV_commit": st.get("cryoEV_commit"), "machine": platform.node(), "ended": C.now()})
+        rjs = sorted(run_root.glob("*/run.json"), key=lambda p: p.stat().st_mtime)
         if not rjs:
-            raise Blocked(f"no run.json (run_experiments exit {rc}); see train.log")
+            raise Blocked(f"time cap: stopped after --max-hours {max_hours:g}, before any run folder" if
+                          st.get("time_capped") else f"no run.json (run_experiments exit {rc}); see train.log")
         runs = [p.parent for p in rjs]
         rj = C.read_json(rjs[-1])
         st["run"], st["run_status"] = rjs[-1].parent.name, rj.get("status")
@@ -350,7 +369,7 @@ def run_one(root: Path, qdir: Path, allow_big=False) -> dict:
     C.write_json(tmp / C.STATUS, st)
     rename_retry(tmp, final)
     done = {k: st.get(k) for k in ("job", "status", "reason", "dataset", "bundle_id", "run", "run_status",
-                                   "runs", "machine", "ended", "allow_big")}
+                                   "runs", "machine", "ended", "allow_big", "max_hours", "time_capped")}
     C.write_json(final / C.DONE, done)                  # last: the laptop pulls only folders with DONE.json
     if st["status"] == "done":
         shutil.rmtree(work, ignore_errors=True)
@@ -374,8 +393,14 @@ def main(argv=None):
     ap.add_argument("--wait", type=float, default=0, help="seconds to wait for another runner's lock (default 0)")
     ap.add_argument("--allow-big", action="store_true",
                     help=f"GPU < {LAPTOP_GPU_MB // 1024} GB: also run y8m/l/x or imgsz > {MAX_LAPTOP_IMGSZ} "
-                         f"(the bundle must set --time)")
+                         f"(needs --max-hours)")
+    ap.add_argument("--max-hours", type=float, help="stop the trainer after this many hours: blocked 'time cap', "
+                    "the partial run (weights/last.pt) is kept")
     a = ap.parse_args(argv)
+    if a.allow_big and not a.max_hours:
+        print("[jobs] --allow-big needs --max-hours: a model too big for the GPU can spill into system RAM and "
+              "run 10-50x slower instead of failing", file=sys.stderr)
+        return 2
     root = a.queue_dir.resolve()
     if not (root / C.Q).is_dir():
         print(f"[jobs] {root} has no {C.Q}/ folder", file=sys.stderr)
@@ -402,7 +427,7 @@ def main(argv=None):
         print(f"[jobs] running {qdir.name}", flush=True)
         keep_awake(True)
         try:
-            done = run_one(root, qdir, a.allow_big)
+            done = run_one(root, qdir, a.allow_big, a.max_hours)
         finally:
             keep_awake(False)
         print(f"[jobs] {done['job']}: {done['status']}" + (f" ({done['reason']})" if done.get("reason") else ""))

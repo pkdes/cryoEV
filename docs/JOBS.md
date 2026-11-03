@@ -38,19 +38,20 @@ When the desktop isn't available. Same bundle, runner and pull; the queue is a l
 ```powershell
 python registry/registry.py job new --type train --where laptop --name v5_y8s_640 --images <list.txt> --who pujan
 python training/make_job_bundle.py --dataset-dir <prepared dataset> -- --single-run --model-size s --imgsz 640 --batch 4 --workers 2 --rect 0
-python jobs/sync.py local job_20261103_v5_y8s_640 --bundle <zip>              # push + run + pull, one command
+python jobs/sync.py local job_20261103_v5_y8s_640 --bundle <zip> --max-hours 6   # push + run + pull, one command
 ```
 Rules on a GPU under 8 GB (the laptop: RTX 3050 Ti, 4 GB, 15 GB RAM):
 
 | Rule | Why |
 |---|---|
 | `--workers` ≤ 2 in the bundle, or blocked | More workers exhaust the page file (WinError 1455) |
-| y8m/l/x or imgsz > 640: blocked "desktop only", unless `--allow-big` **and** the bundle sets `--time <hours>` | Too big for 4 GB; `--time` caps a run that spills into system RAM |
+| y8m/l/x or imgsz > 640: blocked "desktop only", unless `--allow-big --max-hours <H>` | Too big for 4 GB can spill into system RAM and crawl; the runner stops it at H hours |
 | Refuses (exit 2, job stays queued): a network queue folder, or running on battery | The laptop never takes the desktop's jobs |
 | `--allow-big` is recorded in DONE.json and the registry note | Visible on the history page |
 
 - **Set once:** NVIDIA Control Panel → Manage 3D settings → Program settings → python.exe → "CUDA - Sysmem Fallback Policy" = "Prefer No Sysmem Fallback". Without it, too big runs 10–50× slower instead of failing "oom".
 - **Comparing with v5 F5:** v5 F5 is y8m, imgsz 1440, batch 8, `rect` off, from v4_y8m weights (`models/models.yaml`). Pass `--rect 0` to match. A 640 model isn't directly comparable; compare on the test split (val is inflated).
+- **`--max-hours` (any machine), not Ultralytics `--time`.** `--time` overrides `--epochs` and stretches or shrinks the epoch count to fill the time. `--max-hours` stops the trainer (and its workers) at H hours: blocked, `run.json` status `time_cap`, `weights/last.pt` kept, imported as a failed run.
 - **What fits:** see the table below (measured, 3-epoch runs on v5 S1).
 - **Tests.** `python -m unittest discover -s jobs/tests` uses temp roots and a fake trainer, so no GPU is needed.
 

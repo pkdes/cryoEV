@@ -5,7 +5,7 @@
     python jobs/sync.py pull --share \\\\desktop\\cj [--who pujan]
     python jobs/sync.py status --share \\\\desktop\\cj
     python jobs/sync.py retry <job id> --share \\\\desktop\\cj
-    python jobs/sync.py local <job id> --bundle <zip> [--allow-big]      (train on this machine)
+    python jobs/sync.py local <job id> --bundle <zip> [--max-hours H] [--allow-big]   (train on this machine)
 
 push: the job must be a `train` job in the registry (`registry.py job new --type train --where desktop ...`).
   Copies the zip (+ .md5) to q/.incoming/<job>/, checks the copy's md5, writes job.json, renames the folder to
@@ -255,11 +255,13 @@ def retry(job_id, share, force=False):
 
 
 # ---------------------------------------------------------------- local (the laptop trains its own job)
-def local(job_id, bundle, queue=LOCAL_QUEUE, allow_big=False, who="pujan", runner_argv=None):
+def local(job_id, bundle, queue=LOCAL_QUEUE, allow_big=False, who="pujan", runner_argv=None, max_hours=None):
     """push to a local queue folder, run jobs/run_job.py on it for this job, pull. -> pull() output ([] when
     the runner refused to start). The same code paths as the desktop; only the folder is local."""
     from run_job import is_network_path
     queue = Path(queue)
+    if allow_big and not max_hours:
+        raise SyncError("--allow-big needs --max-hours (the runner stops the trainer then; the partial run is kept)")
     if is_network_path(queue):
         raise SyncError(f"{queue} is a network folder; `local` uses a folder on this machine (default {LOCAL_QUEUE})")
     (queue / C.Q).mkdir(parents=True, exist_ok=True)
@@ -267,6 +269,8 @@ def local(job_id, bundle, queue=LOCAL_QUEUE, allow_big=False, who="pujan", runne
     argv = (runner_argv or [sys.executable, str(HERE / "run_job.py")]) + ["--queue-dir", str(queue), "--job", job_id]
     if allow_big:
         argv.append("--allow-big")
+    if max_hours:
+        argv += ["--max-hours", str(max_hours)]
     rc = subprocess.run(argv, cwd=REPO).returncode
     if rc in (2, 3):
         raise SyncError(f"run_job.py exit {rc} ({'refused at start' if rc == 2 else 'another runner holds the lock'});"
@@ -281,7 +285,8 @@ def main(argv=None):
     lp.add_argument("job_id")
     lp.add_argument("--bundle", required=True, type=Path, help="zip from training/make_job_bundle.py")
     lp.add_argument("--queue", type=Path, default=LOCAL_QUEUE, help=f"local queue folder (default {LOCAL_QUEUE})")
-    lp.add_argument("--allow-big", action="store_true", help="y8m/l/x or imgsz > 640 on a small GPU (needs --time)")
+    lp.add_argument("--allow-big", action="store_true", help="y8m/l/x or imgsz > 640 on a small GPU (needs --max-hours)")
+    lp.add_argument("--max-hours", type=float, help="the runner stops the trainer after this many hours")
     lp.add_argument("--who", default="pujan", help="people.json id for the set-status lines")
     for name in ("push", "pull", "status", "retry"):
         p = sub.add_parser(name)
@@ -299,7 +304,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     try:
         if a.cmd == "local":
-            local(a.job_id, a.bundle, a.queue, a.allow_big, a.who)
+            local(a.job_id, a.bundle, a.queue, a.allow_big, a.who, max_hours=a.max_hours)
         elif a.cmd == "push":
             print(f"[push] queued {push(a.job_id, a.bundle, a.share, a.copier)}")
         elif a.cmd == "pull":
