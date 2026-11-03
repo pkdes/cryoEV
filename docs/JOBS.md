@@ -63,10 +63,12 @@ Rules on a GPU under 8 GB (the laptop: RTX 3050 Ti, 4 GB, 15 GB RAM):
 | y8s | 640 | 4 | 0 | 2.8 GB | 28 | ~2.3 h |
 | y8m | 640 | 2 | 0 | 3.6 GB | 33 | ~2.8 h |
 | y8m | 640 | 4 | 0 | 3.6 GB | 31 | ~2.6 h |
-| y8n | 960 | 4 | 0 | out of memory (CUDA) | — | — |
-| y8s | 960 | 2 → 1 | 0 | out of memory after halving | — | — |
+| y8n | 960 | 4 | 0 | 3.0 GB, then out of memory 37% into epoch 2 (a dense batch) | 37 | — |
+| y8s | 960 | 2 → 1 | 0 | out of memory in epoch 1, even after halving to 1 | — | — |
 
-- 640 is the ceiling. 2 workers are ~2.6× faster than 0, when the memory check allows it (close Box, browsers, extra windows).
+- 640 is the safe ceiling; 960 is borderline (y8n batch 2 and y8m/s at 960 untested). Ultralytics halves the batch only in epoch 1, so a later spike fails the run.
+- The NVIDIA GPU was empty at each start (the display runs on the AMD iGPU): the GPU limits are real. System RAM was short (2–6 GB commit free), which forced 0 workers; 2 workers are ~2.6× faster when the memory check allows it (close Box, browsers, extra windows).
+- Not tried yet: batch 1–2 at 960; 640 tiles cut from the native images (keeps the 1440 pixel scale; needs a tiler that cuts labels too); `mask_ratio` 8; a frozen backbone when fine-tuning.
 - Set `--max-hours` ~1.5× the table (early stopping often ends sooner). The desktop's 1440 runs can't be done here.
 - **Tests.** `python -m unittest discover -s jobs/tests` uses temp roots and a fake trainer, so no GPU is needed.
 
