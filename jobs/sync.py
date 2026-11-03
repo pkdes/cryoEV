@@ -260,8 +260,8 @@ def local(job_id, bundle, queue=LOCAL_QUEUE, allow_big=False, who="pujan", runne
     the runner refused to start). The same code paths as the desktop; only the folder is local."""
     from run_job import is_network_path
     queue = Path(queue)
-    if allow_big and not max_hours:
-        raise SyncError("--allow-big needs --max-hours (the runner stops the trainer then; the partial run is kept)")
+    if not max_hours:
+        raise SyncError("local needs --max-hours (the runner stops the trainer then; the partial run is kept)")
     if is_network_path(queue):
         raise SyncError(f"{queue} is a network folder; `local` uses a folder on this machine (default {LOCAL_QUEUE})")
     (queue / C.Q).mkdir(parents=True, exist_ok=True)

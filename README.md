@@ -130,7 +130,7 @@ python analysis/multilayer_role_analysis.py --dataset roboflow_20260824_cryoai_v
     --source-name "roboflow - 20260824 cryoai v3" --model-run-dir "<run folder name>"
 ```
 Each run appends a row to `CryoAI/EXPERIMENT_LOG.csv`. Long runs should go in the background with output logged to a file.
-To train on the A6000 desktop through the job queue (`make_job_bundle.py` → `jobs/sync.py push` → `jobs/run_job.py` → `jobs/sync.py pull`), see [`docs/JOBS.md`](docs/JOBS.md).
+To train on the A6000 desktop through the job queue (`make_job_bundle.py` → `jobs/sync.py push` → `jobs/run_job.py` → `jobs/sync.py pull`), or on the laptop (`jobs/sync.py local`), see [`docs/JOBS.md`](docs/JOBS.md).
 
 Multi-class (EV / non-EV), re-split by session, fine-tuned from a registered model (full schedule; see the gotchas on `--time` and v4-init early stopping):
 ```bash

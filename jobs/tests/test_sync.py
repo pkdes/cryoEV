@@ -177,11 +177,13 @@ class SyncTests(T.TempRoots, unittest.TestCase):
         lq = self.tmp / "lq"
         with self.assertRaisesRegex(sync.SyncError, "needs --max-hours"):
             sync.local(JOB, self.zp, lq, allow_big=True)
+        with self.assertRaisesRegex(sync.SyncError, "needs --max-hours"):
+            sync.local(JOB, self.zp, lq)
         with self.assertRaisesRegex(sync.SyncError, "network folder"):
-            sync.local(JOB, self.zp, "\\\\desk\\cj")
+            sync.local(JOB, self.zp, "\\\\desk\\cj", max_hours=1)
         with mock.patch.dict(os.environ, T.hooks_env(gpu=T.LAPTOP_GPU, on_battery=True)):    # refused at start
             with self.assertRaisesRegex(sync.SyncError, "exit 2"):
-                sync.local(JOB, self.zp, lq)
+                sync.local(JOB, self.zp, lq, max_hours=1)
         self.assertEqual(sync.status(lq), [(JOB, "queued")])                                 # still queued
         self.assertFalse((self.lap / "jobs" / "pulled.jsonl").exists())                     # nothing pulled
         os.environ.update(T.hooks_env(gpu=T.DESKTOP_GPU))
@@ -194,7 +196,7 @@ class SyncTests(T.TempRoots, unittest.TestCase):
         registry.new_job("train", "laptop", "t2", images=self.tmp / "imgs.txt", who="pujan", root=self.reg,
                          date="20261102")
         zp2 = T.make_bundle(self.tmp / "b3", args=["--model-size", "n", "--imgsz", "320"], stamp="20261102-120009")
-        out = sync.local("job_20261102_t2", zp2, lq)
+        out = sync.local("job_20261102_t2", zp2, lq, max_hours=1)
         self.assertEqual(out[0]["status"], "done")
         self.assertEqual(registry.current(root=self.reg)["job_20261102_t2"]["status"], "done")
 

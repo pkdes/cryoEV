@@ -6,7 +6,8 @@
 Picks the oldest <queue>/q/<job>/ that has READY and no <queue>/d/<job>/, then:
   1. checks: zip md5 (job.json and the .md5 sidecar), repo commit == JOB.json commit, Ultralytics 8.4.x,
      longest extracted path < 240 characters, free disk >= 10 GB + 3x the zip, GPU not busy; on a GPU < 8 GB
-     (the laptop): --workers <= 2, and no y8m/l/x or imgsz > 640 unless --allow-big (with --max-hours).
+     (the laptop): --max-hours set, --workers <= 2, free commit memory >= 4 GB + 2 GB per worker, and no y8m/l/x
+     or imgsz > 640 unless --allow-big.
      The laptop also refuses (exit 2, queue untouched) a network queue folder and running on battery;
   2. unzips into <queue>/work/<job>/ and runs training/run_experiments.py --single-run --no-notify with the
      bundle's args (CRYOEV_CRYOAI_ROOT = the work folder);
@@ -43,6 +44,7 @@ LAPTOP_GPU_MB = 8192            # below this: small train jobs only
 BIG_SIZES = ("m", "l", "x")
 MAX_LAPTOP_IMGSZ = 640
 SMALL_MAX_WORKERS = 2           # small GPU (= the laptop, 15 GB RAM): more dataloader workers exhaust the page file
+COMMIT_BASE_GB, COMMIT_PER_WORKER_GB = 4, 2   # small GPU: free commit (RAM + page file) needed at start
 MIN_FREE_GB = 10                # free disk needed: this + 3x the zip (unzip, results, the pulled copy)
 BUSY_MB = 256                   # a compute app using this much (or any python process) means the GPU is busy
 HOOKS_ENV = "CRYOEV_JOBS_TEST_HOOKS"   # tests only: JSON {train_cmd, gpu: {total_mb, apps, used_mb}, ultralytics,
@@ -147,6 +149,25 @@ def on_battery() -> bool:
     return bool(ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(s))) and s.ac == 0   # 0 offline, 255 unknown
 
 
+def free_commit_gb() -> float:
+    """Commit memory still available (RAM + page file): what WinError 1455 runs out of."""
+    h = hooks().get("free_commit_gb")
+    if h is not None:
+        return float(h)
+    if os.name != "nt":
+        return float("inf")
+    import ctypes
+
+    class MemStatus(ctypes.Structure):
+        _fields_ = [("len", ctypes.c_ulong), ("load", ctypes.c_ulong), ("total_phys", ctypes.c_ulonglong),
+                    ("avail_phys", ctypes.c_ulonglong), ("total_page", ctypes.c_ulonglong),
+                    ("avail_page", ctypes.c_ulonglong), ("total_virt", ctypes.c_ulonglong),
+                    ("avail_virt", ctypes.c_ulonglong), ("avail_ext", ctypes.c_ulonglong)]
+    m = MemStatus()
+    m.len = ctypes.sizeof(m)
+    return m.avail_page / 1e9 if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)) else float("inf")
+
+
 def free_gb(p) -> float:
     h = hooks().get("free_gb")
     return float(h) if h is not None else shutil.disk_usage(p).free / 1e9
@@ -235,6 +256,11 @@ def check_job(qdir: Path, work: Path, st: dict, allow_big=False) -> tuple:
         if w is None or not str(w).isdigit() or int(w) > SMALL_MAX_WORKERS:
             raise Blocked(f"--workers {w or '8 (default)'} on a {gpu['total_mb'] / 1024:.0f} GB GPU machine: "
                           f"use --workers <= {SMALL_MAX_WORKERS} (page file)")
+        need, have = COMMIT_BASE_GB + COMMIT_PER_WORKER_GB * int(w), free_commit_gb()
+        st["free_commit_gb_at_start"] = round(have, 1)
+        if have < need:                                # each worker loads its own torch/CUDA; short = a silent hang
+            raise Blocked(f"memory: {have:.1f} GB commit free (RAM + page file), need {need} GB for --workers {w}: "
+                          f"close apps (Box, browsers, extra windows) or use --workers 0")
     need = MIN_FREE_GB + 3 * zp.stat().st_size / 1e9
     have = free_gb(work.parent if work.parent.exists() else qdir)
     if have < need:
@@ -412,6 +438,10 @@ def main(argv=None):
             return 2
         if on_battery():
             print("[jobs] on battery: plug in, then start again", file=sys.stderr)
+            return 2
+        if not a.max_hours:
+            print("[jobs] the laptop needs --max-hours: a stuck dataloader worker hangs the trainer without an "
+                  "error (11-03: 1 h 25 min)", file=sys.stderr)
             return 2
     lock = acquire_lock(root / C.LOCK, a.wait)
     if lock is None:

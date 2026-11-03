@@ -36,6 +36,20 @@ Decided:
 - datasets may be built straight from a local `lv_*` (no Roboflow push first);
 - only the user promotes a model (v5 F5 = production).
 
+Round 3 shipped 2026-11-02/03 (pushed through 46e6c28; later commits local until the next push OK):
+| Part | What | Where |
+|---|---|---|
+| Paths | Data roots from env or the sibling folders; no `C:\Users\pujan` in code; ntfy topic from `CRYOEV_NTFY_TOPIC` | `data_utils/config.py` |
+| Graph + lookup | Columns label sets → datasets → models → review; revise back-edges; "Show history" (also unused exports); image lookup | history page |
+| Runs log themselves | `run.json` (finished / error / oom) and a true exit code; the importer reads it | `run_experiments.py` |
+| Job runner (our own; MLflow/ClearML trial 11-02 said build) | Desktop queue over a Tailscale share; laptop `sync.py local`; small-GPU guards | [JOBS.md](JOBS.md) |
+| Registry | OS write lock per line | `registry.append` |
+
+Next (user to rank):
+- the user's real review → dataset from `lv_*` (`dataset_from_lv.py`, not built) → Roboflow push;
+- desktop setup; a `CryoAI-laptop` backup plan;
+- backlog: a cloud GPU worker (Lambda API: launch → bundle → run → copy `d/<job>` back → terminate; hour and cost caps).
+
 ## Spec draft: jobs and lineage (not built)
 **Problem**
 - The history page's status board mixes entity types into one set of lanes, and doesn't say what a job is doing.

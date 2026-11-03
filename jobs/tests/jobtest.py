@@ -23,8 +23,10 @@ LAPTOP_GPU = {"total_mb": 4096, "apps": []}
 YAML = "names:\n  0: EV\ntrain: images/train\nval: images/val\n"
 
 
-def hooks_env(train_cmd=FAKE, gpu=DESKTOP_GPU, ultralytics="8.4.94", on_battery=False, free_gb=100, **extra):
-    h = {"gpu": gpu, "ultralytics": ultralytics, "on_battery": on_battery, "free_gb": free_gb, **extra}
+def hooks_env(train_cmd=FAKE, gpu=DESKTOP_GPU, ultralytics="8.4.94", on_battery=False, free_gb=100, free_commit_gb=100,
+              **extra):
+    h = {"gpu": gpu, "ultralytics": ultralytics, "on_battery": on_battery, "free_gb": free_gb,
+         "free_commit_gb": free_commit_gb, **extra}
     if train_cmd:
         h["train_cmd"] = train_cmd
     return {run_job.HOOKS_ENV: json.dumps(h), run_job.TESTING_ENV: "1"}

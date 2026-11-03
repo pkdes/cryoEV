@@ -60,7 +60,7 @@ class SmokeTest(unittest.TestCase):
         job = f"job_{datetime.now():%Y%m%d}_smoke"
         py("jobs/sync.py", "push", job, "--bundle", zp, "--share", share)
         py("jobs/sync.py", "status", "--share", share)
-        py("jobs/run_job.py", "--queue-dir", share)
+        py("jobs/run_job.py", "--queue-dir", share, "--max-hours", "0.5")
         done = C.read_json(share / C.D / job / C.DONE)
         self.assertEqual(done["status"], "done", done)
         rj = C.read_json(share / C.D / job / "run.json")

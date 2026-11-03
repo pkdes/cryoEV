@@ -116,7 +116,7 @@ class RunJobTests(T.TempRoots, unittest.TestCase):
 
     def test_desktop_only_on_small_gpu_with_controls(self):
         q = self.push(args=["--model-size", "m", "--imgsz", "1440"])
-        self.assertEqual(self.run_job(gpu=T.LAPTOP_GPU), 1)
+        self.assertEqual(self.run_job("--max-hours", "1", gpu=T.LAPTOP_GPU), 1)
         self.assertIn("desktop only", self.done(q.name)["reason"])
         # control 1: the same bundle on the desktop GPU runs
         q2 = self.push("job_20261102_t2", args=["--model-size", "m", "--imgsz", "1440"], stamp="20261102-120003")
@@ -125,25 +125,26 @@ class RunJobTests(T.TempRoots, unittest.TestCase):
         # control 2: y8n at 320 runs on the laptop GPU; the default imgsz (1440) does not
         q3 = self.push("job_20261102_t3", args=["--model-size", "n", "--imgsz", "320", "--workers", "2"],
                        stamp="20261102-120004")
-        self.assertEqual(self.run_job(gpu=T.LAPTOP_GPU), 0)
+        self.assertEqual(self.run_job("--max-hours", "1", gpu=T.LAPTOP_GPU), 0)
         self.assertEqual(self.done(q3.name)["status"], "done")
         q4 = self.push("job_20261102_t4", args=["--model-size", "n", "--workers", "2"], stamp="20261102-120005")
-        self.assertEqual(self.run_job(gpu=T.LAPTOP_GPU), 1)
+        self.assertEqual(self.run_job("--max-hours", "1", gpu=T.LAPTOP_GPU), 1)
         self.assertIn("imgsz 1440", self.done(q4.name)["reason"])
 
     def test_allow_big_on_small_gpu(self):
         big = ["--model-size", "m", "--imgsz", "640", "--workers", "2"]
         q = self.push(args=big)
         self.assertEqual(self.run_job("--allow-big", gpu=T.LAPTOP_GPU), 2)          # no --max-hours: refused
+        self.assertEqual(self.run_job(gpu=T.LAPTOP_GPU), 2)                        # the laptop always needs it
         self.assertFalse((self.share / C.D / q.name).exists(), "refused at start: still queued")
-        self.assertEqual(self.run_job(gpu=T.LAPTOP_GPU), 1)                        # control: no flag, desktop only
+        self.assertEqual(self.run_job("--max-hours", "1", gpu=T.LAPTOP_GPU), 1)                        # control: no flag, desktop only
         self.assertIn("desktop only", self.done(q.name)["reason"])
         q3 = self.push("job_20261102_t3", args=big, stamp="20261102-120004")
         self.assertEqual(self.run_job("--allow-big", "--max-hours", "1", gpu=T.LAPTOP_GPU), 0)
         d = self.done(q3.name)
         self.assertEqual((d["status"], d["allow_big"], d["max_hours"], d["time_capped"]), ("done", True, 1.0, None))
         q4 = self.push("job_20261102_t4", args=["--model-size", "n", "--imgsz", "320"], stamp="20261102-120005")
-        self.assertEqual(self.run_job(gpu=T.LAPTOP_GPU), 1)                        # default 8 workers on the laptop
+        self.assertEqual(self.run_job("--max-hours", "1", gpu=T.LAPTOP_GPU), 1)                        # default 8 workers on the laptop
         self.assertIn("--workers 8 (default)", self.done(q4.name)["reason"])
         self.assertIsNone(self.done(q4.name)["allow_big"])
 
@@ -165,12 +166,21 @@ class RunJobTests(T.TempRoots, unittest.TestCase):
         self.assertEqual(self.run_job(gpu=T.LAPTOP_GPU, on_battery=True), 2)
         self.assertFalse((self.share / C.D / q.name).exists(), "a refused start leaves the job queued")
         with mock.patch.object(run_job, "is_network_path", lambda p: True):
-            self.assertEqual(self.run_job(gpu=T.LAPTOP_GPU), 2)
+            self.assertEqual(self.run_job("--max-hours", "1", gpu=T.LAPTOP_GPU), 2)
             self.assertFalse((self.share / C.D / q.name).exists())
             self.assertEqual(self.run_job(gpu=T.DESKTOP_GPU), 0)      # control: the desktop runs its own share
         self.assertEqual(self.done(q.name)["status"], "done")
         self.assertTrue(run_job.is_network_path("\\\\desk\\cj"))
         self.assertFalse(run_job.is_network_path(self.share))
+
+    def test_low_commit_memory_is_blocked(self):
+        q = self.push(args=["--model-size", "n", "--imgsz", "320", "--workers", "2"])
+        self.assertEqual(self.run_job("--max-hours", "1", gpu=T.LAPTOP_GPU, free_commit_gb=6), 1)   # needs 4 + 2x2
+        self.assertIn("memory: 6.0 GB commit free", self.done(q.name)["reason"])
+        q2 = self.push("job_20261102_t2", args=["--model-size", "n", "--imgsz", "320", "--workers", "0"],
+                       stamp="20261102-120003")
+        self.assertEqual(self.run_job("--max-hours", "1", gpu=T.LAPTOP_GPU, free_commit_gb=6), 0)   # control: 0 workers
+        self.assertEqual(self.done(q2.name)["status"], "done")
 
     def test_low_disk_is_blocked(self):
         q = self.push()
