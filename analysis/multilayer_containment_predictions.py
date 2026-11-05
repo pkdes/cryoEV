@@ -8,7 +8,7 @@ Workflow per image:
   1. Get the predicted "EV" polygons: from cached prediction files with
      --predictions-dir (the predict_models.py / run_experiments.py format,
      <dir>/<split>/<stem>.txt or <dir>/<stem>.txt, kept at conf >= --conf),
-     or, by default, by running the model live (--model-path).
+     or, only with --live, by running the model (--model-path).
   2. Run the same containment test among predictions: a predicted polygon
      that fully contains >=1 other predicted polygon is classified
      "multilayer"; a predicted polygon fully contained inside another is
@@ -18,18 +18,19 @@ Workflow per image:
   4. Score the multilayer classification (and inner-layer classification)
      as precision/recall against those true categories.
 
-The live path stays the default: cached polygons are single largest contours,
-rasterized by load_predictions_yolo_format(), which truncates vertices to int
-(CLEANUP_CANDIDATES "R2 vertex truncation", undecided), so cached masks are not
-the live masks. On v5 F5 / S1 valid (26 images, 2026-11-05) every TP/FP/FN, per
-image, was identical either way; Run_14's own images are not on the laptop, so
-its default setup is unchecked. Switching the default is the user's call.
+Cached predictions are the default (user, 2026-11-05), like the other analysis
+scripts; pass --predictions-dir, or --live to re-run the model. Cached polygons
+are single largest contours, rasterized by load_predictions_yolo_format(), which
+truncates vertices to int (CLEANUP_CANDIDATES "R2 vertex truncation", undecided),
+so cached masks are not exactly the live masks. On v5 F5 / S1 valid (26 images,
+2026-11-05) every TP/FP/FN, per image, was identical either way. Run_14's own
+images are not on the laptop, so its setup is unchecked.
 
 --model <model_id> (models.yaml) keeps only the EV class of a multi-class model,
 on both paths; without it every prediction is used, as before.
 
-    python analysis/multilayer_containment_predictions.py                    # Run_14, live (as before)
     python analysis/multilayer_containment_predictions.py --predictions-dir <run>/predictions
+    python analysis/multilayer_containment_predictions.py --live              # Run_14 weights, re-run on the GPU
 """
 
 import argparse
@@ -87,7 +88,9 @@ def classify_predictions(pred_masks):
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--predictions-dir", type=Path, default=None,
-                    help="read cached prediction files instead of running the model")
+                    help="cached prediction files (the default path; required unless --live)")
+    ap.add_argument("--live", action="store_true",
+                    help="run the model (--model-path) instead of reading cached predictions")
     ap.add_argument("--model-path", type=Path, default=MODEL_PATH, help="weights for the live path")
     ap.add_argument("--dataset-dir", type=Path, default=DATASET, help="YOLO dataset holding images/<split>/")
     ap.add_argument("--source-root", type=Path, default=SOURCE_ROOT,
@@ -101,7 +104,12 @@ def parse_args(argv=None):
     ap.add_argument("--device", default="0")
     ap.add_argument("--model", default=None,
                     help="model_id in models.yaml: keep only the EV class of a multi-class model")
-    return ap.parse_args(argv)
+    args = ap.parse_args(argv)
+    if args.live and args.predictions_dir is not None:
+        ap.error("use either --predictions-dir (cached) or --live, not both")
+    if not args.live and args.predictions_dir is None:
+        ap.error("pass --predictions-dir <run>/predictions (cached, the default path), or --live to run the model")
+    return args
 
 
 def get_predictions(img_path, yolo_split, args, keep_classes):
