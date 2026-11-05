@@ -162,6 +162,28 @@ class WatchTests(T.TempRoots, unittest.TestCase):
             held.close()
         self.assertEqual(rc, 3, out)
 
+    def test_self_update_restarts_on_its_own_code(self):
+        log = self.share / C.WATCH_LOG
+        (self.dev / "jobs" / "watch.py").open("a", encoding="utf-8").write("# a change to the watcher\n")
+        git(self.dev, "commit", "-am", "watcher change")
+        git(self.dev, "push", "origin", "main")
+        new = git(self.dev, "rev-parse", "HEAD")
+        rc, out = self.watch("--update-every", "0", loops=5)
+        self.assertEqual(rc, 0, out)
+        text = log.read_text(encoding="utf-8")
+        self.assertEqual(text.count("watcher started"), 2, text)           # restarted once, from the new file
+        self.assertIn(f"code updated to {new[:7]}: restarting", text)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), new)
+        self.assertEqual(C.read_json(self.share / C.WATCH_JSON)["repo_commit"], new)
+
+    def test_self_update_without_code_change_does_not_restart(self):
+        new = self.new_commit("notes.txt")                              # control: not watcher code
+        rc, out = self.watch("--update-every", "0", loops=5)
+        text = (self.share / C.WATCH_LOG).read_text(encoding="utf-8")
+        self.assertEqual(text.count("watcher started"), 1, text)
+        self.assertNotIn("restarting", text)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), new, "updated while idle")
+
     def test_after_child(self):
         self.assertEqual([watch.after_child(rc) for rc in (0, 1, 2, 3, 4, -1)],
                          ["next", "next", "pause", "wait", "wait", "wait"])
