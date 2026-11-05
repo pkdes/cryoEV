@@ -49,7 +49,29 @@ C:\cj_venv\Scripts\python C:\cj_repo\jobs\watch.py --queue-dir C:\cj
 - **Exit codes.** `run_job.py`: 0 = done or nothing ready, 1 = blocked, 2 = refused at start, 3 = the lock is held, 4 = GPU busy (2–4 leave the queue untouched). `watch.py`: 3 = another watcher is running. `sync.py`: 2 = refused or failed.
 - **Smoke test.** `jobs/tests/test_smoke.py` (real GPU, y8n at 320). The fixture is `<CryoAI-laptop>\fixtures\smoke\` (`tiny\` + `yolov8n-seg.pt`):
   `set CRYOEV_JOBS_SMOKE_DATA=...\fixtures\smoke\tiny` and `set CRYOEV_JOBS_SMOKE_WEIGHTS=...\fixtures\smoke\yolov8n-seg.pt`.
-- **Tests.** `python -m unittest discover -s jobs/tests`: temp roots, a fake trainer, and a temp git origin for the watcher (`test_watch.py`); no GPU needed.
+- **Tests.** `python -m unittest discover -s jobs/tests`: temp roots, a fake trainer, and a temp git origin for the watcher (`test_watch.py`); no GPU needed. `test_monitor.py` covers the live monitor.
+
+## Live monitor
+The history page's **Live** tab shows the queue as it runs. On the laptop, start the monitor next to the history server, which serves the registry folder on the tailnet. The page fetches `live/live.json` next to `history.html`:
+```powershell
+python -m http.server 8768 --directory <CryoAI-laptop>\registry        # the history server (already running)
+python jobs/monitor.py --share \\coe-bme-rc-ml\cj                       # writes <registry>\live\live.json every 30 s
+```
+- `--share` is repeatable (one card per queue); `--every 30`; `--once` writes one snapshot; `--out` changes the file. One monitor per output file (`monitor.lock`; a second exits 3).
+- Read only on the share: small files through `common.read_shared`, nothing under `d\.tmp_*`, never the registry `*.jsonl`. Each queue is read in a thread and given up after 20 s.
+- Opened as a file (`file://`), the page fetches nothing and shows how to start the monitor; open it from the server.
+
+| Shown | Meaning |
+|---|---|
+| Queue **offline** / **access denied** | The share can't be reached (Tailscale, desktop off, no answer in 20 s) / the login has no access |
+| Watcher **alive** | Heartbeat < 5 min old, state idle or running |
+| **paused** / **waiting for GPU** / **waiting** | `STOP` or a machine problem (detail says) / a labmate uses the GPU / `runner.lock` held |
+| **stale** / **no watcher** / **stopped** | No heartbeat for 5 min (watcher not running) / no `watch.json` / the watcher exited |
+| Phase **setting up** / **training** / **finishing** | No `results.csv` yet / epochs running / final validation (`progress.json`), the last epoch done, or patience ran out, and no `DONE.json` yet |
+| **ETA** | Epochs left × the median of the last ≤ 5 epoch durations (epoch 1 skipped), capped at the job's `max_hours`. **≤ X**: Ultralytics stops at best epoch + patience unless val improves |
+| **batch 8 of 16 asked** | Ultralytics halved the batch after an out-of-memory in epoch 1 (`progress.json`); runs from before `progress.json` show "unknown (older run)" |
+| **Hung?** | Running, but no new epoch for max(5 × median epoch, 10 min) |
+| **Stale** banner | The snapshot is older than 3 intervals: the monitor stopped; nothing is shown as running |
 
 ## Training on the laptop
 When the desktop isn't available. Same bundle, runner and pull; the queue is a local folder (`C:\cj_local`).

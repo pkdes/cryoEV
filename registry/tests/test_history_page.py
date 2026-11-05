@@ -163,6 +163,11 @@ class HistoryPage(unittest.TestCase):
         self.assertNotIn("insertAdjacentHTML", self.html_x)
         self.assertNotIn("document.write", self.html_x)
 
+    def test_live_tab(self):
+        for t in ('id="t-live"', '>Live</button>', '<div id="live" class="pane hide">', "live/live.json",
+                  "cache:'no-store'", "location.protocol.indexOf('http')===0", "jobs/monitor.py --share"):
+            self.assertIn(t, self.html_s)
+
     def test_no_external_url(self):
         for html in (self.html_s, self.html_x):
             self.assertIsNone(re.search(r"(?i)https?://|//cdn|\bsrc\s*=|<link\b|@import|url\(", html))
@@ -478,6 +483,144 @@ class Browser(unittest.TestCase):
                 self.assertTrue(all(u.startswith("file:") for u in requests), requests)
             finally:
                 ctx.close()
+
+    def test_live_from_file_makes_no_request(self):
+        ctx, page, errors, requests, dialogs = self.open(390)
+        try:
+            page.click("#t-live")
+            self.assertTrue(page.is_visible("#live"))
+            note = page.inner_text("#lbody")
+            self.assertIn("python jobs/monitor.py --share \\\\coe-bme-rc-ml\\cj", note)
+            self.assertIn("served by the history server", note)
+            page.wait_for_timeout(500)
+            self.assertEqual(errors, [])
+            self.assertTrue(requests and all(u.startswith("file:") for u in requests), requests)
+            self.assertFalse(any("live.json" in u for u in requests))
+        finally:
+            ctx.close()
+
+
+class LiveServed(unittest.TestCase):
+    """The Live tab served over a localhost http.server, with live/live.json written by jobs/monitor.py --once from
+    temp queues built in code (jobs/tests/jobtest.py): queue A has a job at epoch 4 of 300 with batch 8 of 16
+    (ETA 3700 s = 1 h 2 min), queue B one with best epoch 2 + patience 3 (bound 12.5 s), a stale heartbeat and a
+    cancelled job. A second folder holds the same snapshot with its time set 10 min back: the stale banner."""
+
+    @classmethod
+    def setUpClass(cls):
+        if sync_playwright is None:
+            raise unittest.SkipTest("playwright not installed")
+        import functools
+        import http.server
+        import subprocess
+        import threading
+        sys.path.insert(0, str(REG.parent / "jobs" / "tests"))
+        import jobtest as T
+        cls.tmp = tempfile.TemporaryDirectory()
+        t = Path(cls.tmp.name)
+        a, b = t / "qa", t / "qb"
+        (a / "q").mkdir(parents=True)
+        (b / "q").mkdir(parents=True)
+        T.watch_fixture(a, job="job_20261104_live")
+        T.running_fixture(a, progress={"batch": 8, "batch_asked": 16}, patience=300)
+        T.watch_fixture(b, job="job_20261104_pat", age_s=600)
+        T.running_fixture(b, job="job_20261104_pat", progress={"best_epoch": 2}, patience=3)
+        T.done_fixture(b, "job_20261104_cxl", status="cancelled", reason="cancelled by pujan: test")
+        lap = t / "lap"
+        lap.mkdir()
+        env = {k: v for k, v in os.environ.items() if k != "CRYOEV_REGISTRY"}
+        env["CRYOEV_LAPTOP_ROOT"] = str(lap)
+        cls.live, cls.stale = t / "live_site", t / "stale_site"
+        r = subprocess.run([sys.executable, str(REG.parent / "jobs" / "monitor.py"), "--share", str(a), "--share",
+                            str(b), "--once", "--out", str(cls.live / "live" / "live.json")],
+                           capture_output=True, text=True, env=env, timeout=120)
+        assert r.returncode == 0, r.stderr
+        hp.build([SAMPLES], cls.live / "history.html")
+        snap = json.loads((cls.live / "live" / "live.json").read_text(encoding="utf-8"))
+        import datetime as dt
+        snap["generated_utc"] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=10)).isoformat()
+        (cls.stale / "live").mkdir(parents=True)
+        (cls.stale / "live" / "live.json").write_text(json.dumps(snap), encoding="utf-8")
+        hp.build([SAMPLES], cls.stale / "history.html")
+        cls.servers = []
+        for site in (cls.live, cls.stale):
+            class Quiet(http.server.SimpleHTTPRequestHandler):
+                def log_message(self, *a):
+                    pass
+            srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=str(site)))
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            cls.servers.append(srv)
+        cls.pw = sync_playwright().start()
+        cls.browser = launch(cls.pw)
+        if cls.browser is None:
+            cls.tearDownClass()
+            raise unittest.SkipTest("no Edge / Chrome for Playwright")
+
+    @classmethod
+    def tearDownClass(cls):
+        if getattr(cls, "browser", None):
+            cls.browser.close()
+        cls.pw.stop()
+        for s in cls.servers:
+            s.shutdown()
+            s.server_close()
+        cls.tmp.cleanup()
+
+    def open(self, srv, width):
+        base = f"http://127.0.0.1:{srv.server_address[1]}/"
+        ctx = self.browser.new_context(viewport={"width": width, "height": 900})
+        ctx.route("**/*", lambda route: route.continue_() if route.request.url.startswith(base) else route.abort())
+        page = ctx.new_page()
+        errors, requests = [], []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.on("request", lambda r: requests.append(r.url))
+        page.goto(base + "history.html")
+        page.click("#t-live")
+        return ctx, page, errors, requests, base
+
+    def test_live_tab(self):
+        for width in (390, 1280):
+            ctx, page, errors, requests, base = self.open(self.servers[0], width)
+            try:
+                page.wait_for_selector("#lbody .lrun .lchart svg")
+                text = page.inner_text("#lbody")
+                for t in ("Epoch 4 / 300", "1 h 2 min", "batch 8 of 16 asked", "31.4 GB", "≤ 13 s",
+                          "job_20261104_cxl", "cancelled by pujan: test", "stale", "alive", "Updated"):
+                    self.assertIn(t, text)
+                self.assertNotIn("Stale: this snapshot", text)
+                runs = page.query_selector_all("#lbody .lrun")
+                self.assertEqual(len(runs), 2)
+                charts = runs[0].query_selector_all(".lchart svg")
+                self.assertEqual(len(charts), 2)                         # train losses, val mask mAP
+                self.assertEqual(len(charts[0].query_selector_all("path.lline")), 4)
+                self.assertEqual(len(charts[1].query_selector_all("path.lline")), 2)
+                charts[1].hover()
+                tip = runs[0].query_selector_all(".ltip")[1].inner_text()
+                self.assertIn("Epoch", tip)
+                self.assertIn("mAP50-95", tip)
+                self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), width)
+                if SHOTS:
+                    Path(SHOTS).mkdir(parents=True, exist_ok=True)
+                    page.mouse.move(0, 0)
+                    page.screenshot(path=str(Path(SHOTS) / f"live_{width}.png"), full_page=True)
+                self.assertEqual(errors, [])
+                self.assertIn(base + "live/live.json", requests)
+                self.assertTrue(all(u.startswith(base) for u in requests), requests)
+            finally:
+                ctx.close()
+
+    def test_stale_banner(self):
+        ctx, page, errors, requests, base = self.open(self.servers[1], 390)
+        try:
+            page.wait_for_selector("#lbody .lstale")
+            self.assertIn("Stale: this snapshot is 10 min old", page.inner_text("#lbody .lstale"))
+            self.assertEqual(len(page.query_selector_all("#lbody .lrun")), 0)   # nothing shown as running
+            self.assertIn("unknown (stale)", page.inner_text("#lbody"))
+            if SHOTS:
+                page.screenshot(path=str(Path(SHOTS) / "live_stale_390.png"), full_page=True)
+            self.assertEqual(errors, [])
+        finally:
+            ctx.close()
 
 
 if __name__ == "__main__":

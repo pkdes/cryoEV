@@ -21,7 +21,11 @@ self-contained static HTML file: inline CSS/JS, no external URLs. The page has
   abandoned / cancelled / retired records are hidden until "Show history" (then dimmed); production is starred;
 - an Image lookup tab: image name or substring -> datasets + split (lists/*.tsv), label versions that changed it
   (the lv's changes.jsonl next to its version.json, else the registry's label_change rows), review packages
-  (their data.js) and jobs (package or image_list), Roboflow image + split, session / grid. ONE embedded index.
+  (their data.js) and jobs (package or image_list), Roboflow image + split, session / grid. ONE embedded index;
+- a Live tab: jobs/monitor.py's snapshot (live/live.json next to the page), fetched every 30 s only when the page is
+  served over http(s) (from file:// it shows how to start the monitor and makes no request): per queue the watcher,
+  the running job (phase, epoch bar, elapsed, ETA, batch used vs asked, GPU memory, val mask mAP; train-loss and
+  val-mAP charts) and the queue and recent finished jobs; a stale banner when the snapshot is > 3 intervals old.
 Pointer records (`owner` = version.json / batches.jsonl#id) get the owner file's fields underneath, as
 registry.current() does.
 
@@ -713,9 +717,11 @@ def safe_json(obj) -> str:
 
 CSS = r"""
 :root{--bg:#fafaf9;--fg:#1c1917;--mut:#6b6560;--card:#fff;--line:#e3e0dc;--acc:#2456c7;--accbg:#e8eefc;
---prod:#0f7a3d;--prodbg:#dcf3e5;--warn:#9a5b00;--warnbg:#fdf0d8;--dim:.5}
+--prod:#0f7a3d;--prodbg:#dcf3e5;--warn:#9a5b00;--warnbg:#fdf0d8;--dim:.5;
+--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100}
 @media (prefers-color-scheme:dark){:root{--bg:#141312;--fg:#ece9e5;--mut:#a39e98;--card:#1e1c1b;--line:#35322f;
---acc:#8fb0ff;--accbg:#1f2a44;--prod:#6fdc9c;--prodbg:#163323;--warn:#f2c26b;--warnbg:#3a2c12}}
+--acc:#8fb0ff;--accbg:#1f2a44;--prod:#6fdc9c;--prodbg:#163323;--warn:#f2c26b;--warnbg:#3a2c12;
+--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500}}
 *{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
 header,main{max-width:1280px;margin:0 auto;padding:12px 16px}
@@ -808,6 +814,47 @@ section.sec>details>summary{font-weight:600;cursor:pointer}
 .lcard .lname{font-family:ui-monospace,Consolas,monospace;font-size:.85rem;font-weight:600;word-break:break-all}
 .lrow{font-size:.85rem;margin-top:4px;overflow-wrap:anywhere}
 .lrow>b{color:var(--mut);font-weight:600;margin-right:4px}
+.lmeta{color:var(--mut);font-size:.85rem;margin:0 0 8px;overflow-wrap:anywhere}
+.lmeta code,.lnote code{font-family:ui-monospace,Consolas,monospace;font-size:.82rem;background:var(--card);border:1px solid var(--line);border-radius:4px;padding:0 4px;overflow-wrap:anywhere;word-break:break-all}
+.lnote{padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--card);overflow-wrap:anywhere}
+.lstale{margin:8px 0;padding:8px 10px;border-radius:8px;background:var(--warnbg);color:var(--warn);font-weight:600;overflow-wrap:anywhere}
+.lq{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:12px;min-width:0}
+.lq>h3{margin:0 0 6px;font-size:1rem;font-family:ui-monospace,Consolas,monospace;overflow-wrap:anywhere;word-break:break-all}
+.lq h4{margin:14px 0 4px;font-size:.9rem}
+.lw{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline;font-size:.88rem}
+.lrun{border:1px solid var(--line);border-radius:8px;padding:10px;margin:10px 0;background:var(--bg);min-width:0}
+.lrun .top{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline}
+.lep{font-weight:600;margin-top:8px}
+.lstats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:10px 0}
+.lstat{border:1px solid var(--line);border-radius:8px;padding:6px 8px;background:var(--card);min-width:0}
+.lstat .k{font-size:.75rem;color:var(--mut)}.lstat .v{font-size:1.1rem;font-weight:600;overflow-wrap:anywhere}
+.lstat .s{font-size:.75rem;color:var(--mut);overflow-wrap:anywhere}
+.lcharts{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px}
+.lchart{margin:0;border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--card);min-width:0}
+.lchart figcaption{font-weight:600;font-size:.9rem}
+.lleg{display:flex;flex-wrap:wrap;gap:2px 12px;font-size:.78rem;color:var(--mut);margin:2px 0 4px}
+.lkey{display:inline-block;width:14px;border-top:2px solid;vertical-align:middle;margin-right:4px}
+.lplot{position:relative}.lplot svg{display:block;overflow:visible;touch-action:pan-y}
+.lplot svg:focus{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px}
+.lgrid{stroke:var(--line);stroke-width:1}
+.laxis{fill:var(--mut);font-size:11px;font-variant-numeric:tabular-nums}
+.llab{fill:var(--mut);font-size:11px}
+.lline{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.ls1{stroke:var(--s1)}.ls2{stroke:var(--s2)}.ls3{stroke:var(--s3)}.ls4{stroke:var(--s4)}
+.lf1{fill:var(--s1)}.lf2{fill:var(--s2)}.lf3{fill:var(--s3)}.lf4{fill:var(--s4)}
+.ldot{stroke:var(--card);stroke-width:2}
+.lxh{stroke:var(--mut);stroke-width:1}
+.ltip{position:absolute;top:0;pointer-events:none;background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:.78rem;box-shadow:0 2px 8px rgba(0,0,0,.15);white-space:nowrap;z-index:2}
+.ltip .r{display:flex;gap:6px;align-items:center}.ltip b{font-variant-numeric:tabular-nums}.ltip .n{color:var(--mut)}
+.ltab{width:100%;border-collapse:collapse;font-size:.85rem}
+.ltab td,.ltab th{border-top:1px solid var(--line);padding:4px;text-align:left;vertical-align:top;overflow-wrap:anywhere}
+.ltab td:first-child{font-family:ui-monospace,Consolas,monospace;font-size:.78rem;word-break:break-all}
+.lchart details{margin-top:4px;font-size:.8rem}.lchart details summary{cursor:pointer;color:var(--mut)}
+.lchart details .ltab td{font-family:inherit;font-variant-numeric:tabular-nums;word-break:normal}
+.lchart details>div{max-height:240px;overflow:auto}
+.lfin{border-top:1px solid var(--line);padding:6px 0;min-width:0}
+.lfin .top{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline}
+@media (max-width:420px){.lstats,.lcharts{grid-template-columns:1fr}}
 """
 
 JS = r"""
@@ -972,8 +1019,9 @@ function show(k){var r=R[k];D.textContent='';D.classList.remove('hidden');
   if(window.matchMedia('(min-width:900px)').matches)D.scrollTop=0;
 }
 // tabs
-var panes=['tree','graph','lookup'];
-function tab(p){panes.forEach(function(n){document.getElementById(n).classList.toggle('hide',n!==p);
+var panes=['tree','graph','lookup','live'];
+function tab(p){if(p==='live')setTimeout(liveDraw,0);
+  panes.forEach(function(n){document.getElementById(n).classList.toggle('hide',n!==p);
   var t=document.getElementById('t-'+n);t.classList.toggle('on',n===p);t.setAttribute('aria-selected',String(n===p));});}
 panes.forEach(function(n){document.getElementById('t-'+n).addEventListener('click',function(){tab(n);});});
 // lineage graph: columns, boxes as buttons over an SVG edge layer (positions computed here)
@@ -1061,6 +1109,145 @@ function lookup(){var q=lq.value.trim();lres.textContent='';
   lres.appendChild(el('div','note',hits.length+' match'+(hits.length===1?'':'es')+(hits.length>50?', showing the first 50':'')));
   hits.slice(0,50).forEach(function(x){lres.appendChild(imgCard(x));});}
 lq.addEventListener('input',lookup);
+// live: jobs/monitor.py's snapshot (live/live.json next to this page). Fetched every 30 s, and only when the page is
+// served over http(s): opened as a file, the page makes no request at all.
+var LB=document.getElementById('lbody'),LS=null,LERR=null,LSTALE=false,lcharts=[],lopen={};
+function dur(s){if(s==null||isNaN(s))return '?';s=Math.max(0,Math.round(s));if(s<60)return s+' s';
+  var m=Math.round(s/60);if(m<60)return m+' min';var h=Math.floor(m/60);m%=60;
+  if(h<48)return h+' h'+(m?' '+m+' min':'');return Math.floor(h/24)+' d '+(h%24)+' h';}
+function f3(v){return v==null?'?':Number(v).toFixed(3);}
+function sig(v){return v==null?'?':Number(v).toPrecision(3);}
+function snapAge(){return LS?(Date.now()-Date.parse(LS.generated_utc))/1000:null;}
+function liveStale(){var a=snapAge();return a!=null&&a>3*(LS.interval_s||30);}
+function stat(box,k,v,s){var d=el('div','lstat');d.appendChild(el('div','k',k));d.appendChild(el('div','v',v));
+  if(s)d.appendChild(el('div','s',s));box.appendChild(d);}
+var LCHIP={done:'done',blocked:'blocked',cancelled:'cancelled',running:'in_progress',alive:'done',
+  paused:'blocked',waiting:'blocked','waiting for GPU':'blocked',offline:'blocked','access denied':'blocked',
+  stale:'blocked',stopped:'blocked','no watcher':'blocked'};
+function chip(t){return el('span','chip '+(LCHIP[t]||''),t);}
+// a small line chart: one y axis from 0, hairline grid, legend + end labels, crosshair tooltip per epoch, table view
+function lineChart(title,S,defs,fmt){
+  var fig=el('figure','lchart');fig.appendChild(el('figcaption',null,title));
+  var leg=el('div','lleg');defs.forEach(function(d,i){var s=el('span');var k=el('span','lkey');
+    k.style.borderTopColor='var(--s'+(i+1)+')';s.appendChild(k);s.appendChild(document.createTextNode(d[1]));leg.appendChild(s);});
+  fig.appendChild(leg);var plot=el('div','lplot');fig.appendChild(plot);
+  var dt=el('details');dt.open=!!lopen[title];dt.addEventListener('toggle',function(){lopen[title]=dt.open;});
+  dt.appendChild(el('summary',null,'Table'));var tw=el('div'),t=el('table','ltab'),hr=el('tr');
+  hr.appendChild(el('th',null,'epoch'));defs.forEach(function(d){hr.appendChild(el('th',null,d[1]));});t.appendChild(hr);
+  S.epoch.forEach(function(e,j){var tr=el('tr');tr.appendChild(el('td',null,e));
+    defs.forEach(function(d){tr.appendChild(el('td',null,fmt(S[d[0]][j])));});t.appendChild(tr);});
+  tw.appendChild(t);dt.appendChild(tw);fig.appendChild(dt);
+  fig.draw=function(){
+    var W=plot.clientWidth;if(!W)return;var H=180,ML=44,MR=46,MT=8,MB=24,pw=W-ML-MR,ph=H-MT-MB;
+    plot.textContent='';var svg=svgEl('svg');svg.setAttribute('width',W);svg.setAttribute('height',H);
+    svg.setAttribute('tabindex','0');svg.setAttribute('role','img');svg.setAttribute('aria-label',title+', '+S.epoch.length+' epochs; table below');
+    var xs=S.epoch,n=xs.length,ymax=0;defs.forEach(function(d){S[d[0]].forEach(function(v){if(v!=null&&v>ymax)ymax=v;});});
+    var raw=(ymax||1)/4,mag=Math.pow(10,Math.floor(Math.log10(raw))),r=raw/mag;
+    var step=(r<=1?1:r<=2?2:r<=2.5?2.5:r<=5?5:10)*mag,top=step*Math.ceil((ymax||1)/step-1e-9);
+    var x0=xs[0],x1=n>1?xs[n-1]:xs[0]+1;
+    function X(e){return ML+(n>1?(e-x0)/(x1-x0)*pw:pw/2);}function Y(v){return MT+ph-v/top*ph;}
+    for(var g=0;g<=top+step/2;g+=step){var ln=svgEl('line','lgrid');ln.setAttribute('x1',ML);ln.setAttribute('x2',ML+pw);
+      ln.setAttribute('y1',Y(g));ln.setAttribute('y2',Y(g));svg.appendChild(ln);
+      var tx=svgEl('text','laxis');tx.setAttribute('x',ML-6);tx.setAttribute('y',Y(g)+4);tx.setAttribute('text-anchor','end');
+      tx.textContent=step<0.01?g.toExponential(0):String(+g.toFixed(4));svg.appendChild(tx);}
+    var xr=(x1-x0)/4,xm=Math.pow(10,Math.floor(Math.log10(Math.max(xr,1)))),xq=xr/xm;
+    var xstep=Math.max(1,(xq<=1?1:xq<=2?2:xq<=5?5:10)*xm);
+    for(var e=Math.ceil(x0/xstep)*xstep;e<=x1;e+=xstep){if(n<2&&e!==x0)continue;
+      var xt=svgEl('text','laxis');xt.setAttribute('x',X(e));xt.setAttribute('y',H-6);xt.setAttribute('text-anchor','middle');
+      xt.textContent=e;svg.appendChild(xt);}
+    var ends=[];
+    defs.forEach(function(d,i){var v=S[d[0]],p='',pen=false,last=null;
+      for(var j=0;j<n;j++){if(v[j]==null){pen=false;continue;}p+=(pen?'L':'M')+X(xs[j]).toFixed(1)+','+Y(v[j]).toFixed(1);pen=true;last=j;}
+      if(last==null)return;
+      if(n===1){var c=svgEl('circle','lf'+(i+1));c.setAttribute('cx',X(xs[0]));c.setAttribute('cy',Y(v[0]));c.setAttribute('r',4);svg.appendChild(c);}
+      else{var pa=svgEl('path','lline ls'+(i+1));pa.setAttribute('d',p);svg.appendChild(pa);}
+      ends.push({y:Y(v[last]),x:X(xs[last]),t:d[1]});});
+    ends.sort(function(a,b){return a.y-b.y;});var prev=-1e9;   // end labels; one that would overlap the last is left to the legend
+    ends.forEach(function(L){if(L.y-prev<12)return;prev=L.y;var t=svgEl('text','llab');t.setAttribute('x',L.x+6);
+      t.setAttribute('y',L.y+4);t.textContent=L.t;svg.appendChild(t);});
+    var xh=svgEl('line','lxh');xh.setAttribute('y1',MT);xh.setAttribute('y2',MT+ph);xh.style.display='none';svg.appendChild(xh);
+    var dots=defs.map(function(d,i){var c=svgEl('circle','ldot lf'+(i+1));c.setAttribute('r',4);c.style.display='none';svg.appendChild(c);return c;});
+    var hit=svgEl('rect');hit.setAttribute('x',ML);hit.setAttribute('y',0);hit.setAttribute('width',pw);hit.setAttribute('height',H);
+    hit.setAttribute('fill','transparent');svg.appendChild(hit);plot.appendChild(svg);
+    var tip=el('div','ltip');tip.style.display='none';plot.appendChild(tip);var cur=n-1;
+    function showAt(j){cur=Math.max(0,Math.min(n-1,j));var x=X(xs[cur]);xh.setAttribute('x1',x);xh.setAttribute('x2',x);xh.style.display='';
+      tip.textContent='';tip.appendChild(el('div','n','Epoch '+xs[cur]));
+      defs.forEach(function(d,i){var v=S[d[0]][cur],r=el('div','r'),k=el('span','lkey');k.style.borderTopColor='var(--s'+(i+1)+')';
+        r.appendChild(k);r.appendChild(el('b',null,fmt(v)));r.appendChild(el('span','n',d[1]));tip.appendChild(r);
+        if(v==null)dots[i].style.display='none';else{dots[i].setAttribute('cx',x);dots[i].setAttribute('cy',Y(v));dots[i].style.display='';}});
+      tip.style.display='';var tw2=tip.offsetWidth;tip.style.left=(x+12+tw2>W?Math.max(0,x-12-tw2):x+12)+'px';}
+    function hide(){xh.style.display='none';tip.style.display='none';dots.forEach(function(c){c.style.display='none';});}
+    function near(ev){var b=svg.getBoundingClientRect(),px=ev.clientX-b.left,best=0;
+      xs.forEach(function(e,j){if(Math.abs(X(e)-px)<Math.abs(X(xs[best])-px))best=j;});return best;}
+    svg.addEventListener('pointermove',function(ev){showAt(near(ev));});svg.addEventListener('pointerdown',function(ev){showAt(near(ev));});
+    svg.addEventListener('pointerleave',hide);svg.addEventListener('focus',function(){showAt(cur);});svg.addEventListener('blur',hide);
+    svg.addEventListener('keydown',function(ev){if(ev.key==='ArrowLeft'||ev.key==='ArrowRight'){ev.preventDefault();showAt(cur+(ev.key==='ArrowLeft'?-1:1));}});
+  };
+  lcharts.push(fig);return fig;}
+function liveDraw(){lcharts.forEach(function(f){f.draw();});}
+function runBox(r){var b=el('div','lrun'),top=el('div','top');top.appendChild(el('span','rid',r.job));top.appendChild(chip('running'));
+  top.appendChild(el('span','chip',r.phase));b.appendChild(top);if(r.run)b.appendChild(el('div','note','run '+r.run));
+  if(r.cancel_requested)b.appendChild(el('div','why','Cancel requested: the runner stops the job within ~10 s (the partial run is kept).'));
+  if(r.hung)b.appendChild(el('div','why','Hung? No new epoch for '+dur(r.last_epoch_age_s)+' (expected every '+dur(r.epoch_median_s)+'). Check train.log on the desktop.'));
+  if(r.batch_halved)b.appendChild(el('div','why','batch '+r.batch+' of '+r.batch_asked+' asked: Ultralytics halved it after running out of GPU memory in epoch 1.'));
+  if(r.epoch!=null&&r.epochs){var ep=el('div','lep','Epoch '+r.epoch+' / '+r.epochs);b.appendChild(ep);
+    var bar=el('div','bar'),fill=el('i');fill.style.width=Math.min(100,Math.round(100*r.epoch/r.epochs))+'%';bar.appendChild(fill);b.appendChild(bar);}
+  else b.appendChild(el('div','lep',r.phase==='setting up'?'Setting up: no epoch finished yet':'Epoch ?'));
+  var st=el('div','lstats');
+  stat(st,'Elapsed',dur(r.elapsed_s),r.last_epoch_age_s!=null?'last epoch '+dur(r.last_epoch_age_s)+' ago':null);
+  if(r.phase==='finishing')stat(st,'ETA','final validation',null);
+  else if(r.eta_patience_bound_s!=null)stat(st,'ETA','≤ '+dur(r.eta_patience_bound_s),'early stop unless val improves (best epoch '+r.best_epoch+', patience '+r.patience+'); all epochs '+dur(r.eta_s));
+  else stat(st,'ETA',r.eta_s==null?'?':dur(r.eta_s),r.eta_capped?'time cap: max_hours '+r.max_hours:(r.epoch_median_s!=null?'median epoch '+dur(r.epoch_median_s):'after epoch 2'));
+  stat(st,'Batch',r.batch!=null?(r.batch_halved?r.batch+' of '+r.batch_asked+' asked':String(r.batch)):(r.batch_note||'unknown'),
+    r.batch==null&&r.batch_asked!=null?'asked '+r.batch_asked:null);
+  stat(st,'GPU memory',r.gpu_reserved_gb!=null?r.gpu_reserved_gb+' GB':'unknown','reserved by the trainer');
+  stat(st,'Val mask mAP50-95',f3(r.map50_95),'mAP50 '+f3(r.map50));b.appendChild(st);
+  var S=r.series;if(S&&S.epoch.length){var cs=el('div','lcharts');
+    cs.appendChild(lineChart('Train losses',S,[['box','box'],['seg','seg'],['cls','cls'],['dfl','dfl']],sig));
+    cs.appendChild(lineChart('Val mask mAP',S,[['map50','mAP50'],['map50_95','mAP50-95']],f3));b.appendChild(cs);}
+  return b;}
+function queueBox(q,stale){var s=el('section','lq');s.appendChild(el('h3',null,q.share));
+  if(q.reach!=='ok'){var w=el('div','lw');w.appendChild(chip(q.reach||'offline'));w.appendChild(el('span','note',q.detail||''));s.appendChild(w);return s;}
+  var W=q.watcher,w2=el('div','lw');w2.appendChild(el('span','note','Watcher'));w2.appendChild(chip(W.display));
+  w2.appendChild(el('span','note',(W.age_s!=null?'heartbeat '+dur(W.age_s)+' ago':'no heartbeat')+(W.machine?' · '+W.machine:'')
+    +(W.detail?' · '+W.detail:'')));s.appendChild(w2);
+  if(q.running&&!stale)s.appendChild(runBox(q.running));
+  else if(!stale)s.appendChild(el('div','note','No job running.'));
+  s.appendChild(el('h4',null,'Queue ('+q.jobs.length+')'));
+  if(q.jobs.length){var t=el('table','ltab');q.jobs.forEach(function(j){var tr=el('tr');tr.appendChild(el('td',null,j.job));
+      var td=el('td');td.appendChild(chip(stale&&j.state==='running'?'unknown (stale)':j.state));
+      var note=[j.cancel_requested&&!j.reason?'cancel requested':null,j.reason,j.state==='done'||j.state==='blocked'||j.state==='cancelled'?(j.pulled?'pulled':'not pulled'):null]
+        .filter(function(x){return x;}).join(' · ');if(note)td.appendChild(el('div','note',note));tr.appendChild(td);t.appendChild(tr);});s.appendChild(t);}
+  else s.appendChild(el('div','note','No jobs in q/.'));
+  s.appendChild(el('h4',null,'Recent finished ('+q.finished.length+')'));
+  q.finished.forEach(function(f){var d=el('div','lfin'),tp=el('div','top');tp.appendChild(el('span','rid',f.job));tp.appendChild(chip(f.status));d.appendChild(tp);
+    var m=f.metrics||{};d.appendChild(el('div','note',[m.mask_map50_95!=null?'mask mAP50-95 '+f3(m.mask_map50_95):null,
+      m.mask_map50!=null?'mAP50 '+f3(m.mask_map50):null,f.best_epoch!=null?'best epoch '+f.best_epoch:null,
+      f.ended?'ended '+f.ended:null,f.pulled?'pulled':'not pulled'].filter(function(x){return x;}).join(' · ')));
+    if(f.reason)d.appendChild(el('div','why',f.reason));s.appendChild(d);});
+  if(!q.finished.length)s.appendChild(el('div','note','None yet.'));
+  return s;}
+function liveRender(){LB.textContent='';lcharts=[];
+  if(!LS){LB.appendChild(el('div','note',LERR||'Loading live/live.json …'));return;}
+  LSTALE=liveStale();var meta=el('div','lmeta');meta.id='lage';LB.appendChild(meta);liveTick();
+  if(LSTALE)LB.appendChild(el('div','lstale','Stale: this snapshot is '+dur(snapAge())+' old (the monitor writes every '+
+    dur(LS.interval_s)+'). jobs/monitor.py has stopped or cannot write, so nothing below is current and no job is shown as running.'));
+  if(LERR)LB.appendChild(el('div','why',LERR));
+  LS.queues.forEach(function(q){LB.appendChild(queueBox(q,LSTALE));});
+  liveDraw();}
+function liveTick(){var m=document.getElementById('lage');if(!m||!LS)return;
+  if(liveStale()!==LSTALE){liveRender();return;}
+  m.textContent='Updated '+dur(snapAge())+' ago · every '+dur(LS.interval_s)+' · monitor on '+(LS.monitor&&LS.monitor.machine||'?');}
+function liveLoad(){fetch('live/live.json',{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('status '+r.status);return r.json();})
+  .then(function(j){LS=j;LERR=null;liveRender();})
+  .catch(function(e){LERR='Could not load live/live.json ('+e.message+'). Is jobs/monitor.py running next to the history server?';liveRender();});}
+if(location.protocol.indexOf('http')===0){liveLoad();setInterval(liveLoad,30000);setInterval(liveTick,5000);
+  var lrt=null;window.addEventListener('resize',function(){clearTimeout(lrt);lrt=setTimeout(liveDraw,150);});}
+else{var ln=el('div','lnote');ln.appendChild(el('strong',null,'Live needs the page served by the history server. '));
+  ln.appendChild(document.createTextNode('On the laptop, next to the server, start '));
+  ln.appendChild(el('code',null,'python jobs/monitor.py --share \\\\coe-bme-rc-ml\\cj'));
+  ln.appendChild(document.createTextNode(' and open this page from the server, not as a file. Opened as a file, the page fetches nothing.'));
+  LB.appendChild(ln);}
 drawGraph();lookup();
 apply();
 })();
@@ -1091,6 +1278,7 @@ def render_html(model: dict) -> str:
 <button type="button" class="tab on" role="tab" id="t-tree" data-p="tree" aria-selected="true">History tree</button>
 <button type="button" class="tab" role="tab" id="t-graph" data-p="graph" aria-selected="false">Lineage graph</button>
 <button type="button" class="tab" role="tab" id="t-lookup" data-p="lookup" aria-selected="false">Image lookup</button>
+<button type="button" class="tab" role="tab" id="t-live" data-p="live" aria-selected="false">Live</button>
 </div>
 <div id="tree" class="pane"></div>
 <div id="graph" class="pane hide">
@@ -1101,7 +1289,8 @@ def render_html(model: dict) -> str:
 <div id="lookup" class="pane hide">
 <div class="filters"><input id="lq" type="search" placeholder="Image name or part of it" aria-label="Image name"></div>
 <div id="lres"></div>
-</div></div>
+</div>
+<div id="live" class="pane hide"><div id="lbody"></div></div></div>
 <aside id="detail" class="hidden"><div class="note">Tap a record for its detail.</div></aside>
 </div>
 </main>
