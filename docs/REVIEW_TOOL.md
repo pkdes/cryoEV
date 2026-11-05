@@ -21,8 +21,14 @@ One HTML page (`annotation/review_tool/index.html`) for reviewing labels against
    - **Bind to the Tailscale address.** Restart with `--host <IP from tailscale ip -4>`, e.g. `--host 100.101.102.103`, and open `http://100.101.102.103:8765/?k=<key>` on the phone. Allow Python through Windows Firewall when asked.
    - Don't use `--host 0.0.0.0`: it also opens the port to the LAN. The server warns if you do.
 3. On the phone, open the link. Optional: `&mode=classes` opens class review, and `&who=<name>` names the reviewer without asking. Example: `…/?k=<key>&mode=classes`. The `?k=` link sets a 30-day cookie.
+   - The cookie is `review_key_<port>` (the server's listen port). A browser sends a host's cookies to every port, so with one name the real review (8766) and the sandbox (8765), each with its own key, logged each other out.
+   - The old `review_key` cookie is still accepted when it holds this server's key, so current reviewers stay signed in. Only the new name is set.
    - The first visit asks **Who is reviewing?** (see [Reviewer name](#reviewer-name)). The name is then remembered on that device.
 4. Stop the server with Ctrl+C.
+
+**Sandbox.** `--sandbox`, or a package folder named `SANDBOX_…`, puts a fixed amber bar on every view: "SANDBOX — edits here don't count toward the real review". The page moves down by the bar's height, so it covers no control.
+- The flag reaches the page through `data.js`: the server appends `window.REVIEW_SERVER = {"sandbox": true};` when it serves it. The file on disk is unchanged, and a real review's `data.js` is served byte for byte.
+- Example: `python annotation/review_server.py --package <SANDBOX_copy> --port 8765`.
 
 ## Classes
 The class list always follows the Roboflow names, with hotkeys **1–8**: `EV, Low conf EV, MV, inner, Incomplete, Overlapping, VLDL, non-EV`.
@@ -231,6 +237,7 @@ python -m unittest discover -s annotation/tests -v
 ```
 - `test_review_server.py`, standard library only: a live server on a free 127.0.0.1 port.
   - API: ping, PUT, a merge by timestamp, the new / redraw decisions, claims (and their cap), access-key rejection.
+  - Sandbox and cookies: the flag in `data.js` for `--sandbox` and a `SANDBOX_` package (a real package's `data.js` byte-identical); two servers with different keys and one cookie jar both stay signed in; the legacy cookie accepted only with this server's key. The browser tests check the bar at 400 and 1280 px (`SandboxBarTests`).
   - Hardening: rejected bad edits and bad values, never stored; bad Content-Length; idle-socket timeout; key redacted from logs; default host.
   - Records: an offline reshape survives a newer list; the real September edits merge and apply, read-only, and change some labels.
 - `test_review_tool_browser.py`, Playwright with headless Edge or Chrome (skipped without one):

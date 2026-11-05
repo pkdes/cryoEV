@@ -44,8 +44,10 @@ class MonitorTests(T.TempRoots, unittest.TestCase):
         os.environ.pop("CRYOEV_REGISTRY", None)
         self.out = self.tmp / "reg" / "live" / "live.json"
 
-    def once(self, *shares, out=None, env=None):
-        argv = [*MONITOR, *[x for s in shares for x in ("--share", str(s))], "--once", "--out", str(out or self.out)]
+    def once(self, *shares, out=None, env=None, servers=""):
+        """servers="" by default: the tests never probe this machine's real review / history ports."""
+        argv = [*MONITOR, *[x for s in shares for x in ("--share", str(s))], "--once", "--out", str(out or self.out),
+                "--servers", servers]
         r = subprocess.run(argv, capture_output=True, text=True, env={**os.environ, **(env or {})}, timeout=120)
         return r
 
@@ -163,6 +165,63 @@ class MonitorTests(T.TempRoots, unittest.TestCase):
         T.running_fixture(self.share, progress={})
         (self.share / C.Q / "job_20261104_live" / C.CANCEL).write_text("{}", encoding="utf-8")
         self.assertTrue(self.snap(self.share)["queues"][0]["running"]["cancel_requested"])
+
+    # ------------------------------------------------------------ local server probes
+    def test_server_probes(self):
+        """A live dummy server answering 403 (as the review server does without its key) and one answering 404 (as
+        http.server does for /api/ping) are up; a port nobody listens on and one that accepts but never answers are
+        down, within the time bound. The snapshot carries them, in --servers order."""
+        import http.server
+        import socket
+
+        class Answer(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(403 if self.server.server_address[1] == live else 404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        servers = []
+        for _ in range(2):
+            srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Answer)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            self.addCleanup(srv.server_close)
+            self.addCleanup(srv.shutdown)
+            servers.append(srv)
+        live, live404 = (s.server_address[1] for s in servers)
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        dead = s.getsockname()[1]
+        s.close()                                                      # nothing listens on `dead` any more
+        mute = socket.socket()                                         # listens, never accepts or answers
+        mute.bind(("127.0.0.1", 0))
+        mute.listen(1)
+        self.addCleanup(mute.close)
+        hang = mute.getsockname()[1]
+        t0 = time.monotonic()
+        r = M.probe_servers([("review", live), ("history", live404), ("sandbox", dead), ("mute", hang)])
+        self.assertLess(time.monotonic() - t0, M.PROBE_TOTAL_S + 0.5)
+        self.assertEqual([(x["name"], x["port"], x["up"]) for x in r],
+                         [("review", live, True), ("history", live404, True), ("sandbox", dead, False),
+                          ("mute", hang, False)])
+        self.assertIsInstance(r[0]["ms"], int)
+        t0 = time.monotonic()                                          # the total bound holds whatever the timeout
+        self.assertFalse(M.probe_servers([("mute", hang)], timeout=5, total=0.5)[0]["up"])
+        self.assertLess(time.monotonic() - t0, 1.5)
+        # through the CLI: the snapshot has servers; the default list is the laptop's three
+        snap = self.once(self.share, servers=f"review={live},sandbox={dead}")
+        self.assertEqual(snap.returncode, 0, snap.stderr)
+        self.assertIn(f"servers: review=127.0.0.1:{live}, sandbox=127.0.0.1:{dead}", snap.stdout)
+        got = json.loads(self.out.read_text(encoding="utf-8"))["servers"]
+        self.assertEqual([(x["name"], x["port"], x["up"]) for x in got], [("review", live, True), ("sandbox", dead, False)])
+        self.assertEqual(M.parse_servers(M.SERVERS), [("review", 8766), ("sandbox", 8765), ("history", 8768)])
+        self.assertEqual(M.parse_servers(""), [])
+        self.assertEqual(json.loads(self.out.read_text(encoding="utf-8"))["queues"][0]["reach"], "ok")
+        for bad in ("review", "review=x", "=8766", "review=70000"):
+            with self.assertRaises(ValueError):
+                M.parse_servers(bad)
+        self.assertEqual(self.once(self.share, servers="review").returncode, 2)   # argparse error
 
     # ------------------------------------------------------------ controls on the monitor itself
     def test_share_unchanged(self):

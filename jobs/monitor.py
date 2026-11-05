@@ -2,6 +2,7 @@
 """Laptop: a live snapshot of the desktop's training queue for the history page's Live tab (docs/JOBS.md).
 
     python jobs/monitor.py --share \\\\gpu-desktop\\cj [--share ...] [--every 30] [--once] [--out <file>]
+        [--servers review=8766,sandbox=8765,history=8768]
 
 Every --every seconds it reads each queue (in a thread, given up after 20 s) and writes one JSON file, by default
 <registry>/live/live.json (the history page fetches live/live.json when served over http):
@@ -9,7 +10,10 @@ Every --every seconds it reads each queue (in a thread, given up after 20 s) and
   - the watcher (watch.json + heartbeat age; stale after 5 min without a heartbeat);
   - every job in q/ (sync.queue_rows), and the 10 most recent finished ones with their final metrics;
   - the running job: phase, epoch / epochs, elapsed, ETA, batch used vs asked, GPU memory, the latest val mask mAP
-    and the per-epoch series, from work/<job>/.../runs/<run>/ (progress.json, else results.csv + args.yaml).
+    and the per-epoch series, from work/<job>/.../runs/<run>/ (progress.json, else results.csv + args.yaml);
+  - servers: this laptop's review / sandbox / history servers (--servers), each probed with GET /api/ping on
+    127.0.0.1 (any HTTP answer, 403 and 404 included, is up; refused or no answer in 1 s is down), all at once,
+    in their own threads, given up after 3 s in total. The history page's Servers bar shows them.
 Read only on the share: every file is read with common.read_shared (full sharing, closed at once), so a desktop
 delete/rmtree is never blocked by it; an os.replace onto a file being read can still fail for those milliseconds,
 which the desktop's writers retry (common.write_json, train_yolo._write_progress). Nothing under d/.tmp_* is
@@ -20,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import http.client
 import io
 import json
 import os
@@ -47,6 +52,9 @@ HUNG_EPOCHS = 5
 ETA_WINDOW = 5               # median of the last <= 5 epoch durations
 DEFAULT_HOURS = 48.0         # watch.py's --max-hours when job.json has none
 N_FINISHED = 10
+SERVERS = "review=8766,sandbox=8765,history=8768"   # name=port on 127.0.0.1 (docs/JOBS.md, Live monitor)
+PROBE_TIMEOUT_S = 1.0        # per server: connect + answer
+PROBE_TOTAL_S = 3.0          # all servers together (they run in parallel)
 LIVE_FILE, LOCK_FILE = "live.json", "monitor.lock"
 LOSSES = (("box", "train/box_loss"), ("seg", "train/seg_loss"), ("cls", "train/cls_loss"), ("dfl", "train/dfl_loss"))
 MAP50, MAP50_95 = "metrics/mAP50(M)", "metrics/mAP50-95(M)"
@@ -358,9 +366,62 @@ class Reader:
         return box["v"]
 
 
-def snapshot(shares, reader: Reader, every) -> dict:
+# ---------------------------------------------------------------- local servers
+def parse_servers(text: str) -> list:
+    """"review=8766,sandbox=8765" -> [("review", 8766), ("sandbox", 8765)]; "" -> [] (no probes)."""
+    out = []
+    for part in (text or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, sep, port = part.partition("=")
+        if not sep or not name.strip() or not port.strip().isdigit() or not 0 < int(port) < 65536:
+            raise ValueError(f"bad server {part!r}: expected name=port, e.g. review=8766")
+        out.append((name.strip(), int(port)))
+    return out
+
+
+def probe(port: int, timeout=PROBE_TIMEOUT_S) -> tuple:
+    """GET /api/ping on 127.0.0.1:port -> (up, ms). Any HTTP status is up: the review servers answer 403 without
+    the key and the history server (http.server) 404; a refused connection, a timeout or garbage is down."""
+    t0 = time.perf_counter()
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        c.request("GET", "/api/ping")
+        c.getresponse().read(64)
+        up = True
+    except (OSError, http.client.HTTPException):
+        up = False
+    finally:
+        c.close()
+    return up, round((time.perf_counter() - t0) * 1000)
+
+
+def probe_servers(servers, timeout=PROBE_TIMEOUT_S, total=PROBE_TOTAL_S) -> list:
+    """[{name, port, up, ms}] for each (name, port), probed in parallel; one that has not answered by `total`
+    seconds is down. Separate from the queue reader threads, so a dead share never delays these."""
+    box = [None] * len(servers)
+
+    def work(i, port):
+        box[i] = probe(port, timeout)
+    threads = [threading.Thread(target=work, args=(i, port), daemon=True, name=f"probe {port}")
+               for i, (_, port) in enumerate(servers)]
+    for t in threads:
+        t.start()
+    end = time.monotonic() + total
+    for t in threads:
+        t.join(max(0.0, end - time.monotonic()))
+    out = []
+    for (name, port), r in zip(servers, box):
+        up, ms = r if r is not None else (False, None)
+        out.append({"name": name, "port": port, "up": up, "ms": ms})
+    return out
+
+
+def snapshot(shares, reader: Reader, every, servers=()) -> dict:
     return {"schema": "live/1", "generated": C.now(), "generated_utc": C.now_utc(), "interval_s": every,
             "monitor": {"machine": platform.node(), "pid": os.getpid()},
+            "servers": probe_servers(list(servers)),
             "queues": [reader.read(Path(s)) for s in shares]}
 
 
@@ -371,7 +432,14 @@ def main(argv=None):
     ap.add_argument("--every", type=float, default=30.0, help="seconds between snapshots (default 30)")
     ap.add_argument("--once", action="store_true", help="write one snapshot, then exit")
     ap.add_argument("--out", type=Path, help=f"default <registry>/live/{LIVE_FILE}")
+    ap.add_argument("--servers", default=SERVERS,
+                    help=f"local servers to probe each cycle, name=port,... on 127.0.0.1 (default {SERVERS}; "
+                         "'' = none)")
     a = ap.parse_args(argv)
+    try:
+        servers = parse_servers(a.servers)
+    except ValueError as e:
+        ap.error(str(e))
     try:
         out = a.out or config.registry_root() / "live" / LIVE_FILE
     except config.ConfigError as e:
@@ -385,10 +453,11 @@ def main(argv=None):
     reader = Reader()
     print(f"[monitor] {', '.join(map(str, a.share))} -> {out}" + ("" if a.once else f" every {a.every:g} s"),
           flush=True)
+    print("[monitor] servers: " + (", ".join(f"{n}=127.0.0.1:{p}" for n, p in servers) or "none"), flush=True)
     try:
         while True:
             t0 = time.time()
-            snap = snapshot(a.share, reader, a.every)
+            snap = snapshot(a.share, reader, a.every, servers)
             try:
                 C.write_json(out, snap)
             except OSError as e:                       # e.g. the page server's reader holds it: next cycle

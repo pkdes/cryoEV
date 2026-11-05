@@ -45,6 +45,11 @@ canvas{display:block;width:100%;height:100%}
 #side .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0}
 #side kbd{font:11px ui-monospace,monospace;border:1px solid var(--line);border-radius:4px;padding:0 4px}
 .help li{margin:2px 0;color:var(--mute)}
+#sandbox{position:fixed;left:0;right:0;top:0;z-index:60;padding:4px 10px;padding-top:calc(4px + env(safe-area-inset-top,0px));background:#fbbf24;color:#1c1300;font-weight:700;font-size:13px;line-height:1.3;text-align:center;overflow-wrap:anywhere;border-bottom:1px solid #b45309}
+#sandbox[hidden]{display:none}
+body.sandbox{padding-top:var(--sbh,0px)}
+body.sandbox #tri{top:var(--sbh,0px);height:calc(100dvh - var(--sbh,0px));padding-top:0}
+body.sandbox #list,body.sandbox #side{top:var(--sbh,0px)}
 #banner{position:absolute;left:8px;top:8px;right:8px;background:var(--warn);color:#fff;padding:6px 10px;border-radius:6px;display:none}
 #hint{position:absolute;left:8px;bottom:44px;background:rgba(0,0,0,.6);color:#fff;padding:4px 8px;border-radius:6px;font-size:12px;pointer-events:none}
 #edToast{position:absolute;left:50%;top:44px;transform:translateX(-50%);background:rgba(0,0,0,.82);color:#fff;padding:6px 8px 6px 12px;border-radius:8px;font-size:13px;display:flex;gap:8px;align-items:center;z-index:2}
@@ -151,6 +156,7 @@ canvas{display:block;width:100%;height:100%}
 </style>
 </head>
 <body>
+<div id="sandbox" role="status" hidden>SANDBOX — edits here don't count toward the real review</div>
 <div id="app">
 <header>
   <button id="menuBtn" title="Image list">☰</button>
@@ -319,6 +325,13 @@ try {
 } catch (e) { storageOk = false; }
 if (!storageOk) banner("This browser blocks local storage, so edits are lost on reload. Export often.");
 
+// Sandbox servers (review_server.py --sandbox, or a SANDBOX_ package) append REVIEW_SERVER.sandbox to data.js:
+// a fixed amber bar on every view, with the page pushed down by its height so it covers no control.
+if ((window.REVIEW_SERVER || {}).sandbox) {
+  const sb = $("sandbox"), fit = () => document.documentElement.style.setProperty("--sbh", sb.offsetHeight + "px");
+  sb.hidden = false; document.body.classList.add("sandbox"); fit();
+  window.addEventListener("resize", fit);
+}
 function banner(msg) { const b = $("banner"); b.textContent = msg; b.style.display = msg ? "block" : "none"; }
 let saveTimer = null;
 function persist() {

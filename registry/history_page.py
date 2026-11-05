@@ -26,6 +26,11 @@ self-contained static HTML file: inline CSS/JS, no external URLs. The page has
   (the lv's changes.jsonl next to its version.json, else the registry's label_change rows) or list it in
   reviewed_images (noted "reviewed"), review packages
   (their data.js) and jobs (package or image_list), Roboflow image + split, session / grid. ONE embedded index;
+- a Servers bar in the header: links to the laptop's review (8766), sandbox (8765) and history (8768) servers,
+  built in the browser from where the page was opened (tailscale serve's public ports 443 / 8443 / 8445, else
+  http on the local port; opened as a file: names only, no links), each with an up / down / unknown dot from the
+  Live snapshot's `servers` (jobs/monitor.py probes them; grey when the snapshot is stale or missing). The browser
+  itself never contacts another port: the links are plain links;
 - a Live tab: jobs/monitor.py's snapshot (live/live.json next to the page), fetched every 30 s only when the page is
   served over http(s) (from file:// it shows how to start the monitor and makes no request): per queue the watcher,
   the running job (phase, epoch bar, elapsed, ETA, batch used vs asked, GPU memory, val mask mAP; train-loss and
@@ -83,6 +88,13 @@ JOB_LANES = (("annotate", "Annotate"), ("revise", "Revise"), ("train", "Train"),
 OPEN_ORDER = {"blocked": 0, "in_progress": 1, "ready": 2}       # anything else open sorts last
 CLOSED = {"done", "cancelled"}
 APP_PORT = 8766                                                 # review app port (NEXT_ITERATION.md)
+# The header's Servers bar: each laptop server's port behind `tailscale serve` (public) and on 127.0.0.1 (local).
+# jobs/monitor.py probes the same local ports under the same names (its --servers default).
+SERVERS = (
+    {"name": "review", "label": "Review", "public_port": 443, "local_port": APP_PORT, "path": "/"},
+    {"name": "sandbox", "label": "Sandbox", "public_port": 8443, "local_port": 8765, "path": "/"},
+    {"name": "history", "label": "History", "public_port": 8445, "local_port": 8768, "path": "/history.html"},
+)
 SPLITS = ("train", "valid", "test")
 EXCLUDED_LABEL = {"20261012": "20261012 lipo"}                  # sessions left out of the registry by design
 
@@ -359,6 +371,7 @@ def build_model(current: dict, history: dict, stats: dict, sources, changes=None
         "queue": queue, "other_jobs": other_jobs, "models": models, "lists": lists,
         "graph": graph_model(current, recs, find, sort_key),
         "lk": lookup_index(current, roots, changes or []),
+        "servers": [dict(x) for x in SERVERS],
     }
 
 
@@ -873,6 +886,17 @@ section.sec>details>summary{font-weight:600;cursor:pointer}
 .lchart details{margin-top:4px;font-size:.8rem}.lchart details summary{cursor:pointer;color:var(--mut)}
 .lchart details .ltab td{font-family:inherit;font-variant-numeric:tabular-nums;word-break:normal}
 .lchart details>div{max-height:240px;overflow:auto}
+.srvbar{display:flex;flex-wrap:wrap;gap:2px 14px;align-items:center;margin:2px 0 4px;min-width:0}
+.srvbar .srvk{color:var(--mut);font-size:.85rem;font-weight:600}
+.srvi{display:inline-flex;gap:6px;align-items:center;min-width:0;overflow-wrap:anywhere}
+.srvl{font-weight:600;color:var(--fg);overflow-wrap:anywhere}
+a.srvl{color:var(--acc);padding:6px 0;min-height:32px;display:inline-flex;align-items:center}
+.chip.sv{display:inline-flex;gap:4px;align-items:center}
+.chip.sv i{display:inline-block;width:8px;height:8px;border-radius:50%;background:currentColor}
+.chip.sv.up{background:var(--prodbg);color:var(--prod);border-color:transparent}
+.chip.sv.down{background:var(--warnbg);color:var(--warn);border-color:transparent}
+.chip.sv.unk{color:var(--mut)}.chip.sv.unk i{opacity:var(--dim)}
+.srvbar .note{flex:1 1 100%;overflow-wrap:anywhere}
 .lfin{border-top:1px solid var(--line);padding:6px 0;min-width:0}
 .lfin .top{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline}
 @media (max-width:420px){.lstats,.lcharts{grid-template-columns:1fr}}
@@ -1146,6 +1170,25 @@ function f3(v){return v==null?'?':Number(v).toFixed(3);}
 function sig(v){return v==null?'?':Number(v).toPrecision(3);}
 function snapAge(){return LS?(Date.now()-Date.parse(LS.generated_utc))/1000:null;}
 function liveStale(){var a=snapAge();return a!=null&&a>3*(LS.interval_s||30);}
+// Servers bar: links built from this page's own address; the dots come from the snapshot (the monitor probes the
+// ports on the laptop), so the browser never contacts another port. Grey when the snapshot is stale or missing.
+var SV=M.servers||[],SVPUB=['','443','8443','8445'];
+function srvHref(s,loc){
+  if(SVPUB.indexOf(loc.port)>=0)return loc.protocol+'//'+loc.hostname+(s.public_port===443?'':':'+s.public_port)+s.path;
+  return 'http:'+'//'+loc.hostname+':'+s.local_port+s.path;}
+function srvRender(){var bar=document.getElementById('srv');if(!bar)return;bar.textContent='';
+  var served=location.protocol.indexOf('http')===0,known=LS&&!liveStale()&&LS.servers||null;
+  bar.appendChild(el('span','srvk','Servers'));
+  SV.forEach(function(s){var w=el('span','srvi');w.dataset.name=s.name;
+    if(!served){w.appendChild(el('span','srvl',s.label));bar.appendChild(w);return;}
+    var a=el('a','srvl',s.label);a.href=srvHref(s,location);w.appendChild(a);
+    var r=null;(known||[]).forEach(function(x){if(x&&x.name===s.name)r=x;});
+    var st=r==null?'unk':r.up?'up':'down',c=el('span','chip sv '+st);c.appendChild(el('i'));
+    c.appendChild(document.createTextNode(st==='unk'?'unknown':st));
+    c.title=st==='unk'?(LS?'snapshot stale or without servers':'no live snapshot'):(st+' · 127.0.0.1:'+r.port+(r.ms!=null?' · '+r.ms+' ms':''));
+    w.appendChild(c);bar.appendChild(w);});
+  bar.appendChild(el('span','note',served?'First time on a device: open the review link with its ?k= key (ask Pujan).'
+    :'Names only: open via the history server for links.'));}
 function stat(box,k,v,s){var d=el('div','lstat');d.appendChild(el('div','k',k));d.appendChild(el('div','v',v));
   if(s)d.appendChild(el('div','s',s));box.appendChild(d);}
 var LCHIP={done:'done',blocked:'blocked',cancelled:'cancelled',running:'in_progress',alive:'done',
@@ -1254,7 +1297,7 @@ function queueBox(q,stale){var s=el('section','lq');s.appendChild(el('h3',null,q
     if(f.reason)d.appendChild(el('div','why',f.reason));s.appendChild(d);});
   if(!q.finished.length)s.appendChild(el('div','note','None yet.'));
   return s;}
-function liveRender(){LB.textContent='';lcharts=[];
+function liveRender(){LB.textContent='';lcharts=[];srvRender();
   if(!LS){LB.appendChild(el('div','note',LERR||'Loading live/live.json …'));return;}
   LSTALE=liveStale();var meta=el('div','lmeta');meta.id='lage';LB.appendChild(meta);liveTick();
   if(LSTALE)LB.appendChild(el('div','lstale','Stale: this snapshot is '+dur(snapAge())+' old (the monitor writes every '+
@@ -1275,6 +1318,7 @@ else{var ln=el('div','lnote');ln.appendChild(el('strong',null,'Live needs the pa
   ln.appendChild(el('code',null,'python jobs/monitor.py --share \\\\gpu-desktop\\cj'));
   ln.appendChild(document.createTextNode(' and open this page from the server, not as a file. Opened as a file, the page fetches nothing.'));
   LB.appendChild(ln);}
+srvRender();
 drawGraph();lookup();
 apply();
 })();
@@ -1289,6 +1333,7 @@ def render_html(model: dict) -> str:
 <style>{CSS}</style></head>
 <body>
 <header><h1>Registry history</h1>
+<nav class="srvbar" id="srv" aria-label="Servers"></nav>
 <div class="meta" id="gen"></div><div class="meta" id="counts"></div>
 <div class="prodline" id="prodline"></div>
 <div class="models" id="models"></div>
