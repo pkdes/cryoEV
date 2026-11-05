@@ -113,50 +113,69 @@ C:\cj\STOP                 pause request (`sync.py stop`); `start` renames it to
   - It writes the registry only through `registry.py import` and `registry.py set-status <job> done|blocked --reason ... --who pujan`.
 
 ## Desktop setup checklist (user, admin; once)
-1. **IT.** Check that the department allows Tailscale and a file share on this PC.
-2. **Tailscale.** Install it and sign in. In the tailnet ACL, allow TCP 445 to the desktop **only from `pujrog`** (the laptop).
-3. **Firewall.** Add an inbound rule: TCP 445 from `100.64.0.0/10` only (the tailnet), on all profiles.
-   Then open the built-in **"File and Printer Sharing (SMB-In)"** rules and make sure none of them allows 445 from any address. Disable them or scope them to `100.64.0.0/10`.
-   Check with `Get-NetFirewallRule -DisplayGroup "File and Printer Sharing" | Get-NetFirewallAddressFilter`.
-4. **Folders, locked to you.** New folders under `C:\` let every signed-in user modify them, so labmates could queue jobs or change the code and packages. Create the three folders and remove inheritance:
+Done on `coe-bme-rc-ml` 2026-11-04. "Admin window": PowerShell → Run as administrator (prompt `C:\WINDOWS\system32>`); "normal window": plain PowerShell.
+1. **IT.** Check that the department allows Tailscale, a file share and (if needed, step 5) a share-only local account.
+2. **Tailscale.** Install it and sign in with the laptop's account. `tailscale status` lists both machines.
+   Optional: a tailnet ACL allowing TCP 445 to the desktop only from `pujrog`. With only your own devices on the tailnet it can wait; a wrong ACL can cut off the phone.
+3. **Firewall** (admin). Allow 445 from the tailnet only, then check the built-in rules (on `coe-bme-rc-ml` only the Public SMB-In is on, scoped to `LocalSubnet`: left as is):
    ```powershell
+   New-NetFirewallRule -DisplayName "cryoEV share from Tailscale" -Direction Inbound -Protocol TCP -LocalPort 445 -RemoteAddress 100.64.0.0/10 -Action Allow -Profile Any
+   Get-NetFirewallRule -DisplayName "File and Printer Sharing (SMB-In)" | ForEach-Object { [pscustomobject]@{ Profile = $_.Profile; Enabled = $_.Enabled; Remote = (($_ | Get-NetFirewallAddressFilter).RemoteAddress -join ',') } } | Format-Table
+   ```
+4. **Folders, locked to you** (admin). New folders under `C:\` let every signed-in user modify them:
+   ```powershell
+   $me = whoami
+   mkdir C:\cj\q -Force
    foreach ($d in 'C:\cj','C:\cj_repo','C:\cj_venv') {
      New-Item -ItemType Directory -Force $d | Out-Null
-     icacls $d /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" "Administrators:(OI)(CI)F" "SYSTEM:(OI)(CI)F"
+     icacls $d /inheritance:r /grant:r "${me}:(OI)(CI)F" "Administrators:(OI)(CI)F" "SYSTEM:(OI)(CI)F"
    }
-   icacls C:\cj      # expect exactly 3 lines: <you>, BUILTIN\Administrators, NT AUTHORITY\SYSTEM (all (OI)(CI)(F))
+   icacls C:\cj      # 3 lines: SYSTEM, Administrators, you, all (OI)(CI)(F)
    ```
-5. **Share.** Share `C:\cj` to **your own account only**, with SMB encryption:
+   On a **shared lab login** (e.g. `ML-2619`), everyone who uses that login has the same access (accepted 11-04).
+5. **Share** (admin), encrypted, your account only:
    ```powershell
-   New-SmbShare -Name cj -Path C:\cj -FullAccess "$env:COMPUTERNAME\$env:USERNAME" -EncryptData $true
+   $me = whoami
+   New-SmbShare -Name cj -Path C:\cj -FullAccess $me -EncryptData $true
    ```
-   Everything runs as you, never as admin or SYSTEM.
-6. **Runner clone and venv** (the venv lives **outside** the clone, so the clone stays clean):
+   **If that login has no password:** Windows refuses network logins without one, so add a share-only account (not in Users: no desk sign-in, reaches `C:\cj` only):
    ```powershell
-   git clone https://github.com/pkdes/cryoEV C:\cj_repo        # public: fetch needs no credentials
-   py -3.11 -m venv C:\cj_venv
-   C:\cj_venv\Scripts\pip install -r C:\cj_repo\requirements.txt   # CUDA torch + Ultralytics 8.4.x
+   $pw = Read-Host "Password for the share account (12+ characters)" -AsSecureString
+   New-LocalUser -Name cjshare -Password $pw -PasswordNeverExpires -UserMayNotChangePassword -Description "cryoEV job queue share (laptop only)"
+   icacls C:\cj /grant "cjshare:(OI)(CI)M"
+   Grant-SmbShareAccess -Name cj -AccountName cjshare -AccessRight Change -Force
+   ```
+   Undo: `Remove-LocalUser cjshare; Revoke-SmbShareAccess -Name cj -AccountName cjshare -Force`.
+   **On the laptop**, once: `cmdkey /add:coe-bme-rc-ml /user:COE-BME-RC-ML\cjshare /pass` (asks for the password).
+6. **Runner clone and venv** (normal window; the venv lives outside the clone). No `py` launcher on `coe-bme-rc-ml`: the venv is made from Anaconda's Python 3.11.
+   ```powershell
+   git clone https://github.com/pkdes/cryoEV C:\cj_repo
+   C:\ProgramData\anaconda3\python.exe -m venv C:\cj_venv          # or: py -3.11 -m venv C:\cj_venv
+   C:\cj_venv\Scripts\python -m pip install --upgrade pip
+   C:\cj_venv\Scripts\pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu118   # first: a plain install is CPU-only
+   C:\cj_venv\Scripts\pip install -r C:\cj_repo\requirements.txt ultralytics==8.4.94
+   C:\cj_venv\Scripts\python -c "import torch, ultralytics; print(torch.cuda.is_available(), torch.cuda.get_device_name(0), ultralytics.__version__)"   # True NVIDIA RTX A6000 8.4.94
    C:\cj_venv\Scripts\python C:\cj_repo\jobs\watch.py --stamp-venv
    ```
-   Never edit files in `C:\cj_repo`: the watcher pauses on modified or extra `.py` files. Your own clone stays untouched.
-7. **Page file.** Set a fixed page file on C: of 48–64 GB. Until then, bundle with `--batch 8 --workers 4` or fewer (README gotcha: Windows commit memory, `ArrayMemoryError` / WinError 1455 show up as run status `oom`).
-8. **Power and updates.** No sleep on AC power (`powercfg /change standby-timeout-ac 0`). Set Windows Update active hours to cover training time.
-9. **Env vars** (user scope, `setx`): `CRYOEV_NTFY_TOPIC` = the laptop's secret topic (watcher pauses and job ends are pushed). `CRYOEV_CRYOAI_ROOT` isn't needed (the runner sets it per job).
-   **Long paths:** keep the short root `C:\cj` (the runner's 240-character check applies either way).
-10. **Start the watcher** in a terminal and leave it open:
+   Never edit files in `C:\cj_repo`: the watcher pauses on modified or extra `.py` files.
+7. **Page file (optional).** A fixed 32–64 GB page file on C: needs that much free disk plus ~10 GB for jobs. Skipped on `coe-bme-rc-ml` (67 GB free, 11-04): bundle with `--batch 8 --workers 4` or fewer; a run ending `oom` with WinError 1455 / `ArrayMemoryError` is the signal to clean up disk and set it.
+8. **Power and updates** (admin): `powercfg /change standby-timeout-ac 0`; Windows Update active hours over training time (may be IT-managed).
+9. **ntfy** (normal window): `setx CRYOEV_NTFY_TOPIC <secret topic>`, the same value on the laptop; subscribe in the ntfy app. Never write the topic into the repo (it's public). New windows only see it.
+10. **Start the watcher** in a new normal window and leave it open:
     ```powershell
     C:\cj_venv\Scripts\python C:\cj_repo\jobs\watch.py --queue-dir C:\cj
     ```
     A terminal survives a locked screen and switching user, but **stops on sign-out or reboot**.
-11. **After the smoke test: a scheduled task** (survives sign-out and reboots). Run as yourself with S4U ("do not store password"), at startup, no time limit:
+11. **Scheduled task** (survives sign-out and reboots). Run as yourself with S4U ("do not store password"), at startup, no time limit:
     ```powershell
     $a = New-ScheduledTaskAction -Execute 'C:\cj_venv\Scripts\python.exe' -Argument 'C:\cj_repo\jobs\watch.py --queue-dir C:\cj' -WorkingDirectory 'C:\cj_repo'
     $t = New-ScheduledTaskTrigger -AtStartup
-    $p = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
+    $p = New-ScheduledTaskPrincipal -UserId (whoami) -LogonType S4U -RunLevel Limited
     $s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
     Register-ScheduledTask -TaskName cryoEV-watch -Action $a -Trigger $t -Principal $p -Settings $s
     ```
-    Then check, with no terminal watcher running: `Start-ScheduledTask cryoEV-watch`, and from the laptop `sync.py status` shows the watcher alive. Push one smoke job to confirm CUDA and `CRYOEV_NTFY_TOPIC` work under the task (S4U has no network credentials, which the public `git fetch` doesn't need).
+    Then, with no terminal watcher running: `Start-ScheduledTask cryoEV-watch`; from the laptop `sync.py status` shows the watcher alive. Push one smoke job to confirm CUDA and `CRYOEV_NTFY_TOPIC` work under the task.
+- **Paths from Git Bash:** run `sync.py` from PowerShell, or check the share prints as `\\host\cj`. A path with one leading backslash is a local folder; `push` now refuses a share root that doesn't exist (11-04: one did, and made `C:\coe-bme-rc-ml\cj`).
 - **Sharing the GPU.** The watcher waits while anyone else uses the GPU, but a job that has started keeps it until it ends. `sync.py stop` prevents new jobs only.
 
 ## Recovery
