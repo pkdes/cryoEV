@@ -168,6 +168,8 @@ class AuthLive(unittest.TestCase):
             st, h, _ = self.get(path, tok)
             self.assertEqual(st, want, path)
             for k, v in SEC.items():
+                if k == "x-frame-options" and path.startswith("/review/"):
+                    v = "SAMEORIGIN"        # the shell may frame the review tool (same origin only); DENY elsewhere
                 self.assertEqual(T.hall(h, k), [v], (path, k))
 
     def test_relative_redirects(self):

@@ -19,7 +19,8 @@
     "annotate",
     "revise",
     "train",
-    "check"
+    "check",
+    "predict"
    ]
   },
   "where": {

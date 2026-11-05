@@ -189,7 +189,7 @@ class ProxyDown(unittest.TestCase):
             st, h, body = T.request(p.port, "GET", "/review/", T.cookie(token))
             self.assertEqual(st, 502)
             self.assertIn(b"not running", body)
-            self.assertEqual(T.hget(h, "x-frame-options"), "DENY")
+            self.assertEqual(T.hget(h, "x-frame-options"), "SAMEORIGIN")   # /review/* may be framed by the shell
         finally:
             p.stop()
             env.cleanup()

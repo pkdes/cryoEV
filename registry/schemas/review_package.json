@@ -20,7 +20,8 @@
     "review",
     "sandbox",
     "control",
-    "part"
+    "part",
+    "prediction"
    ]
   },
   "parent": {
@@ -139,6 +140,21 @@
    ],
    "pattern": "^[a-z0-9_]+$",
    "description": "people.json id of whoever set this status explicitly (registry.py set-status); explicit beats derived"
+  },
+  "owner": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+   "description": "portal person id that owns a prediction package"
+  },
+  "prediction_set": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^ps_\\d{8}_[0-9a-f]{6}$"
   }
  },
  "required": [

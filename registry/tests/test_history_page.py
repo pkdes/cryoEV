@@ -120,7 +120,7 @@ class HistoryPage(unittest.TestCase):
         self.assertEqual(self.m_s["recs"]["job|job_20261102_prelipo_v5f5_review_v2"]["job"]["next"],
                          "Review in app (port 8766)")
         self.assertEqual(self.m_s["stats"]["label_change_rows"], 1)
-        self.assertEqual(len(self.m_s["recs"]), 15)  # 13 entity samples + 2 job samples (job/1)
+        self.assertEqual(len(self.m_s["recs"]), 16)  # 14 entity samples (incl. prediction_set) + 2 job samples
         # samples: pull -> lv; export -> dataset -> run -> model -> inference check; package under model
         S = self.m_s["sections"]
         self.assertEqual(find_node(S, "model|v5_evnonev_y8m_20261029")[-3:],

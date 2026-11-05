@@ -1,0 +1,4 @@
+image,model_id,n_detections,mean_conf
+0001,v5_evnonev_y8m_20261029,5,0.7300
+0002,v5_evnonev_y8m_20261029,5,0.7900
+0003,v5_evnonev_y8m_20261029,3,0.9100

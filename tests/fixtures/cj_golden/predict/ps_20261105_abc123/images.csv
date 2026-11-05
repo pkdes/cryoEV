@@ -1,0 +1,4 @@
+image,file,orig_name,sample_label,nm_per_px,nm_confirmed_by,source
+0001,images/0001.png,golden_0001.png,S1,1.4724,pujan,session:golden
+0002,images/0002.png,golden_0002.png,S1,1.4724,pujan,session:golden
+0003,images/0003.png,golden_0003.png,S2,1.4724,pujan,session:golden

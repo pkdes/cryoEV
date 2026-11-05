@@ -33,7 +33,7 @@ from pathlib import Path
 
 COOKIE = "__Host-cj_session"
 SESSION_S = 30 * 86400            # 30 days
-ROLES = ("admin",)                # P1 is admin only; P1b adds more
+ROLES = ("admin", "advanced", "basic")   # admin > advanced > basic; modules list every role they allow
 ID_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,39}")
 KEY_BYTES = 32
 

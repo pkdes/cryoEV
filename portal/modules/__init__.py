@@ -1,0 +1,104 @@
+"""
+Portal module plug-ins (contract: BUILD_CONTRACTS.md section 1, private).
+
+Each portal/modules/<id>.py defines:
+    PREFIX = "/jobs"            # the URL space it owns: pages at PREFIX/, JSON at PREFIX/api/...
+    ROLES = ("admin",)          # roles allowed anywhere under PREFIX (Gate enforces; 403 otherwise)
+    def routes(ctx) -> list[Route]
+
+`load(ctx)` imports every module file, checks the declarations, adds the PREFIX -> PREFIX/ redirect, and returns
+(routes, rules) where rules = [(prefix, roles), ...] longest prefix first, for the Gate.
+"""
+from __future__ import annotations
+
+import html
+import importlib
+import pkgutil
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.routing import Route
+
+HERE = Path(__file__).resolve().parent
+TEMPLATES = HERE.parent / "templates"
+PREFIX_RE = re.compile(r"^/[a-z][a-z0-9-]*$")
+RESERVED = {"/", "/login", "/healthz", "/cj", "/history", "/review"}
+
+
+def no_store(r: Response) -> Response:
+    r.headers["Cache-Control"] = "no-store"
+    return r
+
+
+@dataclass
+class Ctx:
+    cfg: object
+
+    @staticmethod
+    def user(request: Request) -> dict:
+        return request.scope["cj_user"]
+
+    @staticmethod
+    def can_see(user: dict, owner_id) -> bool:
+        """Admins see everything; everyone else only what they own."""
+        return bool(user) and (user.get("role") == "admin" or (owner_id is not None and user.get("id") == owner_id))
+
+    @staticmethod
+    def no_store(r: Response) -> Response:
+        return no_store(r)
+
+    @staticmethod
+    def json(data, status: int = 200) -> JSONResponse:
+        return no_store(JSONResponse(data, status_code=status))
+
+    @staticmethod
+    def page(request: Request, title: str, body_html: str, active: str = "") -> HTMLResponse:
+        """Shell page: base.html with the cj bar (header.js) and cj.css. `body_html` must already be escaped."""
+        tpl = (TEMPLATES / "base.html").read_text(encoding="utf-8")
+        out = (tpl.replace("{{title}}", html.escape(title)).replace("{{active}}", html.escape(active))
+               .replace("{{body}}", body_html))
+        return no_store(HTMLResponse(out))
+
+
+def _redirect(to: str):
+    async def go(request: Request):
+        return RedirectResponse(to, status_code=307)
+    return go
+
+
+def discover() -> list:
+    return sorted(m.name for m in pkgutil.iter_modules([str(HERE)]) if not m.name.startswith("_"))
+
+
+def load(ctx: Ctx, names=None):
+    """-> (routes, rules). Raises ValueError on a bad declaration (fail loudly at start, not at request time)."""
+    from portal import auth as A
+    routes, rules, seen = [], [], set()
+    for name in (discover() if names is None else names):
+        mod = importlib.import_module(f"portal.modules.{name}")
+        prefix, roles = getattr(mod, "PREFIX", None), tuple(getattr(mod, "ROLES", ()) or ())
+        if not isinstance(prefix, str) or not PREFIX_RE.match(prefix) or prefix in RESERVED or prefix in seen:
+            raise ValueError(f"portal module {name}: bad or duplicate PREFIX {prefix!r}")
+        if not roles or any(r not in A.ROLES for r in roles):
+            raise ValueError(f"portal module {name}: ROLES must be a non-empty subset of {A.ROLES}")
+        mod_routes = list(mod.routes(ctx))
+        for r in mod_routes:
+            if not (r.path == prefix + "/" or r.path.startswith(prefix + "/")):
+                raise ValueError(f"portal module {name}: route {r.path} is outside {prefix}/")
+        seen.add(prefix)
+        routes.append(Route(prefix, _redirect(prefix + "/"), methods=["GET"]))
+        routes.extend(mod_routes)
+        rules.append((prefix, roles))
+    rules.sort(key=lambda pr: -len(pr[0]))
+    return routes, rules
+
+
+def allowed(rules, path: str, role) -> bool:
+    """Gate check: the longest matching PREFIX decides; paths outside every module PREFIX pass (core routes)."""
+    for prefix, roles in rules:
+        if path == prefix or path.startswith(prefix + "/"):
+            return role in roles
+    return True

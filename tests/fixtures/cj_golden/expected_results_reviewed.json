@@ -1,0 +1,75 @@
+{
+ "schema": "results/1",
+ "prediction_set": "ps_20261105_abc123",
+ "model": "v5_evnonev_y8m_20261029",
+ "rule": {
+  "conf": 0.5,
+  "ev_classes": [
+   0
+  ],
+  "multilayer": "geometry: outline containing another outline"
+ },
+ "refused": null,
+ "_tolerance": {
+  "diam_nm_*": "relative 0.02",
+  "other": "exact"
+ },
+ "samples": {
+  "S1": {
+   "n_images": 2,
+   "n_reviewed": 1,
+   "ev_total": 4,
+   "ev_per_image_mean": 2.0,
+   "diam_nm_median": 95.4,
+   "diam_nm_q1": 86.59,
+   "diam_nm_q3": 106.41,
+   "pct_multilayer_geometry": 25.0,
+   "pct_multilayer_reviewer": 50.0,
+   "inner_layers_excluded": 1,
+   "nonev_total": 3
+  },
+  "S2": {
+   "n_images": 1,
+   "n_reviewed": 0,
+   "ev_total": 2,
+   "ev_per_image_mean": 2.0,
+   "diam_nm_median": 117.41,
+   "diam_nm_q1": 102.74,
+   "diam_nm_q3": 132.09,
+   "pct_multilayer_geometry": 50.0,
+   "pct_multilayer_reviewer": null,
+   "inner_layers_excluded": 1,
+   "nonev_total": 0
+  }
+ },
+ "images": {
+  "0001": {
+   "sample_label": "S1",
+   "reviewed": false,
+   "nm_per_px": 1.4724,
+   "ev": 2,
+   "multilayer": 1,
+   "inner": 1,
+   "nonev": 1
+  },
+  "0002": {
+   "sample_label": "S1",
+   "reviewed": true,
+   "nm_per_px": 1.4724,
+   "ev": 2,
+   "multilayer": 0,
+   "inner": 0,
+   "nonev": 2
+  },
+  "0003": {
+   "sample_label": "S2",
+   "reviewed": false,
+   "nm_per_px": 1.4724,
+   "ev": 2,
+   "multilayer": 1,
+   "inner": 1,
+   "nonev": 0
+  }
+ },
+ "_note": "pct_multilayer_reviewer = share of EVs the reviewer classed MV, over REVIEWED images only; null for a sample with no reviewed image"
+}

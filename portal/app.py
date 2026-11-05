@@ -45,6 +45,7 @@ from starlette.routing import Route  # noqa: E402
 
 from data_utils import config as repo_config  # noqa: E402
 from portal import auth as A  # noqa: E402
+from portal import modules as M  # noqa: E402
 from portal import proxy as P  # noqa: E402
 
 OPEN = frozenset({"/login", "/cj/cj.css", "/cj/brand.json", "/healthz"})   # the ONLY routes without a session
@@ -206,10 +207,11 @@ class Gate:
     """Outermost ASGI layer: security headers on every response, deny by default (only OPEN without a session),
     Origin check on unsafe methods, and the access log with `k` redacted (never cookies or keys)."""
 
-    def __init__(self, app: Starlette, auth: A.Auth, origins=()):
+    def __init__(self, app: Starlette, auth: A.Auth, origins=(), rules=()):
         self.app = app
         self.auth = auth
         self.origins = tuple(origins)
+        self.rules = list(rules)            # [(module PREFIX, roles)] from portal.modules.load, longest first
         self.routes = app.routes
 
     async def __call__(self, scope, receive, send):
@@ -220,10 +222,13 @@ class Gate:
             return await send({"type": "websocket.close", "code": 1008})
         box = {"status": None}
 
+        frameable = scope.get("path", "").startswith("/review/")   # the shell may frame the review tool (same origin)
+
         async def send_secure(msg):
             if msg["type"] == "http.response.start":
                 names = {k for k, _ in SECURITY_HEADERS}
-                hdrs = [(k, v) for k, v in msg.get("headers", []) if k.lower() not in names] + list(SECURITY_HEADERS)
+                sec = [(k, (b"SAMEORIGIN" if frameable and k == b"x-frame-options" else v)) for k, v in SECURITY_HEADERS]
+                hdrs = [(k, v) for k, v in msg.get("headers", []) if k.lower() not in names] + sec
                 msg = {**msg, "headers": hdrs}
                 box["status"] = msg["status"]
             await send(msg)
@@ -241,6 +246,8 @@ class Gate:
                 elif state != "ok":
                     deny = page(403, "Not signed in", "This sign-in is unknown, expired or revoked. Open a current "
                                                       "key link.")
+            if deny is None and user is not None and not M.allowed(self.rules, path, user.get("role")):
+                deny = page(403, "Not allowed", "Your role can't open this part of the portal.")
             if deny is None and method in UNSAFE and not origin_ok(scope, self.origins):
                 deny = page(403, "Refused", "Cross-origin request refused.")
             if deny is not None:
@@ -435,6 +442,8 @@ def create_app(cfg: Config) -> Gate:
         Route("/review", redirect("/review/"), methods=["GET"]),
         Route("/review/{path:path}", review, methods=["GET", "HEAD", "PUT", "POST", "DELETE"]),
     ]
+    mod_routes, rules = M.load(M.Ctx(cfg))          # portal/modules/<id>.py plug-ins (BUILD_CONTRACTS.md section 1)
+    routes.extend(mod_routes)
 
     @contextlib.asynccontextmanager
     async def lifespan(app):
@@ -446,7 +455,7 @@ def create_app(cfg: Config) -> Gate:
 
     star = Starlette(routes=routes, lifespan=lifespan)
     star.router.redirect_slashes = False
-    gate = Gate(star, auth, cfg.origins)
+    gate = Gate(star, auth, cfg.origins, rules)
     gate.proxy = proxy
     gate.auth = auth
     return gate

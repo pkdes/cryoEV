@@ -38,7 +38,8 @@ from data_utils.path_guard import protected_problem  # noqa: E402
 PROTECTED = list(config.protected_roots())  # processing datasets, Box
 EXCLUDED_SESSIONS = {"20261012"}
 ENTITIES = ["image", "session", "grid", "roboflow_image", "pull", "roboflow_export", "label_version",
-            "review_package", "inference_check", "dataset", "job_bundle", "run", "model", "job"]
+            "review_package", "inference_check", "dataset", "job_bundle", "run", "model", "job",
+            "prediction_set"]
 N_EXAMPLES = 3
 
 
