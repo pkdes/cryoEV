@@ -1272,7 +1272,7 @@ if(location.protocol.indexOf('http')===0){liveLoad();setInterval(liveLoad,30000)
   var lrt=null;window.addEventListener('resize',function(){clearTimeout(lrt);lrt=setTimeout(liveDraw,150);});}
 else{var ln=el('div','lnote');ln.appendChild(el('strong',null,'Live needs the page served by the history server. '));
   ln.appendChild(document.createTextNode('On the laptop, next to the server, start '));
-  ln.appendChild(el('code',null,'python jobs/monitor.py --share \\\\coe-bme-rc-ml\\cj'));
+  ln.appendChild(el('code',null,'python jobs/monitor.py --share \\\\gpu-desktop\\cj'));
   ln.appendChild(document.createTextNode(' and open this page from the server, not as a file. Opened as a file, the page fetches nothing.'));
   LB.appendChild(ln);}
 drawGraph();lookup();

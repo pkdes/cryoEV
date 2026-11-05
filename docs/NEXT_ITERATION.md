@@ -48,7 +48,7 @@ Round 3 shipped 2026-11-02/03 (pushed through 46e6c28; later commits local until
 Round 3b shipped 2026-11-04 (all pushed, through 66ea92d):
 | Part | What | Where |
 |---|---|---|
-| Desktop runner live | `coe-bme-rc-ml` set up; watcher as a scheduled task; trains with latest main; **self-updates and restarts** when its code changes | `jobs/watch.py`, [JOBS.md](JOBS.md) |
+| Desktop runner live | `gpu-desktop` set up; watcher as a scheduled task; trains with latest main; **self-updates and restarts** when its code changes | `jobs/watch.py`, [JOBS.md](JOBS.md) |
 | Cancel | `sync.py cancel <job>`: a running job stops within ~10 s (partial run kept), a queued one never starts | `jobs/run_job.py`, `jobs/sync.py` |
 | Live monitor | `progress.json` each epoch (actual batch); `jobs/monitor.py` → `registry/live/live.json`; **Live tab** on the history page | `training/train_yolo.py`, `jobs/monitor.py`, history page |
 | Seeds | `run_experiments.py --seed` (default 42) | `training/run_experiments.py` |

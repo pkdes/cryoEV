@@ -377,13 +377,13 @@ class TestJobBundle(unittest.TestCase):
                 (ds / "images" / s / f"{s}_0.png").write_bytes(b"\x89PNG fake " + s.encode())
                 (ds / "labels" / s / f"{s}_0.txt").write_text("0 0.1 0.1 0.2 0.1 0.2 0.2\n")
             (ds / "dataset.yaml").write_text(
-                "# YOLO dataset config\npath: C:/Users/ML-2619/Desktop/CryoAI/training outputs/my_dataset\n"
-                "train: images/train\nval: C:/Users/ML-2619/Desktop/CryoAI/training outputs/my_dataset/images/val\n"
+                "# YOLO dataset config\npath: C:/Users/lab-login/Desktop/CryoAI/training outputs/my_dataset\n"
+                "train: images/train\nval: C:/Users/lab-login/Desktop/CryoAI/training outputs/my_dataset/images/val\n"
                 "test: images/test\n\nnames:\n  0: EV\n  1: non-EV\n", encoding="utf-8")
             out = run("training/make_job_bundle.py", "--allow-dirty", "--dataset-dir", ds, "--out", Path(tmp) / "out",
                       "--", "--single-run", "--model-size", "m", "--batch", "8", "--rect", "0",
                       "--weights", "models/v4_y8m_20260924/best.pt")
-            self.assertIn("path: C:/Users/ML-2619", out)
+            self.assertIn("path: C:/Users/lab-login", out)
             zips = list((Path(tmp) / "out").glob("*.zip"))
             self.assertEqual(len(zips), 1)
             self.assertTrue(zips[0].with_name(zips[0].stem + "_README.md").exists())
@@ -394,7 +394,7 @@ class TestJobBundle(unittest.TestCase):
             y = desk / "my_dataset" / "dataset.yaml"
             text = y.read_text(encoding="utf-8")
             self.assertNotIn("\npath:", text)
-            self.assertNotIn("ML-2619/Desktop/CryoAI/training outputs/my_dataset/images", text)
+            self.assertNotIn("lab-login/Desktop/CryoAI/training outputs/my_dataset/images", text)
             resolved = mjb.resolve_like_ultralytics(y)
             self.assertEqual(set(resolved), {"train", "val", "test"})
             for s, p in resolved.items():

@@ -104,7 +104,7 @@ python training/make_job_bundle.py --dataset-dir "<CryoAI>/training outputs/<dat
   It also lists what to send back: the run folder, the logs and the new `EXPERIMENT_LOG.csv` row. Nothing on the desktop is automated.
 - **Arguments.** Everything after `--` goes to `run_experiments.py`. Flags it doesn't define are refused, and `--dataset` is set by the bundle.
   For `--weights PATH` or `--weights=PATH`, a file tracked in the repo is used from the desktop's own checkout; any other file is packed into `weights/`. A folder is refused.
-- **`dataset.yaml` paths.** The absolute `path:` line (e.g. `C:/Users/ML-2619/...`) is commented out, and
+- **`dataset.yaml` paths.** The absolute `path:` line (e.g. `C:/Users/lab-login/...`) is commented out, and
   `train`/`val`/`test` become relative. With no `path:`, Ultralytics uses the yaml's own folder as the root. A relative
   `path:` would resolve against the working directory, so it is removed rather than made relative. `JOB.json` in
   the zip lists the changes, the arguments, the bundling PC's Ultralytics version and an md5 for every image and label. The README has the desktop check for Ultralytics 8.4.x, because 8.4 is the version that falls back to the yaml's folder.

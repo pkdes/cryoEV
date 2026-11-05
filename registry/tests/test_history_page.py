@@ -622,7 +622,7 @@ class Browser(unittest.TestCase):
             page.click("#t-live")
             self.assertTrue(page.is_visible("#live"))
             note = page.inner_text("#lbody")
-            self.assertIn("python jobs/monitor.py --share \\\\coe-bme-rc-ml\\cj", note)
+            self.assertIn("python jobs/monitor.py --share \\\\gpu-desktop\\cj", note)
             self.assertIn("served by the history server", note)
             page.wait_for_timeout(500)
             self.assertEqual(errors, [])

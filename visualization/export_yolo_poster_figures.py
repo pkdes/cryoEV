@@ -7,7 +7,7 @@ open cleanly in Illustrator.
 Example
 -------
 python -m visualization.export_yolo_poster_figures \
-    --run-dir "C:\\Users\\ML-2619\\Desktop\\Pujan Cryo\\cryo-ev pipeline\\Model Training by Yifei\\round_2\\results_yolov8_heavy_augmentation\\training\\vesicle_instance_seg_v2"
+    --run-dir "C:\\Users\\lab-login\\Desktop\\Pujan Cryo\\cryo-ev pipeline\\Model Training by Yifei\\round_2\\results_yolov8_heavy_augmentation\\training\\vesicle_instance_seg_v2"
 """
 
 from __future__ import annotations

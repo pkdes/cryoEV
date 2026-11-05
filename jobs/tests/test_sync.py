@@ -115,10 +115,10 @@ class SyncTests(T.TempRoots, unittest.TestCase):
             sync.push(JOB, bad, self.tmp / "s2", copier="shutil", check_registry=False)
 
     def test_push_refuses_a_missing_share(self):
-        stray = self.tmp / "coe-bme-rc-ml" / "cj"                 # what a UNC path missing one backslash becomes
+        stray = self.tmp / "gpu-desktop" / "cj"                 # what a UNC path missing one backslash becomes
         with self.assertRaisesRegex(sync.SyncError, "not found"):
             sync.push(JOB, self.zp, stray, copier="shutil")
-        self.assertFalse((self.tmp / "coe-bme-rc-ml").exists(), "no stray folder created")
+        self.assertFalse((self.tmp / "gpu-desktop").exists(), "no stray folder created")
 
     def run_and_pull(self, **env):
         sync.push(JOB, self.zp, self.share, copier="shutil")

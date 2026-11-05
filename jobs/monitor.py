@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Laptop: a live snapshot of the desktop's training queue for the history page's Live tab (docs/JOBS.md).
 
-    python jobs/monitor.py --share \\\\coe-bme-rc-ml\\cj [--share ...] [--every 30] [--once] [--out <file>]
+    python jobs/monitor.py --share \\\\gpu-desktop\\cj [--share ...] [--every 30] [--once] [--out <file>]
 
 Every --every seconds it reads each queue (in a thread, given up after 20 s) and writes one JSON file, by default
 <registry>/live/live.json (the history page fetches live/live.json when served over http):
@@ -367,7 +367,7 @@ def snapshot(shares, reader: Reader, every) -> dict:
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--share", action="append", required=True, type=Path,
-                    help="queue root, e.g. \\\\coe-bme-rc-ml\\cj (repeatable)")
+                    help="queue root, e.g. \\\\gpu-desktop\\cj (repeatable)")
     ap.add_argument("--every", type=float, default=30.0, help="seconds between snapshots (default 30)")
     ap.add_argument("--once", action="store_true", help="write one snapshot, then exit")
     ap.add_argument("--out", type=Path, help=f"default <registry>/live/{LIVE_FILE}")

@@ -57,14 +57,14 @@ from inference.perf_log import PerformanceLogger
 # Configuration defaults
 # ---------------------------------------------------------------------------
 IMAGES_DIR = Path(
-    r"C:\Users\ML-2619\Desktop\Pujan Cryo\20260430 - PLL-film exp analysis\images"
+    r"C:\Users\lab-login\Desktop\Pujan Cryo\20260430 - PLL-film exp analysis\images"
 )
 MODEL_WEIGHTS = Path(
-    r"C:\Users\ML-2619\Desktop\Pujan Cryo\cryo-ev pipeline\Model Training by Yifei"
+    r"C:\Users\lab-login\Desktop\Pujan Cryo\cryo-ev pipeline\Model Training by Yifei"
     r"\round_2\results_yolov8_heavy_augmentation\training\vesicle_instance_seg_v2\weights\best.pt"
 )
 OUTPUT_DIR = Path(
-    r"C:\Users\ML-2619\Desktop\Pujan Cryo\20260430 - PLL-film exp analysis\cross_grid_results"
+    r"C:\Users\lab-login\Desktop\Pujan Cryo\20260430 - PLL-film exp analysis\cross_grid_results"
 )
 
 IMGSZ = 1024

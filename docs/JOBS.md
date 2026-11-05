@@ -58,7 +58,7 @@ C:\cj_venv\Scripts\python C:\cj_repo\jobs\watch.py --queue-dir C:\cj
 The history page's **Live** tab shows the queue as it runs. On the laptop, start the monitor next to the history server, which serves the registry folder on the tailnet. The page fetches `live/live.json` next to `history.html`:
 ```powershell
 python -m http.server 8768 --directory <CryoAI-laptop>\registry        # the history server (already running)
-python jobs/monitor.py --share \\coe-bme-rc-ml\cj                       # writes <registry>\live\live.json every 30 s
+python jobs/monitor.py --share \\gpu-desktop\cj                       # writes <registry>\live\live.json every 30 s
 ```
 - `--share` is repeatable (one card per queue); `--every 30`; `--once` writes one snapshot; `--out` changes the file. One monitor per output file (`monitor.lock`; a second exits 3).
 - Read only on the share: small files through `common.read_shared`, nothing under `d\.tmp_*`, never the registry `*.jsonl`. Each queue is read in a thread and given up after 20 s.
@@ -138,11 +138,11 @@ C:\cj\STOP                 pause request (`sync.py stop`); `start` renames it to
   - It writes the registry only through `registry.py import` and `registry.py set-status <job> done|blocked --reason ... --who pujan`.
 
 ## Desktop setup checklist (user, admin; once)
-Done on `coe-bme-rc-ml` 2026-11-04. "Admin window": PowerShell → Run as administrator (prompt `C:\WINDOWS\system32>`); "normal window": plain PowerShell.
+Done on `gpu-desktop` 2026-11-04. "Admin window": PowerShell → Run as administrator (prompt `C:\WINDOWS\system32>`); "normal window": plain PowerShell.
 1. **IT.** Check that the department allows Tailscale, a file share and (if needed, step 5) a share-only local account.
 2. **Tailscale.** Install it and sign in with the laptop's account. `tailscale status` lists both machines.
-   Optional: a tailnet ACL allowing TCP 445 to the desktop only from `pujrog`. With only your own devices on the tailnet it can wait; a wrong ACL can cut off the phone.
-3. **Firewall** (admin). Allow 445 from the tailnet only, then check the built-in rules (on `coe-bme-rc-ml` only the Public SMB-In is on, scoped to `LocalSubnet`: left as is):
+   Optional: a tailnet ACL allowing TCP 445 to the desktop only from `home-laptop`. With only your own devices on the tailnet it can wait; a wrong ACL can cut off the phone.
+3. **Firewall** (admin). Allow 445 from the tailnet only, then check the built-in rules (on `gpu-desktop` only the Public SMB-In is on, scoped to `LocalSubnet`: left as is):
    ```powershell
    New-NetFirewallRule -DisplayName "cryoEV share from Tailscale" -Direction Inbound -Protocol TCP -LocalPort 445 -RemoteAddress 100.64.0.0/10 -Action Allow -Profile Any
    Get-NetFirewallRule -DisplayName "File and Printer Sharing (SMB-In)" | ForEach-Object { [pscustomobject]@{ Profile = $_.Profile; Enabled = $_.Enabled; Remote = (($_ | Get-NetFirewallAddressFilter).RemoteAddress -join ',') } } | Format-Table
@@ -157,7 +157,7 @@ Done on `coe-bme-rc-ml` 2026-11-04. "Admin window": PowerShell → Run as admini
    }
    icacls C:\cj      # 3 lines: SYSTEM, Administrators, you, all (OI)(CI)(F)
    ```
-   On a **shared lab login** (e.g. `ML-2619`), everyone who uses that login has the same access (accepted 11-04).
+   On a **shared lab login** (e.g. `lab-login`), everyone who uses that login has the same access (accepted 11-04).
 5. **Share** (admin), encrypted, your account only:
    ```powershell
    $me = whoami
@@ -166,13 +166,13 @@ Done on `coe-bme-rc-ml` 2026-11-04. "Admin window": PowerShell → Run as admini
    **If that login has no password:** Windows refuses network logins without one, so add a share-only account (not in Users: no desk sign-in, reaches `C:\cj` only):
    ```powershell
    $pw = Read-Host "Password for the share account (12+ characters)" -AsSecureString
-   New-LocalUser -Name cjshare -Password $pw -PasswordNeverExpires -UserMayNotChangePassword -Description "cryoEV job queue share (laptop only)"
-   icacls C:\cj /grant "cjshare:(OI)(CI)M"
-   Grant-SmbShareAccess -Name cj -AccountName cjshare -AccessRight Change -Force
+   New-LocalUser -Name queue-share -Password $pw -PasswordNeverExpires -UserMayNotChangePassword -Description "cryoEV job queue share (laptop only)"
+   icacls C:\cj /grant "queue-share:(OI)(CI)M"
+   Grant-SmbShareAccess -Name cj -AccountName queue-share -AccessRight Change -Force
    ```
-   Undo: `Remove-LocalUser cjshare; Revoke-SmbShareAccess -Name cj -AccountName cjshare -Force`.
-   **On the laptop**, once: `cmdkey /add:coe-bme-rc-ml /user:COE-BME-RC-ML\cjshare /pass` (asks for the password).
-6. **Runner clone and venv** (normal window; the venv lives outside the clone). No `py` launcher on `coe-bme-rc-ml`: the venv is made from Anaconda's Python 3.11.
+   Undo: `Remove-LocalUser queue-share; Revoke-SmbShareAccess -Name cj -AccountName queue-share -Force`.
+   **On the laptop**, once: `cmdkey /add:gpu-desktop /user:GPU-DESKTOP\queue-share /pass` (asks for the password).
+6. **Runner clone and venv** (normal window; the venv lives outside the clone). No `py` launcher on `gpu-desktop`: the venv is made from Anaconda's Python 3.11.
    ```powershell
    git clone https://github.com/pkdes/cryoEV C:\cj_repo
    C:\ProgramData\anaconda3\python.exe -m venv C:\cj_venv          # or: py -3.11 -m venv C:\cj_venv
@@ -183,7 +183,7 @@ Done on `coe-bme-rc-ml` 2026-11-04. "Admin window": PowerShell → Run as admini
    C:\cj_venv\Scripts\python C:\cj_repo\jobs\watch.py --stamp-venv
    ```
    Never edit files in `C:\cj_repo`: the watcher pauses on modified or extra `.py` files.
-7. **Page file (optional).** A fixed 32–64 GB page file on C: needs that much free disk plus ~10 GB for jobs. Skipped on `coe-bme-rc-ml` (67 GB free, 11-04): bundle with `--batch 8 --workers 4` or fewer; a run ending `oom` with WinError 1455 / `ArrayMemoryError` is the signal to clean up disk and set it.
+7. **Page file (optional).** A fixed 32–64 GB page file on C: needs that much free disk plus ~10 GB for jobs. Skipped on `gpu-desktop` (67 GB free, 11-04): bundle with `--batch 8 --workers 4` or fewer; a run ending `oom` with WinError 1455 / `ArrayMemoryError` is the signal to clean up disk and set it.
 8. **Power and updates** (admin): `powercfg /change standby-timeout-ac 0`; Windows Update active hours over training time (may be IT-managed).
 9. **ntfy** (normal window): `setx CRYOEV_NTFY_TOPIC <secret topic>`, the same value on the laptop; subscribe in the ntfy app. Never write the topic into the repo (it's public). New windows only see it.
 10. **Start the watcher** in a new normal window and leave it open:
@@ -200,7 +200,7 @@ Done on `coe-bme-rc-ml` 2026-11-04. "Admin window": PowerShell → Run as admini
     Register-ScheduledTask -TaskName cryoEV-watch -Action $a -Trigger $t -Principal $p -Settings $s
     ```
     Then, with no terminal watcher running: `Start-ScheduledTask cryoEV-watch`; from the laptop `sync.py status` shows the watcher alive. Push one smoke job to confirm CUDA and `CRYOEV_NTFY_TOPIC` work under the task.
-- **Paths from Git Bash:** run `sync.py` from PowerShell, or check the share prints as `\\host\cj`. A path with one leading backslash is a local folder; `push` now refuses a share root that doesn't exist (11-04: one did, and made `C:\coe-bme-rc-ml\cj`).
+- **Paths from Git Bash:** run `sync.py` from PowerShell, or check the share prints as `\\host\cj`. A path with one leading backslash is a local folder; `push` now refuses a share root that doesn't exist (11-04: one did, and made `C:\gpu-desktop\cj`).
 - **Sharing the GPU.** The watcher waits while anyone else uses the GPU, but a job that has started keeps it until it ends. `sync.py stop` prevents new jobs only.
 
 ## Recovery
