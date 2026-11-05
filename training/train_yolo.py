@@ -621,6 +621,11 @@ def validate_yolo_model(model_path: str, data_yaml: str, imgsz: int = 1024, batc
     model = YOLO(model_path)
     val_kwargs = dict(data=data_yaml, split=split, imgsz=imgsz, batch=batch_size,
                       device=device, verbose=False)
+    # Validate the way the model was trained. Ultralytics' default overlap_mask=True paints all GT into one map,
+    # carving nested membrane layers into rings: v5 F5 test EV mask mAP50-95 0.476 instead of 0.708 (models.yaml).
+    trained = ((getattr(model, "ckpt", None) or {}).get("train_args") or {}).get("overlap_mask")
+    if trained is not None:
+        val_kwargs['overlap_mask'] = trained
     if project is not None:
         val_kwargs['project'] = project
         val_kwargs['name'] = name

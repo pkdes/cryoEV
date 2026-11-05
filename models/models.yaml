@@ -11,7 +11,7 @@ models:
     arch: yolov8m-seg, rect=False (mosaic + mixup on), overlap_mask=False, batch 8, fine-tuned from v4_y8m_20260924, ultralytics 8.4.94
     train_data: roboflow - 20261028 cryoai v5 S1 (114 train / 26 val / 39 test images; split balanced by session)
     val_mask_map50_95: 0.622   # 26 val images; inflated -- v4 init has seen 16 of them
-    test_mask_map50_95: EV 0.708 / non-EV 0.508   # 39 S1 test images
+    test_mask_map50_95: EV 0.708 / non-EV 0.508   # 39 S1 test images; Ultralytics val(split=test, imgsz 1440, overlap_mask=False, as trained); mask mAP50 0.905. With the default overlap_mask=True nested GT layers are carved into rings: EV 0.476 / non-EV 0.506 (re-checked 11-04)
     test_detection: EV F1=0.828 at conf 0.25, 0.868 at val-chosen conf; non-EV F1=0.827; lipo tiles EV F1 0.898 (v4_y8m 0.724)   # practical view
     test_roles: multilayer F1=0.868 inner-layer F1=0.842   # containment 0.99 / size ratio 0.75
     source_run: training outputs/roboflow_20261028_cryoai_v5_S1_evnonev/runs/2026-10-29_054810_y8m_1440_8b_300ep_Run_15
