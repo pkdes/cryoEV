@@ -151,6 +151,7 @@ Answered on 2026-10-30, see the Registry section: 1 (per-entity files), 2 (sessi
 ## Suggested changes to files owned by others (not made; listed in NEXT_ITERATION.md)
 - `inference/inference_check.py`: add `"schema": "inference_check/1"` (and `id` = `batch_id`) to each `batches.jsonl` line.
 - `annotation/apply_review_edits.py`: when a version replaces an older one, write `supersedes` into the new version.json. Keep SUPERSEDED.md, but also log a `label_version` status line.
+  - Done 2026-11-04: `supersedes` = the newest earlier lv of the same `pkg` and `base`. The importer then logs the older lv as `superseded`.
 - `annotation/build_review_package.py`:
   - data.js `id` = folder name;
   - explicit `base` (pull id) and `model` id fields instead of the free-text `run`;

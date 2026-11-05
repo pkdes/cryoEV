@@ -300,6 +300,133 @@ class GraphLookup(unittest.TestCase):
         self.assertEqual(self.m["lk"]["sources"]["no_image_list"], ["pkg_old", "pkg_old_part1"])
 
 
+
+def full_refs(m, name):
+    """-> {entity key: full ref list} for one image (the 3-item [n, rows, "reviewed"] form included)."""
+    L = m["lk"]
+    for n, refs in L["i"]:
+        if n == name:
+            return {L["e"][r[0] if isinstance(r, list) else r]: (r if isinstance(r, list) else None) for r in refs}
+    return None
+
+
+def scope_registry(t: Path):
+    """Three label versions of one package: lv_..0900 has no review_scope (made before 2026-11-04), lv_..1000 is
+    all_edits, lv_..1100 is reviewed_only with 1 of 3 images reviewed (img_c, approved with no changes) and img_b
+    held back. Known answers: chips amber / amber / "verified 1/3"; img_c "reviewed" in lv_..1100 only."""
+    reg = t / "registry"
+    reg.mkdir(parents=True)
+    vers = {
+        "lv_20990101_0900": {"n_images_applied": 2},
+        "lv_20990101_1000": {"n_images_applied": 2, "review_scope": "all_edits", "n_reviewed": 1, "n_package_images": 3,
+                             "reviewed_images": ["img_c_png"], "n_held_back": 0, "held_back_images": [],
+                             "supersedes": "lv_20990101_0900"},
+        "lv_20990101_1100": {"n_images_applied": 0, "review_scope": "reviewed_only", "n_reviewed": 1,
+                             "n_package_images": 3, "reviewed_images": ["img_c_png"], "n_held_back": 1,
+                             "held_back_images": ["img_b_png"], "supersedes": "lv_20990101_1000"},
+    }
+    lines = []
+    for lv, v in vers.items():
+        d = t / "labels" / lv
+        d.mkdir(parents=True)
+        (d / "version.json").write_text(json.dumps({"id": lv, "pkg": "pkg_s", **v}), encoding="utf-8")
+        rows = [] if v.get("review_scope") == "reviewed_only" else ["img_a_png", "img_b_png"]
+        (d / "changes.jsonl").write_text("".join(json.dumps({"schema": "label_change/1", "label_version": lv,
+                                                             "image": im}) + "\n" for im in rows), encoding="utf-8")
+        lines.append({"schema": "label_version/1", "id": lv, "status": "created", "owner": str(d / "version.json"),
+                      **({"supersedes": v["supersedes"]} if "supersedes" in v else {})})
+    (reg / "label_version.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines), encoding="utf-8")
+    (reg / "image.jsonl").write_text("".join(json.dumps({"schema": "image/1", "id": f"img_{c}_png", "session": "20990101"})
+                                             + "\n" for c in "abc"), encoding="utf-8")
+    return reg
+
+
+class ReviewScopeChips(unittest.TestCase):
+    OLD, ALL, REV = "label_version|lv_20990101_0900", "label_version|lv_20990101_1000", "label_version|lv_20990101_1100"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        t = Path(cls.tmp.name)
+        cls.out = t / "out" / "history.html"
+        cls.m = hp.build([scope_registry(t)], cls.out)
+        cls.html = cls.out.read_text(encoding="utf-8")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_chips(self):
+        R = self.m["recs"]
+        self.assertEqual(R[self.REV]["ver"], ["verified 1/3", "ver"])
+        self.assertEqual(R[self.ALL]["ver"], ["all edits incl. unreviewed", "unrev"])
+        self.assertEqual(R[self.OLD]["ver"], ["all edits incl. unreviewed", "unrev"])     # no scope field
+        self.assertIsNone(R["image|img_a_png"]["ver"])
+        nodes, _ = graph_index(self.m)
+        self.assertEqual(nodes[self.REV][4], "verified 1/3 · 0 images changed")
+        self.assertEqual(nodes[self.OLD][4], "all edits incl. unreviewed · 2 images changed")
+        self.assertEqual((R[self.REV]["sup"], R[self.ALL]["supby"]), ("lv_20990101_1000", ["lv_20990101_1100"]))
+        self.assertTrue(R[self.ALL]["dim"])                    # superseded by the newer partial ship
+
+    def test_lookup_reviewed(self):
+        c = full_refs(self.m, "img_c_png")
+        e = self.m["lk"]["e"]
+        self.assertEqual(c, {self.ALL: [e.index(self.ALL), None, "reviewed"], self.REV: [e.index(self.REV), None, "reviewed"]})
+        a = full_refs(self.m, "img_a_png")                     # changed, not reviewed: the plain row count
+        self.assertEqual(a, {self.OLD: [e.index(self.OLD), 1], self.ALL: [e.index(self.ALL), 1]})
+        self.assertEqual(lookup_refs(self.m, "img_c_png"), {self.ALL: None, self.REV: None})
+
+    def test_page_rules(self):
+        self.assertNotIn("innerHTML", self.html)
+        self.assertIsNone(re.search(r"(?i)https?://", self.html))
+
+    @unittest.skipIf(sync_playwright is None, "playwright not installed")
+    def test_browser(self):
+        with sync_playwright() as pw:
+            browser = launch(pw)
+            if browser is None:
+                self.skipTest("no Edge / Chrome for Playwright")
+            try:
+                for width in (390, 1280):
+                    page = browser.new_page(viewport={"width": width, "height": 900})
+                    errors = []
+                    page.on("pageerror", lambda e: errors.append(str(e)))
+                    page.goto(self.out.as_uri())
+                    page.wait_for_selector("#tree .rec")
+                    row = f"#tree .rec[data-k='{self.REV}']"
+                    self.assertEqual(page.inner_text(row + " .st.ver"), "verified 1/3")
+                    self.assertEqual(page.inner_text(f"#tree .rec[data-k='{self.OLD}'] .st.unrev"), "all edits incl. unreviewed")
+                    amber = page.eval_on_selector(f"#tree .rec[data-k='{self.OLD}'] .st.unrev", "e => getComputedStyle(e).color")
+                    plain = page.eval_on_selector(f"#tree .rec[data-k='{self.OLD}'] .rid", "e => getComputedStyle(e).color")
+                    self.assertNotEqual(amber, plain)
+                    page.click(row)
+                    d = page.inner_text("#detail")
+                    self.assertIn("verified 1/3", d)
+                    self.assertIn("1 edited image held back (not reviewed)", d)
+                    if width < 900:
+                        page.click("#detail .close")
+                    page.click(f"#tree .rec[data-k='{self.OLD}']")
+                    self.assertIn("every edit applied", page.inner_text("#detail"))
+                    if width < 900:
+                        page.click("#detail .close")
+                    page.click("#t-graph")
+                    page.check("#ghist")
+                    self.assertIn("verified 1/3", page.inner_text(f".gnode[data-k='{self.REV}'] .gsub"))
+                    self.assertEqual(page.eval_on_selector_all(f".gnode[data-k='{self.OLD}'] .gsub.unrev", "e => e.length"), 1)
+                    page.click("#t-lookup")
+                    page.fill("#lq", "img_c")
+                    card = page.inner_text("#lres .lcard")
+                    self.assertIn("lv_20990101_1100 (reviewed)", card)
+                    self.assertIn("changed or reviewed it", card)
+                    page.fill("#lq", "img_a")
+                    self.assertNotIn("reviewed)", page.inner_text("#lres .lcard"))
+                    self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), width)
+                    self.assertEqual(errors, [])
+                    page.close()
+            finally:
+                browser.close()
+
+
 REAL = hp.config.registry_root(required=False)
 
 
@@ -356,6 +483,11 @@ class RealRegistryKnownAnswers(unittest.TestCase):
         v1 = {"review_package|prelipo_v5F5_review"} | {f"review_package|prelipo_v5F5_review_part{i}" for i in range(1, 5)}
         self.assertEqual(hidden, v1)
         self.assertEqual(self.nodes[self.PKG2][2], 0)
+
+    def test_lv_0909_flagged_all_edits(self):
+        """lv_20261030_0909 has no review_scope (made before 2026-11-04, every edit applied): amber, not "verified"."""
+        self.assertEqual(self.m["recs"][self.LV]["ver"], ["all edits incl. unreviewed", "unrev"])
+        self.assertTrue(self.nodes[self.LV][4].startswith("all edits incl. unreviewed"))
 
     def test_lookup(self):
         rows = (REAL / "lists" / "roboflow_20261028_cryoai_v5_S1_evnonev.tsv").read_text(encoding="utf-8").splitlines()

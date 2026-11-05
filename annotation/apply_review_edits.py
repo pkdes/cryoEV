@@ -7,7 +7,19 @@ package's own base COCO pull, and write a new, dated label version (docs/LABEL_C
                                conflicts.csv      the rows that were not applied, with the reason
                                version.json       inputs, hashes, counts
 
-Each image's labels are rebuilt with review_server.effective_labels() (the reference applier, the same
+Apply rule (scope, version.json "review_scope"):
+  reviewed_only (default)  an image is applied only when its record has `reviewed` true (edit.reviewed after the
+                           server's merge: the newest reviewedT toggle across writers, as merge_edits and the tool
+                           count it). A record with changes (a decision or a `modified` list) that is not reviewed
+                           is held back: nothing applied, no change rows, its image keeps its base labels; listed
+                           in version.json "held_back_images" and counted in "n_held_back".
+  all_edits (--all-edits)  every record with a decision or a `modified` list is applied, reviewed or not (the rule
+                           before 2026-11-04; lv_20261030_0909 was made this way).
+  Either way version.json lists "reviewed_images" (image keys of every reviewed record, including images approved
+  with no changes, whose labels stay the base's), "n_reviewed", "n_package_images", and "supersedes": the newest
+  earlier lv_* under --out-root with the same pkg and base (null if none), so each partial ship replaces the last.
+
+Each applied image's labels are rebuilt with review_server.effective_labels() (the reference applier, the same
 rules as effGt() in review_tool/index.html) and diffed against the package labels per object:
 
   keep             g<id> "keep:<cls>" that changes nothing (logged, no label change)
@@ -51,7 +63,8 @@ Read-only on the base, package and edits. Refuses --out-root under Box or Cryo-i
 never overwrites an existing lv_ folder.
 
   python annotation/apply_review_edits.py --base <pull>/current.coco.json --package <review package> [--dry-run]
-      [--edits <dir>] [--out-root <CryoAI-laptop>/labels] [--people annotation/people.json] [--stamp YYYYMMDD_HHMM]
+      [--all-edits] [--edits <dir>] [--out-root <CryoAI-laptop>/labels] [--people annotation/people.json]
+      [--stamp YYYYMMDD_HHMM]
 """
 from __future__ import annotations
 
@@ -92,6 +105,7 @@ ROW_FIELDS = ["schema", "label_version", "base", "pkg", "image", "rf_id", "dec_k
 CONFLICT_FIELDS = ["severity", "image", "rf_id", "file", "dec_key", "op", "reason", "ann_old", "cls_from", "cls_to",
                    "who_raw", "who", "t", "seed"]
 RF_SUFFIX = re.compile(r"\.rf\.[0-9a-f]+\.\w+$")
+SCOPES = ("reviewed_only", "all_edits")
 
 
 # ---------------------------------------------------------------- inputs
@@ -525,8 +539,33 @@ def check_source(source, base_path) -> str:
         return "identical copy"
     raise SystemExit(f"[ERROR] data.js was built from {source}, not --base {base_path} (and the files differ)")
 
-def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou: float = DUP_IOU):
-    """Everything but writing: -> (coco_out, rows (without label_version), conflicts, info)."""
+def is_reviewed(edit) -> bool:
+    """The image's reviewed flag: edit.reviewed is True (the server keeps the newest reviewedT toggle across
+    writers, merge_edits; the same test as the registry's revise-job progress)."""
+    return _migrate(edit).get("reviewed") is True
+
+
+def find_supersedes(out_root: Path, lv: str, pkg: str, base_name: str) -> str | None:
+    """The newest lv_* under out_root, earlier than lv, whose version.json has the same pkg and base; else None."""
+    found = []
+    for d in Path(out_root).glob("lv_*") if Path(out_root).is_dir() else []:
+        if not (re.fullmatch(r"lv_\d{8}_\d{4}", d.name) and d.name < lv):
+            continue
+        try:
+            v = json.loads((d / "version.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(v, dict) and v.get("pkg") == pkg and v.get("base") == base_name:
+            found.append(d.name)
+    return max(found) if found else None
+
+
+def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou: float = DUP_IOU,
+          scope: str = "reviewed_only"):
+    """Everything but writing: -> (coco_out, rows (without label_version), conflicts, info).
+    scope "reviewed_only": records not marked reviewed are held back; "all_edits": every record with changes."""
+    if scope not in SCOPES:
+        raise ValueError(f"scope {scope!r}: expected one of {SCOPES}")
     base = json.loads(Path(base_path).read_text(encoding="utf-8"))
     data = read_data_js(Path(package) / "data.js")
     who_of = roster_lookup(people)
@@ -586,6 +625,7 @@ def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou
         by_file[rec["file"]] = (f, rec)
 
     rows, skipped, applied_images, n_unchanged = [], Counter(), 0, 0
+    reviewed_images, held_back = set(), set()
     cache = {}
     base_dups = {i["id"]: base_duplicate_pairs(anns_by_img.get(i["id"], {}), dup_iou, cache) for i in base["images"]}
     per_image = {}  # base image id -> ops
@@ -593,12 +633,19 @@ def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou
     for file in sorted(by_file, key=lambda f: (order.get(f, len(order)), f)):
         f, rec = by_file[file]
         e = _migrate(rec["edit"])
+        b, im = images_by_file.get(file), pkg_images.get(file)
+        stem = (b.get("extra") or {}).get("name") if b else None
+        image = stem or stem_of(file)
+        reviewed = is_reviewed(rec["edit"])
+        if reviewed:
+            reviewed_images.add(image)
         if not (e["dec"] or e.get("modified")):
             n_unchanged += 1
             continue
-        b, im = images_by_file.get(file), pkg_images.get(file)
-        stem = (b.get("extra") or {}).get("name") if b else None
-        common = {"image": stem or stem_of(file), "rf_id": (b.get("extra") or {}).get("roboflow_id") if b else None,
+        if scope == "reviewed_only" and not reviewed:
+            held_back.add(image)    # not reviewed: nothing applied, no rows; the image keeps its base labels
+            continue
+        common = {"image": image, "rf_id": (b.get("extra") or {}).get("roboflow_id") if b else None,
                   "reviewed": bool(e.get("reviewed")), "file": file}
         if b is None or im is None:
             rows.append({**common, "dec_key": "*", "op": "keep", "ann_old": None, "cls_from": None, "cls_to": None,
@@ -677,7 +724,10 @@ def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou
             sev = {"conflict": "conflict", "duplicate-dropped": "dropped"}.get(row["status"], "warn")
             conflicts.append({"file": r["file"], "severity": sev, **{k: row[k] for k in CONFLICT_FIELDS if k in row}})
     counts = Counter(r["op"] for r in out_rows if r["status"] == "applied")
-    info_out = {"n_records": len(records), "n_images_applied": applied_images, "n_records_without_changes": n_unchanged,
+    info_out = {"review_scope": scope, "n_package_images": len(data["images"]),
+                "reviewed_images": sorted(reviewed_images), "n_reviewed": len(reviewed_images),
+                "held_back_images": sorted(held_back), "n_held_back": len(held_back),
+                "n_records": len(records), "n_images_applied": applied_images, "n_records_without_changes": n_unchanged,
                 "counts_by_op": {k: counts.get(k, 0) for k in OPS},
                 "counts_conflict_by_op": dict(sorted(Counter(r["op"] for r in out_rows if r["status"] == "conflict").items())),
                 "counts_dropped_by_op": dict(sorted(Counter(r["op"] for r in out_rows if r["status"] == "duplicate-dropped").items())),
@@ -720,8 +770,11 @@ def main(argv=None):
     ap.add_argument("--class-groups", type=Path, default=CLASS_GROUPS, help="Recorded by hash in version.json")
     ap.add_argument("--dup-iou", type=float, default=DUP_IOU, help="Mask IoU at or above which two outlines are duplicates")
     ap.add_argument("--stamp", default=None, help="Version stamp YYYYMMDD_HHMM (default: now)")
+    ap.add_argument("--all-edits", action="store_true",
+                    help="Apply every record with changes, reviewed or not (default: only images marked reviewed)")
     ap.add_argument("--dry-run", action="store_true", help="Report only; write nothing")
     a = ap.parse_args(argv)
+    scope = "all_edits" if a.all_edits else "reviewed_only"
 
     base, package = a.base.resolve(), a.package.resolve()
     edits_dir = (a.edits or package / "edits").resolve()
@@ -742,17 +795,23 @@ def main(argv=None):
         if not p.exists():
             raise SystemExit(f"[ERROR] {what} not found: {p}")
     people = load_people(a.people)
-    print("[steps] effective_labels() per record -> per-object diff vs package labels; "
+    print(f"[steps] scope {scope} ({'only images marked reviewed; unreviewed edits held back' if scope == 'reviewed_only' else 'every record with changes, reviewed or not'}); "
+          "effective_labels() per record -> per-object diff vs package labels; "
           f"duplicates at mask IoU >= {a.dup_iou}; pixels = normalized x w/h, clamped, 0.01 px; "
           "bbox/area recomputed; conflicts not written", flush=True)
     print(f"[in] base {base}\n[in] package {package}\n[in] edits {edits_dir}\n[in] people {a.people} ({len(people)})", flush=True)
 
-    coco, rows, conflicts, info = apply(base, package, edits_dir, people, a.dup_iou)
+    coco, rows, conflicts, info = apply(base, package, edits_dir, people, a.dup_iou, scope)
     for r in rows:
         r["label_version"] = lv
     labels = coco_bytes(coco)
+    supersedes = find_supersedes(out_root, lv, info["pkg"], info["base_name"])
     version = {"id": lv, "base": info["base_name"], "base_path": str(base), "base_sha256": sha256_file(base),
                "pkg": info["pkg"], "package_path": str(package), "edits_dir": str(edits_dir),
+               "review_scope": scope, "n_package_images": info["n_package_images"],
+               "n_reviewed": info["n_reviewed"], "reviewed_images": info["reviewed_images"],
+               "n_held_back": info["n_held_back"], "held_back_images": info["held_back_images"],
+               "supersedes": supersedes,
                "n_records": info["n_records"], "n_images_applied": info["n_images_applied"],
                "n_records_without_changes": info["n_records_without_changes"],
                "counts_by_op": info["counts_by_op"], "counts_conflict_by_op": info["counts_conflict_by_op"],
@@ -764,8 +823,16 @@ def main(argv=None):
                "labels_sha256": hashlib.sha256(labels).hexdigest(), "dup_iou": a.dup_iou,
                "class_groups_sha256": sha256_file(a.class_groups), "people_sha256": sha256_file(a.people),
                "tool": f"apply_review_edits.py {git_sha()}", "created": datetime.now().isoformat(timespec="seconds")}
+    if scope == "reviewed_only":
+        print(f"[OK] reviewed only: {info['n_reviewed']} of {info['n_package_images']} images; "
+              f"{info['n_held_back']} edited images held back (not reviewed)")
+    else:
+        n_unrev = sum(1 for im in {r['image'] for r in rows} if im not in set(info["reviewed_images"]))
+        print(f"[OK] all edits: {info['n_images_applied']} edited images applied, {n_unrev} of them not reviewed; "
+              f"{info['n_reviewed']} of {info['n_package_images']} images reviewed")
     print(f"[OK] {info['n_records']} records, {info['n_images_applied']} images applied; "
-          f"annotations {info['n_annotations_base']} -> {info['n_annotations_out']}")
+          f"annotations {info['n_annotations_base']} -> {info['n_annotations_out']}; "
+          f"supersedes {supersedes or 'none'}; labels sha256 {version['labels_sha256']}")
     print("[OK] applied by op: " + ", ".join(f"{k} {v}" for k, v in info["counts_by_op"].items()))
     print(f"[OK] conflicts: {info['n_conflicts']} {info['counts_conflict_by_op']}; duplicate-dropped {info['n_dropped']} "
           f"{info['counts_dropped_by_op']}; warnings {info['n_warnings']}; skipped {info['skipped']}")

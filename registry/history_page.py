@@ -19,8 +19,12 @@ self-contained static HTML file: inline CSS/JS, no external URLs. The page has
   datasets -> models -> review/revise (packages, revise/annotate jobs); SVG edges parent -> child from `inputs[]`
   (legacy fields when absent); model -> package/job -> label version is the dashed back-edge. Superseded /
   abandoned / cancelled / retired records are hidden until "Show history" (then dimmed); production is starred;
+- label versions carry a review chip (tree row, graph node subtitle, detail panel): "verified N/M" for a
+  reviewed_only version (n_reviewed / n_package_images), amber "all edits incl. unreviewed" for all_edits and for
+  older versions with no review_scope;
 - an Image lookup tab: image name or substring -> datasets + split (lists/*.tsv), label versions that changed it
-  (the lv's changes.jsonl next to its version.json, else the registry's label_change rows), review packages
+  (the lv's changes.jsonl next to its version.json, else the registry's label_change rows) or list it in
+  reviewed_images (noted "reviewed"), review packages
   (their data.js) and jobs (package or image_list), Roboflow image + split, session / grid. ONE embedded index;
 - a Live tab: jobs/monitor.py's snapshot (live/live.json next to the page), fetched every 30 s only when the page is
   served over http(s) (from file:// it shows how to start the monitor and makes no request): per queue the watcher,
@@ -315,6 +319,7 @@ def build_model(current: dict, history: dict, stats: dict, sources, changes=None
             "supby": superseded_by.get(rec["id"], []) if ent == "label_version" else [],
             "dim": ent == "label_version" and (rec.get("status") == "superseded" or bool(superseded_by.get(rec["id"]))),
             "prod": ent == "model" and rec.get("status") == "production",
+            "ver": review_chip(rec) if ent == "label_version" else None,
             "links": links, "hist": hist, "raw": rec,
         }
     counts: dict[str, int] = {}
@@ -381,6 +386,15 @@ def _split_counts(rec) -> str | None:
     return "/".join("?" if ct[s] is None else str(ct[s]) for s in names) + " " + "/".join(names)
 
 
+def review_chip(rec) -> list:
+    """A label version's review scope -> [text, css class]: "verified N/M" (reviewed_only), else the amber
+    "all edits incl. unreviewed" (all_edits, or an older version.json with no review_scope: those applied every edit)."""
+    if rec.get("review_scope") == "reviewed_only":
+        n, m = rec.get("n_reviewed"), rec.get("n_package_images")
+        return [f"verified {'?' if n is None else n}/{'?' if m is None else m}", "ver"]
+    return ["all edits incl. unreviewed", "unrev"]
+
+
 def _graph_sub(ent, rec) -> str:
     if ent == "dataset":
         return _split_counts(rec) or ""
@@ -392,7 +406,7 @@ def _graph_sub(ent, rec) -> str:
         return (f"{n} images" if n is not None else "") + (f" · {rec['kind']}" if rec.get("kind") == "part" else "")
     if ent == "label_version":
         n = rec.get("n_images_applied")
-        return f"{n} images changed" if n is not None else ""
+        return review_chip(rec)[0] + (f" · {n} images changed" if n is not None else "")
     if ent == "job":
         p = rec.get("progress") if isinstance(rec.get("progress"), dict) else {}
         return f"{rec.get('type')} · {p.get('done', '?')}/{p.get('total', '?')} {p.get('unit') or ''}".strip()
@@ -460,7 +474,8 @@ def graph_model(current, recs, find, sort_key) -> dict:
 
 # ---------------------------------------------------------------- image lookup
 # ONE index: image key -> refs into a shared entity-key list. ref = n (entity index) or [n, note]
-# (split for a dataset / Roboflow image, number of change rows for a label version).
+# (split for a dataset / Roboflow image, number of change rows for a label version), or [n, rows or null, "reviewed"]
+# for an image in a label version's reviewed_images (approved with no changes: no rows, still listed).
 # Only images that are records (image/1, or a roboflow_image stem) are indexed, as on the model page;
 # other names from lists and logs are counted, never shown.
 
@@ -515,14 +530,14 @@ def lookup_index(current, roots, changes) -> dict:
     ents, eidx, img, hidden = [], {}, {name: [] for name in known}, set()
     used = {"change_log": [], "label_change_rows": [], "package_data_js": [], "no_image_list": []}
 
-    def add(name, k, note=None):
+    def add(name, k, note=None, flag=None):
         if name not in known:
             hidden.add(name)
             return
         if k not in eidx:
             eidx[k] = len(ents)
             ents.append(k)
-        ref = eidx[k] if note is None else [eidx[k], note]
+        ref = eidx[k] if note is None and flag is None else [eidx[k], note] if flag is None else [eidx[k], note, flag]
         if ref not in img[name]:
             img[name].append(ref)
 
@@ -547,8 +562,11 @@ def lookup_index(current, roots, changes) -> dict:
         n: dict = {}
         for im in rows:
             n[im] = n.get(im, 0) + 1
+        reviewed = {im for im in rec.get("reviewed_images") or [] if isinstance(im, str)}
         for im, c in n.items():
-            add(image_key(im), k, c)
+            add(image_key(im), k, c, "reviewed" if im in reviewed else None)
+        for im in sorted(reviewed - set(n)):           # approved with no changes: no change rows, still reviewed here
+            add(image_key(im), k, None, "reviewed")
     pkg_imgs: dict = {}
     for k, rec in current.items():
         if k.startswith("review_package|"):
@@ -775,6 +793,9 @@ h1{font-size:1.25rem;margin:4px 0}h2{font-size:1.05rem;margin:18px 0 8px}
 .st{font-size:.72rem;padding:1px 6px;border-radius:999px;border:1px solid var(--line);color:var(--mut);white-space:nowrap}
 .prod{background:var(--prodbg);color:var(--prod);font-weight:700}
 .gap{background:var(--warnbg);color:var(--warn)}
+.st.ver{background:var(--prodbg);color:var(--prod);border-color:transparent}
+.st.unrev{background:var(--warnbg);color:var(--warn);border-color:transparent}
+.gnode .gsub.unrev{color:var(--warn)}
 .note{font-size:.78rem;color:var(--mut)}
 .dim{opacity:var(--dim)}.ctx{opacity:.6}
 .sel{outline:2px solid var(--acc);border-radius:6px}
@@ -871,6 +892,7 @@ function recButton(k){
   if(r.supby.length)b.appendChild(el('span','note','superseded by '+r.supby.join(', ')));
   if(Object.keys(r.gaps).length)b.appendChild(el('span','st gap','gap'));
   if(r.copy_of)b.appendChild(el('span','note','copy of '+r.copy_of));
+  if(r.ver)b.appendChild(el('span','st '+r.ver[1],r.ver[0]));
   b.addEventListener('click',function(ev){ev.preventDefault();show(k);});
   return b;
 }
@@ -1003,6 +1025,10 @@ function show(k){var r=R[k];D.textContent='';D.classList.remove('hidden');
   Object.keys(r.who).forEach(function(f){kv(dl,f,r.who[f]);});Object.keys(r.when).forEach(function(f){kv(dl,f,r.when[f]);});
   Object.keys(r.gaps).forEach(function(f){kv(dl,f,r.gaps[f]);});if(r.copy_of)kv(dl,'copy_of',r.copy_of);
   if(r.sup)kv(dl,'supersedes',r.sup);if(r.supby.length)kv(dl,'superseded by',r.supby.join(', '));
+  if(r.ver){var vw=el('span');vw.appendChild(el('span','st '+r.ver[1],r.ver[0]));var x=r.raw;
+    if(x.review_scope==='reviewed_only')vw.appendChild(el('span','note',' '+(x.n_held_back==null?'?':x.n_held_back)+' edited image'+(x.n_held_back===1?'':'s')+' held back (not reviewed)'));
+    else vw.appendChild(el('span','note',x.review_scope?' --all-edits: reviewed or not':' made before review scope (2026-11-04): every edit applied'));
+    kv(dl,'review',vw);}
   D.appendChild(dl);
   D.appendChild(el('h3',null,'Links ('+r.links.length+')'));
   if(r.links.length){var t=el('table');r.links.forEach(function(L){var tr=el('tr');tr.appendChild(el('td',null,L[0]));
@@ -1036,7 +1062,7 @@ function gbox(i,p){var n=G.nodes[i],k=n[0],r=R[k];
   b.style.left=p.x+'px';b.style.top=p.y+'px';b.style.width=p.w+'px';b.style.height=BH+'px';
   var l1=el('div','gl1');l1.appendChild(el('span','tag',SHORT[r.e]||r.e));
   if(r.prod)l1.appendChild(el('span','st prod','★ production'));else if(r.s!=null)l1.appendChild(el('span','st',String(r.s).replace('_',' ')));
-  b.appendChild(l1);b.appendChild(el('div','gid',r.id));if(n[4])b.appendChild(el('div','gsub',n[4]));
+  b.appendChild(l1);b.appendChild(el('div','gid',r.id));if(n[4])b.appendChild(el('div','gsub'+(r.ver?' '+r.ver[1]:''),n[4]));
   b.addEventListener('click',function(){show(k);});return b;}
 function svgEl(t,cls){var e=document.createElementNS(NS,t);if(cls)e.setAttribute('class',cls);return e;}
 function arrow(x,y,dir){return 'M'+x+','+y+'L'+(x-8*dir)+','+(y-4.5)+'L'+(x-8*dir)+','+(y+4.5)+'Z';}
@@ -1084,7 +1110,7 @@ function markGraph(){var active=!!(fe.value||fs.value||fq.value.trim());
 gh.addEventListener('change',drawGraph);
 // image lookup: one embedded index (image -> refs into M.lk.e)
 var LK=M.lk,lq=document.getElementById('lq'),lres=document.getElementById('lres');
-var GROUPS=[['dataset','Datasets (split)'],['label_version','Label versions that changed it (change rows)'],
+var GROUPS=[['dataset','Datasets (split)'],['label_version','Label versions that changed or reviewed it (change rows)'],
   ['review_package','Review packages'],['job','Jobs'],['roboflow_image','Roboflow image (split)']];
 function norm(q){return q.replace(/\.(png|jpe?g|tiff?)$/i,'_$1').replace(/[\s-]+/g,'-').toLowerCase();}
 function imgCard(x){var name=x[0],c=el('div','lcard');c.dataset.name=name;var ik=R['image|'+name]?'image|'+name:null;
@@ -1098,7 +1124,8 @@ function imgCard(x){var name=x[0],c=el('div','lcard');c.dataset.name=name;var ik
     if(!refs.length)r.appendChild(el('span','note','none'));
     refs.forEach(function(f,i){var k=LK.e[Array.isArray(f)?f[0]:f];if(i)r.appendChild(document.createTextNode(', '));
       r.appendChild(link(R[k].id,k));if(R[k].dim||R[k].s==='superseded'||R[k].s==='cancelled')r.appendChild(el('span','note',' ['+R[k].s+']'));
-      if(Array.isArray(f))r.appendChild(el('span','note',' ('+f[1]+')'));});
+      if(Array.isArray(f)&&f.length>2){var pp=[];if(f[1]!=null)pp.push(f[1]);pp.push(f[2]);r.appendChild(el('span','note',' ('+pp.join(', ')+')'));}
+      else if(Array.isArray(f))r.appendChild(el('span','note',' ('+f[1]+')'));});
     c.appendChild(r);});
   return c;}
 function lookup(){var q=lq.value.trim();lres.textContent='';

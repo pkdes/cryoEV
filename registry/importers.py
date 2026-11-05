@@ -455,14 +455,27 @@ class Importer:
                  inputs=inputs, outputs=sorted(outputs), port=APP_PORT, n_edit_records=n)
 
     def label_versions(self):
+        """Review scope (apply_review_edits.py, 2026-11-04): review_scope, n_reviewed, n_package_images, n_held_back
+        and supersedes come from version.json (absent on older versions: the page shows those as all edits). An lv
+        that a newer version.json names in `supersedes` is status superseded, like SUPERSEDED / SUPERSEDED.md."""
+        dirs = [d for d in sorted((self.laptop / "labels").glob("lv_*")) if (d / "version.json").exists()]
+        named = set()
+        for d in dirs:
+            try:
+                s = read_json(d / "version.json").get("supersedes")
+            except (OSError, ValueError, AttributeError):
+                s = None
+            if isinstance(s, str) and s != d.name:
+                named.add(s)
         for d in sorted((self.laptop / "labels").glob("lv_*")):
             vj = d / "version.json"
             if not vj.exists():
                 self.refuse("label_version: version.json missing", d.name)
                 continue
-            sup = next((old for old, new in SUPERSEDED.items() if new == d.name), None)
-            superseded = d.name in SUPERSEDED or (d / "SUPERSEDED.md").exists()
             v = read_json(vj)
+            sup = next((old for old, new in SUPERSEDED.items() if new == d.name), None) or \
+                (v.get("supersedes") if isinstance(v.get("supersedes"), str) else None)
+            superseded = d.name in SUPERSEDED or (d / "SUPERSEDED.md").exists() or d.name in named
             inputs = []
             if v.get("base"):
                 inputs.append({"id": v["base"], "role": "base",
@@ -470,6 +483,8 @@ class Importer:
             if v.get("pkg"):
                 inputs.append({"id": v["pkg"], "role": "edits", "entity": "review_package"})
             self.add("label_version", id=d.name, owner=str(vj), supersedes=sup, inputs=inputs or None,
+                     review_scope=v.get("review_scope"), n_reviewed=v.get("n_reviewed"),
+                     n_package_images=v.get("n_package_images"), n_held_back=v.get("n_held_back"),
                      status="superseded" if superseded else "created")
 
     def inference_checks(self):

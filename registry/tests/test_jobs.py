@@ -184,6 +184,34 @@ class ReviseJobs(unittest.TestCase):
     def run_import(self):
         return importers.run(self.root, laptop=self.laptop, cache=self.cache, processing=None)
 
+    def test_label_version_review_scope(self):
+        """A partial ship (apply_review_edits.py reviewed_only) after the older lv: the record carries review_scope,
+        n_reviewed, n_package_images, n_held_back and supersedes; the older lv (no scope fields) stays valid and is
+        now superseded. Schema-checked on append (registry.append refuses an invalid record)."""
+        lv2 = self.laptop / "labels" / "lv_20990106_0900"
+        lv2.mkdir(parents=True)
+        (lv2 / "version.json").write_text(json.dumps({
+            "id": lv2.name, "base": PULL, "pkg": "pkg_a", "edits_dir": "x", "n_images_applied": 1,
+            "counts_by_op": {}, "class_groups_sha256": "0" * 64, "people_sha256": "0" * 64, "tool": "test",
+            "created": "2099-01-06T09:00:00", "review_scope": "reviewed_only", "n_package_images": 10, "n_reviewed": 3,
+            "reviewed_images": ["img0_png", "img2_png", "img4_png"], "n_held_back": 1, "held_back_images": ["img1_png"],
+            "supersedes": "lv_20990105_0900"}), encoding="utf-8")
+        res = self.run_import()
+        self.assertEqual([k for k in res["refused"] if k.startswith("label_version")], [])
+        cur = registry.current("label_version", self.root)
+        new, old = cur["lv_20990106_0900"], cur["lv_20990105_0900"]
+        self.assertEqual((new["review_scope"], new["n_reviewed"], new["n_package_images"], new["n_held_back"],
+                          new["supersedes"], new["status"]), ("reviewed_only", 3, 10, 1, "lv_20990105_0900", "created"))
+        self.assertEqual(new["reviewed_images"], ["img0_png", "img2_png", "img4_png"])
+        self.assertEqual(old["status"], "superseded")
+        self.assertNotIn("review_scope", old)
+        schemas = importers.registry.load_schemas()
+        for rec in (new, old):
+            self.assertEqual(importers.registry.check_record(rec, schemas), [], rec["id"])
+        bad = dict(new, review_scope="everything")
+        self.assertTrue(importers.registry.check_record(bad, schemas))          # control: a wrong scope fails
+        self.assertEqual(sum(self.run_import()["appended"].values()), 0)        # re-import: 0 lines
+
     def test_progress_status_and_skips(self):
         self.run_import()
         cur = registry.current("job", self.root)

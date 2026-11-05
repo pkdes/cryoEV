@@ -214,6 +214,17 @@ The page clamps coordinates. If the server rejects one image, the page shows a b
 
 Known limit: older items without a decision key or `t` still follow the whole-list rule. That means September-era list items until their first edit, and keyless hand-drawn outlines until the Editor keys them. Two offline reviewers who both change such an item: the newer list wins.
 
+## Shipping a partial review
+1. Review images in the tool and press **R** on each one you have checked (also when you changed nothing).
+2. Run `python annotation/apply_review_edits.py --base <pull>/current.coco.json --package <review package>`.
+   - By default it applies only images marked reviewed (`--all-edits` applies everything, reviewed or not).
+   - The run prints e.g. "reviewed only: 45 of 160 images; 12 edited images held back (not reviewed)".
+3. The new `lv_<stamp>` lists `reviewed_images` and `held_back_images`, and `supersedes` the previous lv of the same
+   package and base. The history page shows it as "verified 45/160".
+
+Repeat at any time; each new lv supersedes the last. Unreviewed images keep their base labels until someone
+reviews them. Rules: [LABEL_CHANGES.md](LABEL_CHANGES.md#apply-rule).
+
 ## Tests
 ```bash
 python -m unittest discover -s annotation/tests -v

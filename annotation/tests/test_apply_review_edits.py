@@ -57,11 +57,13 @@ def md5_tree(folder: Path) -> dict:
             for p in sorted(folder.rglob("*")) if p.is_file()}
 
 
-def run(base, pkg, edits, out_root, stamp="20990101_0000", extra=()):
+def run(base, pkg, edits, out_root, stamp="20990101_0000", extra=(), all_edits=True):
+    """all_edits=True (--all-edits) keeps the tests written before 2026-11-04 on the rule they check (every record
+    with changes applied); all_edits=False runs the CLI default (only images marked reviewed)."""
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         v = ar.main(["--base", str(base), "--package", str(pkg), "--edits", str(edits), "--out-root", str(out_root),
-                     "--stamp", stamp, *extra])
+                     "--stamp", stamp, *(["--all-edits"] if all_edits else []), *extra])
     out = Path(out_root) / f"lv_{stamp}"
     return v, out, buf.getvalue()
 
@@ -498,6 +500,114 @@ class QcFixTests(unittest.TestCase):
         self.assertFalse((Path.home() / "Box" / "_ar_must_not_exist").exists())
 
 
+
+class ReviewScopeTests(unittest.TestCase):
+    """Shipping a partial review (2026-11-04). The synthetic package: a.png reviewed + edits, b.png NOT reviewed +
+    edits (an old list reshaping 9 and adding an object), c.png reviewed with no changes (one base label, id 20)."""
+    C_ANN = (20, 3, 1, [sq(100, 100, 50)])
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="ar_scope_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.base, self.pkg, self.edits = build_synthetic(self.tmp / "in", [self.C_ANN])
+        self.out_root = self.tmp / "labels"
+        self.base_coco = json.loads(self.base.read_text(encoding="utf-8"))
+
+    def anns_of(self, coco, image_id):
+        return [key_of(a) for a in coco["annotations"] if a["image_id"] == image_id]
+
+    def test_default_reviewed_only(self):
+        v, out, log = run(self.base, self.pkg, self.edits, self.out_root, all_edits=False)   # the CLI default
+        coco, rows, conflicts, ver = read_out(out)
+        self.assertEqual(ver, v)
+        self.assertEqual((ver["review_scope"], ver["n_package_images"], ver["reviewed_images"], ver["n_reviewed"],
+                          ver["held_back_images"], ver["n_held_back"], ver["n_images_applied"], ver["supersedes"]),
+                         ("reviewed_only", 3, ["a_png", "c_png"], 2, ["b_png"], 1, 1, None))
+        self.assertEqual(ver["n_records_without_changes"], 1)                    # c.png, still counted as before
+        self.assertIn("reviewed only: 2 of 3 images; 1 edited images held back (not reviewed)", log)
+        self.assertIn("[steps] scope reviewed_only", log)
+        self.assertEqual({r["image"] for r in rows}, {"a_png"})                  # held back: no rows
+        self.assertTrue(all(r["reviewed"] for r in rows))
+        # reviewed, no decisions -> labels = base; unreviewed -> base; reviewed + edits -> applied
+        self.assertEqual(self.anns_of(coco, 3), self.anns_of(self.base_coco, 3))
+        self.assertEqual(self.anns_of(coco, 2), self.anns_of(self.base_coco, 2))
+        got = {a["id"]: a for a in coco["annotations"]}
+        self.assertNotIn(5, got)                                                 # g5 del
+        self.assertEqual(got[2]["category_id"], 3)                               # g2 keep:MV
+        self.assertEqual(got[3]["segmentation"], px(RESHAPE3))
+        self.assertEqual(sorted(i for i in got if i > 20), [21, 22, 23])         # p0, p1, nabc on a.png only
+        self.assertEqual({got[i]["image_id"] for i in (21, 22, 23)}, {1})
+
+    def test_all_edits_applies_unreviewed(self):
+        v, out, log = run(self.base, self.pkg, self.edits, self.out_root, all_edits=True)
+        coco, rows, _, ver = read_out(out)
+        self.assertEqual((ver["review_scope"], ver["reviewed_images"], ver["held_back_images"], ver["n_held_back"],
+                          ver["n_images_applied"]), ("all_edits", ["a_png", "c_png"], [], 0, 2))
+        self.assertIn("all edits: 2 edited images applied, 1 of them not reviewed; 2 of 3 images reviewed", log)
+        self.assertEqual({r["image"] for r in rows}, {"a_png", "b_png"})
+        b_rows = [r for r in rows if r["image"] == "b_png"]
+        self.assertTrue(b_rows and not any(r["reviewed"] for r in b_rows))
+        got = {a["id"]: a for a in coco["annotations"]}
+        self.assertEqual(got[9]["segmentation"], px(LIST_RESHAPE9))              # b.png's list applied
+        self.assertEqual(self.anns_of(coco, 3), self.anns_of(self.base_coco, 3))  # c.png still = base
+        # the reviewed subset of an all_edits run is the reviewed_only run: a.png's labels are the same
+        _, out2, _ = run(self.base, self.pkg, self.edits, self.out_root, stamp="20990101_0001", all_edits=False)
+        self.assertEqual(self.anns_of(read_out(out2)[0], 1), self.anns_of(coco, 1))
+
+    def test_same_inputs_same_hash_and_supersedes(self):
+        v1, o1, _ = run(self.base, self.pkg, self.edits, self.out_root, stamp="20990101_0000", all_edits=False)
+        v2, o2, _ = run(self.base, self.pkg, self.edits, self.out_root, stamp="20990101_0001", all_edits=False)
+        h = lambda o: hashlib.sha256((o / "labels.coco.json").read_bytes()).hexdigest()
+        self.assertEqual(h(o1), h(o2))
+        self.assertEqual((v1["labels_sha256"], v2["labels_sha256"]), (h(o1), h(o1)))
+        self.assertEqual((v1["supersedes"], v2["supersedes"]), (None, "lv_20990101_0000"))
+        v3 = run(self.base, self.pkg, self.edits, self.out_root, stamp="20990101_0002", all_edits=False)[0]
+        self.assertEqual(v3["supersedes"], "lv_20990101_0001")                   # the newest earlier one
+        # a dry run reports it too (and writes nothing)
+        v4 = run(self.base, self.pkg, self.edits, self.out_root, stamp="20990101_0003", extra=["--dry-run"],
+                 all_edits=False)[0]
+        self.assertEqual(v4["supersedes"], "lv_20990101_0002")
+        self.assertFalse((self.out_root / "lv_20990101_0003").exists())
+        # another package on the same base: not superseded
+        other = self.tmp / "other_pkg"
+        other.mkdir()
+        txt = (self.pkg / "data.js").read_text(encoding="utf-8").replace('"id": "synthetic_pkg"', '"id": "other_pkg"')
+        self.assertIn('"other_pkg"', txt)
+        (other / "data.js").write_text(txt, encoding="utf-8")
+        empty = self.tmp / "empty"
+        empty.mkdir()
+        v5 = run(self.base, other, empty, self.out_root, stamp="20990101_0004", all_edits=False)[0]
+        self.assertEqual((v5["pkg"], v5["supersedes"], v5["n_reviewed"], v5["n_held_back"]), ("other_pkg", None, 0, 0))
+        # an older lv folder (no scope fields) of the same package is still found
+        old = self.out_root / "lv_20990101_0000" / "version.json"
+        j = json.loads(old.read_text(encoding="utf-8"))
+        for k in ("review_scope", "reviewed_images", "n_reviewed", "held_back_images", "n_held_back", "n_package_images",
+                  "supersedes"):
+            j.pop(k)
+        old.write_text(json.dumps(j), encoding="utf-8")
+        shutil.rmtree(self.out_root / "lv_20990101_0001")
+        shutil.rmtree(self.out_root / "lv_20990101_0002")
+        v6 = run(self.base, self.pkg, self.edits, self.out_root, stamp="20990101_0005", all_edits=False)[0]
+        self.assertEqual(v6["supersedes"], "lv_20990101_0000")
+
+    def test_reviewed_rule_with_two_writers(self):
+        """merge_edits keeps the newest reviewedT toggle: A approves, B un-reviews later -> not reviewed (held back)."""
+        a = {"dec": {"g8": {"v": "del", "t": 10, "who": "A"}}, "t": 10, "reviewed": True, "reviewedT": 10}
+        b = {"dec": {}, "t": 20, "reviewed": False, "reviewedT": 20}
+        self.assertFalse(ar.is_reviewed(rs.merge_edits(a, b)))
+        self.assertTrue(ar.is_reviewed(rs.merge_edits(b, {**a, "reviewedT": 30})))
+        self.assertFalse(ar.is_reviewed({"dec": {}, "reviewed": "yes"}))         # only a real true counts
+        for f in self.edits.glob("*.json"):
+            f.unlink()
+        (self.edits / "b.png.json").write_text(json.dumps({"file": "b.png", "edit": rs.merge_edits(a, b)}), encoding="utf-8")
+        ver = run(self.base, self.pkg, self.edits, self.out_root, all_edits=False)[0]
+        self.assertEqual((ver["held_back_images"], ver["reviewed_images"], ver["n_images_applied"]), (["b_png"], [], 0))
+
+    def test_apply_rejects_unknown_scope(self):
+        with self.assertRaises(ValueError):
+            ar.apply(self.base, self.pkg, self.edits, [], scope="everything")
+
+
 def assert_round_trip(tc, pkg, edits, pkg2, conflicts, rows):
     """data.js rebuilt from the output COCO (no edits) == effective_labels() of the applied edits, minus the
     conflicts, within 1 px. Base labels by id; added ones paired by class and position."""
@@ -608,6 +718,22 @@ class RealV2Tests(unittest.TestCase):
                         "--pred-dir", str(self.tmp / "nopreds"), "--out-dir", str(pkg2), "--no-zip", "--part-size", "0"],
                        check=True, capture_output=True)
         assert_round_trip(self, self.pkg, self.pkg / "edits", pkg2, self.conflicts, self.rows)
+
+    def test_9_scope_control_real(self):
+        """Control (2026-11-04): --all-edits on today's package reproduces lv_20261030_0909's labels hash (when that lv
+        is beside the repo); the default (reviewed only) applies 0 images and holds back all 28 September carry-overs
+        (none is marked reviewed), so its labels equal the base."""
+        self.assertEqual(self.ver["review_scope"], "all_edits")
+        lv0909 = LAPTOP / "labels" / "lv_20261030_0909" / "version.json"
+        if lv0909.is_file():
+            self.assertEqual(self.ver["labels_sha256"], json.loads(lv0909.read_text(encoding="utf-8"))["labels_sha256"])
+        v = run(self.base, self.pkg, self.pkg / "edits", self.tmp / "labels9", extra=["--dry-run"], all_edits=False)[0]
+        self.assertEqual((v["review_scope"], v["n_images_applied"], v["n_held_back"], v["n_reviewed"], v["n_package_images"]),
+                         ("reviewed_only", 0, 28, 0, 160))
+        _, out, _ = run(self.base, self.pkg, self.pkg / "edits", self.tmp / "labels9", all_edits=False)
+        base = json.loads(self.base.read_text(encoding="utf-8"))
+        self.assertEqual([key_of(a) for a in read_out(out)[0]["annotations"]], [key_of(a) for a in base["annotations"]])
+        self.assertEqual(md5_tree(REAL_V2 / "edits"), self.before)
 
     def test_1_zero_edits_real(self):
         empty = self.tmp / "empty"

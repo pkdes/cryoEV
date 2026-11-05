@@ -27,15 +27,33 @@ ids/batches/datasets/runs contract) extends this file; it does not replace these
 - `merge_edits()` rebuilds `edit` from fixed keys. New per-record data goes in the wrapper, not inside `edit`.
 
 ## Apply rule
-- An image is applied when its record has any decision or a polygon list (`modified`).
-- `reviewed` does not gate applying. It is logged per row as a status.
+Since 2026-11-04 (user decision), the default is **only reviewed**. `version.json` `review_scope` records which rule made a version.
+
+| Scope | Flag | Applied |
+|---|---|---|
+| `reviewed_only` | default | Records with any decision or a polygon list (`modified`) **and** `reviewed` true |
+| `all_edits` | `--all-edits` | Every record with any decision or a polygon list, reviewed or not (the rule before 2026-11-04) |
+
+- `reviewed` = the record's `edit.reviewed` is `true`. With several writers, the server's merge keeps the newest
+  `reviewedT` toggle (`merge_edits`), so the last reviewer to press R decides. The registry's revise-job progress
+  counts the same flag.
+- Held back (`reviewed_only`): an unreviewed record with changes. Nothing is applied, it gets no change rows, and its
+  image keeps its base labels. Listed in `held_back_images` and counted in `n_held_back`.
+- An image approved with no changes is listed in `reviewed_images` and keeps its base labels.
+- `reviewed` is still logged per row.
 - Zero edits → output labels equal the base (same annotations, same ids).
+- Older versions have no `review_scope`. They applied every edit (e.g. `lv_20261030_0909`: 28 September carry-overs,
+  none reviewed). The history page flags them, and `all_edits` versions, in amber.
 
 ## Label version
 - id: `lv_<YYYYMMDD_HHMM>`, written to `CryoAI-laptop/labels/lv_<YYYYMMDD_HHMM>/`. Never overwritten.
 - Folder: `labels.coco.json`, `changes.jsonl`, `conflicts.csv`, `version.json`.
 - `version.json`: `{id, base, pkg, edits_dir, n_images_applied, counts_by_op, class_groups_sha256, people_sha256,
   tool: "apply_review_edits.py <git sha>", created}`.
+  - Review scope (2026-11-04): `review_scope`, `n_package_images`, `reviewed_images` (sorted image keys),
+    `n_reviewed`, `held_back_images`, `n_held_back`.
+  - `supersedes`: the newest earlier `lv_*` under `--out-root` with the same `pkg` and `base`, else null. Each partial
+    ship replaces the last; the registry importer marks the older one `superseded`.
 - COCO objects: internal fields (`u, x, lc, seed, src, t`) are stripped; bbox and area are recomputed from the
   outline; coordinates are clamped to the image. An object with several rings stays one annotation.
 - Annotation ids: kept for surviving base objects; new objects get `max(base id) + 1, …`.
