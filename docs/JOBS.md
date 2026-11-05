@@ -63,6 +63,14 @@ python jobs/monitor.py --share \\gpu-desktop\cj                       # writes <
 - `--share` is repeatable (one card per queue); `--every 30`; `--once` writes one snapshot; `--out` changes the file. One monitor per output file (`monitor.lock`; a second exits 3).
 - Read only on the share: small files through `common.read_shared`, nothing under `d\.tmp_*`, never the registry `*.jsonl`. Each queue is read in a thread and given up after 20 s.
 - Opened as a file (`file://`), the page fetches nothing and shows how to start the monitor; open it from the server.
+- **Server probes.** Each cycle the monitor also probes the laptop's servers on 127.0.0.1 with `GET /api/ping`: `review` 8766, `sandbox` 8765, `history` 8768 (`--servers review=8766,sandbox=8765,history=8768` is the default; `--servers ""` turns it off).
+  - Any HTTP answer is **up**, 403 and 404 included. Refused, or no answer in 1 s, is **down**.
+  - All the probes run at once in their own threads, apart from the queue readers, and are given up after 3 s. live.json gets `servers: [{name, port, up, ms}]`.
+- **Servers bar** (history page header, under the title): Review, Sandbox and History links, each with a dot from the snapshot: green up, amber down, grey unknown (stale or no snapshot).
+  - The links are built from the page's own address. On a `tailscale serve` port (443, 8443, 8445) they use the same scheme and host: Review `/`, Sandbox `:8443/`, History `:8445/history.html`. Opened on another port (e.g. 127.0.0.1:8768) they use `http:` and the local ports.
+  - Opened as a file, it shows the names only, with no links.
+  - The browser never contacts another port; the status comes only from `live.json`.
+  - A first visit to the review needs its `?k=` link once per device (ask the lab). No key is in the page.
 
 | Shown | Meaning |
 |---|---|

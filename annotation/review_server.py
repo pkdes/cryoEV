@@ -4,7 +4,13 @@ edits to disk, so the browser tool can be used remotely (e.g. behind a
 Microsoft Dev Tunnel) by several reviewers at once, and still work offline with later sync.
 
 Standard library only. Every request needs the access key: open the printed
-URL once (…/?k=<key>) and a cookie carries it from then on.
+URL once (…/?k=<key>) and a cookie carries it from then on. The cookie is named review_key_<port> (this
+server's listen port): browsers share cookies across the ports of one host, so two servers on one laptop
+(each package with its own key) would overwrite one review_key cookie. The older review_key cookie is still
+accepted when it holds this server's key; only the new name is set.
+
+--sandbox (also on when the package folder's name starts with SANDBOX_) puts an amber "SANDBOX" bar on every
+page: data.js is served with window.REVIEW_SERVER = {"sandbox": true} appended (the file on disk is unchanged).
 
 Routes:
   GET  /, /data.js, /images/<name>   the package itself
@@ -24,6 +30,7 @@ planned annotation/apply_review_edits.py that turns them into a new COCO export.
 Usage:
   python annotation/review_server.py --package "../CryoAI/annotation review/cryoai_v4_review"
   python annotation/review_server.py --package <pkg> --host 100.x.y.z   # this PC's Tailscale IP: phones on the tailnet
+  python annotation/review_server.py --package <SANDBOX_pkg> --port 8765   # a practice copy: sandbox bar on
 """
 import argparse
 import json
@@ -40,7 +47,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-COOKIE = "review_key"
+COOKIE = "review_key"  # legacy name, accepted (when it matches) but never set; the cookie is COOKIE_<port>
+SANDBOX_PREFIX = "SANDBOX_"
 DEC_PREFIXES = ("g", "p", "n")  # g<label id>, p<prediction index>, n<id of an outline drawn in the tool>
 MAX_BODY = 20 * 2**20
 CLAIM_SECONDS = 90
@@ -53,7 +61,21 @@ WHO_MAX = 40
 WHO_RE = re.compile(rf"[\w .\-]{{0,{WHO_MAX}}}")
 
 
-def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people: list = ()):
+def cookie_name(port: int) -> str:
+    """review_key_<port>: one cookie per server, since a browser sends a host's cookies to all of its ports."""
+    return f"{COOKIE}_{port}"
+
+
+def is_sandbox(pkg: Path, flag: bool = False) -> bool:
+    return bool(flag) or Path(pkg).name.startswith(SANDBOX_PREFIX)
+
+
+def sandbox_js(on: bool) -> bytes:
+    """Appended to data.js when served: the page shows the sandbox bar from it. Nothing for a real review."""
+    return b"\nwindow.REVIEW_SERVER = {\"sandbox\": true};\n" if on else b""
+
+
+def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people: list = (), sandbox: bool = False):
     people = list(people)
     edits_dir = pkg / "edits"
     edits_dir.mkdir(exist_ok=True)
@@ -86,18 +108,28 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
         def _json(self, code, obj):
             self._send(code, json.dumps(obj).encode())
 
+        def _cookie(self):
+            return cookie_name(self.server.server_address[1])
+
         def _authed(self, query):
-            cookie = SimpleCookie(self.headers.get("Cookie", ""))
-            given = (query.get("k", [None])[0] or self.headers.get("X-Review-Key")
-                     or (cookie[COOKIE].value if COOKIE in cookie else None))
-            return given is not None and secrets.compare_digest(given, key)
+            try:
+                cookie = SimpleCookie(self.headers.get("Cookie", ""))
+            except Exception:  # http.cookies.CookieError on a malformed header: no cookie
+                cookie = {}
+            given = query.get("k", [None])[0] or self.headers.get("X-Review-Key")
+            if given is not None:
+                return secrets.compare_digest(given, key)
+            # this port's cookie, else the legacy one (set before cookies were per port) if it holds this key
+            return any(name in cookie and secrets.compare_digest(cookie[name].value, key)
+                       for name in (self._cookie(), COOKIE))
 
         def do_GET(self):
             url = urlparse(self.path)
             q = parse_qs(url.query)
             if not self._authed(q):
                 return self._send(403, b"Access key required: open the full link that includes ?k=...", "text/plain")
-            extra = {"Set-Cookie": f"{COOKIE}={key}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"} if "k" in q else None
+            extra = ({"Set-Cookie": f"{self._cookie()}={key}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"}
+                     if "k" in q else None)
             if url.path == "/api/ping":
                 return self._json(200, {"ok": True})
             if url.path == "/api/people":
@@ -124,7 +156,8 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
             ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             if ctype.startswith("text/") or ctype.endswith("javascript"):
                 ctype += "; charset=utf-8"
-            self._send(200, path.read_bytes(), ctype, extra)
+            body = path.read_bytes() + (sandbox_js(sandbox) if rel == "data.js" else b"")
+            self._send(200, body, ctype, extra)
 
         do_HEAD = do_GET
 
@@ -387,6 +420,8 @@ def main():
                          "on the tailnet pass this PC's Tailscale IP (`tailscale ip -4`), not 0.0.0.0")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--key", default=None, help="Access key (default: reuse <package>/.review_key, else generate one)")
+    ap.add_argument("--sandbox", action="store_true",
+                    help=f"Show the SANDBOX bar on every page (also on when the package folder starts with {SANDBOX_PREFIX})")
     args = ap.parse_args()
 
     pkg = args.package.resolve()
@@ -396,8 +431,12 @@ def main():
     key = args.key or (key_file.read_text().strip() if key_file.exists() else secrets.token_urlsafe(18))
     key_file.write_text(key)
 
-    srv = ThreadingHTTPServer((args.host, args.port), make_handler(pkg, key, valid, data.get("id", ""), load_people()))
+    sandbox = is_sandbox(pkg, args.sandbox)
+    srv = ThreadingHTTPServer((args.host, args.port),
+                              make_handler(pkg, key, valid, data.get("id", ""), load_people(), sandbox))
     print(f"[OK] Serving {pkg.name}: {len(valid)} images, edits -> {pkg / 'edits'}", flush=True)
+    if sandbox:
+        print("[OK] Sandbox: every page shows the SANDBOX bar (edits here don't count toward the real review)", flush=True)
     # The key is printed once, in this link; request logs redact it. It is also in <package>/.review_key.
     shown = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
     print(f"[OK] Link: http://{shown}:{args.port}/?k={key}", flush=True)

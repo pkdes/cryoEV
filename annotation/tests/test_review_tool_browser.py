@@ -1259,6 +1259,40 @@ class AcceptCardTests(CardBase):
         self.check_js_equals_python(page)
 
 
+class SandboxBarTests(Base):
+    """review_server.py --sandbox: the amber bar is on every view (cards at 400 px, Editor at 1280 px) and pushes
+    the page down rather than covering its controls. Control: the same fixture served normally has no bar."""
+
+    @classmethod
+    def make_server(cls):
+        return LiveServer(args=("--sandbox",))
+
+    def check_bar(self, page, below, width):
+        bar = page.locator("#sandbox")
+        self.assertTrue(bar.is_visible())
+        self.assertIn("SANDBOX — edits here don't count toward the real review", bar.inner_text())
+        b, top = bar.bounding_box(), page.locator(below).bounding_box()
+        self.assertEqual((b["x"], b["y"], b["width"]), (0, 0, width))           # fixed, full width, at the top
+        self.assertGreaterEqual(top["y"] + 0.5, b["y"] + b["height"])           # the view starts below it
+        self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), width)
+
+    def test_bar_on_cards_and_editor(self):
+        page = self.open("&who=phone", **PhoneTests.PHONE)
+        self.assertFalse(page.locator("#tri").is_hidden())
+        self.check_bar(page, "#tri", 400)
+        if SHOTS:
+            page.screenshot(path=str(Path(SHOTS) / "sandbox_cards_400.png"))
+        page = self.open("&who=tester&mode=editor", viewport={"width": 1280, "height": 800})
+        self.check_bar(page, "header", 1280)
+        if SHOTS:
+            page.screenshot(path=str(Path(SHOTS) / "sandbox_editor_1280.png"))
+        plain = LiveServer()                                                     # control: no --sandbox
+        self.addCleanup(plain.close)
+        page = self.open(url=plain.url + "&who=tester&mode=editor", viewport={"width": 1280, "height": 800})
+        self.assertTrue(page.locator("#sandbox").is_hidden())
+        self.assertEqual(page.locator("header").bounding_box()["y"], 0)
+
+
 class RealPackageTests(Base):
     """The September package's data.js + saved edits, copied (never written in place)."""
 

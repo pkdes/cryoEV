@@ -50,25 +50,26 @@ def free_port() -> int:
 class LiveServer:
     """review_server.py in a subprocess, serving a temp package: the fixture, or whatever build(folder) writes."""
 
-    def __init__(self, build=make_fixture.build):
+    def __init__(self, build=make_fixture.build, name="pkg", key=KEY, args=()):
         self.dir = Path(tempfile.mkdtemp(prefix="review_pkg_"))
-        self.pkg = self.dir / "pkg"
+        self.pkg = self.dir / name
+        self.key = key
         build(self.pkg)
         self.data = load_data(self.pkg)
         self.port = free_port()
         self.log = self.dir / "server.log"  # a file, not a pipe: an unread pipe fills up and stalls the server
         self._log = open(self.log, "wb")
         self.proc = subprocess.Popen([sys.executable, str(SERVER), "--package", str(self.pkg), "--port", str(self.port),
-                                      "--key", KEY], stdout=self._log, stderr=subprocess.STDOUT)
+                                      "--key", key, *args], stdout=self._log, stderr=subprocess.STDOUT)
         for _ in range(100):
             try:
-                if self.request("GET", "/api/ping")[0] == 200:
+                if self.request("GET", "/api/ping", key=key)[0] == 200:
                     break
             except OSError:
                 time.sleep(0.05)
         else:
             raise RuntimeError("review_server.py did not start")
-        self.url = f"http://127.0.0.1:{self.port}/?k={KEY}"
+        self.url = f"http://127.0.0.1:{self.port}/?k={key}"
 
     def request(self, method, path, body=None, key=KEY, headers=None):
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
@@ -130,6 +131,7 @@ class ServerAPI(unittest.TestCase):
         code, _, r = self.srv.request("GET", f"/?k={KEY}", key=None)
         self.assertEqual(code, 200)
         cookie = r.getheader("Set-Cookie").split(";")[0]
+        self.assertEqual(cookie, f"review_key_{self.srv.port}={KEY}")   # one cookie per port
         self.assertEqual(self.srv.request("GET", "/api/ping", key=None, headers={"Cookie": cookie})[0], 200)
 
     def test_put_edit(self):
@@ -287,6 +289,72 @@ class ServerAPI(unittest.TestCase):
         for k in range(rs.MAX_CLAIMS + 30):
             self.srv.request("POST", f"/api/claim?c=fixA_new.png%7Cp{k}&who=r{k}", b"")
         self.assertLessEqual(len(self.srv.request("GET", "/api/claims")[1]["claims"]), rs.MAX_CLAIMS)
+
+
+class SandboxAndCookies(unittest.TestCase):
+    """--sandbox / a SANDBOX_ package: data.js carries the sandbox flag (the page shows the bar); a real package's
+    data.js is served byte-identical to the file. Cookies: review_key_<port>, so two servers on one host don't
+    overwrite each other's key; the legacy review_key cookie still works when it holds this server's key."""
+
+    def test_sandbox_flag_in_data_js(self):
+        flag = b'window.REVIEW_SERVER = {"sandbox": true};'
+        for name, args, on in (("pkg", ("--sandbox",), True), ("SANDBOX_pkg", (), True), ("pkg", (), False)):
+            with self.subTest(name=name, args=args):
+                srv = LiveServer(name=name, args=args)
+                try:
+                    code, body, _ = srv.request("GET", "/data.js?h=1")
+                    disk = (srv.pkg / "data.js").read_bytes()
+                    self.assertEqual(code, 200)
+                    self.assertEqual(flag in body, on)
+                    if on:
+                        self.assertTrue(body.startswith(disk))          # the package's own data.js, then the flag
+                    else:
+                        self.assertEqual(body, disk)                   # real review: unchanged, byte for byte
+                    self.assertIn(b'id="sandbox"', srv.request("GET", "/")[1])
+                    self.assertEqual(rs.is_sandbox(srv.pkg, "--sandbox" in args), on)
+                finally:
+                    srv.stop()
+                    self.assertEqual("[OK] Sandbox" in srv.log.read_text(encoding="utf-8", errors="replace"), on)
+                    srv.close()
+
+    def test_two_ports_share_one_cookie_jar(self):
+        """One cookie jar for 127.0.0.1 (cookies ignore the port): after both ?k= links, both servers accept it.
+        Control: under the old single name the second link's cookie replaced the first's, which then got 403."""
+        a, b = LiveServer(key="key-for-a"), LiveServer(key="key-for-b")
+        try:
+            jar = {}
+            for srv in (a, b):
+                r = srv.request("GET", f"/?k={srv.key}", key=None)[2]
+                name, value = r.getheader("Set-Cookie").split(";")[0].split("=", 1)
+                jar[name] = value                                  # same host: one value per cookie name
+            self.assertEqual(jar, {f"review_key_{a.port}": "key-for-a", f"review_key_{b.port}": "key-for-b"})
+            header = "; ".join(f"{k}={v}" for k, v in jar.items())
+            for srv in (a, b):
+                self.assertEqual(srv.request("GET", "/api/ping", key=None, headers={"Cookie": header})[0], 200)
+            self.assertEqual(a.request("GET", "/api/ping", key=None,
+                                       headers={"Cookie": f"review_key_{a.port}=key-for-b"})[0], 403)
+            # control: the legacy name holding b's key (what the second link used to leave behind) is refused by a
+            self.assertEqual(a.request("GET", "/api/ping", key=None, headers={"Cookie": "review_key=key-for-b"})[0], 403)
+        finally:
+            a.close()
+            b.close()
+
+    def test_legacy_cookie(self):
+        srv = LiveServer()
+        try:
+            def ping(cookie):
+                return srv.request("GET", "/api/ping", key=None, headers={"Cookie": cookie})[0]
+            self.assertEqual(ping(f"review_key={KEY}"), 200)                       # set before cookies were per port
+            self.assertEqual(ping("review_key=someone-elses-key"), 403)           # another server's key
+            self.assertEqual(ping(f"review_key=wrong; review_key_{srv.port}={KEY}"), 200)
+            self.assertEqual(ping(f"review_key_{srv.port + 1}={KEY}"), 403)      # another port's cookie name
+            self.assertEqual(ping('review_key="unterminated'), 403)               # malformed header: no crash
+            r = srv.request("GET", f"/?k={KEY}", key=None, headers={"Cookie": f"review_key={KEY}"})[2]
+            self.assertEqual(r.getheader("Set-Cookie").split("=")[0], f"review_key_{srv.port}")   # only the new name
+            self.assertIsNone(srv.request("GET", "/", key=None, headers={"Cookie": f"review_key={KEY}"})[2]
+                              .getheader("Set-Cookie"))                       # no ?k=: nothing set
+        finally:
+            srv.close()
 
 
 class Hardening(unittest.TestCase):

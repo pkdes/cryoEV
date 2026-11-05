@@ -168,6 +168,14 @@ class HistoryPage(unittest.TestCase):
                   "cache:'no-store'", "location.protocol.indexOf('http')===0", "jobs/monitor.py --share"):
             self.assertIn(t, self.html_s)
 
+    def test_servers_bar(self):
+        self.assertEqual([(x["name"], x["label"], x["public_port"], x["local_port"], x["path"]) for x in self.m_s["servers"]],
+                         [("review", "Review", 443, 8766, "/"), ("sandbox", "Sandbox", 8443, 8765, "/"),
+                          ("history", "History", 8445, 8768, "/history.html")])
+        head = self.html_s[self.html_s.index("<h1>Registry history</h1>"):self.html_s.index('<div class="meta" id="gen">')]
+        self.assertIn('<nav class="srvbar" id="srv" aria-label="Servers"></nav>', head)   # right after the title
+        self.assertNotRegex(self.html_s, r"\?k=[A-Za-z0-9_-]{6,}")                       # no key, ever
+
     def test_no_external_url(self):
         for html in (self.html_s, self.html_x):
             self.assertIsNone(re.search(r"(?i)https?://|//cdn|\bsrc\s*=|<link\b|@import|url\(", html))
@@ -556,6 +564,10 @@ class Browser(unittest.TestCase):
                 self.assertTrue(all(u.startswith("file:") for u in requests), requests)
                 self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), width)
                 self.assertIn("PRODUCTION", page.inner_text("#prodline"))
+                bar = page.inner_text("#srv")                           # as a file: names only, no links, no dots
+                for t in ("Review", "Sandbox", "History", "open via the history server for links"):
+                    self.assertIn(t, bar)
+                self.assertEqual(page.eval_on_selector_all("#srv a, #srv .chip", "els => els.length"), 0)
                 self.assertIn(EVIL, page.inner_text("#tree"))          # shown as text, not run
                 page.click(f"#tree .rec[data-k='label_version|{self.ids['NEW']}']")
                 d = page.inner_text("#detail")
@@ -663,25 +675,36 @@ class LiveServed(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if k != "CRYOEV_REGISTRY"}
         env["CRYOEV_LAPTOP_ROOT"] = str(lap)
         cls.live, cls.stale = t / "live_site", t / "stale_site"
-        r = subprocess.run([sys.executable, str(REG.parent / "jobs" / "monitor.py"), "--share", str(a), "--share",
-                            str(b), "--once", "--out", str(cls.live / "live" / "live.json")],
-                           capture_output=True, text=True, env=env, timeout=120)
-        assert r.returncode == 0, r.stderr
-        hp.build([SAMPLES], cls.live / "history.html")
-        snap = json.loads((cls.live / "live" / "live.json").read_text(encoding="utf-8"))
-        import datetime as dt
-        snap["generated_utc"] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=10)).isoformat()
-        (cls.stale / "live").mkdir(parents=True)
-        (cls.stale / "live" / "live.json").write_text(json.dumps(snap), encoding="utf-8")
-        hp.build([SAMPLES], cls.stale / "history.html")
         cls.servers = []
         for site in (cls.live, cls.stale):
+            site.mkdir()
+
             class Quiet(http.server.SimpleHTTPRequestHandler):
                 def log_message(self, *a):
                     pass
             srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=str(site)))
             threading.Thread(target=srv.serve_forever, daemon=True).start()
             cls.servers.append(srv)
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        dead = s.getsockname()[1]
+        s.close()
+        # the Servers bar's fixture: review and history = the two test servers (up), sandbox = a closed port (down)
+        cls.ports = {"review": cls.servers[0].server_address[1], "sandbox": dead,
+                     "history": cls.servers[1].server_address[1]}
+        r = subprocess.run([sys.executable, str(REG.parent / "jobs" / "monitor.py"), "--share", str(a), "--share",
+                            str(b), "--once", "--out", str(cls.live / "live" / "live.json"),
+                            "--servers", ",".join(f"{k}={v}" for k, v in cls.ports.items())],
+                           capture_output=True, text=True, env=env, timeout=120)
+        assert r.returncode == 0, r.stderr
+        hp.build([SAMPLES], cls.live / "history.html")
+        snap = json.loads((cls.live / "live" / "live.json").read_text(encoding="utf-8"))
+        import datetime as dt
+        snap["generated_utc"] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=10)).isoformat()
+        (cls.stale / "live").mkdir()
+        (cls.stale / "live" / "live.json").write_text(json.dumps(snap), encoding="utf-8")
+        hp.build([SAMPLES], cls.stale / "history.html")
         cls.pw = sync_playwright().start()
         cls.browser = launch(cls.pw)
         if cls.browser is None:
@@ -740,6 +763,106 @@ class LiveServed(unittest.TestCase):
                 self.assertTrue(all(u.startswith(base) for u in requests), requests)
             finally:
                 ctx.close()
+
+    def bar(self, page):
+        """{name: [href or None, status class or None]} from the Servers bar."""
+        return page.evaluate("""() => Object.fromEntries([...document.querySelectorAll('#srv .srvi')].map(w => {
+            const a = w.querySelector('a'), c = w.querySelector('.chip');
+            return [w.dataset.name, [a ? a.getAttribute('href') : null, c ? c.className.split(' ').pop() : null]];}))""")
+
+    def fresh(self):
+        """The live site's snapshot, its time set to now (a slow run must not make it stale), as JSON text."""
+        import datetime as dt
+        f = self.live / "live" / "live.json"
+        snap = json.loads(f.read_text(encoding="utf-8"))
+        snap["generated_utc"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        f.write_text(json.dumps(snap), encoding="utf-8")
+        return json.dumps(snap)
+
+    def test_servers_bar_dots(self):
+        """The fixture snapshot: review and history up, sandbox down; the page itself only asks its own origin."""
+        snap = json.loads(self.fresh())
+        self.assertEqual({x["name"]: x["up"] for x in snap["servers"]}, {"review": True, "sandbox": False, "history": True})
+        for width in (390, 1280):
+            ctx, page, errors, requests, base = self.open(self.servers[0], width)
+            try:
+                page.wait_for_selector("#srv .chip.down")
+                b = self.bar(page)
+                self.assertEqual({k: v[1] for k, v in b.items()}, {"review": "up", "sandbox": "down", "history": "up"})
+                # opened on 127.0.0.1 at a port that is not a tailnet one: plain http to each local port
+                self.assertEqual({k: v[0] for k, v in b.items()},
+                                 {"review": "http:" + "//127.0.0.1:8766/", "sandbox": "http:" + "//127.0.0.1:8765/",
+                                  "history": "http:" + "//127.0.0.1:8768/history.html"})
+                self.assertIn("First time on a device: open the review link with its ?k= key (ask Pujan)",
+                              page.inner_text("#srv"))
+                self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), width)
+                self.assertEqual(errors, [])
+                self.assertTrue(all(u.startswith(base) for u in requests), requests)   # no probe from the browser
+            finally:
+                ctx.close()
+
+    def test_servers_bar_stale_is_grey(self):
+        ctx, page, errors, requests, base = self.open(self.servers[1], 390)
+        try:
+            page.wait_for_selector("#lbody .lstale")
+            self.assertEqual({k: v[1] for k, v in self.bar(page).items()},
+                             {"review": "unk", "sandbox": "unk", "history": "unk"})
+            self.assertIn("unknown", page.inner_text("#srv"))
+            self.assertEqual(errors, [])
+        finally:
+            ctx.close()
+
+    def open_as(self, origin, width):
+        """The page as if served at `origin` (tailscale serve's https ports, or the history server's own port):
+        every request is answered here from the live site, so nothing reaches a real server on this machine."""
+        ctx = self.browser.new_context(viewport={"width": width, "height": 900})
+        files = {"/history.html": ("text/html", (self.live / "history.html").read_bytes()),
+                 "/live/live.json": ("application/json", self.fresh().encode())}
+
+        def answer(route):
+            u = route.request.url
+            path = u[len(origin):].split("?")[0] if u.startswith(origin + "/") else None
+            if path in files:
+                route.fulfill(status=200, content_type=files[path][0], body=files[path][1])
+            elif path is not None:
+                route.fulfill(status=404, body="")
+            else:
+                route.abort()
+        ctx.route("**/*", answer)
+        page = ctx.new_page()
+        errors, requests = [], []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.on("request", lambda r: requests.append(r.url))
+        page.goto(origin + "/history.html")
+        page.wait_for_selector("#srv .chip.down")
+        return ctx, page, errors, requests
+
+    def test_servers_bar_hrefs(self):
+        S, H = "https:" + "//", "http:" + "//"
+        tail = {"review": "/", "sandbox": "/", "history": "/history.html"}
+        public = {"review": S + "home-laptop.example", "sandbox": S + "home-laptop.example:8443",
+                  "history": S + "home-laptop.example:8445"}
+        cases = {S + "home-laptop.example:8445": public, S + "home-laptop.example": public,
+                 H + "127.0.0.1:8768": {"review": H + "127.0.0.1:8766", "sandbox": H + "127.0.0.1:8765",
+                                        "history": H + "127.0.0.1:8768"},
+                 H + "localhost:8768": {"review": H + "localhost:8766", "sandbox": H + "localhost:8765",
+                                        "history": H + "localhost:8768"}}
+        for origin, want in cases.items():
+            for width in (390, 1280):
+                with self.subTest(origin=origin, width=width):
+                    ctx, page, errors, requests = self.open_as(origin, width)
+                    try:
+                        self.assertEqual({k: v[0] for k, v in self.bar(page).items()},
+                                         {k: v + tail[k] for k, v in want.items()})
+                        self.assertTrue(all(u.startswith(origin + "/") for u in requests), requests)
+                        self.assertIn(origin + "/live/live.json", requests)
+                        self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), width)
+                        self.assertEqual(errors, [])
+                        if SHOTS and origin.endswith(":8445"):
+                            Path(SHOTS).mkdir(parents=True, exist_ok=True)
+                            page.screenshot(path=str(Path(SHOTS) / f"servers_bar_{width}.png"))
+                    finally:
+                        ctx.close()
 
     def test_stale_banner(self):
         ctx, page, errors, requests, base = self.open(self.servers[1], 390)
