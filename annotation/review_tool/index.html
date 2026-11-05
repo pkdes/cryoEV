@@ -304,7 +304,10 @@ const esc = v => String(v == null ? "" : v).replace(/[&<>"']/g, ch => ({"&": "&a
 // The server accepts who = [\w .-]{0,40} (review_server.valid_who); a typed name must fit, or every save would get a 400.
 const WHO_OK = v => /^[\p{L}\p{N}_ .\-]{1,40}$/u.test(v);
 const cv = $("cv"), ctx = cv.getContext("2d"), stage = $("stage");
-const KEY = "cryoev-review:" + D.id;
+// Drafts in localStorage, per package. A SANDBOX_ copy has the real package's id, so the sandbox (the server's
+// REVIEW_SERVER.sandbox flag) gets its own key: on one origin, the real review would otherwise take sandbox drafts
+// for its own unsaved edits and upload them. A real package keeps the exact old key, so no draft is orphaned.
+const KEY = "cryoev-review:" + D.id + ((window.REVIEW_SERVER || {}).sandbox ? ":sandbox" : "");
 
 // ---------- state ----------
 let edits = {};            // file -> {gt:[...], reviewed:bool, modified:bool}
@@ -344,7 +347,8 @@ function persist() {
 
 const curImg = () => D.images[cur];
 // Per-image edit record (full spec: docs/REVIEW_TOOL.md):
-//   dec  {key: {v, t, who, p?}}  one decision per object, merged across reviewers per key, newest wins.
+//   dec  {key: {v, t, who, p?}}  one decision per object, merged across reviewers per key: the latest received
+//                            wins (server_t, stamped by the server; pending = made here, not yet stamped).
 //                            "g<label id>": "keep:<cls>" | "del";  "p<pred idx>": "add:<cls>" | "no";
 //                            "n<uid>" (drawn in the Editor): "new:<cls>" | "del";  null = undone.
 //                            p = the object's own outline (normalized rings) when reshaped; always on "new:".
@@ -391,11 +395,13 @@ const SEPT = "#38bdf8";
 function effGt(im) {  // labels as they stand: base list + everyone's decisions (+ reshaped outlines)
   const e = edits[im.file], base = e && e.gtT && e.gt ? e.gt : im.gt, out = [];
   const dec = key => (key && e && e.dec && e.dec[key]) || null;
-  const decP = key => { const d = dec(key); return d && d.p && d.t > ((e && e.gtT) || 0) ? d.p : null; };
+  // A decision with server_t (or pending) counts as newer than any list item: it won the server-time merge, so a
+  // larger item t only means that device's clock ran ahead (review_server.effective_labels).
+  const decP = key => { const d = dec(key); return d && d.p && (d.t > ((e && e.gtT) || 0) || stampedDec(d)) ? d.p : null; };
   for (const g of base) {
     if (typeof g.t === "number") {
       const d = dec(keyOf(g));
-      if (!d || (d.t || 0) < g.t) { out.push(g); continue; }
+      if (!d || ((d.t || 0) < g.t && !stampedDec(d))) { out.push(g); continue; }
       if (d.v === "del" || d.v === "no" || (!d.v && g.src)) continue;
       if (!d.v) { const o = im.gt.find(x => x.id === g.id); out.push(o ? {...g, c: o.c, p: o.p} : g); continue; }  // undone: the package label
       const m = /^(?:keep|add|new):(.*)$/.exec(d.v);
@@ -436,12 +442,13 @@ const selKey = g => keyOf(g) || "L" + hash(JSON.stringify(g.p));
 const findKey = (list, key) => (list || []).find(g => selKey(g) === key) || null;
 const selObj = () => sel && sel.kind === "gt" ? findKey(gtOf(curImg()), sel.key) : null;
 const selEdit = e => sel && sel.kind === "gt" ? findKey(e.gt, sel.key) : null;  // the selection in the record's list
-// A new entry's t is above the entry and list item it replaces (and the list), so it wins the merge even when
-// another device's clock runs ahead.
+// A new entry's t (this device's clock) is above the entry and list item it replaces (and the list), so the
+// per-item rule in effGt applies it. It is marked pending until the server stamps server_t (its receive time),
+// which orders the merge (pickDec), so a device whose clock runs ahead can't override later saves.
 function setDec(e, key, v, p) {
   const prev = e.dec[key], item = (e.gt || []).find(g => keyOf(g) === key);
   const t = Math.max(Date.now(), prev ? (prev.t || 0) + 1 : 0, item && typeof item.t === "number" ? item.t + 1 : 0, (e.gtT || 0) + 1);
-  e.dec[key] = p ? {v, t, who: me(), p} : {v, t, who: me()};
+  e.dec[key] = p ? {v, t, who: me(), p, pending: true} : {v, t, who: me(), pending: true};
   const f = recFile.get(e); if (f) mine.add(f + "\n" + key + "\n" + t);
 }
 const decided = (im, key) => !!key && decV(edits[im.file], key) != null;
@@ -492,13 +499,27 @@ function restoreSnap(im, snap) {  // undo: revert only entries this tab wrote si
   // merge keeps it (a tie keeps the saved copy).
   if (s.gt && (s.gtT === e.gtT || myGtT.has(e.gtT))) { e.gt = s.gt; e.gtT = Math.max(Date.now(), (e.gtT || 0) + 1); myGtT.add(e.gtT); }
 }
+// Merge order of one decision (review_server._rank / _pick, docs/REVIEW_TOOL.md): server_t, the server's receive
+// time; an entry saved before server_t existed counts its client t instead. A pending entry (made here, not yet
+// stamped) beats any other copy: the server will receive it last. The same decision stamped replaces it (the ack).
+const SERVER_SET = ["server_t", "pending", "who"];
+const rankDec = d => typeof d.server_t === "number" ? d.server_t : d.t || 0;
+const stampedDec = d => !!d && (typeof d.server_t === "number" || d.pending === true);
+const bareDec = d => JSON.stringify(Object.keys(d).filter(k => !SERVER_SET.includes(k)).sort().map(k => [k, d[k]]));
+const sameDec = (x, y) => bareDec(x) === bareDec(y);
+function pickDec(x, y) {  // x: a's entry (the saved copy), y: b's
+  if (!x || !y) return x || y;
+  if (sameDec(x, y)) return typeof y.server_t === "number" && typeof x.server_t !== "number" ? y : x;
+  const px = x.pending === true, py = y.pending === true;
+  if (px !== py) return py ? y : x;
+  if (px) return (y.t || 0) > (x.t || 0) ? y : x;
+  return rankDec(y) > rankDec(x) ? y : x;
+}
 function mergeEdit(a, b) {
   if (!a) return migrate(b); if (!b) return migrate(a);
   migrate(a); migrate(b);
   const out = {dec: {}, t: Math.max(a.t || 0, b.t || 0), modified: !!(a.modified || b.modified)};
-  for (const k of new Set([...Object.keys(a.dec), ...Object.keys(b.dec)])) {
-    const x = a.dec[k], y = b.dec[k]; out.dec[k] = !x ? y : !y ? x : (y.t > x.t ? y : x);
-  }
+  for (const k of new Set([...Object.keys(a.dec), ...Object.keys(b.dec)])) out.dec[k] = pickDec(a.dec[k], b.dec[k]);
   if (a.gtT || b.gtT) { const s = (b.gtT || 0) > (a.gtT || 0) ? b : a; out.gt = s.gt; out.gtT = s.gtT; }
   const ra = a.reviewedT || 0, rb = b.reviewedT || 0;
   out.reviewed = rb > ra ? !!b.reviewed : !!a.reviewed; out.reviewedT = Math.max(ra, rb);
@@ -507,7 +528,7 @@ function mergeEdit(a, b) {
 function newerThan(l, s) {  // does local hold anything the server copy lacks?
   if (!l) return false; if (!s) return true;
   if ((l.gtT || 0) > (s.gtT || 0) || (l.reviewedT || 0) > (s.reviewedT || 0)) return true;
-  return Object.entries(l.dec || {}).some(([k, d]) => !(s.dec || {})[k] || d.t > s.dec[k].t);
+  return Object.entries(l.dec || {}).some(([k, d]) => { const x = (s.dec || {})[k]; return !x || (pickDec(x, d) === d && !sameDec(x, d)); });
 }
 function pushUndo() {  // every Editor change starts here; callers ask for a name first (needWho)
   if (!me()) throw new Error("edit without a reviewer name");

@@ -29,6 +29,7 @@ One HTML page (`annotation/review_tool/index.html`) for reviewing labels against
 **Sandbox.** `--sandbox`, or a package folder named `SANDBOX_…`, puts a fixed amber bar on every view: "SANDBOX — edits here don't count toward the real review". The page moves down by the bar's height, so it covers no control.
 - The flag reaches the page through `data.js`: the server appends `window.REVIEW_SERVER = {"sandbox": true};` when it serves it. The file on disk is unchanged, and a real review's `data.js` is served byte for byte.
 - Example: `python annotation/review_server.py --package <SANDBOX_copy> --port 8765`.
+- **Drafts are kept apart.** A `SANDBOX_` copy has the real package's id, so the page stores sandbox drafts under `cryoev-review:<id>:sandbox` (from the server's flag). A real package keeps the exact old key, `cryoev-review:<id>`, so reviewers' unsaved drafts are still picked up. Before this, a real review on the same origin as the sandbox would have uploaded sandbox drafts as its own.
 
 ## Classes
 The class list always follows the Roboflow names, with hotkeys **1–8**: `EV, Low conf EV, MV, inner, Incomplete, Overlapping, VLDL, non-EV`.
@@ -65,6 +66,7 @@ Most moved keys: cards 3 (was non-EV, now MV) and 5 (was inner); Editor 2, 3, 5 
 - `&who=<name>` in the link, or a name typed into the old prompt, becomes the roster id when it matches an id, name or alias (any case, e.g. `Puj` → `pujan`). Otherwise it is kept as given.
 - The current name shows in the Editor header and the cards' filter row (👤). Tap it to change.
 - Claims (`/api/claim?who=`) use the same value.
+- On the server, the `who` of a request's new decisions and of its claim goes through one function, `review_server._request_identity(handler, claimed)`. Today it returns the picker's value unchanged. Behind the planned portal it is where a verified identity goes: an `X-CJ-User` header, trusted only after the gateway secret is checked. That is not implemented, and no header is read yet.
 
 **Escaping:** strings from edit records and claims (who, seed, a decision's class) are HTML-escaped wherever the page builds HTML. The server also refuses names with markup.
 
@@ -164,10 +166,12 @@ The tool runs on packages without the optional fields: those flags and counts ar
 
 ## Edit record (`<package>/edits/<file>.json` = `{"file", "edit"}`)
 ```
-edit = {dec: {key: {v, t, who, p?}}, gt?, gtT?, reviewed, reviewedT, modified, t}
+edit = {dec: {key: {v, t, who, p?, server_t?}}, gt?, gtT?, reviewed, reviewedT, modified, t}
 ```
 **Decisions** (`dec`): one per object.
-- `t` is ms since the epoch; `who` is the reviewer: a roster id from `people.json`, or a name typed under "Other" (older records: any free text).
+- `t` is ms since the epoch on the reviewer's device (the client time, kept as written); `who` is the reviewer: a roster id from `people.json`, or a name typed under "Other" (older records: any free text).
+- `server_t` (since TODO #53) is the server's receive time in ms, stamped when the server stores a decision the page sent. It orders the merge. Records saved before it have none.
+- `pending: true` exists only in the page (localStorage, PUT bodies, exports): a decision made there that the server hasn't stamped yet. The server drops it when it stamps `server_t`, and never stores it.
 - `p` is the object's own outline (list of normalized rings). It is present whenever the object was reshaped or redrawn.
 
 | Key | Values | Meaning |
@@ -194,11 +198,18 @@ edit = {dec: {key: {v, t, who, p?}}, gt?, gtT?, reviewed, reviewedT, modified, t
 - When such a list is saved again, every item gets a `t`. It is the newer of the list's `gtT` and the item's decision `t`, so the labels don't change; the tests check this on all 33 September records.
 - A record with `gt` but no `gtT` counts only if `modified` (then `gtT = t`). Otherwise the list is ignored.
 
-**Merge** (`review_server.merge_edits`, mirrored by `mergeEdit()` in the page):
-- Per decision key, the newest `t` wins (a tie keeps the saved copy).
-- `gt` / `gtT`: the newest `gtT` wins as a whole list. With per-object `t`, this no longer overrides newer per-object decisions.
+**Merge** (`review_server.merge_edits`, mirrored by `mergeEdit()` / `pickDec()` in the page):
+- **Per decision key, the latest received wins** (TODO #53). Before, the newest client `t` won, so a device whose clock ran ahead silently beat everyone's later saves.
+  - Order: `server_t`. **A decision without `server_t` (saved before it existed) counts its `t` instead.**
+  - The page marks each new decision `pending`. A pending decision beats any other copy, and the server stamps it `server_t` = max(receive time, the replaced entry's order + 1). So a new decision always sorts above what it replaced, even an old entry whose `t` is in the future.
+  - The same decision (equal apart from `server_t` / `pending` / `who`) keeps the stamped copy: the server's reply replaces the page's pending one. A re-sent copy is not stamped again.
+  - Otherwise: the larger order wins; a tie keeps the saved copy.
+- **Old records are unchanged.** Entries without `pending` are never stamped, so records saved before `server_t`, and PUTs from a page still open on the old version, merge byte-identical to the old rule (tests: `test_server_time_and_scope.py`).
+- **Offline edits:** they are received when the device reconnects, so they win over decisions others made on those objects in the meantime (the old rule decided by device clock).
+- `gt` / `gtT`: the newest `gtT` wins as a whole list. Per object, a decision with `server_t` (or `pending`) applies over its list item whatever the item's `t`. Every Editor change writes its object's decision, so a larger item `t` only means a clock ran ahead. Items with a decision without `server_t` keep the `t` rule below.
 - `reviewed`: the newest `reviewedT` wins. `modified`: OR. `t`: max.
-- **Clocks:** a new entry gets `t` = max(now, the entry it replaces + 1, its list item's `t` + 1, `gtT` + 1). So editing a value that came from a device whose clock runs ahead still wins. Edits made at the same moment on two devices with skewed clocks still resolve by clock: newest `t` wins.
+- **Clocks:** a new entry gets `t` = max(now, the entry it replaces + 1, its list item's `t` + 1, `gtT` + 1), as before.
+- **Still on device clocks:** `gtT` (which list is the base) and `reviewedT` (the reviewed flag). A device far ahead can still win the reviewed toggle.
 
 **Undo** (Editor `Z`, card ↺) reverts only entries this browser tab wrote since the step being undone.
 - If someone else's decision arrived in between, on any key, it stays.
@@ -240,6 +251,13 @@ python -m unittest discover -s annotation/tests -v
   - Sandbox and cookies: the flag in `data.js` for `--sandbox` and a `SANDBOX_` package (a real package's `data.js` byte-identical); two servers with different keys and one cookie jar both stay signed in; the legacy cookie accepted only with this server's key. The browser tests check the bar at 400 and 1280 px (`SandboxBarTests`).
   - Hardening: rejected bad edits and bad values, never stored; bad Content-Length; idle-socket timeout; key redacted from logs; default host.
   - Records: an offline reshape survives a newer list; the real September edits merge and apply, read-only, and change some labels.
+- `test_server_time_and_scope.py` (TODO #53 and the sandbox key):
+  - a later save beats a decision from a device a day ahead: through the API, with an Editor list, and in two browsers;
+  - an old entry with a future `t` is replaced for good;
+  - old-format records (fixtures) merge byte-identical to a frozen copy of the old `merge_edits`, by pair, chain and re-sent copy, and through a live server, including an old page's PUTs;
+  - `mergeEdit()` equals `merge_edits()`;
+  - `_request_identity` decides every saved and claimed `who`;
+  - sandbox drafts on one origin are never uploaded by the real review, and the real key is unchanged.
 - `test_review_tool_browser.py`, Playwright with headless Edge or Chrome (skipped without one):
   - script syntax (no node on the lab PC, so the browser parses it);
   - class order, and the new-class mark (fixture, and R1's pre-lipo package);

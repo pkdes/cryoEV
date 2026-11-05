@@ -439,7 +439,8 @@ def image_ops(im: dict, rec: dict, base_anns: dict, w: int, h: int, dup_iou: flo
 
     def when(o):
         d, item = o["d"], o["item"] or {}
-        t = d.get("t") if d else item.get("t", e.get("gtT"))
+        # server receive time when the decision has one (review_server._rank); older records: the client t, as before
+        t = (d["server_t"] if _num(d.get("server_t")) else d.get("t")) if d else item.get("t", e.get("gtT"))
         return t if _num(t) else math.inf
 
     # Duplicate outlines: clusters of final outlines linked at IoU >= dup_iou (pairs that already overlapped in the
