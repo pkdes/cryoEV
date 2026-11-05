@@ -17,8 +17,9 @@ Routes:
   GET  /api/ping                     {"ok": true}
   GET  /api/people                   the reviewer roster from annotation/people.json, for the name picker
   GET  /api/edits                    {file: edit record} for every saved image
-  PUT  /api/edits?f=<file>           merge one image's record into the saved one (per-decision, newest
-                                     wins; see merge_edits) and return the merged record
+  PUT  /api/edits?f=<file>           merge one image's record into the saved one (per decision, the latest
+                                     received wins: the page's new decisions come marked pending and are
+                                     stamped server_t here; see merge_edits) and return the merged record
   POST /api/claim?c=<case>&who=<n>   reserve the card (or "<file>|editor") on a reviewer's screen for CLAIM_SECONDS
   GET  /api/claims                   active claims {case: reviewer}, so other reviewers skip them
 
@@ -184,12 +185,18 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
                 assert valid_edit(edit)
             except (ValueError, AssertionError):
                 return self._json(400, {"error": "bad edit"})
+            for d in (edit.get("dec") or {}).values():  # this request's own decisions: who comes from one place
+                if isinstance(d, dict) and d.get("pending") is True:
+                    who = _request_identity(self, d.get("who"))
+                    if who != d.get("who"):
+                        d["who"] = who
             target = edits_dir / f"{file}.json"
             with lock:
                 saved = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
                 cur = saved.get("edit")
-                merged = merge_edits(cur, edit)
-                rx = stamp_received(saved.get("rx") or {}, cur, merged, int(time.time() * 1000))
+                now = int(time.time() * 1000)
+                merged = merge_edits(cur, edit, now)  # stamps server_t on the decisions this request brings
+                rx = stamp_received(saved.get("rx") or {}, cur, merged, now)
                 tmp = target.with_suffix(".tmp")
                 tmp.write_text(json.dumps({"file": file, "pkg": pkg_id, "fmt": RECORD_FMT, "edit": merged, "rx": rx}),
                                encoding="utf-8")
@@ -206,6 +213,7 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
             case, who = q.get("c", [""])[0][:600], q.get("who", ["anonymous"])[0][:WHO_MAX] or "anonymous"
             if not valid_who(who):
                 return self._json(400, {"error": "bad reviewer name"})
+            who = _request_identity(self, who)
             now = time.time()
             with lock:
                 active_claims(now)
@@ -221,6 +229,17 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
     claims = {}  # "<file>|<case key>" -> (reviewer, expiry): the card on each reviewer's screen
 
     return Handler
+
+
+def _request_identity(handler, claimed):
+    """THE ONE PLACE a request's reviewer comes from: the who saved on this request's new decisions (pending ones)
+    and on its claim.
+
+    Today: `claimed`, the name the page's picker sent (a decision's who, a claim's ?who=), unverified, as before.
+    Portal (not implemented): behind the portal gateway this returns the gateway's verified user (an X-CJ-User
+    header), and only after checking the gateway's shared secret on the same request; without that check a header
+    is just another claim. Until then no header is read here."""
+    return claimed
 
 
 def _no_constant(name):
@@ -273,6 +292,8 @@ def valid_edit(edit) -> bool:
             return False
         if d.get("who") is not None and not valid_who(d["who"]):
             return False
+        if ("server_t" in d and not _num(d["server_t"])) or ("pending" in d and not isinstance(d["pending"], bool)):
+            return False
         if (d.get("v") or "").startswith("new:") and d.get("p") is None:  # a drawn outline carries its polygon
             return False
     return True
@@ -291,23 +312,76 @@ def _migrate(e):
     return e
 
 
-def merge_edits(a, b):
-    """Merge two reviewers' records for one image: each decision key keeps its newest entry, the polygon
-    list keeps the newest Editor save, the reviewed flag keeps its newest toggle. Mirrors mergeEdit()
-    in review_tool/index.html."""
+SERVER_SET = ("server_t", "pending", "who")  # fields the server sets or may rewrite on receipt (see _same)
+
+
+def _rank(d) -> float:
+    """A decision's place in the merge order: server_t, the server's receive time (ms). An entry saved before
+    server_t existed has only the client's t, which stands in for it (a missing server_t counts as t)."""
+    st = d.get("server_t")
+    return st if _num(st) else d.get("t", 0)
+
+
+def _stamped(d) -> bool:
+    """Went through the server-time merge (server_t), or is this browser's newest, not sent yet (pending)."""
+    return bool(d) and (_num(d.get("server_t")) or d.get("pending") is True)
+
+
+def _same(x, y) -> bool:
+    """One decision, whether or not the server has stamped it yet: equal apart from server_t, pending and who
+    (who: a later trusted identity may replace the picker's name, _request_identity)."""
+    return ({k: v for k, v in x.items() if k not in SERVER_SET} == {k: v for k, v in y.items() if k not in SERVER_SET})
+
+
+def _pick(x, y):
+    """The entry one decision key keeps (x: a's, the saved copy; y: b's). Mirrors pickDec() in the page.
+      same decision           -> the stamped copy (an acknowledged upload replaces the pending one), else x
+      one side pending        -> the pending one: the page's newest change, received when it is sent
+      both pending            -> the newer client t (two copies of one browser's work, e.g. an import)
+      otherwise               -> the larger rank (server_t, else t); a tie keeps x.
+    With no server_t and no pending anywhere (records saved before server_t) this is the old rule exactly:
+    the newer t wins, a tie keeps the saved copy."""
+    if x is None or y is None:
+        return x if y is None else y
+    if _same(x, y):
+        return y if _num(y.get("server_t")) and not _num(x.get("server_t")) else x
+    px, py = x.get("pending") is True, y.get("pending") is True
+    if px != py:
+        return y if py else x
+    if px:
+        return y if y.get("t", 0) > x.get("t", 0) else x
+    return y if _rank(y) > _rank(x) else x
+
+
+def merge_edits(a, b, now_ms=None):
+    """Merge two reviewers' records for one image: each decision key keeps its newest entry by server receive
+    time (_pick), the polygon list keeps the newest Editor save (gtT), the reviewed flag keeps its newest toggle
+    (reviewedT); gtT and reviewedT are still client times. Mirrors mergeEdit() in review_tool/index.html.
+
+    now_ms: the server's receive time, for a PUT (b = the request's record). b's pending entries that win are
+    stamped server_t = max(now_ms, rank of the entry they replace + 1) and lose the pending flag, so a new decision
+    always sorts above what it replaced, even an old entry whose t ran ahead. Entries without pending are never
+    stamped, so records from before server_t (and an old cached page's PUTs) merge byte-identical to before."""
     if not a:
-        return _migrate(b)
-    a, b = _migrate(a), _migrate(b)
-    out = {"dec": {}, "t": max(a.get("t", 0), b.get("t", 0)), "modified": bool(a.get("modified") or b.get("modified"))}
-    for k in dict.fromkeys([*a["dec"], *b["dec"]]):  # a's keys, then b's new ones: the same order as mergeEdit()
-        x, y = a["dec"].get(k), b["dec"].get(k)
-        out["dec"][k] = y if x is None else x if y is None else (y if y.get("t", 0) > x.get("t", 0) else x)
-    if a.get("gtT") or b.get("gtT"):
-        s = b if (b.get("gtT") or 0) > (a.get("gtT") or 0) else a
-        out["gt"], out["gtT"] = s.get("gt"), s.get("gtT")
-    ra, rb = a.get("reviewedT", 0) or 0, b.get("reviewedT", 0) or 0
-    out["reviewed"] = bool(b.get("reviewed")) if rb > ra else bool(a.get("reviewed"))
-    out["reviewedT"] = max(ra, rb)
+        out = _migrate(b)
+    else:
+        a, b = _migrate(a), _migrate(b)
+        out = {"dec": {}, "t": max(a.get("t", 0), b.get("t", 0)), "modified": bool(a.get("modified") or b.get("modified"))}
+        for k in dict.fromkeys([*a["dec"], *b["dec"]]):  # a's keys, then b's new ones: the same order as mergeEdit()
+            out["dec"][k] = _pick(a["dec"].get(k), b["dec"].get(k))
+        if a.get("gtT") or b.get("gtT"):
+            s = b if (b.get("gtT") or 0) > (a.get("gtT") or 0) else a
+            out["gt"], out["gtT"] = s.get("gt"), s.get("gtT")
+        ra, rb = a.get("reviewedT", 0) or 0, b.get("reviewedT", 0) or 0
+        out["reviewed"] = bool(b.get("reviewed")) if rb > ra else bool(a.get("reviewed"))
+        out["reviewedT"] = max(ra, rb)
+    if now_ms is not None:
+        old = (a or {}).get("dec") or {}
+        for k, d in out["dec"].items():
+            if d.get("pending") is True:
+                prev = old.get(k)
+                st = max(now_ms, _rank(prev) + 1) if prev else now_ms
+                out["dec"][k] = {**{f: v for f, v in d.items() if f != "pending"}, "server_t": st}
     return out
 
 
@@ -347,21 +421,23 @@ def effective_labels(image: dict, edit) -> list:
     Base = the record's polygon list if it has one (gtT), else the package labels; decisions apply on top.
     A list item with its own t (saved by the current tool) takes its decision whenever the decision is at
     least as new as the item, so per-object edits survive anyone's newer list; an item without t (older
-    lists) takes a decision's polygon only if the decision is newer than the whole list (gtT)."""
+    lists) takes a decision's polygon only if the decision is newer than the whole list (gtT). A decision with
+    server_t (or pending) always counts as newer: it won the server-time merge, and every Editor change writes its
+    object's decision, so a list item with a larger client t only means that device's clock ran ahead."""
     e = _migrate(edit)
     gt_t = e.get("gtT") or 0
     base = e["gt"] if e.get("gtT") and e.get("gt") is not None else image["gt"]
 
     def dec_p(key):
         d = e["dec"].get(key)
-        return d["p"] if d and d.get("p") and d.get("t", 0) > gt_t else None
+        return d["p"] if d and d.get("p") and (d.get("t", 0) > gt_t or _stamped(d)) else None
 
     out = []
     for g in base:
         gkey = f"g{g['id']}" if g.get("id") is not None else None
         if _num(g.get("t")):
             d = e["dec"].get(g.get("src") or gkey) if (g.get("src") or gkey) else None
-            if not d or d.get("t", 0) < g["t"]:
+            if not d or (d.get("t", 0) < g["t"] and not _stamped(d)):
                 out.append(g)
                 continue
             v = d.get("v")
