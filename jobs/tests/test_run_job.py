@@ -161,6 +161,41 @@ class RunJobTests(T.TempRoots, unittest.TestCase):
         self.assertTrue((run / "weights" / "last.pt").is_file(), "partial run kept")
         self.assertEqual(C.read_json(run / "run.json")["status"], "time_cap")
 
+    def test_cancel_stops_a_running_job(self):
+        import threading
+        import sync
+        q = self.push()
+        other = self.push("job_20261102_t2", stamp="20261102-120003")
+        sync.cancel("job_20261102_t2", self.share, reason="control: another job")   # must not touch t1
+
+        def cancel_soon():
+            started = self.share / C.WORK / q.name / "fake_started.txt"
+            for _ in range(200):
+                if started.exists():
+                    break
+                time.sleep(0.05)
+            time.sleep(0.5)
+            sync.cancel(q.name, self.share, reason="not going well")
+        threading.Thread(target=cancel_soon, daemon=True).start()
+        t0 = time.time()
+        with mock.patch.object(run_job, "CANCEL_POLL_S", 0.3), mock.patch.dict(os.environ, {"FAKE_TRAINER": "hang"}):
+            self.assertEqual(self.run_job("--job", q.name), 1)
+        self.assertLess(time.time() - t0, 30, "stopped, not waited for (the fake trainer sleeps 600 s)")
+        d = self.done(q.name)
+        self.assertEqual(d["status"], "cancelled")
+        self.assertIn("not going well", d["reason"])
+        run = self.share / C.D / q.name / "runs" / d["run"]
+        self.assertTrue((run / "weights" / "last.pt").is_file(), "partial run kept")
+        self.assertEqual(C.read_json(run / "run.json")["status"], "cancelled")
+        # the job cancelled while queued is never started
+        self.assertEqual(self.run_job("--job", other.name), 1)
+        d2 = self.done(other.name)
+        self.assertEqual(d2["status"], "cancelled")
+        self.assertIn("before it started", d2["reason"])
+        self.assertFalse((self.share / C.WORK / other.name).exists(), "never unzipped")
+        with self.assertRaisesRegex(sync.SyncError, "already finished"):
+            sync.cancel(q.name, self.share)
+
     def test_laptop_refuses_battery_and_network_queue_untouched(self):
         q = self.push(args=["--model-size", "n", "--imgsz", "320", "--workers", "2"])
         self.assertEqual(self.run_job(gpu=T.LAPTOP_GPU, on_battery=True), 2)

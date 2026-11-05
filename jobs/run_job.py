@@ -50,6 +50,7 @@ COMMIT_BASE_GB, COMMIT_PER_WORKER_GB = 4, 2   # small GPU: free commit (RAM + pa
 MIN_FREE_GB = 10                # free disk needed: this + 3x the zip (unzip, results, the pulled copy)
 BUSY_MB = 256                   # a compute app using this much (or any python process) means the GPU is busy
 BUSY_TOTAL_MB = 2048            # or this much in use in total (under WDDM per-app memory reads N/A)
+CANCEL_POLL_S = 10              # how often a running job looks for q/<job>/CANCEL (and the time cap)
 MAX_STALE = 2                   # interrupted attempts (d/.tmp_<job>.stale_*) before the job is blocked
 EXIT_GPU_BUSY = 4               # GPU busy before the job was touched: try again later (watch.py waits)
 HOOKS_ENV = "CRYOEV_JOBS_TEST_HOOKS"   # tests only: JSON {train_cmd, gpu: {total_mb, apps, used_mb}, ultralytics,
@@ -59,6 +60,22 @@ TESTING_ENV = "CRYOEV_JOBS_TESTING"    # on every call) wins over the env; both 
 
 class Blocked(Exception):
     pass
+
+
+class Cancelled(Exception):
+    pass
+
+
+def cancel_request(qdir: Path):
+    """q/<job>/CANCEL (sync.py cancel) -> its reason, or None."""
+    f = qdir / C.CANCEL
+    if not f.is_file():
+        return None
+    try:
+        c = C.read_json(f)
+        return f"cancelled by {c.get('who', '?')} ({c.get('when', '?')}): {c.get('reason') or 'no reason given'}"
+    except (OSError, ValueError):
+        return "cancelled (CANCEL file present)"
 
 
 def hooks() -> dict:
@@ -380,12 +397,22 @@ def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
     log = work / "train.log"
     runs = []
     try:
+        why = cancel_request(qdir)
+        if why:                                        # cancelled while queued: never started
+            raise Cancelled(why + " (before it started)")
         if n_stale >= MAX_STALE:                       # killed mid-run twice (reboots): stop retrying it
             raise Blocked(f"killed twice: {n_stale} interrupted attempts in d/.tmp_{job_id}.stale_*; "
                           f"check train.log there, then `sync.py retry`")
         spec, job, zp, names = check_job(qdir, work, st, allow_big)   # GPU-busy first: an orphan may own work/
         if work.exists():                              # our own scratch from an earlier attempt
-            shutil.rmtree(work)
+            for i in range(4):                         # a reader over SMB can hold a file for a moment
+                try:
+                    shutil.rmtree(work)
+                    break
+                except OSError:
+                    if i == 3:
+                        raise
+                    time.sleep(2 ** i)
         work.mkdir(parents=True)
         print(f"[jobs] {job_id}: checks passed; unzipping {zp.name}")
         with zipfile.ZipFile(zp) as z:
@@ -399,22 +426,40 @@ def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
         env = {**os.environ, "CRYOEV_CRYOAI_ROOT": str(work), "PYTHONIOENCODING": "utf-8"}
         with open(log, "wb") as lf:
             p = subprocess.Popen(argv, cwd=REPO, env=env, stdout=lf, stderr=subprocess.STDOUT)
-            try:
-                rc = p.wait(timeout=max_hours * 3600 if max_hours else None)
-            except subprocess.TimeoutExpired:
-                kill_tree(p)
-                rc = p.wait()
-                st["time_capped"] = True
+            deadline = time.time() + max_hours * 3600 if max_hours else None
+            while True:                                # short waits: a cancel or the time cap is seen within ~10 s
+                try:
+                    rc = p.wait(timeout=CANCEL_POLL_S if deadline is None
+                                else max(0.1, min(CANCEL_POLL_S, deadline - time.time())))
+                    break
+                except subprocess.TimeoutExpired:
+                    why = cancel_request(qdir)
+                    if why:
+                        st["cancelled"] = why
+                    elif deadline is not None and time.time() >= deadline:
+                        st["time_capped"] = True
+                    else:
+                        continue
+                    kill_tree(p)
+                    rc = p.wait()
+                    break
         st["exit_code"] = rc
         run_root = work / "training outputs" / st["dataset"] / "runs"
-        if st.get("time_capped"):                      # the trainer never wrote run.json: say why, keep last.pt
+        if st.get("time_capped") or st.get("cancelled"):   # the trainer never wrote run.json: say why, keep last.pt
+            why = st.get("cancelled") or f"stopped by run_job.py after --max-hours {max_hours:g}"
             for rd in (d for d in run_root.glob("*") if d.is_dir() and not (d / "run.json").exists()):
                 C.write_json(rd / "run.json", {
-                    "schema": "run/1", "id": rd.name, "dataset": st["dataset"], "status": "time_cap",
-                    "error": f"stopped by run_job.py after --max-hours {max_hours:g} (partial run: weights/last.pt)",
+                    "schema": "run/1", "id": rd.name, "dataset": st["dataset"],
+                    "status": "cancelled" if st.get("cancelled") else "time_cap",
+                    "error": f"{why} (partial run: weights/last.pt)",
                     "bundle_id": st.get("bundle_id"), "job_bundle": st.get("bundle_id"),
                     "cryoEV_commit": st.get("cryoEV_commit"), "machine": platform.node(), "ended": C.now()})
         rjs = sorted(run_root.glob("*/run.json"), key=lambda p: p.stat().st_mtime)
+        if st.get("cancelled"):
+            runs = [p.parent for p in rjs]
+            if rjs:
+                st["run"], st["run_status"] = rjs[-1].parent.name, "cancelled"
+            raise Cancelled(st["cancelled"])
         if not rjs:
             raise Blocked(f"time cap: stopped after --max-hours {max_hours:g}, before any run folder" if
                           st.get("time_capped") else f"no run.json (run_experiments exit {rc}); see train.log")
@@ -428,6 +473,8 @@ def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
         st.update(status="done", reason=None)
     except Blocked as e:
         st.update(status="blocked", reason=str(e))
+    except Cancelled as e:
+        st.update(status="cancelled", reason=str(e))
     except Exception as e:                              # a runner bug must still end the job, not hang it
         st.update(status="blocked", reason=f"runner error: {type(e).__name__}: {e}")
     try:

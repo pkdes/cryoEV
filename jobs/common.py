@@ -17,12 +17,14 @@ import json
 import os
 import shutil
 import subprocess
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 Q, D, WORK, INCOMING, RETIRED = "q", "d", "work", ".incoming", ".retired"
 READY, DONE, JOB_FILE, STATUS, LOCK = "READY", "DONE.json", "job.json", "status.json", "runner.lock"
 STOP, WATCH_JSON, WATCH_LOCK, WATCH_LOG = "STOP", "watch.json", "watch.lock", "watch.log"   # watch.py
+CANCEL = "CANCEL"                 # q/<job>/CANCEL: sync.py cancel; run_job.py stops or skips the job
 MAX_PATH = 240                   # Windows MAX_PATH is 260; Expand-Archive dropped files silently past it
 MAX_JOB_ID = 48                  # keeps <queue>\work\<job>\... short
 ROBOCOPY_OK_MAX = 7              # robocopy exit codes >= 8 are failures
@@ -59,9 +61,58 @@ def read_json(path):
 def write_json(path, obj):
     """Write via a .tmp file and rename, so a reader never sees half a file."""
     path = Path(path)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")   # per process: two writers never share a tmp file
     tmp.write_text(json.dumps(obj, indent=1, default=str), encoding="utf-8")
-    os.replace(tmp, path)
+    for i in range(6):                     # a reader holding the target open (e.g. the laptop monitor over SMB, for a
+        try:                               # few ms) makes the replace fail on Windows: retry, ~3 s in all
+            return os.replace(tmp, path)
+        except PermissionError:
+            if i == 5:
+                raise
+            time.sleep(0.1 * 2 ** i)
+
+
+def now_utc():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def read_shared(path, limit=None) -> bytes:
+    """Read a file another machine may be replacing or deleting, without getting in its way.
+
+    Python's open() on Windows denies delete sharing, so while a laptop read holds a desktop file open over SMB, the
+    desktop's os.replace / rmtree on it fails. This opens with read+write+delete sharing, reads (the last `limit`
+    bytes when given) and closes at once. Raises OSError like open()."""
+    if os.name != "nt":
+        with open(path, "rb") as f:
+            if limit:
+                f.seek(max(0, os.fstat(f.fileno()).st_size - limit))
+            return f.read()
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+                                wintypes.DWORD, wintypes.HANDLE]
+    GENERIC_READ, SHARE_ALL, OPEN_EXISTING = 0x80000000, 0x1 | 0x2 | 0x4, 3
+    h = k32.CreateFileW(str(path), GENERIC_READ, SHARE_ALL, None, OPEN_EXISTING, 0x80, None)
+    if h == wintypes.HANDLE(-1).value or h is None:
+        err = ctypes.get_last_error()
+        raise FileNotFoundError(err, f"cannot open {path}", str(path)) if err in (2, 3) else \
+            OSError(err, f"cannot open {path} (Windows error {err})", str(path))
+    try:
+        import msvcrt
+        fd = msvcrt.open_osfhandle(h, os.O_RDONLY | os.O_BINARY)
+    except OSError:
+        k32.CloseHandle(h)
+        raise
+    with os.fdopen(fd, "rb") as f:                   # closes the handle
+        if limit:
+            f.seek(max(0, os.fstat(fd).st_size - limit))
+        return f.read()
+
+
+def read_json_shared(path):
+    return json.loads(read_shared(path).decode("utf-8"))
 
 
 def robocopy_argv(src, dst, files=()) -> list:

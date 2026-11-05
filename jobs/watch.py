@@ -67,10 +67,13 @@ class Watcher:
 
     def state(self, state, detail=None, job=None):
         self.last = f"{state}" + (f": {detail}" if detail else "")
-        C.write_json(self.root / C.WATCH_JSON, {
-            "schema": "watch/1", "state": state, "detail": detail, "job": job, "heartbeat": C.now(),
-            "since": self.started, "pid": os.getpid(), "machine": platform.node(), "repo": str(self.repo),
-            "repo_commit": self.git("rev-parse", "HEAD").stdout.strip() or None})
+        try:                                           # a status file must never stop the watcher (or its job)
+            C.write_json(self.root / C.WATCH_JSON, {
+                "schema": "watch/1", "state": state, "detail": detail, "job": job, "heartbeat": C.now(),
+                "heartbeat_utc": C.now_utc(), "since": self.started, "pid": os.getpid(), "machine": platform.node(),
+                "repo": str(self.repo), "repo_commit": self.git("rev-parse", "HEAD").stdout.strip() or None})
+        except OSError as e:
+            print(f"[watch] watch.json not written: {e}", flush=True)
 
     def notify_once(self, key, title, msg):
         """One push per distinct problem until it clears (see clear())."""

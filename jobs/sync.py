@@ -7,6 +7,7 @@
     python jobs/sync.py retry <job id> --share \\\\desktop\\cj
     python jobs/sync.py release <job id> --share ...      (a job pushed with --hold)
     python jobs/sync.py stop|start --share ...            (pause / resume the desktop watcher, jobs/watch.py)
+    python jobs/sync.py cancel <job id> --share ... [--reason "..."]   (stop a queued or running job)
     python jobs/sync.py local <job id> --bundle <zip> [--max-hours H] [--allow-big]   (train on this machine)
 
 push: the job must be a `train` job in the registry (`registry.py job new --type train --where desktop ...`).
@@ -157,15 +158,32 @@ def start(share):
 def watch_state(share):
     """watch.json plus the heartbeat age in seconds, or None."""
     try:
-        w = C.read_json(Path(share) / C.WATCH_JSON)
+        w = C.read_json_shared(Path(share) / C.WATCH_JSON)
     except (OSError, ValueError):
         return None
-    from datetime import datetime
+    from datetime import datetime, timezone
     try:
-        w["age_s"] = round((datetime.now() - datetime.fromisoformat(w["heartbeat"])).total_seconds())
+        if w.get("heartbeat_utc"):                     # both machines' clocks compared in UTC
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(w["heartbeat_utc"])
+        else:
+            age = datetime.now() - datetime.fromisoformat(w["heartbeat"])
+        w["age_s"] = round(age.total_seconds())
     except (KeyError, ValueError, TypeError):
         w["age_s"] = None
     return w
+
+
+def cancel(job_id, share, who="pujan", reason=None):
+    """Ask the runner to stop a queued or running job: writes q/<job>/CANCEL (a new file; nothing is deleted).
+    A running job is stopped within ~10 s (its partial run is kept); a queued one is never started."""
+    qd = Path(share) / C.Q / job_id
+    if not (qd / C.JOB_FILE).is_file():
+        raise SyncError(f"{job_id} is not in {qd.parent}")
+    if (Path(share) / C.D / job_id / C.DONE).is_file():
+        raise SyncError(f"{job_id} has already finished (d/{job_id}/DONE.json)")
+    C.write_json(qd / C.CANCEL, {"job": job_id, "who": who, "when": C.now(), "from": platform.node(),
+                                 "reason": reason or "cancelled from the laptop"})
+    return qd / C.CANCEL
 
 
 # ---------------------------------------------------------------- pull
@@ -253,7 +271,7 @@ def pull(share, who="pujan", copier="auto"):
         registry_cmd("import")
     out = []
     for job_id, done, sha, copied, skipped in pulled:
-        target = "done" if done["status"] == "done" else "blocked"
+        target = done["status"] if done["status"] in ("done", "cancelled") else "blocked"
         reason = done.get("reason") or ("blocked on the runner" if target == "blocked" else None)
         cur = registry_job(job_id)
         if cur is None:
@@ -262,6 +280,8 @@ def pull(share, who="pujan", copier="auto"):
             args = ["set-status", job_id, target, "--who", who]
             if target == "blocked":
                 args += ["--reason", reason[:300]]
+            elif target == "cancelled":
+                args += ["--note", (reason or "cancelled")[:300]]
             else:
                 args += ["--note", f"run {done.get('run')} ({done.get('machine')}"
                                    + (", --allow-big" if done.get("allow_big") else "") + ")"]
@@ -282,24 +302,46 @@ def pull(share, who="pujan", copier="auto"):
 
 
 # ---------------------------------------------------------------- status / retry
-def status(share):
+def queue_rows(share) -> list:
+    """One dict per job in q/: job, state (done / blocked / cancelled / running / queued / held), reason, pulled,
+    cancel_requested, done (DONE.json or None). Reads only small files, with the shared reader."""
     share = Path(share)
     seen = {j for j, _ in ledger(ledger_path())} if config.laptop_root(required=False) else set()
     rows = []
     for d in sorted((share / C.Q).iterdir()) if (share / C.Q).is_dir() else []:
         if d.name.startswith(".") or not d.is_dir():
             continue
+        row = {"job": d.name, "state": None, "reason": None, "pulled": d.name in seen, "done": None,
+               "cancel_requested": (d / C.CANCEL).is_file()}
         if (share / C.D / d.name / C.DONE).is_file():
-            st = C.read_json(share / C.D / d.name / C.DONE)
-            what = f"{st['status']}" + (f" ({st.get('reason')})" if st.get("reason") else "")
-            what += " pulled" if d.name in seen else " not pulled"
+            try:
+                row["done"] = C.read_json_shared(share / C.D / d.name / C.DONE)
+                row["state"], row["reason"] = row["done"].get("status"), row["done"].get("reason")
+            except (OSError, ValueError) as e:
+                row["state"], row["reason"] = "unknown", f"DONE.json unreadable: {e}"
         elif (share / C.D / f".tmp_{d.name}").is_dir():
-            what = "running (or stopped mid-job)"
+            row["state"] = "running"
         elif (d / C.READY).is_file():
-            what = "queued"
+            row["state"] = "queued"
+        elif (d / C.JOB_FILE).is_file():
+            row["state"] = "held"
         else:
-            what = "no READY (push incomplete)"
-        rows.append((d.name, what))
+            row["state"] = "incomplete"
+        rows.append(row)
+    return rows
+
+
+def status(share):
+    share = Path(share)
+    rows = []
+    for r in queue_rows(share):
+        what = {"running": "running (or stopped mid-job)", "held": "held (`release` starts it)",
+                "incomplete": "no READY (push incomplete)"}.get(r["state"], r["state"])
+        if r["done"] is not None:
+            what += (f" ({r['reason']})" if r["reason"] else "") + (" pulled" if r["pulled"] else " not pulled")
+        elif r["cancel_requested"]:
+            what += " (cancel requested)"
+        rows.append((r["job"], what))
     for name, what in rows:
         print(f"{name:50} {what}")
     w = watch_state(share)
@@ -372,10 +414,13 @@ def main(argv=None):
     lp.add_argument("--allow-big", action="store_true", help="y8m/l/x or imgsz > 640 on a small GPU (needs --max-hours)")
     lp.add_argument("--max-hours", type=float, help="the runner stops the trainer after this many hours")
     lp.add_argument("--who", default="pujan", help="people.json id for the set-status lines")
-    for name in ("push", "pull", "status", "retry", "release", "stop", "start"):
+    for name in ("push", "pull", "status", "retry", "release", "stop", "start", "cancel"):
         p = sub.add_parser(name)
-        if name in ("push", "retry", "release"):
+        if name in ("push", "retry", "release", "cancel"):
             p.add_argument("job_id")
+        if name == "cancel":
+            p.add_argument("--reason", help="why (shown on the Live tab and in the registry)")
+            p.add_argument("--who", default="pujan")
         p.add_argument("--share", required=True, type=Path, help="queue root on the desktop, e.g. \\\\desktop\\cj")
         if name in ("push", "pull"):
             p.add_argument("--copier", choices=["auto", "robocopy", "shutil"], default="auto")
@@ -395,6 +440,9 @@ def main(argv=None):
         elif a.cmd == "push":
             q = push(a.job_id, a.bundle, a.share, a.copier, max_hours=a.max_hours, hold=a.hold)
             print(f"[push] {'held (run `release` to start it)' if a.hold else 'queued'}: {q}")
+        elif a.cmd == "cancel":
+            print(f"[cancel] wrote {cancel(a.job_id, a.share, a.who, a.reason)}: the runner stops it within ~10 s "
+                  f"(a queued job is never started); then `pull` records it")
         elif a.cmd == "release":
             print(f"[release] {release(a.job_id, a.share)} is ready")
         elif a.cmd == "stop":

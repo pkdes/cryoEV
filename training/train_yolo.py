@@ -399,6 +399,44 @@ def _log_per_class_epoch(trainer):
         print(f"[WARN] per-class epoch log failed: {e}")
 
 
+def _write_progress(trainer, batch_asked=None):
+    """Ultralytics callback: write <save_dir>/progress.json each epoch (atomic), for the job monitor
+    (jobs/monitor.py). Records the batch actually used: Ultralytics halves it on a first-epoch OOM
+    while args.yaml keeps the asked value. Never interrupts training."""
+    import json
+    import os
+    import time
+    try:
+        import torch
+        stopper = getattr(trainer, "stopper", None)
+        metrics = {k: round(float(v), 5) for k, v in (getattr(trainer, "metrics", None) or {}).items()
+                   if isinstance(v, (int, float))}
+        final = trainer.epoch + 1 > trainer.epochs     # Ultralytics fires this once more for best.pt's final val
+        doc = {
+            "schema": "progress/1", "phase": "final_eval" if final else "training",
+            "epoch": min(trainer.epoch + 1, trainer.epochs), "epochs": trainer.epochs,
+            "batch": getattr(trainer, "batch_size", None), "batch_asked": batch_asked,
+            "epoch_s": round(float(getattr(trainer, "epoch_time", 0) or 0), 2),
+            "elapsed_s": round(time.time() - getattr(trainer, "train_time_start", time.time()), 1),
+            "best_epoch": getattr(stopper, "best_epoch", None),   # 1-based: the trainer calls stopper(epoch + 1, ...)
+            "patience": getattr(stopper, "patience", None),
+            "time_cap_h": getattr(trainer.args, "time", None),
+            "gpu_reserved_gb": round(torch.cuda.memory_reserved() / 1e9, 2) if torch.cuda.is_available() else None,
+            "metrics": metrics, "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        path = Path(trainer.save_dir) / "progress.json"
+        tmp = path.with_name(f"progress.json.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(doc, indent=1), encoding="utf-8")
+        for i in range(5):                     # a monitor reading over SMB can hold it for a moment
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                time.sleep(0.2 * (i + 1))
+    except Exception as e:
+        print(f"[WARN] progress.json not written: {e}")
+
+
 def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int = 300, imgsz: int = 1024,
                            batch_size: int = 16, device: str = '0', project: str = 'yolo_results',
                            name: str = 'vesicle_seg', patience: int = 50, overlap_mask: bool = True,
@@ -445,6 +483,7 @@ def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int =
     
     model = YOLO(weights or model_name)
     model.add_callback("on_fit_epoch_end", _log_per_class_epoch)
+    model.add_callback("on_fit_epoch_end", lambda tr: _write_progress(tr, batch_size))
 
     import time, torch, gc
     if torch.cuda.is_available() and mem_fraction:

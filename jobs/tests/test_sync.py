@@ -164,6 +164,19 @@ class SyncTests(T.TempRoots, unittest.TestCase):
         self.assertEqual((out[0]["copied"], out[0]["skipped"]), ([], [run]))
         self.assertEqual(sorted(p.name for p in dest.iterdir()), ["mine.txt"])
 
+    def test_cancelled_job_pulls_as_cancelled(self):
+        sync.push(JOB, self.zp, self.share, copier="shutil")
+        sync.cancel(JOB, self.share, reason="wrong dataset")
+        self.assertEqual(sync.status(self.share), [(JOB, "queued (cancel requested)")])
+        self.assertEqual(self.run_job(), 1)
+        out = sync.pull(self.share, copier="shutil")
+        self.assertEqual(out[0]["status"], "cancelled")
+        cur = registry.current(root=self.reg)[JOB]
+        self.assertEqual(cur["status"], "cancelled")
+        self.assertIn("wrong dataset", cur.get("note") or "")
+        rows = sync.queue_rows(self.share)
+        self.assertEqual((rows[0]["state"], rows[0]["pulled"]), ("cancelled", True))
+
     def test_blocked_job_pulls_as_blocked_then_retry(self):
         out = self.run_and_pull(FAKE_TRAINER="error")
         self.assertEqual(out[0]["status"], "blocked")
