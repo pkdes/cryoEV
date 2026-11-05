@@ -1,0 +1,170 @@
+"""tools/backup_state.py on a temp source tree and a temp git clone (bare remote + clone).
+
+Known answers: a second run with nothing changed makes no commit; changing one edit file makes a commit
+with exactly one changed path under state/; `.review_key` never appears in any commit.
+"""
+import hashlib
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "tools"))
+import backup_state as B  # noqa: E402
+
+INCLUDED = {
+    "registry/job.jsonl": "{\"id\": 1}\n",
+    "registry/lists/job_a.txt": "img1\r\nimg2\r\n",           # CRLF must survive byte for byte
+    "registry/sub/meta.json": "{}",
+    "registry/table.csv": "a,b\n1,2\n",
+    "review/pkg1/edits/img_a.png.json": "{\"edits\": []}\n",
+    "review/pkg1/edits/deep/img_b.json": "{\"edits\": [1]}\n",
+    "review/pkg1/package.json": "{\"name\": \"pkg1\"}\n",
+    "labels/lv_1/version.json": "{\"v\": 1}\n",
+    "labels/lv_1/conflicts.csv": "x\n",
+    "labels/lv_1/notes.txt": "n\n",
+    "september_edits/seed/one.png.json": "{}\n",
+    "september_edits/resolution.csv": "r\n",
+    "jobs/pulled.jsonl": "{}\n",
+    "tracking/v2/map.csv": "m\n",
+    "logs/run.log": "log line\n",
+}
+EXCLUDED = {
+    "review/pkg1/.review_key": "SECRETVALUE\n",
+    "review/pkg1/edits/api_key.json": "{}\n",
+    "registry/live/live.json": "{}\n",
+    "registry/history.html": "<html>",
+    "review/pkg1/images/a.png": "PNG",
+    "review/pkg1/index.html": "<html>",
+    "review/pkg1/data.js": "var x;",
+    "logs/shot.jpg": "JPG",
+    "jobs/model.pt": "PT",
+    "predictions/x.txt": "not whitelisted\n",
+    "review/top.json": "not in a package folder\n",
+}
+
+
+def md5(p):
+    return hashlib.md5(Path(p).read_bytes()).hexdigest()
+
+
+def git(cwd, *args):
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8",
+                       errors="replace")
+    if r.returncode != 0:
+        raise AssertionError(f"git {args}: {r.stderr}")
+    return r.stdout
+
+
+class BackupTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = Path(self.tmp.name)
+        self.src = t / "src"
+        for rel, text in {**INCLUDED, **EXCLUDED}.items():
+            p = self.src / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(text.encode())
+        big = self.src / "logs" / "huge.log"
+        big.write_bytes(b"x" * (2 * 1024 * 1024))  # over --max-mb 1
+        self.remote = t / "remote.git"
+        git(t, "init", "-q", "--bare", "-b", "main", str(self.remote))
+        self.clone = t / "clone"
+        git(t, "clone", "-q", str(self.remote), str(self.clone))
+        for k, v in (("user.name", "test"), ("user.email", "test@example.invalid")):
+            git(self.clone, "config", k, v)
+        self.src_snapshot = self.snapshot(self.src)
+
+    def tearDown(self):
+        # never write into the source: byte-identical before/after every test
+        self.assertEqual(self.snapshot(self.src), self.src_snapshot)
+        self.tmp.cleanup()
+
+    @staticmethod
+    def snapshot(folder):
+        return {p.relative_to(folder).as_posix(): md5(p) for p in sorted(folder.rglob("*")) if p.is_file()}
+
+    def run_backup(self, push=True):
+        return B.main(["--source", str(self.src), "--repo", str(self.clone), "--max-mb", "1"]
+                      + (["--push"] if push else []))
+
+    def commits(self):
+        return int(git(self.clone, "rev-list", "--count", "HEAD").strip())
+
+    def mirrored(self):
+        m = self.clone / "state"
+        return {p.relative_to(m).as_posix() for p in m.rglob("*") if p.is_file()}
+
+    def test_whitelist_manifest_and_idempotent(self):
+        self.assertEqual(self.run_backup(), 0)
+        self.assertEqual(self.mirrored(), set(INCLUDED))
+        manifest = B.read_manifest(self.clone / "MANIFEST.md5")
+        self.assertEqual(set(manifest), set(INCLUDED))
+        for rel, digest in manifest.items():
+            self.assertEqual(digest, md5(self.src / rel), rel)
+        rels = [ln.split("  ", 1)[1] for ln in (self.clone / "MANIFEST.md5").read_text().splitlines()]
+        self.assertEqual(rels, sorted(rels), "manifest sorted by path")
+        n = self.commits()
+        self.assertEqual(self.run_backup(), 0)
+        self.assertEqual(self.commits(), n, "second run with no change must not commit")
+
+    def test_one_change_one_path(self):
+        self.run_backup()
+        (self.src / "review/pkg1/edits/img_a.png.json").write_text("{\"edits\": [42]}\n")
+        self.src_snapshot = self.snapshot(self.src)
+        self.assertEqual(self.run_backup(), 0)
+        names = [ln for ln in git(self.clone, "show", "--name-only", "--format=", "HEAD").splitlines() if ln]
+        self.assertEqual([n for n in names if n.startswith("state/")], ["state/review/pkg1/edits/img_a.png.json"])
+        self.assertEqual(set(names) - {"state/review/pkg1/edits/img_a.png.json"}, {"MANIFEST.md5"})
+        self.assertIn(": 1 changed", git(self.clone, "log", "-1", "--format=%s"))
+
+    def test_deleted_source_file_removed_from_mirror(self):
+        self.run_backup()
+        (self.src / "tracking/v2/map.csv").unlink()
+        self.src_snapshot = self.snapshot(self.src)
+        self.run_backup()
+        self.assertNotIn("tracking/v2/map.csv", self.mirrored())
+        self.assertFalse((self.clone / "state/tracking").exists(), "empty mirror dirs are pruned")
+
+    def test_verify_on_fresh_clone(self):
+        self.run_backup(push=True)
+        fresh = Path(self.tmp.name) / "fresh"
+        git(self.tmp.name, "clone", "-q", str(self.remote), str(fresh))
+        self.assertEqual(B.verify(self.src, fresh, max_mb=1), 0)
+        # control: a corrupted mirror file must be reported
+        (fresh / "state/registry/job.jsonl").write_text("tampered\n")
+        self.assertGreater(B.verify(self.src, fresh, max_mb=1), 0)
+
+    def test_review_key_never_committed(self):
+        self.run_backup()
+        (self.src / "labels/lv_1/version.json").write_text("{\"v\": 2}\n")
+        self.src_snapshot = self.snapshot(self.src)
+        self.run_backup()
+        log = git(self.clone, "log", "--all", "--name-only", "--format=")
+        self.assertNotIn(".review_key", log)
+        self.assertNotIn("api_key", log)
+        self.assertNotIn("huge.log", log)
+        self.assertNotIn("SECRETVALUE", git(self.clone, "log", "--all", "-p"))
+
+    def test_dry_run_writes_nothing(self):
+        before = self.snapshot(self.clone)
+        self.assertEqual(B.main(["--source", str(self.src), "--repo", str(self.clone), "--dry-run"]), 0)
+        self.assertEqual(self.snapshot(self.clone), before)
+
+    def test_failure_exits_nonzero(self):
+        not_repo = Path(self.tmp.name) / "plain"
+        not_repo.mkdir()
+        os.environ.setdefault("GIT_CEILING_DIRECTORIES", str(Path(self.tmp.name)))
+        try:
+            self.assertNotEqual(B.main(["--source", str(self.src), "--repo", str(not_repo)]), 0)
+        finally:
+            if os.environ.get("GIT_CEILING_DIRECTORIES") == str(Path(self.tmp.name)):
+                del os.environ["GIT_CEILING_DIRECTORIES"]
+        self.assertNotEqual(B.main(["--source", str(self.src / "missing"), "--repo", str(self.clone)]), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

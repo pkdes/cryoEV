@@ -1,0 +1,47 @@
+#!/bin/sh
+# cryoEV pre-push hook: blocks a push whose new commits add secrets or private literals.
+# Enable once per clone:  git config core.hooksPath .githooks
+# Override (user's call only):  git push --no-verify
+# Python: $CRYOEV_PYTHON if set, else python, python3, py -3.
+
+remote="$1"
+zero=0000000000000000000000000000000000000000
+here=$(cd "$(dirname "$0")" && pwd)
+scanner="$here/../tools/prepush_scan.py"
+if [ ! -f "$scanner" ]; then
+    scanner="$(git rev-parse --show-toplevel)/tools/prepush_scan.py"
+fi
+
+run_scan() {
+    if [ -n "$CRYOEV_PYTHON" ]; then
+        "$CRYOEV_PYTHON" "$scanner" "$@"
+    elif command -v python >/dev/null 2>&1; then
+        python "$scanner" "$@"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 "$scanner" "$@"
+    else
+        py -3 "$scanner" "$@"
+    fi
+}
+
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -z "$local_sha" ] && continue
+    case "$local_sha" in *[!0]*) ;; *) continue ;; esac   # branch delete: nothing to scan
+    if [ "$remote_sha" != "$zero" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+        set -- --range "$remote_sha..$local_sha"
+    elif git rev-parse --verify -q "refs/remotes/$remote/main" >/dev/null 2>&1; then
+        set -- --range "$remote/main..$local_sha"
+    elif git rev-parse --verify -q refs/remotes/origin/main >/dev/null 2>&1; then
+        set -- --range "origin/main..$local_sha"
+    else
+        set -- --new-ref "$local_sha"   # commits not on any remote
+    fi
+    echo "pre-push: scanning $local_ref ($*)" >&2
+    run_scan "$@" </dev/null || status=1
+done
+
+if [ "$status" -ne 0 ]; then
+    echo "pre-push: push BLOCKED by tools/prepush_scan.py" >&2
+fi
+exit $status

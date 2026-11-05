@@ -116,6 +116,7 @@ To add a model, put `best.pt` in `models/<model_id>/` and add an entry to `model
 | `analysis/summarize_training_progress.py` | Three comparison tables for slides (multilayer approach, training data, model size), with role F1 on one shared setting |
 | `analysis/morphology.py` | Ellipse fitting and shape descriptors |
 | `training/monitor_run.py`, `notify.py` | Live training monitor (aggregate + per-class table from each run's `per_class_epoch.csv`), completion notifications |
+| `tools/` | Repo tools: a pre-push secret scan (enable with `git config core.hooksPath .githooks`) and the daily state backup; see [`docs/TOOLS.md`](docs/TOOLS.md) |
 | `embedding/` | DINO embedding + clustering workflow; see `embedding/README.md`. Planned to move to its own fork |
 
 **How it fits together:** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) has a dependency diagram. **Cleanup history and remaining candidates:** [`CLEANUP_CANDIDATES.md`](CLEANUP_CANDIDATES.md).
