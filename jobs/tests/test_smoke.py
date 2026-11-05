@@ -51,7 +51,7 @@ class SmokeTest(unittest.TestCase):
             exp += ["--weights", os.environ["CRYOEV_JOBS_SMOKE_WEIGHTS"]]
         py("training/make_job_bundle.py", "--dataset-dir", DATA, "--dataset-name", "smoke_tiny", "--out", out,
            "--", *exp)
-        zp = next(out.glob("*.zip"))
+        zp = next(out.glob("*__job_*.zip"))                  # thin job zip; the dataset pack ds_*.zip is pushed with it
         self.assertTrue(Path(str(zp) + ".md5").is_file())
         lst = root / "imgs.txt"
         lst.write_text("".join(p.name + "\n" for p in Path(DATA, "images").rglob("*") if p.is_file()), encoding="utf-8")

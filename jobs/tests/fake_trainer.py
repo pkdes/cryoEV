@@ -8,6 +8,8 @@ FAKE_EPOCHS  = n: first LATEST_RUN.txt and args.yaml, then per epoch (FAKE_EPOCH
                progress.json by tmp + os.replace with train_yolo.py's 5 tries; a refused try (a reader had the file
                open) is logged to <run>/fake_replace_retries.txt, a lost write to fake_replace_errors.txt
                (jobs/monitor.py's concurrency test)
+FAKE_SNAPSHOT = a folder: first writes <it>/<job folder name>.json = {rel: md5} of every file in the dataset
+               folder as the trainer finds it (the fat-vs-thin known-answer test)
 Like the real script: no dataset.yaml -> exit 1 with no run.json.
 """
 import argparse
@@ -24,6 +26,11 @@ for f in ("--dataset", "--model-size", "--imgsz", "--batch", "--epochs", "--run-
 a, _ = ap.parse_known_args()
 root = Path(os.environ["CRYOEV_CRYOAI_ROOT"])
 ds = root / "training outputs" / a.dataset
+if os.environ.get("FAKE_SNAPSHOT"):
+    import hashlib
+    snap = {p.relative_to(ds).as_posix(): hashlib.md5(p.read_bytes()).hexdigest()
+            for p in sorted(ds.rglob("*")) if p.is_file()}
+    Path(os.environ["FAKE_SNAPSHOT"], f"{root.name}.json").write_text(json.dumps(snap, indent=1), encoding="utf-8")
 (root / "fake_started.txt").write_text(str(os.getpid()), encoding="utf-8")
 time.sleep(float(os.environ.get("FAKE_SLEEP") or 0))
 if not (ds / "dataset.yaml").exists():

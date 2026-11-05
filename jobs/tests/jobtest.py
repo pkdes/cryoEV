@@ -52,6 +52,44 @@ def make_bundle(out_dir, name="ds_tiny", args=(), commit=None, yaml=True, files=
     return zp
 
 
+def make_thin_bundle(out_dir, name="ds_tiny", args=(), commit=None, files=None, stamp="20261102-120000",
+                     yaml_text=YAML):
+    """A thin bundle (dataset_cache pack ds_<sha12>.zip + .md5, and a job zip naming it), as make_job_bundle.py
+    writes by default. The pack's source files are written under <out_dir>/_src_<name>/. -> (job zip, pack)."""
+    import dataset_cache
+    out_dir = Path(out_dir)
+    src = out_dir / f"_src_{name}"
+    files = files if files is not None else {"images/train/a.png": b"png", "labels/train/a.txt": b"0 0 0 1 1 1 0",
+                                              "images/val/b.png": b"png", "labels/val/b.txt": b"0 0 0 1 1 1 0"}
+    for rel, data in files.items():
+        (src / rel).parent.mkdir(parents=True, exist_ok=True)
+        (src / rel).write_bytes(data)
+    pack, sha, pack_md5, md5s, _ = dataset_cache.write_pack(out_dir, src, sorted(src / rel for rel in files))
+    zp = out_dir / f"{name}__job_{stamp}.zip"
+    job = {"bundle_id": zp.stem, "dataset_name": name, "cryoEV_commit": commit or run_job.repo_commit(),
+           "run_experiments_args": ["--dataset", name, "--single-run", *args], "md5": md5s,
+           "dataset_sha256": sha, "dataset_pack": pack.name, "dataset_pack_md5": pack_md5}
+    with zipfile.ZipFile(zp, "w") as z:
+        z.writestr(f"{name}/dataset.yaml", yaml_text)
+        z.writestr(f"{name}/JOB.json", json.dumps(job))
+    Path(str(zp) + ".md5").write_text(f"{hashlib.md5(zp.read_bytes()).hexdigest()}  {zp.name}\n", encoding="utf-8")
+    return zp, pack
+
+
+def rewrite_zip(zp, mutate):
+    """Rewrite zip `zp` with mutate({name: bytes}) applied, and its .md5 sidecar to match. -> new md5."""
+    zp = Path(zp)
+    with zipfile.ZipFile(zp) as z:
+        members = {n: z.read(n) for n in z.namelist()}
+    mutate(members)
+    with zipfile.ZipFile(zp, "w") as z:
+        for n, data in members.items():
+            z.writestr(n, data)
+    md5 = hashlib.md5(zp.read_bytes()).hexdigest()
+    Path(str(zp) + ".md5").write_text(f"{md5}  {zp.name}\n", encoding="utf-8")
+    return md5
+
+
 def queue(share, job_id, zp):
     """Put a bundle in the queue the way `sync.py push` does (no registry check)."""
     import sync

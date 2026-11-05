@@ -384,13 +384,16 @@ class TestJobBundle(unittest.TestCase):
                       "--", "--single-run", "--model-size", "m", "--batch", "8", "--rect", "0",
                       "--weights", "models/v4_y8m_20260924/best.pt")
             self.assertIn("path: C:/Users/lab-login", out)
-            zips = list((Path(tmp) / "out").glob("*.zip"))
+            zips = list((Path(tmp) / "out").glob("*__job_*.zip"))          # the job zip; the dataset pack is ds_*.zip
             self.assertEqual(len(zips), 1)
             self.assertTrue(zips[0].with_name(zips[0].stem + "_README.md").exists())
 
             desk = Path(tmp) / "desktop" / "CryoAI" / "training outputs"
             with zipfile.ZipFile(zips[0]) as z:
                 z.extractall(desk)
+                pack = json.loads(z.read("my_dataset/JOB.json"))["dataset_pack"]
+            with zipfile.ZipFile(Path(tmp) / "out" / pack) as z:              # as the README says: the pack too
+                z.extractall(desk / "my_dataset")
             y = desk / "my_dataset" / "dataset.yaml"
             text = y.read_text(encoding="utf-8")
             self.assertNotIn("\npath:", text)
@@ -435,7 +438,7 @@ class TestJobBundle(unittest.TestCase):
             w.write_bytes(b"weights")
             run("training/make_job_bundle.py", "--allow-dirty", "--dataset-dir", ds, "--out", Path(tmp) / "o",
                 "--", "--single-run", f"--weights={w}")
-            z = zipfile.ZipFile(next((Path(tmp) / "o").glob("*.zip")))
+            z = zipfile.ZipFile(next((Path(tmp) / "o").glob("*__job_*.zip")))
             self.assertIn("d/weights/w.pt", z.namelist())
             job = json.loads(z.read("d/JOB.json"))
             self.assertEqual(job["run_experiments_args"][-2:], ["--weights", "../CryoAI/training outputs/d/weights/w.pt"])

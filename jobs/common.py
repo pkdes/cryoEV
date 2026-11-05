@@ -9,6 +9,7 @@ Queue folder (on the desktop, shared to the laptop over Tailscale/SMB):
     <queue>/d/<job>/             run.json, runs/<run>/, status.json, train.log, DONE.json (DONE.json last)
     <queue>/d/.retired/          earlier attempts moved aside by `sync.py retry` (never deleted)
     <queue>/runner.lock          OS lock held by the one running runner
+    <queue>/ds/<sha>/            dataset pack shared by thin bundles, READY last (laptop; dataset_cache.py)
 """
 from __future__ import annotations
 

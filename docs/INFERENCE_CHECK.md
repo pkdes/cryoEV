@@ -95,9 +95,11 @@ Every line repeats the batch fields, so the **last line per `batch_id`** is the 
 python training/make_job_bundle.py --dataset-dir "<CryoAI>/training outputs/<dataset>" \
     -- --single-run --model-size m --batch 8 --rect 0 --patience 300 --weights models/v4_y8m_20260924/best.pt
 ```
-- **Output.** Writes `<out>/<dataset>__job_<time>.zip` and `…_README.md` (default `<repo>/../CryoAI-laptop/job_bundles/`).
+- **Output.** Writes `<out>/<dataset>__job_<time>.zip`, `…_README.md` and the dataset pack `ds_<sha12>.zip`, which holds the
+  images and labels and is reused by later bundles of the same data (default `<repo>/../CryoAI-laptop/job_bundles/`;
+  `--single-zip` puts everything in one zip; see [JOBS.md](JOBS.md), "Dataset cache").
   The README has the exact PowerShell steps for the desktop:
-  1. unzip into `CryoAI\training outputs\`;
+  1. unzip into `CryoAI\training outputs\` (and the pack into the dataset folder);
   2. update `cryoEV` to the bundling commit;
   3. start `run_experiments.py` in the background with a log.
 

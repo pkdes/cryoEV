@@ -11,12 +11,14 @@ Laptop (PowerShell, in the repo):
 # 0. Code changes the job needs must be on GitHub main first (the desktop trains with main): commit + push
 # 1. A train job in the registry (job/1; the list is the dataset's images)
 python registry/registry.py job new --type train --where desktop --name v6_y8m --images <list.txt> --who pujan
-# 2. A bundle: zip + _README.md + .md5 sidecar; JOB.json has bundle_id and the full commit (refused with uncommitted code)
+# 2. A bundle: dataset pack ds_<sha12>.zip (reused if already there) + thin job zip + _README.md + .md5 sidecars;
+#    JOB.json has bundle_id, the full commit and the pack's hash (refused with uncommitted code). --single-zip: the old one zip
 python training/make_job_bundle.py --dataset-dir <prepared dataset> -- --single-run --model-size m --batch 8 --imgsz 1440 --workers 4
-# 3. Queue it (refused if its commit isn't on origin/main). --max-hours caps the run (default 48); --hold queues without starting
+# 3. Queue it (refused if its commit isn't on origin/main); uploads the dataset pack only if the share doesn't have it yet.
+#    --max-hours caps the run (default 48); --hold queues without starting
 python jobs/sync.py push job_20261102_v6_y8m --bundle <zip> --share \\<desktop>\cj --max-hours 24
 python jobs/sync.py release job_20261102_v6_y8m --share \\<desktop>\cj      # only after --hold
-python jobs/sync.py status --share \\<desktop>\cj                            # jobs + watcher state and heartbeat
+python jobs/sync.py status --share \\<desktop>\cj                            # jobs, dataset cache, watcher state and heartbeat
 # 4. Bring results home: run folders -> <CryoAI>/training outputs/<dataset>/runs/, importer, job done|blocked
 python jobs/sync.py pull --share \\<desktop>\cj
 # Pause / resume the watcher (it finishes the current job first; STOP is renamed, never deleted)
@@ -40,11 +42,11 @@ C:\cj_venv\Scripts\python C:\cj_repo\jobs\watch.py --queue-dir C:\cj
 | Clone not on main, modified tracked files, untracked `.py`, `requirements.txt` changed since the venv stamp, disk < 10 GB | **Paused + one ntfy. No job is blocked**; it resumes by itself once fixed |
 | Runs the job | `run_job.py --job X --max-hours <job's, default 48>` as a child; the run records `runner_commit` |
 | Child exit 2 (refused) | Writes `STOP` (paused) + ntfy: needs a person |
-| Idle, every 10 min (`--update-every`) and at start | Updates the clone; if its own code changed (`watch.py`, `common.py`, `run_job.py`, `oslock.py`) it exits 75 and the supervisor loop in `watch.py` starts it again from the new file. No restart by hand after a push; a running job is never interrupted |
+| Idle, every 10 min (`--update-every`) and at start | Updates the clone; if its own code changed (`watch.py`, `common.py`, `run_job.py`, `dataset_cache.py`, `oslock.py`) it exits 75 and the supervisor loop in `watch.py` starts it again from the new file. No restart by hand after a push; a running job is never interrupted |
 
 - **Code version.** Each job trains with the clone's main at that moment. DONE.json keeps both `cryoEV_commit` (where the bundle was made) and `runner_commit` (the code that trained). A bundle from code newer than the desktop's main is blocked "commit mismatch".
 - **After a requirements change on main:** at the desktop, `C:\cj_venv\Scripts\pip install -r C:\cj_repo\requirements.txt`, then `C:\cj_venv\Scripts\python C:\cj_repo\jobs\watch.py --stamp-venv`.
-- **Runner checks** (`run_job.py`, per job): zip md5 (job.json and the `.md5` sidecar); the bundle's commit is in the runner's history; Ultralytics 8.4.x; longest unzipped path < 240 characters; no `download:` in `dataset.yaml` (Ultralytics would run it); free disk ≥ 10 GB + 3× the zip. It keeps the machine awake while the job runs.
+- **Runner checks** (`run_job.py`, per job): zip md5 (job.json and the `.md5` sidecar); for a thin bundle, the dataset pack (below); the bundle's commit is in the runner's history; Ultralytics 8.4.x; longest unzipped path < 240 characters; no `download:` in `dataset.yaml` (Ultralytics would run it); free disk ≥ 10 GB + 3× (the zip + its dataset pack). It keeps the machine awake while the job runs.
 - A failed check or run ends **blocked** with a reason. A job is **done** only when the run's `run.json` says `finished` **and** the trainer exited 0.
 - A job interrupted twice (reboots: `d\.tmp_<job>.stale_*`) is blocked "killed twice" instead of run a third time.
 - The GPU-busy check runs before the old `work\<job>\` is cleared, so an orphaned trainer's files are never deleted under it. If a final rename fails (antivirus, an open Explorer window), it is retried; if it still fails, the runner exits non-zero and the results stay in `d\.tmp_<job>\`.
@@ -126,6 +128,8 @@ Rules on a GPU under 8 GB (the laptop: RTX 3050 Ti, 4 GB, 15 GB RAM):
 ```
 C:\cj\q\.incoming\<job>\   push in progress (the runner never looks here)
 C:\cj\q\<job>\             <bundle>.zip, <bundle>.zip.md5, job.json, READY      laptop writes; READY last
+C:\cj\ds\.incoming\<sha>\  dataset pack upload in progress                       laptop
+C:\cj\ds\<sha>\            ds_<sha12>.zip, ds_<sha12>.zip.md5, READY             laptop writes; READY last; shared by jobs
 C:\cj\work\<job>\          unzipped bundle + training output                     runner; deleted when done
 C:\cj\d\.tmp_<job>\        results being written                                 runner
 C:\cj\d\<job>\             run.json, runs\<run>\, status.json, train.log, DONE.json (last)
@@ -144,6 +148,32 @@ C:\cj\STOP                 pause request (`sync.py stop`); `start` renames it to
   - An existing run folder is never overwritten (it is reported as kept).
   - Pulled jobs are logged in `<CryoAI-laptop>\jobs\pulled.jsonl`, keyed by the DONE.json hash, so a second pull adds nothing.
   - It writes the registry only through `registry.py import` and `registry.py set-status <job> done|blocked --reason ... --who pujan`.
+
+## Dataset cache
+The link to `gpu-desktop` is slow (~1 MB/s), and a full dataset is ~360 MB. Each dataset goes to the queue once, keyed by its content; a job carries only a thin zip that names it.
+
+- **Bundle** (`make_job_bundle.py`, the default). Two files in `--out`:
+  - `ds_<sha12>.zip` + `.md5`: the dataset pack (`images/`, `labels/`, `MANIFEST.json` = schema, `dataset_sha256`, `files` {rel: md5}). If a pack with that name is already in `--out`, it is reused (its sidecar md5 and MANIFEST must match; otherwise the bundle is refused, never overwritten).
+  - `<name>__job_<stamp>.zip` + `.md5`: `<name>/dataset.yaml`, `JOB.json`, `README.md`, `weights/` if packed (KB, not MB).
+  - JOB.json: `dataset_sha256` = sha256 over the sorted lines `rel<TAB>md5` of images/ and labels/ only. It depends only on the files' content and paths (not on zip bytes, timestamps or the dataset name), so seed repeats and renamed copies share one pack. Also `dataset_pack` (file name), `dataset_pack_md5`, `dataset_pack_bytes`, and `md5` (per file, as before).
+  - `--single-zip` writes the old single zip (images and labels inside `<name>/`, no pack). The runner still takes it.
+- **Push** (`sync.py push` / `local`). Before the job itself:
+  - `ds\<sha>\READY` missing: copies the pack + `.md5` to `ds\.incoming\<sha>\`, checks the copy's md5, renames it to `ds\<sha>\`, writes READY last.
+  - `ds\<sha>\` there: nothing is copied. Its `.md5` must equal the local pack's md5, or the push is refused ("same dataset hash, different pack"; check both by hand). A `ds\<sha>\` with a matching `.md5` but no READY (a push interrupted after the rename) gets its READY.
+  - A stale `ds\.incoming\<sha>\` (an interrupted upload) is left alone; the upload goes to a new `ds\.incoming\<sha>.<time>\`. Delete stale ones by hand.
+  - job.json records `dataset_sha256`, `dataset_pack`, `dataset_pack_md5`.
+  - `sync.py push-pack --bundle <job zip> --share ...` uploads only the pack (after a prune, see below).
+- **Run** (`run_job.py`, `jobs/dataset_cache.py`). For a thin job: `ds\<sha>\READY` and the pack must exist ("dataset pack missing"); the pack's md5 must equal JOB.json, job.json and its sidecar; MANIFEST must hash to `dataset_sha256` and list exactly the pack's files. Then it extracts the pack into `work\<job>\training outputs\<name>\`, the thin zip over it, and checks every file's md5 against MANIFEST. Any failure: blocked, with the reason.
+  - Each job gets its **own copy**: the trainer writes inside the dataset folder (`runs\`, `labels\*.cache`, `CAMPAIGN_RESULTS_BRIEF.md`), so nothing links into `ds\`.
+  - `MANIFEST.json` is never written into the job's folder: the trainer sees exactly the tree a `--single-zip` bundle gives (tested byte for byte, `jobs/tests/test_dataset_cache.py`).
+  - The runner never writes or deletes in `ds\`.
+- **Pruning** (by hand, on `gpu-desktop`; nothing prunes automatically). `sync.py status` lists each pack (sha12, size, total) and the jobs in `q\` that may still need it (no DONE.json, or blocked: a blocked job can be retried).
+  - Delete `C:\cj\ds\<sha>` only when status says "no job in q/ still needs it". To check one by hand:
+    ```powershell
+    Select-String -Path C:\cj\q\*\job.json -Pattern '<full sha>' | ForEach-Object { Split-Path (Split-Path $_.Path) -Leaf }   # jobs naming it
+    Get-ChildItem C:\cj\d\<job>\DONE.json                                                                                 # done/cancelled = not needed
+    ```
+  - A job that needs a pruned pack is blocked "dataset pack missing": `sync.py push-pack --bundle <its job zip> --share ...`, then `sync.py retry <job>`.
 
 ## Desktop setup checklist (user, admin; once)
 Done on `gpu-desktop` 2026-11-04. "Admin window": PowerShell → Run as administrator (prompt `C:\WINDOWS\system32>`); "normal window": plain PowerShell.
@@ -218,6 +248,7 @@ Done on `gpu-desktop` 2026-11-04. "Admin window": PowerShell → Run as administ
   - A training process orphaned by the kill still holds the GPU, and the runner blocks "GPU busy" until it exits. Find it with `nvidia-smi` and end it.
 - **A failed copy.**
   - A failed `push` leaves `q\.incoming\<job>\`, which the runner ignores. Push again: it copies into the same folder, checks the md5, then renames it.
+  - A failed pack upload leaves `ds\.incoming\<sha>[.<time>]\` (ignored by the runner). Push again: it uploads into a new folder; delete the stale one by hand.
   - A failed `pull` leaves `<dataset>\.pull_tmp\<run>\`. Nothing is logged and no status is set, so run `pull` again: robocopy `/Z` resumes into the same folder.
 - **A stale lock.** There isn't really one: the OS lock dies with the process. `runner.lock` and `runner.lock.info` staying on disk are normal.
   If `run_job.py` exits 3 ("another runner holds the lock"), a runner really is running. Check Task Manager for `python ... run_job.py`.
@@ -227,3 +258,4 @@ Done on `gpu-desktop` 2026-11-04. "Admin window": PowerShell → Run as administ
   - Fix the cause: push the code ("commit mismatch"), use a shorter name, rebundle, or move the job to the desktop.
   - Then run `python jobs/sync.py retry <job> --share ...`. It moves `d\<job>\` to `d\.retired\`, the next runner picks the job again, and the next pull sets it to done.
   - A bad bundle (md5, path length, "desktop only" on the laptop) needs a new bundle and a new job instead.
+  - "dataset pack missing": `sync.py push-pack --bundle <job zip>`, then `retry`. A pack md5 or MANIFEST mismatch (a damaged copy on the share): at `gpu-desktop`, rename `ds\<sha>\` aside, then `push-pack` and `retry`. If the laptop's pack is damaged too, `make_job_bundle.py` refuses to reuse it: move it out of `--out`, rebundle, and push a new job.
