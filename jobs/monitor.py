@@ -10,8 +10,10 @@ Every --every seconds it reads each queue (in a thread, given up after 20 s) and
   - every job in q/ (sync.queue_rows), and the 10 most recent finished ones with their final metrics;
   - the running job: phase, epoch / epochs, elapsed, ETA, batch used vs asked, GPU memory, the latest val mask mAP
     and the per-epoch series, from work/<job>/.../runs/<run>/ (progress.json, else results.csv + args.yaml).
-Read only on the share: every file is read with common.read_shared (full sharing, closed at once) so the desktop's
-os.replace / rmtree never fails because of it, and nothing under d/.tmp_* is opened. Never writes the registry
+Read only on the share: every file is read with common.read_shared (full sharing, closed at once), so a desktop
+delete/rmtree is never blocked by it; an os.replace onto a file being read can still fail for those milliseconds,
+which the desktop's writers retry (common.write_json, train_yolo._write_progress). Nothing under d/.tmp_* is
+opened. Never writes the registry
 *.jsonl. One monitor per output file (monitor.lock next to it; a second one exits 3).
 """
 from __future__ import annotations
