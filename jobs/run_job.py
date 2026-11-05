@@ -16,7 +16,8 @@ Picks the oldest <queue>/q/<job>/ that has READY and no <queue>/d/<job>/, then:
 A failed check or run ends `blocked` with a reason. One ntfy push at the end ($CRYOEV_NTFY_TOPIC).
 Holds an OS lock on <queue>/runner.lock for the whole job (released if the process dies). Never writes the
 registry, and never deletes anything outside <queue>/work/<job>/. Keeps the machine awake while a job runs.
-Exit: 0 done or nothing to do, 1 blocked, 2 refused at start, 3 lock held by another runner.
+Exit: 0 done or nothing to do, 1 blocked, 2 refused at start, 3 lock held by another runner, 4 GPU busy (the
+job is untouched). A job interrupted twice (d/.tmp_<job>.stale_*) is blocked instead of run a third time.
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ import ast
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -47,8 +49,12 @@ SMALL_MAX_WORKERS = 2           # small GPU (= the laptop, 15 GB RAM): more data
 COMMIT_BASE_GB, COMMIT_PER_WORKER_GB = 4, 2   # small GPU: free commit (RAM + page file) needed at start
 MIN_FREE_GB = 10                # free disk needed: this + 3x the zip (unzip, results, the pulled copy)
 BUSY_MB = 256                   # a compute app using this much (or any python process) means the GPU is busy
+BUSY_TOTAL_MB = 2048            # or this much in use in total (under WDDM per-app memory reads N/A)
+MAX_STALE = 2                   # interrupted attempts (d/.tmp_<job>.stale_*) before the job is blocked
+EXIT_GPU_BUSY = 4               # GPU busy before the job was touched: try again later (watch.py waits)
 HOOKS_ENV = "CRYOEV_JOBS_TEST_HOOKS"   # tests only: JSON {train_cmd, gpu: {total_mb, apps, used_mb}, ultralytics,
-TESTING_ENV = "CRYOEV_JOBS_TESTING"    # commit, on_battery, free_gb}; read only when this is "1" (jobs/tests set both)
+HOOKS_FILE_ENV = "CRYOEV_JOBS_TEST_HOOKS_FILE"   # commit, on_battery, free_gb, free_commit_gb}; the file (re-read
+TESTING_ENV = "CRYOEV_JOBS_TESTING"    # on every call) wins over the env; both read only when this is "1"
 
 
 class Blocked(Exception):
@@ -59,8 +65,12 @@ def hooks() -> dict:
     if os.environ.get(TESTING_ENV) != "1":
         return {}
     try:
-        return json.loads(os.environ.get(HOOKS_ENV) or "{}")
-    except ValueError:
+        h = json.loads(os.environ.get(HOOKS_ENV) or "{}")
+        f = os.environ.get(HOOKS_FILE_ENV)
+        if f and Path(f).is_file():
+            h.update(json.loads(Path(f).read_text(encoding="utf-8")))
+        return h
+    except (ValueError, OSError):
         return {}
 
 
@@ -74,6 +84,31 @@ def repo_commit():
                               text=True, timeout=10).stdout.strip() or None
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def runner_commit():
+    """Full sha of the code that runs the job (hooks: the test's commit)."""
+    h = hooks().get("commit")
+    if h:
+        return h
+    try:
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True,
+                              text=True, timeout=10).stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def commit_in_history(bundle_commit) -> bool:
+    """The runner's code is the bundle's commit or newer (watch.py keeps the clone at the latest main)."""
+    if hooks().get("commit"):
+        return same_commit(bundle_commit, hooks()["commit"])
+    if not bundle_commit or bundle_commit == "unknown":
+        return False
+    try:
+        return subprocess.run(["git", "merge-base", "--is-ancestor", bundle_commit, "HEAD"], cwd=REPO,
+                              capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def same_commit(a, b) -> bool:
@@ -100,8 +135,9 @@ def gpu_state() -> dict:
     Graphics apps listed with [N/A] memory under WDDM (Edge, Claude, ...) are not busy."""
     h = hooks().get("gpu")
     if h is not None:
-        return {"total_mb": h.get("total_mb", 0), "used_mb": h.get("used_mb", 0),
-                "busy": [tuple(a) for a in h.get("apps", [])]}
+        st = {"total_mb": h.get("total_mb", 0), "used_mb": h.get("used_mb", 0),
+              "busy": [tuple(a) for a in h.get("apps", [])]}
+        return _total_rule(st)
     from monitor_run import get_gpu_info
     info = get_gpu_info()
     mb = {k: int(v[:-2]) if v.endswith("MB") and v[:-2].isdigit() else 0
@@ -120,7 +156,14 @@ def gpu_state() -> dict:
                 busy.append((int(parts[0]), parts[1], used))
     except (OSError, subprocess.SubprocessError):
         pass
-    return {"total_mb": total_mb, "used_mb": mb["mem_used"], "busy": busy}
+    return _total_rule({"total_mb": total_mb, "used_mb": mb["mem_used"], "busy": busy})
+
+
+def _total_rule(st):
+    """Under WDDM a labmate's app shows no per-app memory: total use above BUSY_TOTAL_MB also counts as busy."""
+    if not st["busy"] and (st.get("used_mb") or 0) > BUSY_TOTAL_MB:
+        st["busy"] = [(0, "GPU memory in use (total)", st["used_mb"])]
+    return st
 
 
 def is_network_path(p) -> bool:
@@ -223,14 +266,17 @@ def check_job(qdir: Path, work: Path, st: dict, allow_big=False) -> tuple:
         with zipfile.ZipFile(zp) as z:
             job = bundle_job_json(z)
             names = [n for n in z.namelist() if not n.endswith("/")]
+            yamls = [z.read(n).decode("utf-8", "replace") for n in names
+                     if n.count("/") == 1 and n.endswith("/dataset.yaml")]
     except zipfile.BadZipFile as e:
         raise Blocked(f"bad zip: {e}")
     st.update(bundle_id=job.get("bundle_id") or spec.get("bundle_id"), dataset=job.get("dataset_name"),
-              cryoEV_commit=job.get("cryoEV_commit"))
-    commit = repo_commit()
-    if not same_commit(job.get("cryoEV_commit"), commit):
-        raise Blocked(f"commit mismatch: bundle {job.get('cryoEV_commit')}, repo {commit} "
-                      f"(check out the bundle's commit in the runner's repo)")
+              cryoEV_commit=job.get("cryoEV_commit"), runner_commit=runner_commit())
+    if any(re.search(r"^\s*download\s*:", y, re.M) for y in yamls):
+        raise Blocked("dataset.yaml has a download: key (Ultralytics would run it); remove it and rebundle")
+    if not commit_in_history(job.get("cryoEV_commit")):
+        raise Blocked(f"commit mismatch: bundle {job.get('cryoEV_commit')} is not in the runner's history "
+                      f"(runner {repo_commit()}); push the repo, then the watcher updates to main")
     ul = ultralytics_version()
     if not (ul or "").startswith("8.4."):
         raise Blocked(f"Ultralytics {ul} (need 8.4.x)")
@@ -326,6 +372,7 @@ def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
         stale = dd / f".tmp_{job_id}.stale_{time.strftime('%Y%m%d-%H%M%S')}"
         rename_retry(tmp, stale)
         print(f"[jobs] stale {tmp.name} renamed to {stale.name}")
+    n_stale = len(list(dd.glob(f".tmp_{job_id}.stale_*")))
     tmp.mkdir()
     st = {"schema": "job_status/1", "job": job_id, "status": "running", "machine": platform.node(),
           "started": C.now(), "queue_dir": str(root), "max_hours": max_hours}
@@ -333,6 +380,9 @@ def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
     log = work / "train.log"
     runs = []
     try:
+        if n_stale >= MAX_STALE:                       # killed mid-run twice (reboots): stop retrying it
+            raise Blocked(f"killed twice: {n_stale} interrupted attempts in d/.tmp_{job_id}.stale_*; "
+                          f"check train.log there, then `sync.py retry`")
         spec, job, zp, names = check_job(qdir, work, st, allow_big)   # GPU-busy first: an orphan may own work/
         if work.exists():                              # our own scratch from an earlier attempt
             shutil.rmtree(work)
@@ -395,7 +445,8 @@ def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
     C.write_json(tmp / C.STATUS, st)
     rename_retry(tmp, final)
     done = {k: st.get(k) for k in ("job", "status", "reason", "dataset", "bundle_id", "run", "run_status",
-                                   "runs", "machine", "ended", "allow_big", "max_hours", "time_capped")}
+                                   "runs", "machine", "ended", "allow_big", "max_hours", "time_capped",
+                                   "runner_commit", "cryoEV_commit")}
     C.write_json(final / C.DONE, done)                  # last: the laptop pulls only folders with DONE.json
     if st["status"] == "done":
         shutil.rmtree(work, ignore_errors=True)
@@ -452,6 +503,11 @@ def main(argv=None):
         if qdir is None:
             print("[jobs] nothing ready")
             return 0
+        busy = gpu_state()["busy"]
+        if busy:                                       # before the job is touched: it stays queued
+            print("[jobs] GPU busy, not starting: " + ", ".join(f"pid {p} {Path(n).name} {m} MB"
+                                                                 for p, n, m in busy[:3]), file=sys.stderr)
+            return EXIT_GPU_BUSY
         (root / (C.LOCK + ".info")).write_text(f"pid {os.getpid()} {platform.node()} {qdir.name} {C.now()}\n",
                                                encoding="utf-8")
         print(f"[jobs] running {qdir.name}", flush=True)

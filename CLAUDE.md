@@ -22,7 +22,7 @@ Automated detection and characterization of extracellular vesicles and particles
 ## Agents (Claude sessions and other automations)
 - **Use the tools' own commands; don't write records by hand.** Commands are in the README (registry row) and `docs/JOBS.md`:
   - a new job: `registry/registry.py job new ...`; status: `registry.py set-status ...`;
-  - training: `training/make_job_bundle.py`, then `jobs/sync.py local` (laptop) or `push` / `pull` (desktop);
+  - training: `training/make_job_bundle.py`, then `jobs/sync.py push` / `pull` (the desktop watcher, `jobs/watch.py`, trains with GitHub main, so code changes a job needs must be pushed first; `push` refuses otherwise) or `jobs/sync.py local` (laptop);
   - after changing labels, packages or runs by hand: `registry.py import`, then `registry/history_page.py`.
 - **The importers are the safety net.** Work done outside the tools (a run started by hand, a new review package) shows up on the next `registry.py import`; never edit `*.jsonl` directly.
 - **Never automated:** the Roboflow push (the user's OK each time), promoting a model to production (user only), anything under Box.

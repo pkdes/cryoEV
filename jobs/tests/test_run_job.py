@@ -219,10 +219,40 @@ class RunJobTests(T.TempRoots, unittest.TestCase):
         self.assertEqual(self.run_job(ultralytics="8.3.40"), 1)
         self.assertIn("Ultralytics 8.3.40", self.done(q.name)["reason"])
 
-    def test_gpu_busy_is_blocked(self):
+    def test_gpu_busy_leaves_the_job_queued(self):
         q = self.push()
-        self.assertEqual(self.run_job(gpu={"total_mb": 49140, "apps": [[4242, "C:\\py\\python.exe", 9000]]}), 1)
-        self.assertIn("GPU busy", self.done(q.name)["reason"])
+        self.assertEqual(self.run_job(gpu={"total_mb": 49140, "apps": [[4242, "C:/py/python.exe", 9000]]}),
+                         run_job.EXIT_GPU_BUSY)
+        self.assertFalse((self.share / C.D).exists() and any((self.share / C.D).iterdir()), "job untouched")
+        # WDDM: no per-app memory, but 3 GB in use in total -> busy too
+        self.assertEqual(self.run_job(gpu={"total_mb": 49140, "apps": [], "used_mb": 3000}), run_job.EXIT_GPU_BUSY)
+        self.assertEqual(self.run_job(gpu={"total_mb": 49140, "apps": [], "used_mb": 900}), 0)   # control: idle
+        self.assertEqual(self.done(q.name)["status"], "done")
+
+    def test_older_bundle_commit_runs_on_newer_code(self):
+        prev = subprocess.run(["git", "rev-parse", "--short", "HEAD~1"], cwd=T.REPO, capture_output=True,
+                              text=True).stdout.strip()
+        q = self.push(commit=prev)
+        self.assertEqual(self.run_job(), 0)
+        d = self.done(q.name)
+        self.assertEqual(d["status"], "done")
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=T.REPO, capture_output=True, text=True).stdout.strip()
+        self.assertEqual((d["cryoEV_commit"], d["runner_commit"]), (prev, head))   # bundle vs code that trained
+
+    def test_download_key_is_blocked(self):
+        q = self.push(yaml_text=T.YAML + "download: https://example.invalid/x.zip" + chr(10))
+        self.assertEqual(self.run_job(), 1)
+        self.assertIn("download: key", self.done(q.name)["reason"])
+
+    def test_killed_twice_is_blocked_not_rerun(self):
+        q = self.push()
+        dd = self.share / C.D
+        dd.mkdir()
+        (dd / f".tmp_{q.name}.stale_20261104-010000").mkdir()      # one earlier interrupted attempt
+        (dd / f".tmp_{q.name}").mkdir()                              # and the one just killed
+        self.assertEqual(self.run_job(), 1)
+        self.assertIn("killed twice", self.done(q.name)["reason"])
+        self.assertFalse((self.share / C.WORK / q.name).exists(), "not run a third time")
 
     def test_weights_repointed_into_work(self):
         job = {"run_experiments_args": ["--dataset", "d", "--weights", "../CryoAI/training outputs/d/weights/w.pt"]}

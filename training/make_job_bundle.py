@@ -54,11 +54,25 @@ def md5_file(path: Path) -> str:
 
 
 def git_commit() -> str:
+    """Full sha (the desktop resolves it exactly; a short one can become ambiguous)."""
     try:
-        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO, capture_output=True,
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True,
                               text=True, check=True).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
+
+
+CODE_DIRS = ("training", "jobs", "data_utils")   # the code a bundle's run uses
+
+
+def uncommitted_code() -> list:
+    """Modified tracked files under CODE_DIRS: the bundle's commit would not be the code that was tested."""
+    try:
+        r = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no", "--", *CODE_DIRS], cwd=REPO,
+                           capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    return [line[3:] for line in r.stdout.splitlines() if line.strip()]
 
 
 def tracked(path: Path) -> bool:
@@ -203,9 +217,15 @@ def main():
                     help="prepared YOLO dataset: dataset.yaml, images/<split>/, labels/<split>/")
     ap.add_argument("--dataset-name", help="folder name on the desktop (default: --dataset-dir's name)")
     ap.add_argument("--out", type=Path, help="default <CryoAI-laptop>/job_bundles")
+    ap.add_argument("--allow-dirty", action="store_true",
+                    help=f"bundle even with uncommitted changes under {', '.join(CODE_DIRS)} (tests only)")
     ap.add_argument("exp_args", nargs=argparse.REMAINDER,
                     help="after --: arguments for training/run_experiments.py")
     a = ap.parse_args()
+    dirty = [] if a.allow_dirty else uncommitted_code()
+    if dirty:
+        raise SystemExit(f"uncommitted changes in {', '.join(dirty[:5])}: commit (and push, for the desktop) first, "
+                         f"so the bundle's commit is the code that runs")
     if a.out is None:
         try:
             a.out = config.laptop_root() / "job_bundles"

@@ -22,6 +22,7 @@ from pathlib import Path
 
 Q, D, WORK, INCOMING, RETIRED = "q", "d", "work", ".incoming", ".retired"
 READY, DONE, JOB_FILE, STATUS, LOCK = "READY", "DONE.json", "job.json", "status.json", "runner.lock"
+STOP, WATCH_JSON, WATCH_LOCK, WATCH_LOG = "STOP", "watch.json", "watch.lock", "watch.log"   # watch.py
 MAX_PATH = 240                   # Windows MAX_PATH is 260; Expand-Archive dropped files silently past it
 MAX_JOB_ID = 48                  # keeps <queue>\work\<job>\... short
 ROBOCOPY_OK_MAX = 7              # robocopy exit codes >= 8 are failures

@@ -78,6 +78,9 @@ class RobocopyTests(unittest.TestCase):
 class SyncTests(T.TempRoots, unittest.TestCase):
     def setUp(self):
         super().setUp()
+        origin = mock.patch.object(sync, "commit_on_origin", lambda commit: None)   # tested in OriginTests
+        origin.start()
+        self.addCleanup(origin.stop)
         self.lap, self.cai = self.tmp / "lap", self.tmp / "cai"
         self.reg = self.lap / "registry"
         self.reg.mkdir(parents=True)

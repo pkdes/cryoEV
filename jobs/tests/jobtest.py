@@ -32,7 +32,8 @@ def hooks_env(train_cmd=FAKE, gpu=DESKTOP_GPU, ultralytics="8.4.94", on_battery=
     return {run_job.HOOKS_ENV: json.dumps(h), run_job.TESTING_ENV: "1"}
 
 
-def make_bundle(out_dir, name="ds_tiny", args=(), commit=None, yaml=True, files=None, stamp="20261102-120000"):
+def make_bundle(out_dir, name="ds_tiny", args=(), commit=None, yaml=True, files=None, stamp="20261102-120000",
+                yaml_text=YAML):
     """A bundle zip shaped like make_job_bundle.py's (+ .md5 sidecar), written directly."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -43,7 +44,7 @@ def make_bundle(out_dir, name="ds_tiny", args=(), commit=None, yaml=True, files=
            "run_experiments_args": ["--dataset", name, "--single-run", *args]}
     with zipfile.ZipFile(zp, "w") as z:
         if yaml:
-            z.writestr(f"{name}/dataset.yaml", YAML)
+            z.writestr(f"{name}/dataset.yaml", yaml_text)
         for rel, data in files.items():
             z.writestr(f"{name}/{rel}", data)
         z.writestr(f"{name}/JOB.json", json.dumps(job))
@@ -54,7 +55,7 @@ def make_bundle(out_dir, name="ds_tiny", args=(), commit=None, yaml=True, files=
 def queue(share, job_id, zp):
     """Put a bundle in the queue the way `sync.py push` does (no registry check)."""
     import sync
-    return sync.push(job_id, zp, share, copier="shutil", check_registry=False)
+    return sync.push(job_id, zp, share, copier="shutil", check_registry=False, check_origin=False)
 
 
 class TempRoots:

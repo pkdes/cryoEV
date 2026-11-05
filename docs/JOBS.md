@@ -1,37 +1,55 @@
-# Training jobs: laptop queue → desktop runner
+# Training jobs: laptop queue → desktop watcher
 
 The laptop is home base: it owns the registry, makes bundles, pushes them and pulls results.
-The A6000 desktop is only sometimes on. It runs one queued job when someone starts `jobs/run_job.py` by hand, and **never writes the registry**.
+The A6000 desktop (shared lab PC) runs `jobs/watch.py`, started once. It runs every queued job, one at a time, with the **latest GitHub main**, and **never writes the registry**.
 Transport is a folder on the desktop, shared over Tailscale (SMB).
 Tracking rules: [TRACKING_CONTRACT.md](TRACKING_CONTRACT.md). Producers write owner files (`run.json`, `DONE.json`); the laptop's importer reads them.
 
 ## Commands
 Laptop (PowerShell, in the repo):
 ```powershell
+# 0. Code changes the job needs must be on GitHub main first (the desktop trains with main): commit + push
 # 1. A train job in the registry (job/1; the list is the dataset's images)
 python registry/registry.py job new --type train --where desktop --name v6_y8m --images <list.txt> --who pujan
-# 2. A bundle: zip + _README.md + .md5 sidecar; JOB.json has bundle_id and the commit
+# 2. A bundle: zip + _README.md + .md5 sidecar; JOB.json has bundle_id and the full commit (refused with uncommitted code)
 python training/make_job_bundle.py --dataset-dir <prepared dataset> -- --single-run --model-size m --batch 8 --imgsz 1440 --workers 4
-# 3. Queue it on the desktop (READY is written last)
-python jobs/sync.py push job_20261102_v6_y8m --bundle <zip> --share \\<desktop>\cj
-python jobs/sync.py status --share \\<desktop>\cj
-# 5. Bring results home: run folders -> <CryoAI>/training outputs/<dataset>/runs/, importer, job done|blocked
+# 3. Queue it (refused if its commit isn't on origin/main). --max-hours caps the run (default 48); --hold queues without starting
+python jobs/sync.py push job_20261102_v6_y8m --bundle <zip> --share \\<desktop>\cj --max-hours 24
+python jobs/sync.py release job_20261102_v6_y8m --share \\<desktop>\cj      # only after --hold
+python jobs/sync.py status --share \\<desktop>\cj                            # jobs + watcher state and heartbeat
+# 4. Bring results home: run folders -> <CryoAI>/training outputs/<dataset>/runs/, importer, job done|blocked
 python jobs/sync.py pull --share \\<desktop>\cj
+# Pause / resume the watcher (it finishes the current job first; STOP is renamed, never deleted)
+python jobs/sync.py stop  --share \\<desktop>\cj
+python jobs/sync.py start --share \\<desktop>\cj
 ```
-Desktop (in the repo, at the bundle's commit):
+Desktop (runner clone `C:\cj_repo`, venv `C:\cj_venv`; setup below):
 ```powershell
-# 4. Run the oldest ready job; --wait 600 waits for another runner's lock instead of exiting
-python jobs/run_job.py --queue-dir C:\cj
+C:\cj_venv\Scripts\python C:\cj_repo\jobs\watch.py --queue-dir C:\cj
 ```
-- **Runner checks.** It checks the zip md5 (job.json and the `.md5` sidecar), that the repo commit equals JOB.json's `cryoEV_commit`, Ultralytics 8.4.x, and that the longest unzipped path is under 240 characters.
-  It also checks that no other process is on the GPU: any python process, or one using ≥ 256 MB. Graphics apps listed with no memory are ignored.
-  It needs free disk ≥ 10 GB + 3× the zip, and keeps the machine awake while the job runs.
-- A failed check or run ends **blocked** with a reason. A job is **done** only when the run's `run.json` says `finished` **and** the trainer exited 0 (a later step can fail after `run.json` is written).
+
+**Watcher** (`jobs/watch.py`). Every minute it writes `C:\cj\watch.json` (state, job, heartbeat) and `watch.log`, then:
+
+| Situation | What it does |
+|---|---|
+| `STOP` exists (`sync.py stop`) | Paused. A running job is never interrupted |
+| GPU busy (a labmate: any python, ≥ 256 MB, or > 2 GB in use in total) | Waits; the job stays queued. One ntfy after 2 h |
+| Before each job | Holding `runner.lock`: `git fetch` + `merge --ff-only origin/main` (only main, only fast-forward) |
+| Clone not on main, modified tracked files, untracked `.py`, `requirements.txt` changed since the venv stamp, disk < 10 GB | **Paused + one ntfy. No job is blocked**; it resumes by itself once fixed |
+| Runs the job | `run_job.py --job X --max-hours <job's, default 48>` as a child; the run records `runner_commit` |
+| Child exit 2 (refused) | Writes `STOP` (paused) + ntfy: needs a person |
+
+- **Code version.** Each job trains with the clone's main at that moment. DONE.json keeps both `cryoEV_commit` (where the bundle was made) and `runner_commit` (the code that trained). A bundle from code newer than the desktop's main is blocked "commit mismatch".
+- **After a requirements change on main:** at the desktop, `C:\cj_venv\Scripts\pip install -r C:\cj_repo\requirements.txt`, then `C:\cj_venv\Scripts\python C:\cj_repo\jobs\watch.py --stamp-venv`.
+- **Runner checks** (`run_job.py`, per job): zip md5 (job.json and the `.md5` sidecar); the bundle's commit is in the runner's history; Ultralytics 8.4.x; longest unzipped path < 240 characters; no `download:` in `dataset.yaml` (Ultralytics would run it); free disk ≥ 10 GB + 3× the zip. It keeps the machine awake while the job runs.
+- A failed check or run ends **blocked** with a reason. A job is **done** only when the run's `run.json` says `finished` **and** the trainer exited 0.
+- A job interrupted twice (reboots: `d\.tmp_<job>.stale_*`) is blocked "killed twice" instead of run a third time.
 - The GPU-busy check runs before the old `work\<job>\` is cleared, so an orphaned trainer's files are never deleted under it. If a final rename fails (antivirus, an open Explorer window), it is retried; if it still fails, the runner exits non-zero and the results stay in `d\.tmp_<job>\`.
-- One ntfy push at the end, only if `CRYOEV_NTFY_TOPIC` is set.
-- **Exit codes.** `run_job.py`: 0 = done or nothing ready, 1 = blocked, 2 = refused at start (queue untouched), 3 = the lock is held. `sync.py`: 2 = refused or failed.
+- One ntfy push at the end of each job, only if `CRYOEV_NTFY_TOPIC` is set.
+- **Exit codes.** `run_job.py`: 0 = done or nothing ready, 1 = blocked, 2 = refused at start, 3 = the lock is held, 4 = GPU busy (2–4 leave the queue untouched). `watch.py`: 3 = another watcher is running. `sync.py`: 2 = refused or failed.
 - **Smoke test.** `jobs/tests/test_smoke.py` (real GPU, y8n at 320). The fixture is `<CryoAI-laptop>\fixtures\smoke\` (`tiny\` + `yolov8n-seg.pt`):
   `set CRYOEV_JOBS_SMOKE_DATA=...\fixtures\smoke\tiny` and `set CRYOEV_JOBS_SMOKE_WEIGHTS=...\fixtures\smoke\yolov8n-seg.pt`.
+- **Tests.** `python -m unittest discover -s jobs/tests`: temp roots, a fake trainer, and a temp git origin for the watcher (`test_watch.py`); no GPU needed.
 
 ## Training on the laptop
 When the desktop isn't available. Same bundle, runner and pull; the queue is a local folder (`C:\cj_local`).
@@ -70,7 +88,6 @@ Rules on a GPU under 8 GB (the laptop: RTX 3050 Ti, 4 GB, 15 GB RAM):
 - The NVIDIA GPU was empty at each start (the display runs on the AMD iGPU): the GPU limits are real. System RAM was short (2–6 GB commit free), which forced 0 workers; 2 workers are ~2.6× faster when the memory check allows it (close Box, browsers, extra windows).
 - Not tried yet: batch 1–2 at 960; 640 tiles cut from the native images (keeps the 1440 pixel scale; needs a tiler that cuts labels too); `mask_ratio` 8; a frozen backbone when fine-tuning.
 - Set `--max-hours` ~1.5× the table (early stopping often ends sooner). The desktop's 1440 runs can't be done here.
-- **Tests.** `python -m unittest discover -s jobs/tests` uses temp roots and a fake trainer, so no GPU is needed.
 
 ## Queue folder
 ```
@@ -81,6 +98,9 @@ C:\cj\d\.tmp_<job>\        results being written                                
 C:\cj\d\<job>\             run.json, runs\<run>\, status.json, train.log, DONE.json (last)
 C:\cj\d\.retired\          earlier attempts moved aside by `sync.py retry`
 C:\cj\runner.lock          OS lock (msvcrt) held for the whole job; runner.lock.info says who
+C:\cj\watch.lock           OS lock held by the one watcher
+C:\cj\watch.json, watch.log  watcher state + heartbeat (read by `sync.py status`), its log
+C:\cj\STOP                 pause request (`sync.py stop`); `start` renames it to .retired\STOP_<time>
 ```
 - Keep the root and the names short. Windows' 260-character limit once silently dropped images during unzip.
   Use `C:\cj`, short dataset names, and job names like `v6_y8m`. Job ids over 48 characters are refused.
@@ -98,19 +118,46 @@ C:\cj\runner.lock          OS lock (msvcrt) held for the whole job; runner.lock.
 3. **Firewall.** Add an inbound rule: TCP 445 from `100.64.0.0/10` only (the tailnet), on all profiles.
    Then open the built-in **"File and Printer Sharing (SMB-In)"** rules and make sure none of them allows 445 from any address. Disable them or scope them to `100.64.0.0/10`.
    Check with `Get-NetFirewallRule -DisplayGroup "File and Printer Sharing" | Get-NetFirewallAddressFilter`.
-4. **Share.** Create the queue root, e.g. `C:\cj`. Share it to **the user's own account only**; remove Everyone and Users. Turn on SMB encryption:
+4. **Folders, locked to you.** New folders under `C:\` let every signed-in user modify them, so labmates could queue jobs or change the code and packages. Create the three folders and remove inheritance:
    ```powershell
-   New-SmbShare -Name cj -Path C:\cj -FullAccess "$env:COMPUTERNAME\<user>" -EncryptData $true
+   foreach ($d in 'C:\cj','C:\cj_repo','C:\cj_venv') {
+     New-Item -ItemType Directory -Force $d | Out-Null
+     icacls $d /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" "Administrators:(OI)(CI)F" "SYSTEM:(OI)(CI)F"
+   }
+   icacls C:\cj      # expect exactly 3 lines: <you>, BUILTIN\Administrators, NT AUTHORITY\SYSTEM (all (OI)(CI)(F))
    ```
-   The runner runs as that user, never as admin or SYSTEM.
-5. **Repo and venv.** Clone cryoEV and create a venv. Check out **the same commit** as the bundles (`git fetch; git checkout <commit>`); the runner blocks "commit mismatch" otherwise.
-   Install `requirements.txt`, with Ultralytics 8.4.x and CUDA torch.
-6. **Page file.** Set a fixed page file on C: of 48–64 GB. Until then, bundle with `--batch 8 --workers 4` or fewer (README gotcha: Windows commit memory, `ArrayMemoryError` / WinError 1455 show up as run status `oom`).
-7. **Power and updates.** No sleep on AC power (`powercfg /change standby-timeout-ac 0`). Set Windows Update active hours to cover training time, so it doesn't reboot mid-run.
-8. **Env vars** (user scope, `setx`):
-   - `CRYOEV_NTFY_TOPIC`: the same secret topic as the laptop, for the end-of-job push.
-   - `CRYOEV_CRYOAI_ROOT`: not needed for jobs, because the runner sets it to `work\<job>` for each run. Set it only for hand runs.
-   - **Long paths.** Either enable long paths (`HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled = 1`, admin, reboot) or keep the short root `C:\cj`. The runner's 240-character check applies either way.
+5. **Share.** Share `C:\cj` to **your own account only**, with SMB encryption:
+   ```powershell
+   New-SmbShare -Name cj -Path C:\cj -FullAccess "$env:COMPUTERNAME\$env:USERNAME" -EncryptData $true
+   ```
+   Everything runs as you, never as admin or SYSTEM.
+6. **Runner clone and venv** (the venv lives **outside** the clone, so the clone stays clean):
+   ```powershell
+   git clone https://github.com/pkdes/cryoEV C:\cj_repo        # public: fetch needs no credentials
+   py -3.11 -m venv C:\cj_venv
+   C:\cj_venv\Scripts\pip install -r C:\cj_repo\requirements.txt   # CUDA torch + Ultralytics 8.4.x
+   C:\cj_venv\Scripts\python C:\cj_repo\jobs\watch.py --stamp-venv
+   ```
+   Never edit files in `C:\cj_repo`: the watcher pauses on modified or extra `.py` files. Your own clone stays untouched.
+7. **Page file.** Set a fixed page file on C: of 48–64 GB. Until then, bundle with `--batch 8 --workers 4` or fewer (README gotcha: Windows commit memory, `ArrayMemoryError` / WinError 1455 show up as run status `oom`).
+8. **Power and updates.** No sleep on AC power (`powercfg /change standby-timeout-ac 0`). Set Windows Update active hours to cover training time.
+9. **Env vars** (user scope, `setx`): `CRYOEV_NTFY_TOPIC` = the laptop's secret topic (watcher pauses and job ends are pushed). `CRYOEV_CRYOAI_ROOT` isn't needed (the runner sets it per job).
+   **Long paths:** keep the short root `C:\cj` (the runner's 240-character check applies either way).
+10. **Start the watcher** in a terminal and leave it open:
+    ```powershell
+    C:\cj_venv\Scripts\python C:\cj_repo\jobs\watch.py --queue-dir C:\cj
+    ```
+    A terminal survives a locked screen and switching user, but **stops on sign-out or reboot**.
+11. **After the smoke test: a scheduled task** (survives sign-out and reboots). Run as yourself with S4U ("do not store password"), at startup, no time limit:
+    ```powershell
+    $a = New-ScheduledTaskAction -Execute 'C:\cj_venv\Scripts\python.exe' -Argument 'C:\cj_repo\jobs\watch.py --queue-dir C:\cj' -WorkingDirectory 'C:\cj_repo'
+    $t = New-ScheduledTaskTrigger -AtStartup
+    $p = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
+    $s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    Register-ScheduledTask -TaskName cryoEV-watch -Action $a -Trigger $t -Principal $p -Settings $s
+    ```
+    Then check, with no terminal watcher running: `Start-ScheduledTask cryoEV-watch`, and from the laptop `sync.py status` shows the watcher alive. Push one smoke job to confirm CUDA and `CRYOEV_NTFY_TOPIC` work under the task (S4U has no network credentials, which the public `git fetch` doesn't need).
+- **Sharing the GPU.** The watcher waits while anyone else uses the GPU, but a job that has started keeps it until it ends. `sync.py stop` prevents new jobs only.
 
 ## Recovery
 - **A stale `d\.tmp_<job>\`.** The runner was killed or the PC slept.
@@ -122,7 +169,9 @@ C:\cj\runner.lock          OS lock (msvcrt) held for the whole job; runner.lock.
   - A failed `pull` leaves `<dataset>\.pull_tmp\<run>\`. Nothing is logged and no status is set, so run `pull` again: robocopy `/Z` resumes into the same folder.
 - **A stale lock.** There isn't really one: the OS lock dies with the process. `runner.lock` and `runner.lock.info` staying on disk are normal.
   If `run_job.py` exits 3 ("another runner holds the lock"), a runner really is running. Check Task Manager for `python ... run_job.py`.
+- **The watcher is paused** (`sync.py status`): the detail says why. STOP → `sync.py start`. A machine problem (clone not clean, venv stamp, disk, fetch) clears by itself once fixed at the desktop.
+- **No heartbeat for 5 minutes** (`status` warns): the watcher isn't running (sign-out, reboot without the task, crash). Start it again; `watch.log` has its last lines.
 - **Blocked jobs.** `sync.py pull` sets the registry job to blocked, with the reason.
-  - Fix the cause: check out the commit, free the GPU, use a shorter name, or move the job to the desktop.
+  - Fix the cause: push the code ("commit mismatch"), use a shorter name, rebundle, or move the job to the desktop.
   - Then run `python jobs/sync.py retry <job> --share ...`. It moves `d\<job>\` to `d\.retired\`, the next runner picks the job again, and the next pull sets it to done.
   - A bad bundle (md5, path length, "desktop only" on the laptop) needs a new bundle and a new job instead.

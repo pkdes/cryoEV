@@ -358,6 +358,16 @@ class TestStageFailure(unittest.TestCase):
 
 
 class TestJobBundle(unittest.TestCase):
+    def test_refuses_uncommitted_code(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(mjb, "uncommitted_code", lambda: ["jobs/run_job.py"]), \
+                mock.patch.object(sys, "argv", ["make_job_bundle.py", "--dataset-dir", tmp, "--out", tmp]):
+            with self.assertRaisesRegex(SystemExit, "uncommitted changes in jobs/run_job.py"):
+                mjb.main()
+            self.assertEqual(list(Path(tmp).iterdir()), [], "nothing written")
+        self.assertEqual(len(mjb.git_commit()), 40)                      # the full sha
+
     def test_round_trip(self):
         with tempfile.TemporaryDirectory() as tmp:
             ds = Path(tmp) / "my_dataset"
@@ -370,7 +380,7 @@ class TestJobBundle(unittest.TestCase):
                 "# YOLO dataset config\npath: C:/Users/ML-2619/Desktop/CryoAI/training outputs/my_dataset\n"
                 "train: images/train\nval: C:/Users/ML-2619/Desktop/CryoAI/training outputs/my_dataset/images/val\n"
                 "test: images/test\n\nnames:\n  0: EV\n  1: non-EV\n", encoding="utf-8")
-            out = run("training/make_job_bundle.py", "--dataset-dir", ds, "--out", Path(tmp) / "out",
+            out = run("training/make_job_bundle.py", "--allow-dirty", "--dataset-dir", ds, "--out", Path(tmp) / "out",
                       "--", "--single-run", "--model-size", "m", "--batch", "8", "--rect", "0",
                       "--weights", "models/v4_y8m_20260924/best.pt")
             self.assertIn("path: C:/Users/ML-2619", out)
@@ -403,7 +413,7 @@ class TestJobBundle(unittest.TestCase):
             (ds / "images").mkdir(parents=True)
             (ds / "labels").mkdir()
             (ds / "dataset.yaml").write_text("train: images/train\nval: images/val\nnames:\n  0: EV\n")
-            r = subprocess.run([sys.executable, "training/make_job_bundle.py", "--dataset-dir", str(ds),
+            r = subprocess.run([sys.executable, "training/make_job_bundle.py", "--allow-dirty", "--dataset-dir", str(ds),
                                 "--out", str(Path(tmp) / "o"), "--", "--single-run", "--epoch", "5"],
                                cwd=REPO, capture_output=True, text=True)
             self.assertNotEqual(r.returncode, 0)
@@ -423,7 +433,7 @@ class TestJobBundle(unittest.TestCase):
             ds = self._dataset(tmp)
             w = Path(tmp) / "w.pt"
             w.write_bytes(b"weights")
-            run("training/make_job_bundle.py", "--dataset-dir", ds, "--out", Path(tmp) / "o",
+            run("training/make_job_bundle.py", "--allow-dirty", "--dataset-dir", ds, "--out", Path(tmp) / "o",
                 "--", "--single-run", f"--weights={w}")
             z = zipfile.ZipFile(next((Path(tmp) / "o").glob("*.zip")))
             self.assertIn("d/weights/w.pt", z.namelist())
@@ -435,7 +445,7 @@ class TestJobBundle(unittest.TestCase):
     def test_weights_directory_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             ds = self._dataset(tmp)
-            r = subprocess.run([sys.executable, "training/make_job_bundle.py", "--dataset-dir", str(ds),
+            r = subprocess.run([sys.executable, "training/make_job_bundle.py", "--allow-dirty", "--dataset-dir", str(ds),
                                 "--out", str(Path(tmp) / "o"), "--", "--weights", str(Path(tmp))],
                                cwd=REPO, capture_output=True, text=True)
             self.assertNotEqual(r.returncode, 0)
