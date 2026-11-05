@@ -1,6 +1,6 @@
 # Repo tools (`tools/`)
 
-Tests: `python -m unittest discover -s tools/tests` (temp git repos only; never touches real data).
+Tests: `python -m unittest discover -s tools/tests` (temp git repos, temp folders and dummy servers on free local ports; never touches real data or the running servers).
 
 ## Pre-push secret scan: `tools/prepush_scan.py` + `.githooks/pre-push`
 
@@ -51,3 +51,31 @@ schtasks /Create /SC DAILY /ST 21:00 /TN cryoai-state-backup /TR "\"<path>\backu
 ```
 
 Here `backup_state.bat` contains `"<python.exe>" "<repo>\tools\backup_state.py" --source "<laptop data dir>" --repo "<backup clone>" --push >> "<backup clone>\..\backup_state.log" 2>&1`. If a run fails, Task Scheduler shows the non-zero "Last Run Result".
+
+## Laptop services: `tools/services.py` + `tools/register_services_task.ps1`
+
+The review server, review sandbox, history server and job monitor (and later the portal) used to run as children of a shell session and died with it. `services.py` starts them detached, keeps pid files and logs, and a logon task starts them after a reboot.
+
+- **Config:** JSON **outside the repo**, because it holds real paths: `%USERPROFILE%\.cryoev\services.json` (override `--config` or env `CRYOEV_SERVICES_CONFIG`).
+  - One entry per service: `name`, `argv`, `cwd`, `port` (null for the monitor), `enabled`, `log`; optional `host` (health check, default 127.0.0.1) and `env`.
+  - `{python}` = the python running `services.py`, `{repo}` = this checkout; `%VARS%` and `~` are expanded.
+  - `python tools/services.py example-config --out %USERPROFILE%\.cryoev\services.json` writes a template with placeholders (`<CryoAI-laptop>`, `<pkg>`) and never overwrites. The portal entry is there, `enabled: false`.
+  - The config can be written with PowerShell's `>` (UTF-16) or as UTF-8; both load.
+- **Commands:**
+  - `status` (`--json`): name, enabled, state, pid, port, listening, health, uptime, log. Health is `GET /api/ping`: any HTTP answer is up (`http 403` for a review server without its key, `http 404` for the history server); `tcp` if the port accepts but doesn't speak HTTP.
+  - `start [name ...|all]` (default all): enabled entries only. It skips a service whose pid file names a live process of ours, and one whose port something else already holds: **"port busy (not ours)"**, left alone, exit 1. The service starts detached with no console window, out of the caller's job object when Windows allows it. It waits up to `--wait` (15 s) for the port and reports a quick exit with the log's last lines.
+  - `stop [name ...|all]`: kills only a process whose pid, command line **and** creation time match its pid file, plus that process's children (e.g. the real python behind a venv launcher). A hand-started server, a reused pid or any other python is never touched; a stale pid file is just removed.
+  - `restart [name ...|all]`.
+- **Files:** pid files `%USERPROFILE%\.cryoev\run\<name>.pid` (config `run_dir`). Logs: the entry's `log`, default `%USERPROFILE%\.cryoev\logs\<name>.log`, appended with a header per start and moved to `<log>.1` when over 10 MB. The logon task's own output goes to `%USERPROFILE%\.cryoev\logs\services.log`.
+- **Stop is a hard kill** (Windows has no clean stop for a windowless process). The review server writes edits with tmp + rename, so a kill mid-save loses at most that one save.
+- **Migrating from hand-started servers.** Stop the old ones first: `services.py` won't touch them, and while they hold the ports `start` only reports "port busy (not ours)".
+  1. `python tools/services.py example-config --out %USERPROFILE%\.cryoev\services.json`, then fill in the real paths (same `--package` folders and ports as today).
+  2. `python tools/services.py status` shows each running server as "port busy (not ours)".
+  3. Stop the old processes: close their shells, or end the `python` processes on 8765, 8766 and 8768 and the `monitor.py` process. Find them with `Get-NetTCPConnection -LocalPort 8766 -State Listen` (OwningProcess) and `Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ft ProcessId,CommandLine`.
+  4. `python tools/services.py start all`, then `status`: all running, health `http ...`. The review links and keys are unchanged, because the key is kept in `<package>/.review_key`.
+- **Logon task**, one task `cryoev-services` (current user, Interactive, no admin, StartWhenAvailable, 30 s delay after logon, no time limit). Run it from the main checkout:
+  - Register: `powershell -ExecutionPolicy Bypass -File tools\register_services_task.ps1` (`-Python <python.exe>` when PATH has the wrong one). It uses `pythonw.exe` so that no window opens. Running it again replaces the task.
+  - Run it once now: `Start-ScheduledTask cryoev-services`.
+  - Remove it: `... register_services_task.ps1 -Unregister`. Running services are left as they are.
+  - It runs at logon only: after a sign-out the services stop, and the next logon starts them again.
+- **Switching review packages:** edit `--package` in the config, then `services.py restart review`.
