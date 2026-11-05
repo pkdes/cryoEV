@@ -10,6 +10,12 @@ Roles are assigned among the SAME kept masks that size_profile_from_predictions
 measured (confidence >= threshold, file order), so object_id joins directly.
 Thresholds are the validated pair from layer_count_stats.py.
 
+Multi-class models (models.yaml `classes:`, e.g. v5: 0 = EV, 1 = non-EV/VLDL):
+non-EV masks are dropped BEFORE roles are assigned, as size_profile_from_predictions
+drops them before measuring; otherwise a VLDL outline around an EV would make it
+'inner-layer' and the VLDL 'multilayer'. --model, else the predictions folder's
+parent name; single-class models are unchanged.
+
     python -m analysis.add_layer_roles \
         --morphology-csv <out>/morphology/<model>/morphology_all.csv \
         --predictions-dir <out>/predictions/<model>/predictions \
@@ -64,12 +70,17 @@ def main() -> None:
     ap.add_argument('--confidence-threshold', type=float, default=0.5)
     ap.add_argument('--output-csv', type=Path, default=None,
                     help='default: morphology_all_roles.csv beside the input')
+    ap.add_argument('--model', default=None,
+                    help="model_id in models/models.yaml (default: the predictions folder's parent "
+                         "name when registered); a multi-class model keeps its EV class only")
     ap.add_argument('--self-test', action='store_true')
     args = ap.parse_args()
 
     if args.self_test:
         self_test()
         return
+    from inference.model_classes import ev_classes_for
+    keep_classes = ev_classes_for(args.model, args.predictions_dir)
 
     with args.morphology_csv.open(newline='', encoding='utf-8') as f:
         rows = list(csv.DictReader(f))
@@ -81,8 +92,11 @@ def main() -> None:
         image_path = args.images_dir / rel
         with Image.open(image_path) as im:
             w, h = im.size
-        masks, confs, _ = load_predictions_yolo_format(
+        masks, confs, classes = load_predictions_yolo_format(
             args.predictions_dir / f'{image_path.stem}.txt', w, h)
+        if keep_classes is not None:   # EV class only, before roles (see docstring)
+            ev = [i for i, c in enumerate(classes) if c in keep_classes]
+            masks, confs = [masks[i] for i in ev], [confs[i] for i in ev]
         kept = [m for m, c in zip(masks, confs) if c >= args.confidence_threshold]
         role, layers = roles_for(kept)
         for r in recs:

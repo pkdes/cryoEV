@@ -5,7 +5,10 @@ resulting multilayer/standalone/inner-layer classification against the
 original (pre-collapse) COCO ground truth categories (EV/MV/inner/etc.).
 
 Workflow per image:
-  1. Run the model to get predicted "EV" polygons.
+  1. Get the predicted "EV" polygons: from cached prediction files with
+     --predictions-dir (the predict_models.py / run_experiments.py format,
+     <dir>/<split>/<stem>.txt or <dir>/<stem>.txt, kept at conf >= --conf),
+     or, by default, by running the model live (--model-path).
   2. Run the same containment test among predictions: a predicted polygon
      that fully contains >=1 other predicted polygon is classified
      "multilayer"; a predicted polygon fully contained inside another is
@@ -14,17 +17,35 @@ Workflow per image:
      know each matched prediction's TRUE category (MV / inner / EV / ...).
   4. Score the multilayer classification (and inner-layer classification)
      as precision/recall against those true categories.
+
+The live path stays the default: cached polygons are single largest contours,
+rasterized by load_predictions_yolo_format(), which truncates vertices to int
+(CLEANUP_CANDIDATES "R2 vertex truncation", undecided), so cached masks are not
+the live masks. On v5 F5 / S1 valid (26 images, 2026-11-05) every TP/FP/FN, per
+image, was identical either way; Run_14's own images are not on the laptop, so
+its default setup is unchecked. Switching the default is the user's call.
+
+--model <model_id> (models.yaml) keeps only the EV class of a multi-class model,
+on both paths; without it every prediction is used, as before.
+
+    python analysis/multilayer_containment_predictions.py                    # Run_14, live (as before)
+    python analysis/multilayer_containment_predictions.py --predictions-dir <run>/predictions
 """
+
+import argparse
 
 import sys
 from pathlib import Path
 from collections import defaultdict
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "training"))
-from train_yolo import load_predictions_with_classes_from_model, match_objects_hungarian
+from train_yolo import (load_predictions_with_classes_from_model, load_predictions_yolo_format,
+                        match_objects_hungarian)
 
 sys.path.insert(0, str(Path(__file__).parent))
 from multilayer_containment import load_image_annotations, find_containment, SOURCE_ROOT
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from inference.model_classes import ev_class_ids
 
 ROOT = Path(__file__).parent.parent.parent
 DATASET = ROOT / "training outputs" / "roboflow_20260713_all_layer_singleclass"
@@ -36,7 +57,7 @@ NMS_IOU = 0.7
 MATCH_IOU = 0.5
 
 # COCO split name -> converted YOLO dataset split dir name (see prepare_all_layer_singleclass.py)
-SPLIT_MAP = {"train": "train", "valid": "val"}
+SPLIT_MAP = {"train": "train", "valid": "val"}  # --splits names not listed here are used as-is
 
 
 def classify_predictions(pred_masks):
@@ -63,7 +84,60 @@ def classify_predictions(pred_masks):
     return role, layer_count
 
 
-def main():
+def parse_args(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--predictions-dir", type=Path, default=None,
+                    help="read cached prediction files instead of running the model")
+    ap.add_argument("--model-path", type=Path, default=MODEL_PATH, help="weights for the live path")
+    ap.add_argument("--dataset-dir", type=Path, default=DATASET, help="YOLO dataset holding images/<split>/")
+    ap.add_argument("--source-root", type=Path, default=SOURCE_ROOT,
+                    help="COCO export with <split>/_annotations.coco.json (pre-collapse categories)")
+    ap.add_argument("--splits", default=",".join(SPLIT_MAP), help="COCO splits, e.g. train,valid")
+    ap.add_argument("--imgsz", type=int, default=IMGSZ)
+    ap.add_argument("--conf", type=float, default=CONF,
+                    help="live: predict conf; cached: keep predictions with conf >= this")
+    ap.add_argument("--nms-iou", type=float, default=NMS_IOU)
+    ap.add_argument("--match-iou", type=float, default=MATCH_IOU)
+    ap.add_argument("--device", default="0")
+    ap.add_argument("--model", default=None,
+                    help="model_id in models.yaml: keep only the EV class of a multi-class model")
+    return ap.parse_args(argv)
+
+
+def get_predictions(img_path, yolo_split, args, keep_classes):
+    """(masks, confidences) for one image, from the cache or the live model."""
+    if args.predictions_dir is not None:
+        txt = args.predictions_dir / yolo_split / f"{img_path.stem}.txt"
+        if not txt.exists():
+            txt = args.predictions_dir / f"{img_path.stem}.txt"
+        if not txt.exists():
+            # predict_models.py writes a file (maybe empty) for every image, so a missing one is an
+            # error, not "no detections". On Windows a path over 260 characters also reads as missing.
+            raise FileNotFoundError(f"no cached prediction for {img_path.name} under {args.predictions_dir} "
+                                    f"(or the path exceeds MAX_PATH: {len(str(txt))} chars)")
+        from PIL import Image
+        with Image.open(img_path) as im:
+            w, h = im.size
+        masks, confs, classes = load_predictions_yolo_format(txt, w, h)
+        keep = [i for i, c in enumerate(confs) if c >= args.conf]
+    else:
+        masks, confs, classes = load_predictions_with_classes_from_model(
+            str(args.model_path), str(img_path), args.imgsz, args.conf, args.nms_iou, device=args.device
+        )
+        keep = list(range(len(masks)))
+    if keep_classes is not None:
+        keep = [i for i in keep if classes[i] in keep_classes]
+    return [masks[i] for i in keep], [confs[i] for i in keep]
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    keep_classes = ev_class_ids(args.model) if args.model else None
+    print("predictions: " + (f"cached {args.predictions_dir} (conf >= {args.conf})" if args.predictions_dir
+                             else f"live {args.model_path} (conf={args.conf}, nms_iou={args.nms_iou}, "
+                                  f"imgsz={args.imgsz})"))
+    print("classes: " + (f"EV class {sorted(keep_classes)} only" if keep_classes else "all predictions"))
+
     # Confusion counts for the "multilayer" classification (predicted role=='multilayer' vs true category=='MV')
     ml_tp = ml_fp = ml_fn = 0
     # Confusion counts for "inner-layer" classification (predicted role=='inner-layer' vs true category=='inner')
@@ -74,9 +148,10 @@ def main():
 
     per_image_rows = []
 
-    for coco_split, yolo_split in SPLIT_MAP.items():
-        coco_path = SOURCE_ROOT / coco_split / "_annotations.coco.json"
-        img_dir = DATASET / "images" / yolo_split
+    for coco_split in args.splits.split(","):
+        yolo_split = SPLIT_MAP.get(coco_split, coco_split)
+        coco_path = args.source_root / coco_split / "_annotations.coco.json"
+        img_dir = args.dataset_dir / "images" / yolo_split
 
         for img, gt_entries in load_image_annotations(coco_path):
             img_path = img_dir / img["file_name"]
@@ -86,13 +161,11 @@ def main():
             gt_masks = [m for _, _, m in gt_entries]
             gt_cats = [cat for _, cat, _ in gt_entries]
 
-            pred_masks, confidences, pred_classes = load_predictions_with_classes_from_model(
-                str(MODEL_PATH), str(img_path), IMGSZ, CONF, NMS_IOU, device='0'
-            )
+            pred_masks, confidences = get_predictions(img_path, yolo_split, args, keep_classes)
             pred_role, pred_layers = classify_predictions(pred_masks)
 
             matches, unmatched_preds, unmatched_gts = match_objects_hungarian(
-                pred_masks, gt_masks, iou_threshold=MATCH_IOU
+                pred_masks, gt_masks, iou_threshold=args.match_iou
             )
             matched_gt_idx = {gt_idx for _, gt_idx in matches}
 
@@ -144,8 +217,10 @@ def main():
     in_p, in_r, in_f1 = prf(inner_tp, inner_fp, inner_fn)
 
     print("=" * 72)
-    print(f"MULTILAYER CLASSIFICATION ON PREDICTIONS -- model: {MODEL_PATH.parent.parent.name}")
-    print(f"conf={CONF} match_iou={MATCH_IOU} containment_threshold=0.9")
+    print("MULTILAYER CLASSIFICATION ON PREDICTIONS -- "
+          + (f"cached: {args.predictions_dir}" if args.predictions_dir
+             else f"model: {args.model_path.parent.parent.name}"))
+    print(f"conf={args.conf} match_iou={args.match_iou} containment_threshold=0.9")
     print("=" * 72)
     print("\n-- 'Multilayer' classification (predicted contains >=1 other pred) vs true category=='MV' --")
     print(f"TP={ml_tp} FP={ml_fp} FN={ml_fn}  (of which {n_gt_mv_undetected} GT MV polygons were never detected)")
