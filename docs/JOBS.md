@@ -22,6 +22,8 @@ python jobs/sync.py pull --share \\<desktop>\cj
 # Pause / resume the watcher (it finishes the current job first; STOP is renamed, never deleted)
 python jobs/sync.py stop  --share \\<desktop>\cj
 python jobs/sync.py start --share \\<desktop>\cj
+# Cancel a queued or running job (stops it within ~10 s, keeps the partial run; registry: cancelled after pull)
+python jobs/sync.py cancel job_20261102_v6_y8m --share \\<desktop>\cj --reason "wrong dataset"
 ```
 Desktop (runner clone `C:\cj_repo`, venv `C:\cj_venv`; setup below):
 ```powershell

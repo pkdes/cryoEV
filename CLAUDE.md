@@ -24,6 +24,9 @@ Automated detection and characterization of extracellular vesicles and particles
   - a new job: `registry/registry.py job new ...`; status: `registry.py set-status ...`;
   - training: `training/make_job_bundle.py`, then `jobs/sync.py push` / `pull` (the desktop watcher, `jobs/watch.py`, trains with GitHub main, so code changes a job needs must be pushed first; `push` refuses otherwise) or `jobs/sync.py local` (laptop);
   - after changing labels, packages or runs by hand: `registry.py import`, then `registry/history_page.py`.
+  - watch or stop desktop jobs: the history page **Live** tab (`jobs/monitor.py` must be running), `sync.py status`, `sync.py cancel <job>`, `sync.py stop` / `start`.
+  - ship a review: `annotation/apply_review_edits.py` applies **only images marked reviewed** by default; `--all-edits` only when the user asks.
+- **Score segmentation as trained:** Ultralytics `val` needs `overlap_mask=False` for our models (models.yaml). The default carves nested membrane layers into rings and under-reports EV mask mAP (v5 F5: 0.476 vs 0.708).
 - **The importers are the safety net.** Work done outside the tools (a run started by hand, a new review package) shows up on the next `registry.py import`; never edit `*.jsonl` directly.
 - **Never automated:** the Roboflow push (the user's OK each time), promoting a model to production (user only), anything under Box.
 - **The laptop is home base** (registry, review servers, job queue). The A6000 desktop is sometimes on; nothing may depend on it.

@@ -45,6 +45,16 @@ Round 3 shipped 2026-11-02/03 (pushed through 46e6c28; later commits local until
 | Job runner (our own; MLflow/ClearML trial 11-02 said build) | Desktop queue over a Tailscale share; laptop `sync.py local`; small-GPU guards | [JOBS.md](JOBS.md) |
 | Registry | OS write lock per line | `registry.append` |
 
+Round 3b shipped 2026-11-04 (all pushed, through 66ea92d):
+| Part | What | Where |
+|---|---|---|
+| Desktop runner live | `coe-bme-rc-ml` set up; watcher as a scheduled task; trains with latest main; **self-updates and restarts** when its code changes | `jobs/watch.py`, [JOBS.md](JOBS.md) |
+| Cancel | `sync.py cancel <job>`: a running job stops within ~10 s (partial run kept), a queued one never starts | `jobs/run_job.py`, `jobs/sync.py` |
+| Live monitor | `progress.json` each epoch (actual batch); `jobs/monitor.py` → `registry/live/live.json`; **Live tab** on the history page | `training/train_yolo.py`, `jobs/monitor.py`, history page |
+| Seeds | `run_experiments.py --seed` (default 42) | `training/run_experiments.py` |
+| Review shipping | `apply_review_edits.py` applies **only reviewed images** by default (`--all-edits` = old rule); version.json `reviewed_images` / scope / `supersedes`; "verified N/M" chip | [LABEL_CHANGES.md](LABEL_CHANGES.md), [REVIEW_TOOL.md](REVIEW_TOOL.md) |
+| Scoring note | v5 F5 test mask mAP50-95 0.708 / 0.508 is Ultralytics val with `overlap_mask=False` (as trained); the default carves nested layers → EV 0.476 | `models/models.yaml` |
+
 Next (user to rank):
 - the user's real review → dataset from `lv_*` (`dataset_from_lv.py`, not built) → Roboflow push;
 - desktop setup; a `CryoAI-laptop` backup plan;
