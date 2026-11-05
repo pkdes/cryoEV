@@ -20,7 +20,8 @@ from jobtest import C, run_job  # noqa: E402
 import sync  # noqa: E402
 import watch  # noqa: E402
 
-COPY = ["jobs/common.py", "jobs/run_job.py", "jobs/watch.py", "jobs/sync.py", "data_utils/__init__.py",
+COPY = ["jobs/common.py", "jobs/run_job.py", "jobs/dataset_cache.py", "jobs/watch.py", "jobs/sync.py",
+        "data_utils/__init__.py",
         "data_utils/oslock.py", "training/run_experiments.py", "requirements.txt"]
 
 

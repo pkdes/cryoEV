@@ -5,12 +5,14 @@
 
 Picks the oldest <queue>/q/<job>/ that has READY and no <queue>/d/<job>/, then:
   1. checks: zip md5 (job.json and the .md5 sidecar), repo commit == JOB.json commit, Ultralytics 8.4.x,
-     longest extracted path < 240 characters, free disk >= 10 GB + 3x the zip, GPU not busy; on a GPU < 8 GB
+     longest extracted path < 240 characters, free disk >= 10 GB + 3x (the zip + its dataset pack), GPU not busy;
+     a thin bundle (JOB.json dataset_sha256): <queue>/ds/<sha>/READY, the pack's md5 and MANIFEST; on a GPU < 8 GB
      (the laptop): --max-hours set, --workers <= 2, free commit memory >= 4 GB + 2 GB per worker, and no y8m/l/x
      or imgsz > 640 unless --allow-big.
      The laptop also refuses (exit 2, queue untouched) a network queue folder and running on battery;
-  2. unzips into <queue>/work/<job>/ and runs training/run_experiments.py --single-run --no-notify with the
-     bundle's args (CRYOEV_CRYOAI_ROOT = the work folder);
+  2. unzips into <queue>/work/<job>/ (a thin bundle: the dataset pack into training outputs/<dataset>/ first, then
+     the zip over it, then every file checked against the pack's MANIFEST) and runs training/run_experiments.py
+     --single-run --no-notify with the bundle's args (CRYOEV_CRYOAI_ROOT = the work folder);
   3. writes <queue>/d/.tmp_<job>/ (run.json, runs/<run>/, status.json, train.log), renames it to d/<job>/,
      then writes DONE.json last. The status comes from run.json, never from the exit code.
 A failed check or run ends `blocked` with a reason. One ntfy push at the end ($CRYOEV_NTFY_TOPIC).
@@ -39,6 +41,7 @@ REPO = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO / "training"))
 import common as C  # noqa: E402
+import dataset_cache  # noqa: E402
 sys.path.insert(0, str(REPO))
 from data_utils.oslock import acquire_lock  # noqa: E402,F401  (run_job.acquire_lock in tests)
 
@@ -266,7 +269,8 @@ def bundle_job_json(z: zipfile.ZipFile):
 
 
 def check_job(qdir: Path, work: Path, st: dict, allow_big=False) -> tuple:
-    """All pre-run checks. -> (spec, JOB.json, zip path, zip member names). Raises Blocked.
+    """All pre-run checks. -> (spec, JOB.json, zip path, member names to extract, pack), pack = (dataset pack path,
+    MANIFEST {rel: md5}) for a thin bundle (dataset_cache.py), else None. Raises Blocked.
     Records bundle_id / dataset / commit in `st` as soon as JOB.json is read."""
     try:
         spec = C.read_json(qdir / C.JOB_FILE)
@@ -291,6 +295,14 @@ def check_job(qdir: Path, work: Path, st: dict, allow_big=False) -> tuple:
               cryoEV_commit=job.get("cryoEV_commit"), runner_commit=runner_commit())
     if any(re.search(r"^\s*download\s*:", y, re.M) for y in yamls):
         raise Blocked("dataset.yaml has a download: key (Ultralytics would run it); remove it and rebundle")
+    pack = None
+    if dataset_cache.is_thin(job):                     # a thin bundle: its dataset is in <queue>/ds/<sha>/
+        st["dataset_sha256"] = job.get("dataset_sha256")
+        try:
+            pack = dataset_cache.check_pack(qdir.parent.parent, job, spec)
+        except dataset_cache.PackError as e:
+            raise Blocked(str(e))
+        names = names + [f"{job.get('dataset_name')}/{rel}" for rel in sorted(pack[1])]
     if not commit_in_history(job.get("cryoEV_commit")):
         raise Blocked(f"commit mismatch: bundle {job.get('cryoEV_commit')} is not in the runner's history "
                       f"(runner {repo_commit()}); push the repo, then the watcher updates to main")
@@ -324,13 +336,13 @@ def check_job(qdir: Path, work: Path, st: dict, allow_big=False) -> tuple:
         if have < need:                                # each worker loads its own torch/CUDA; short = a silent hang
             raise Blocked(f"memory: {have:.1f} GB commit free (RAM + page file), need {need} GB for --workers {w}: "
                           f"close apps (Box, browsers, extra windows) or use --workers 0")
-    need = MIN_FREE_GB + 3 * zp.stat().st_size / 1e9
+    need = MIN_FREE_GB + 3 * (zp.stat().st_size + (pack[0].stat().st_size if pack else 0)) / 1e9
     have = free_gb(work.parent if work.parent.exists() else qdir)
     if have < need:
         raise Blocked(f"disk: {have:.1f} GB free, need {need:.1f} GB")
     if gpu["busy"]:
         raise Blocked("GPU busy: " + ", ".join(f"pid {p} {Path(n).name} {m} MB" for p, n, m in gpu["busy"][:3]))
-    return spec, job, zp, names
+    return spec, job, zp, names, pack
 
 
 def train_argv(job: dict, work: Path) -> list:
@@ -403,7 +415,7 @@ def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
         if n_stale >= MAX_STALE:                       # killed mid-run twice (reboots): stop retrying it
             raise Blocked(f"killed twice: {n_stale} interrupted attempts in d/.tmp_{job_id}.stale_*; "
                           f"check train.log there, then `sync.py retry`")
-        spec, job, zp, names = check_job(qdir, work, st, allow_big)   # GPU-busy first: an orphan may own work/
+        spec, job, zp, names, pack = check_job(qdir, work, st, allow_big)   # GPU-busy first: an orphan may own work/
         if work.exists():                              # our own scratch from an earlier attempt
             for i in range(4):                         # a reader over SMB can hold a file for a moment
                 try:
@@ -414,12 +426,20 @@ def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
                         raise
                     time.sleep(2 ** i)
         work.mkdir(parents=True)
-        print(f"[jobs] {job_id}: checks passed; unzipping {zp.name}")
+        if pack:                                       # the cached dataset first (this job's own copy), the thin zip over it
+            print(f"[jobs] {job_id}: checks passed; unzipping dataset pack {pack[0].name} ({len(pack[1])} files)")
+            dataset_cache.extract_pack(pack[0], work / "training outputs" / st["dataset"], pack[1])
+        print(f"[jobs] {job_id}: {'then' if pack else 'checks passed;'} unzipping {zp.name}")
         with zipfile.ZipFile(zp) as z:
             z.extractall(work / "training outputs")
         got = sum(1 for p in (work / "training outputs").rglob("*") if p.is_file())
         if got != len(names):
             raise Blocked(f"unzip wrote {got} of {len(names)} files (path length?)")
+        if pack:
+            try:
+                dataset_cache.verify_tree(work / "training outputs" / st["dataset"], pack[1])
+            except dataset_cache.PackError as e:
+                raise Blocked(str(e))
         argv = train_argv(job, work)
         st["argv"] = argv
         print(f"[jobs] {job_id}: training: {' '.join(argv[2:])}  (log {log})", flush=True)

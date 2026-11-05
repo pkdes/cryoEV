@@ -2,12 +2,17 @@
 """
 Package a prepared YOLO dataset as a training job for the shared GPU desktop.
 
-Writes <out>/<dataset>__job_<timestamp>.zip and, next to it, <same>_README.md (the exact commands
-for whoever runs it by hand, and what to send back) and <zip>.md5 (md5 of the zip). JOB.json in the
-zip carries `bundle_id` (= the zip stem). To queue it for jobs/run_job.py instead, see docs/JOBS.md.
+Writes, in <out>:
+  ds_<sha12>.zip (+ .md5)          the dataset pack: images/, labels/, MANIFEST.json. Reused when a pack with the
+                                   same content hash is already there (seed repeats of the same data).
+  <dataset>__job_<timestamp>.zip   the thin job zip: <dataset>/dataset.yaml, JOB.json, README.md, weights/ if packed
+  <same>_README.md, <zip>.md5      the exact commands for whoever runs it by hand; md5 of the zip
+JOB.json carries `bundle_id` (= the zip stem) and the pack reference (`dataset_sha256`, `dataset_pack`,
+`dataset_pack_md5`); jobs/sync.py push uploads a pack only once per queue (docs/JOBS.md, "Dataset cache").
+--single-zip writes the old single zip instead (images and labels inside <dataset>/, no pack).
 
     python training/make_job_bundle.py --dataset-dir <folder with dataset.yaml, images/, labels/> \
-        [--out <dir>] [--dataset-name NAME] -- --single-run --model-size m --batch 8 --rect 0 ...
+        [--out <dir>] [--dataset-name NAME] [--single-zip] -- --single-run --model-size m --batch 8 --rect 0 ...
 
 Everything after `--` goes to training/run_experiments.py unchanged, except --dataset (set by the
 bundle) and --weights (a file outside the repo's models/ is packed into the zip and re-pointed).
@@ -35,6 +40,7 @@ import yaml
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 from data_utils import config  # noqa: E402
+from jobs import dataset_cache  # noqa: E402
 
 SPLIT_KEYS = ("train", "val", "test")
 STORED = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".pt", ".zip"}   # already compressed
@@ -151,10 +157,17 @@ def ultralytics_version() -> str:
 
 
 def readme(name, zip_name, exp_args, changes, counts, commit, weights_note, created,
-           ultra="unknown") -> str:
+           ultra="unknown", pack=None) -> str:
     args = " ".join(f'"{a}"' if " " in a else a for a in exp_args)
     rows = "\n".join(f"| {s} | {c['images']} | {c['labels']} |" for s, c in counts.items())
     chg = "\n".join(f"  - `{c}`" for c in changes) or "  - none needed"
+    unzip_pack = "" if not pack else f"""
+   This job's images and labels are in the dataset pack `{pack}` (next to this zip). Unzip it into the
+   dataset folder the job zip just created:
+   ```powershell
+   Expand-Archive "{pack}" -DestinationPath "<parent>\\CryoAI\\training outputs\\{name}"
+   Remove-Item "<parent>\\CryoAI\\training outputs\\{name}\\MANIFEST.json"   # the pack's md5 list, not training data
+   ```"""
     return f"""# Training job: `{name}`
 
 Built {created} from cryoEV commit `{commit}` by `training/make_job_bundle.py`.
@@ -171,7 +184,7 @@ The repo is `<parent>\\cryoEV`, next to the data folder `<parent>\\CryoAI`.
    ```powershell
    Expand-Archive "{zip_name}" -DestinationPath "<parent>\\CryoAI\\training outputs"
    ```
-   If that folder already exists, stop and ask: don't overwrite another dataset.
+   If that folder already exists, stop and ask: don't overwrite another dataset.{unzip_pack}
 2. Update the repo to commit `{commit}` or later. Check the remote name first (`git remote -v`;
    on the desktop it is usually `CarneyMLdesktop`):
    ```powershell
@@ -217,6 +230,8 @@ def main():
                     help="prepared YOLO dataset: dataset.yaml, images/<split>/, labels/<split>/")
     ap.add_argument("--dataset-name", help="folder name on the desktop (default: --dataset-dir's name)")
     ap.add_argument("--out", type=Path, help="default <CryoAI-laptop>/job_bundles")
+    ap.add_argument("--single-zip", action="store_true",
+                    help="one zip with the images and labels inside (the old format; no dataset pack)")
     ap.add_argument("--allow-dirty", action="store_true",
                     help=f"bundle even with uncommitted changes under {', '.join(CODE_DIRS)} (tests only)")
     ap.add_argument("exp_args", nargs=argparse.REMAINDER,
@@ -274,10 +289,14 @@ def main():
             raise SystemExit(f"--weights {w} not found")
 
     files = sorted(p for d in ("images", "labels") for p in (root / d).rglob("*") if p.is_file())
-    md5 = {}
+    md5, pack_ref, pack, reused = {}, {}, None, False
+    if not a.single_zip:                                # the dataset pack first: the job zip names it
+        pack, sha, pack_md5, md5, reused = dataset_cache.write_pack(a.out, root, files)
+        pack_ref = {"dataset_sha256": sha, "dataset_pack": pack.name, "dataset_pack_md5": pack_md5,
+                    "dataset_pack_bytes": pack.stat().st_size}
     with zipfile.ZipFile(zip_path, "w") as z:
         z.writestr(f"{name}/dataset.yaml", text, compress_type=zipfile.ZIP_DEFLATED)
-        for p in files:
+        for p in files if a.single_zip else ():
             rel = p.relative_to(root).as_posix()
             data = p.read_bytes()
             md5[rel] = hashlib.md5(data).hexdigest()
@@ -289,11 +308,12 @@ def main():
         counts = split_counts(root)
         commit = git_commit()
         ultra = ultralytics_version()
-        body = readme(name, zip_path.name, exp, changes, counts, commit, weights_note, created, ultra)
+        body = readme(name, zip_path.name, exp, changes, counts, commit, weights_note, created, ultra,
+                      pack.name if pack else None)
         job = {"bundle_id": zip_path.stem,
                "dataset_name": name, "source_dir": str(root), "created": created, "cryoEV_commit": commit,
                "run_experiments_args": ["--dataset", name] + exp, "dataset_yaml_changes": changes,
-               "ultralytics_bundled_on": ultra, "splits": counts, "md5": md5}
+               "ultralytics_bundled_on": ultra, "splits": counts, "md5": md5, **pack_ref}
         z.writestr(f"{name}/JOB.json", json.dumps(job, indent=1), compress_type=zipfile.ZIP_DEFLATED)
         z.writestr(f"{name}/README.md", body, compress_type=zipfile.ZIP_DEFLATED)
     readme_path = zip_path.with_name(zip_path.stem + "_README.md")
@@ -302,7 +322,12 @@ def main():
     md5_path = zip_path.with_name(zip_path.name + ".md5")          # sidecar: jobs/sync.py and run_job.py check it
     md5_path.write_text(f"{zip_md5}  {zip_path.name}\n", encoding="utf-8")
 
-    print(f"{zip_path}  ({zip_path.stat().st_size / 1e6:.1f} MB, {len(files)} files)")
+    if pack:
+        print(f"{pack}  ({pack.stat().st_size / 1e6:.1f} MB, {len(files)} files, "
+              f"{'reused: same content hash' if reused else 'new'}; dataset_sha256 {pack_ref['dataset_sha256'][:12]})")
+        print(f"{zip_path}  ({zip_path.stat().st_size / 1e6:.2f} MB, thin: refers to {pack.name})")
+    else:
+        print(f"{zip_path}  ({zip_path.stat().st_size / 1e6:.1f} MB, {len(files)} files)")
     print(f"{readme_path}")
     print(f"{md5_path}  (md5 {zip_md5})")
     for c in changes:

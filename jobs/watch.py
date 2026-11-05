@@ -38,7 +38,8 @@ import run_job  # noqa: E402
 DEFAULT_HOURS = 48.0
 EXIT_RESTART = 75                              # the watcher's own code changed: the supervisor starts it again
 UPDATE_EVERY_S = 600                           # when idle, update the clone this often (and at start)
-CODE_FILES = ("jobs/watch.py", "jobs/common.py", "jobs/run_job.py", "data_utils/oslock.py")   # what this process loaded
+CODE_FILES = ("jobs/watch.py", "jobs/common.py", "jobs/run_job.py", "jobs/dataset_cache.py",
+              "data_utils/oslock.py")                                       # what this process loaded
 GIT_TIMEOUT = 120
 STAMP_NAME = "cryoev_requirements.sha256"     # in the venv (sys.prefix): the requirements.txt it was built from
 

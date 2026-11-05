@@ -5,6 +5,7 @@
     python jobs/sync.py pull --share \\\\desktop\\cj [--who pujan]
     python jobs/sync.py status --share \\\\desktop\\cj
     python jobs/sync.py retry <job id> --share \\\\desktop\\cj
+    python jobs/sync.py push-pack --bundle <zip> --share ...   (only a thin bundle's dataset pack, e.g. after pruning)
     python jobs/sync.py release <job id> --share ...      (a job pushed with --hold)
     python jobs/sync.py stop|start --share ...            (pause / resume the desktop watcher, jobs/watch.py)
     python jobs/sync.py cancel <job id> --share ... [--reason "..."]   (stop a queued or running job)
@@ -12,7 +13,9 @@
 
 push: the job must be a `train` job in the registry (`registry.py job new --type train --where desktop ...`).
   Copies the zip (+ .md5) to q/.incoming/<job>/, checks the copy's md5, writes job.json, renames the folder to
-  q/<job>/ and writes READY last.
+  q/<job>/ and writes READY last. A thin bundle (JOB.json has dataset_sha256) first gets its dataset pack
+  (ds_<sha12>.zip, next to the zip) onto the share as ds/<sha>/, via ds/.incoming/, only if ds/<sha>/ isn't there
+  yet; an existing ds/<sha>/ with another pack md5 is refused (docs/JOBS.md, "Dataset cache").
 pull: for each d/<job>/ with DONE.json not pulled yet, copies runs/<run>/ to <CryoAI>/training outputs/<dataset>/
   runs/<run>/ (new folders only, never overwrites; staged under <dataset>/.pull_tmp/), runs the importer
   (`registry.py import`) and `registry.py set-status <job> done|blocked --reason`, then logs the pull in
@@ -41,6 +44,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "registry"))
 import common as C  # noqa: E402
+import dataset_cache  # noqa: E402
 from data_utils import config  # noqa: E402
 from data_utils.path_guard import protected_problem  # noqa: E402
 
@@ -110,6 +114,9 @@ def push(job_id, bundle, share, copier="auto", check_registry=True, check_origin
     q = share / C.Q
     if (q / job_id).exists() or (share / C.D / job_id).exists():
         raise SyncError(f"{job_id} is already in the queue (q/ or d/); use a new job, or `retry` for d/")
+    pack = {}
+    if dataset_cache.is_thin(job):                     # the dataset goes once per queue, before the job names it
+        pack = push_pack(job, bundle, share, copier)
     inc = q / C.INCOMING / job_id
     files = [bundle.name] + ([bundle.name + ".md5"] if side else [])
     C.copy_files(bundle.parent, inc, files, copier)
@@ -118,11 +125,78 @@ def push(job_id, bundle, share, copier="auto", check_registry=True, check_origin
     C.write_json(inc / C.JOB_FILE, {"schema": "queue_job/1", "job": job_id, "type": "train",
                                     "bundle_id": job.get("bundle_id") or bundle.stem, "zip": bundle.name,
                                     "zip_md5": md5, "dataset": job.get("dataset_name"),
-                                    "pushed": C.now(), "pushed_from": platform.node(), "max_hours": max_hours})
+                                    "pushed": C.now(), "pushed_from": platform.node(), "max_hours": max_hours,
+                                    **pack})
     inc.rename(q / job_id)
     if not hold:
         (q / job_id / C.READY).write_text(C.now() + "\n", encoding="utf-8")  # last
     return q / job_id
+
+
+def push_bundle_pack(bundle, share, copier="auto") -> Path:
+    """`push-pack`: only the dataset pack of a thin bundle (e.g. after ds/<sha>/ was pruned while a job still needed
+    it: then `retry` that job). -> <share>/ds/<sha>."""
+    bundle, share = Path(bundle), Path(share)
+    if not share.is_dir():
+        raise SyncError(f"share {share} not found")
+    try:
+        with zipfile.ZipFile(bundle) as z:
+            names = [n for n in z.namelist() if n.count("/") == 1 and n.endswith("/JOB.json")]
+            job = json.loads(z.read(names[0])) if len(names) == 1 else {}
+    except (OSError, zipfile.BadZipFile, ValueError) as e:
+        raise SyncError(f"can't read {bundle}: {e}")
+    if not dataset_cache.is_thin(job):
+        raise SyncError(f"{bundle.name} is not a thin bundle (its JOB.json names no dataset pack)")
+    push_pack(job, bundle, share, copier)
+    return share / dataset_cache.DS / job["dataset_sha256"]
+
+
+def push_pack(job, bundle, share, copier="auto") -> dict:
+    """Make sure <share>/ds/<sha>/ holds the job's dataset pack (from next to the bundle), uploading it only if the
+    share doesn't have it yet. -> the job.json fields naming it. Never deletes or overwrites on the share."""
+    sha, name = job.get("dataset_sha256"), job.get("dataset_pack")
+    if not dataset_cache.valid_sha(sha) or name != dataset_cache.pack_name(sha):
+        raise SyncError(f"{bundle.name}: JOB.json dataset reference is malformed (dataset_sha256 {sha!r}, "
+                        f"dataset_pack {name!r}); rebundle")
+    local_pack = bundle.parent / name
+    if not local_pack.is_file():
+        raise SyncError(f"dataset pack {name} not found next to {bundle.name} (make_job_bundle.py writes both)")
+    md5 = C.md5_file(local_pack)
+    side = C.sidecar_md5(local_pack)
+    if md5 != str(job.get("dataset_pack_md5", "")).lower() or (side and side != md5):
+        raise SyncError(f"md5 mismatch: {name} is {md5}, JOB.json says {job.get('dataset_pack_md5')}, "
+                        f"its .md5 sidecar {side}")
+    fields = {"dataset_sha256": sha, "dataset_pack": name, "dataset_pack_md5": md5}
+    ds = Path(share) / dataset_cache.DS
+    dest = ds / sha
+    if dest.exists():
+        theirs = C.sidecar_md5(dest / name)
+        if theirs != md5:
+            raise SyncError(f"same dataset hash, different pack: {dataset_cache.DS}/{sha[:12]} on the share has md5 "
+                            f"{theirs}, {name} here is {md5}; check both by hand (nothing was copied)")
+        if not (dest / C.READY).is_file():             # renamed after its md5 check, then interrupted before READY
+            if not (dest / name).is_file() or (dest / name).stat().st_size != local_pack.stat().st_size:
+                raise SyncError(f"{dest} has no READY and its pack is missing or the wrong size; check it by hand")
+            (dest / C.READY).write_text(C.now() + "\n", encoding="utf-8")
+            print(f"[push] dataset pack {sha[:12]}: completed an interrupted upload (READY written)")
+        else:
+            print(f"[push] dataset pack {sha[:12]}: already on the share, not uploaded")
+        return fields
+    inc = ds / C.INCOMING / sha
+    if inc.exists():                                   # an interrupted upload: left as is, a new folder instead
+        inc = ds / C.INCOMING / f"{sha}.{time.strftime('%Y%m%d-%H%M%S')}"
+        n = 1
+        while inc.exists():
+            inc, n = ds / C.INCOMING / f"{sha}.{time.strftime('%Y%m%d-%H%M%S')}_{n}", n + 1
+    print(f"[push] dataset pack {sha[:12]}: uploading {name} ({local_pack.stat().st_size / 1e6:.1f} MB)", flush=True)
+    C.copy_files(local_pack.parent, inc, [name] + ([name + ".md5"] if side else []), copier)
+    if not side:
+        (inc / (name + ".md5")).write_text(f"{md5}  {name}\n", encoding="utf-8")
+    if C.md5_file(inc / name) != md5:
+        raise SyncError(f"md5 of the pack copy in {inc} differs; left there, push again")
+    inc.rename(dest)
+    (dest / C.READY).write_text(C.now() + "\n", encoding="utf-8")   # last
+    return fields
 
 
 def release(job_id, share):
@@ -344,6 +418,14 @@ def status(share):
         rows.append((r["job"], what))
     for name, what in rows:
         print(f"{name:50} {what}")
+    cache = dataset_cache.cache_entries(share)
+    if cache:
+        print(f"dataset cache ({dataset_cache.DS}/): {len(cache)} pack(s), "
+              f"{sum(e['bytes'] for e in cache) / 1e6:.1f} MB")
+        for e in cache:
+            print(f"  {e['sha'][:12]}  {e['bytes'] / 1e6:9.1f} MB" + ("" if e["ready"] else "  (no READY)")
+                  + (f"  needed by {len(e['refs'])} job(s) not done/cancelled: {', '.join(e['refs'][:3])}"
+                     if e["refs"] else "  no job in q/ still needs it"))
     w = watch_state(share)
     if w:
         print(f"watcher: {w.get('state')}" + (f" ({w.get('detail')})" if w.get("detail") else "")
@@ -414,7 +496,7 @@ def main(argv=None):
     lp.add_argument("--allow-big", action="store_true", help="y8m/l/x or imgsz > 640 on a small GPU (needs --max-hours)")
     lp.add_argument("--max-hours", type=float, help="the runner stops the trainer after this many hours")
     lp.add_argument("--who", default="pujan", help="people.json id for the set-status lines")
-    for name in ("push", "pull", "status", "retry", "release", "stop", "start", "cancel"):
+    for name in ("push", "push-pack", "pull", "status", "retry", "release", "stop", "start", "cancel"):
         p = sub.add_parser(name)
         if name in ("push", "retry", "release", "cancel"):
             p.add_argument("job_id")
@@ -422,10 +504,11 @@ def main(argv=None):
             p.add_argument("--reason", help="why (shown on the Live tab and in the registry)")
             p.add_argument("--who", default="pujan")
         p.add_argument("--share", required=True, type=Path, help="queue root on the desktop, e.g. \\\\desktop\\cj")
-        if name in ("push", "pull"):
+        if name in ("push", "push-pack", "pull"):
             p.add_argument("--copier", choices=["auto", "robocopy", "shutil"], default="auto")
-        if name == "push":
+        if name in ("push", "push-pack"):
             p.add_argument("--bundle", required=True, type=Path, help="zip from training/make_job_bundle.py")
+        if name == "push":
             p.add_argument("--max-hours", type=float, help="the runner stops the trainer after this many hours "
                            "(default on the watcher: 48)")
             p.add_argument("--hold", action="store_true", help="queue without READY; `release` starts it")
@@ -440,6 +523,8 @@ def main(argv=None):
         elif a.cmd == "push":
             q = push(a.job_id, a.bundle, a.share, a.copier, max_hours=a.max_hours, hold=a.hold)
             print(f"[push] {'held (run `release` to start it)' if a.hold else 'queued'}: {q}")
+        elif a.cmd == "push-pack":
+            print(f"[push-pack] {push_bundle_pack(a.bundle, a.share, a.copier)}")
         elif a.cmd == "cancel":
             print(f"[cancel] wrote {cancel(a.job_id, a.share, a.who, a.reason)}: the runner stops it within ~10 s "
                   f"(a queued job is never started); then `pull` records it")
