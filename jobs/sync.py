@@ -81,6 +81,9 @@ def commit_on_origin(commit):
 def push(job_id, bundle, share, copier="auto", check_registry=True, check_origin=True, max_hours=None, hold=False):
     import ids
     bundle, share = Path(bundle), Path(share)
+    if not share.is_dir():                         # never create a queue root: a typo would make a stray folder
+        raise SyncError(f"share {share} not found: a desktop share is \\\\host\\cj (two leading backslashes), "
+                        f"and the queue root must already exist")
     if not ids.is_id("job", job_id) or len(job_id) > C.MAX_JOB_ID:
         raise SyncError(f"{job_id!r} is not a job id of <= {C.MAX_JOB_ID} characters (job_<YYYYMMDD>_<slug>)")
     if check_registry:

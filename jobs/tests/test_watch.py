@@ -187,6 +187,7 @@ class OriginTests(unittest.TestCase):
         git(dev, "add", "b.txt")
         git(dev, "commit", "-m", "b")                            # local only
         local = git(dev, "rev-parse", "HEAD")
+        (tmp / "s").mkdir()
         with mock.patch.object(sync, "REPO", dev):
             self.assertIsNone(sync.commit_on_origin(pushed))     # control
             self.assertIn("push the repo first", sync.commit_on_origin(local))
@@ -200,6 +201,7 @@ class OriginTests(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp(prefix="cj_h_"))
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         zp = T.make_bundle(tmp / "b")
+        (tmp / "s").mkdir()
         q = sync.push("job_20261104_h", zp, tmp / "s", copier="shutil", check_registry=False, check_origin=False,
                       hold=True, max_hours=6)
         self.assertFalse((q / C.READY).exists())
