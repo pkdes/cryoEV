@@ -65,6 +65,12 @@
       "string",
       "null"
      ]
+    },
+    "seed": {
+     "type": [
+      "integer",
+      "null"
+     ]
     }
    },
    "required": [

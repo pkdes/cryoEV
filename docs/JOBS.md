@@ -38,6 +38,7 @@ C:\cj_venv\Scripts\python C:\cj_repo\jobs\watch.py --queue-dir C:\cj
 | Clone not on main, modified tracked files, untracked `.py`, `requirements.txt` changed since the venv stamp, disk < 10 GB | **Paused + one ntfy. No job is blocked**; it resumes by itself once fixed |
 | Runs the job | `run_job.py --job X --max-hours <job's, default 48>` as a child; the run records `runner_commit` |
 | Child exit 2 (refused) | Writes `STOP` (paused) + ntfy: needs a person |
+| Idle, every 10 min (`--update-every`) and at start | Updates the clone; if its own code changed (`watch.py`, `common.py`, `run_job.py`, `oslock.py`) it exits 75 and the supervisor loop in `watch.py` starts it again from the new file. No restart by hand after a push; a running job is never interrupted |
 
 - **Code version.** Each job trains with the clone's main at that moment. DONE.json keeps both `cryoEV_commit` (where the bundle was made) and `runner_commit` (the code that trained). A bundle from code newer than the desktop's main is blocked "commit mismatch".
 - **After a requirements change on main:** at the desktop, `C:\cj_venv\Scripts\pip install -r C:\cj_repo\requirements.txt`, then `C:\cj_venv\Scripts\python C:\cj_repo\jobs\watch.py --stamp-venv`.
