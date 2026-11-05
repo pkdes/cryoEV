@@ -1,0 +1,59 @@
+/* CJ shell: design tokens + the top bar + home. Token names and values are the history page's own
+   (registry/history_page.py CSS), so including this file there changes nothing but adds the bar. Everything else
+   is a cj- class: no bare element rules, so a page that includes this keeps its own look. */
+:root{--bg:#fafaf9;--fg:#1c1917;--mut:#6b6560;--card:#fff;--line:#e3e0dc;--acc:#2456c7;--accbg:#e8eefc;
+--prod:#0f7a3d;--prodbg:#dcf3e5;--warn:#9a5b00;--warnbg:#fdf0d8;--dim:.5;
+--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;
+--cj-up:#1a8f4c;--cj-down:#c2410c;--cj-unk:#a8a29e}
+@media (prefers-color-scheme:dark){:root{--bg:#141312;--fg:#ece9e5;--mut:#a39e98;--card:#1e1c1b;--line:#35322f;
+--acc:#8fb0ff;--accbg:#1f2a44;--prod:#6fdc9c;--prodbg:#163323;--warn:#f2c26b;--warnbg:#3a2c12;
+--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;
+--cj-up:#4ade80;--cj-down:#fb923c;--cj-unk:#78716c}}
+
+/* top bar (portal/static/header.js) */
+.cj-bar{display:flex;flex-wrap:wrap;align-items:center;gap:4px 14px;padding:8px 16px;background:var(--card);
+  border-bottom:1px solid var(--line);font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--fg);
+  box-sizing:border-box;width:100%;min-width:0}
+.cj-bar *{box-sizing:border-box}
+.cj-bar .cj-mark{font-weight:800;letter-spacing:.04em;color:var(--fg);text-decoration:none;padding:6px 8px 6px 0;
+  font-size:1.05rem}
+.cj-bar .cj-nav{display:flex;flex-wrap:wrap;gap:2px 4px;align-items:center;flex:1 1 auto;min-width:0}
+.cj-bar .cj-nav a{display:inline-flex;align-items:center;gap:6px;min-height:36px;padding:4px 10px;border-radius:999px;
+  color:var(--fg);text-decoration:none;font-weight:600;white-space:nowrap}
+.cj-bar .cj-nav a:hover,.cj-bar .cj-nav a:focus-visible{background:var(--accbg);color:var(--acc)}
+.cj-bar .cj-nav a[aria-current="page"]{background:var(--accbg);color:var(--acc)}
+.cj-bar .cj-user{margin-left:auto;font-size:.8rem;color:var(--mut);border:1px solid var(--line);border-radius:999px;
+  padding:2px 10px;white-space:nowrap;max-width:12em;overflow:hidden;text-overflow:ellipsis}
+@media (max-width:640px){                   /* phone: wordmark + user on one row, the nav on its own row below */
+  .cj-bar{padding:6px 12px}
+  .cj-bar .cj-nav{order:3;flex:1 1 100%;margin-left:-10px}
+  .cj-bar .cj-nav a{padding:4px 8px}}
+.cj-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--cj-unk);flex:none}
+.cj-dot.up{background:var(--cj-up)}.cj-dot.down{background:var(--cj-down)}
+
+/* pages the shell renders itself (home, 401/403/404/502) */
+.cj-page{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;
+  -webkit-text-size-adjust:100%}
+.cj-page *{box-sizing:border-box}
+.cj-page a{color:var(--acc)}
+.cj-main{max-width:1280px;margin:0 auto;padding:12px 16px 32px;min-width:0}
+.cj-main h1{font-size:1.25rem;margin:6px 0 2px}
+.cj-main h2{font-size:1rem;margin:0 0 6px}
+.cj-mut{color:var(--mut);font-size:.85rem;overflow-wrap:anywhere}
+.cj-wrap{overflow-wrap:anywhere;word-break:break-all}
+#cj-snap{margin-bottom:8px}
+.cj-sec{margin:18px 0 8px;font-size:.8rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)}
+.cj-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,260px),1fr));gap:10px}
+.cj-card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:0}
+.cj-list{list-style:none;margin:0;padding:0}
+.cj-list li{display:flex;flex-wrap:wrap;align-items:center;gap:2px 8px;padding:3px 0;min-width:0}
+.cj-mod{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line);
+  border-radius:10px;padding:10px 12px;min-height:56px;text-decoration:none;color:var(--fg);min-width:0}
+a.cj-mod:hover,a.cj-mod:focus-visible{border-color:var(--acc)}
+.cj-page a.cj-mod{color:var(--fg)}
+.cj-mod.off{opacity:var(--dim)}
+.cj-modt{display:flex;flex-direction:column;flex:1 1 auto;min-width:0}
+.cj-ico{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:9px;
+  background:var(--accbg);color:var(--acc);font-weight:800;flex:none}
+.cj-mod.off .cj-ico{background:var(--line);color:var(--mut)}
+.cj-tag{font-size:.72rem;padding:1px 8px;border-radius:999px;border:1px solid var(--line);color:var(--mut);white-space:nowrap}
