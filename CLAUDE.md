@@ -26,6 +26,9 @@ Automated detection and characterization of extracellular vesicles and particles
   - after changing labels, packages or runs by hand: `registry.py import`, then `registry/history_page.py`.
   - watch or stop desktop jobs: the history page **Live** tab (`jobs/monitor.py` must be running), `sync.py status`, `sync.py cancel <job>`, `sync.py stop` / `start`.
   - ship a review: `annotation/apply_review_edits.py` applies **only images marked reviewed** by default; `--all-edits` only when the user asks.
+  - bundles: `make_job_bundle.py` writes a thin job zip + a content-keyed dataset pack (sent to the desktop once); `--single-zip` = old format. Count EVs with the `classes:` map (class 0 only for multi-class models), never raw `n_detections`.
+- **Pushing:** `.githooks/pre-push` (enabled with `git config core.hooksPath .githooks`) scans outgoing commits for keys and private names; never `--no-verify` without the user. The repo is public: codenames only (docs/JOBS.md).
+- **Small score gaps are noise:** v5 F5-config repeats spread EV mask mAP50-95 ±0.008 (models.yaml `test_seed_spread`).
 - **Score segmentation as trained:** Ultralytics `val` needs `overlap_mask=False` for our models (models.yaml). The default carves nested membrane layers into rings and under-reports EV mask mAP (v5 F5: 0.476 vs 0.708).
 - **The importers are the safety net.** Work done outside the tools (a run started by hand, a new review package) shows up on the next `registry.py import`; never edit `*.jsonl` directly.
 - **Never automated:** the Roboflow push (the user's OK each time), promoting a model to production (user only), anything under Box.
