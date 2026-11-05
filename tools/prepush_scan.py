@@ -244,8 +244,11 @@ def main(argv=None):
     ap.add_argument("--patterns", help="private pattern file (default: env CRYOEV_PRIVATE_PATTERNS, "
                                        "else %%USERPROFILE%%/.cryoev/private_patterns.txt)")
     a = ap.parse_args(argv)
-    try:
-        sys.stdout.reconfigure(errors="replace")
+    try:  # piped (git hook): emit UTF-8 for Git Bash / mintty; a real console handles Unicode itself
+        if not sys.stdout.isatty():
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        else:
+            sys.stdout.reconfigure(errors="replace")
     except Exception:
         pass
     if a.self_test:
