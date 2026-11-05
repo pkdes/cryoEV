@@ -18,6 +18,10 @@ per_image_summary.csv gains n_nonev_detected / n_nonev_accepted. The model is
 --model, else the predictions folder's parent name (<out>/<model_id>/predictions).
 Single-class models: every prediction is measured and the outputs are unchanged.
 
+Every image needs its predictions file (predict_models.py writes one per image; empty = no
+detections): a missing one is an error, not zero detections. Paths over 240 characters are
+read with the Windows long-path prefix (data_utils/longpath.py).
+
 Example
 -------
 python -m inference.size_profile_from_predictions \
@@ -37,6 +41,7 @@ from statistics import mean, median
 from PIL import Image
 
 from analysis.morphology import plot_morphology_distributions, save_morphology_csv
+from data_utils.longpath import prediction_file
 from inference.model_classes import ev_classes_for
 from training.train_yolo import load_predictions_yolo_format
 
@@ -86,7 +91,7 @@ def main() -> None:
     for image_path in image_paths:
         with Image.open(image_path) as im:
             w, h = im.size
-        txt = args.predictions_dir / f"{image_path.stem}.txt"
+        txt = prediction_file(args.predictions_dir, image_path.stem, image_path.name)   # missing = error
         masks, confs, classes = load_predictions_yolo_format(txt, w, h)
         if keep_classes is not None:
             n_nonev_detected = sum(1 for c in classes if c not in keep_classes)

@@ -2,7 +2,7 @@
 """Laptop side of the training-job queue (docs/JOBS.md): push bundles to the desktop's queue share, pull results.
 
     python jobs/sync.py push <job id> --bundle <zip> --share \\\\desktop\\cj
-    python jobs/sync.py pull --share \\\\desktop\\cj [--who pujan]
+    python jobs/sync.py pull --share \\\\desktop\\cj [--who pujan] [--all-weights]
     python jobs/sync.py status --share \\\\desktop\\cj
     python jobs/sync.py retry <job id> --share \\\\desktop\\cj
     python jobs/sync.py push-pack --bundle <zip> --share ...   (only a thin bundle's dataset pack, e.g. after pruning)
@@ -19,7 +19,9 @@ push: the job must be a `train` job in the registry (`registry.py job new --type
 pull: for each d/<job>/ with DONE.json not pulled yet, copies runs/<run>/ to <CryoAI>/training outputs/<dataset>/
   runs/<run>/ (new folders only, never overwrites; staged under <dataset>/.pull_tmp/), runs the importer
   (`registry.py import`) and `registry.py set-status <job> done|blocked --reason`, then logs the pull in
-  <CryoAI-laptop>/jobs/pulled.jsonl. Pulling again adds nothing.
+  <CryoAI-laptop>/jobs/pulled.jsonl. Pulling again adds nothing. weights/epoch*.pt (save_period checkpoints,
+  ~209 MB each) stay on the share unless --all-weights; best.pt and last.pt always come; the ledger line's
+  not_pulled = {files, bytes, paths} lists what was left.
 retry: moves d/<job>/ to d/.retired/<job>_<time>/ so the runner picks the job again (nothing is deleted).
 local: push to a folder on this machine (default C:\\cj_local), run jobs/run_job.py on it, then pull.
 Copies use robocopy /E /Z /R:2 /W:5 when the share is a UNC path (never /MIR, /PURGE or /MOV*; exit >= 8 =
@@ -32,6 +34,7 @@ import hashlib
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -51,6 +54,7 @@ from data_utils.path_guard import protected_problem  # noqa: E402
 REGISTRY_PY = REPO / "registry" / "registry.py"
 LEDGER = Path("jobs") / "pulled.jsonl"          # under <CryoAI-laptop>
 PULL_TMP = ".pull_tmp"                           # <CryoAI>/training outputs/<dataset>/.pull_tmp/<run> while copying
+EPOCH_CKPT = "epoch*.pt"                         # runs/<run>/weights/: left on the share by pull unless --all-weights
 LOCAL_QUEUE = Path("C:/cj_local")                # `local`: the laptop's own queue (short: Windows path limit)
 
 
@@ -283,11 +287,38 @@ def guard(path):
         raise SyncError(f"refused: {problem}")
 
 
-def copy_runs(jd, dataset, copier):
-    """d/<job>/runs/<run>/ -> <CryoAI>/training outputs/<dataset>/runs/<run>/ (new only). -> (copied, skipped)."""
+def left_on_share(rd, all_weights=False) -> list:
+    """Files of run folder rd that pull doesn't copy: weights/epoch*.pt (Ultralytics save_period checkpoints,
+    ~209 MB each, most of a run's size) unless all_weights. best.pt and last.pt are always copied."""
+    w = rd / "weights"
+    if all_weights or not w.is_dir():
+        return []
+    return sorted(p for p in w.glob(EPOCH_CKPT) if p.is_file())
+
+
+def copy_run(rd, part, copier, exclude=()):
+    """C.copy_tree(rd, part) without the files in `exclude` (full paths under rd); same copy rules."""
+    if not exclude:
+        C.copy_tree(rd, part, copier)
+        return
+    if C.use_robocopy(copier, rd, part):
+        argv = C.robocopy_argv(rd, part) + ["/XF", *(str(p) for p in exclude)]   # /XF takes full paths
+        r = subprocess.run(argv, capture_output=True, text=True)
+        if r.returncode > C.ROBOCOPY_OK_MAX:
+            raise OSError(f"robocopy {rd} -> {part} failed (exit {r.returncode}): {r.stdout[-400:]}")
+        return
+    skip = {os.path.normcase(os.path.abspath(p)) for p in exclude}
+    shutil.copytree(rd, part, dirs_exist_ok=True, ignore=lambda d, names: [
+        n for n in names if os.path.normcase(os.path.abspath(os.path.join(d, n))) in skip])
+
+
+def copy_runs(jd, dataset, copier, all_weights=False):
+    """d/<job>/runs/<run>/ -> <CryoAI>/training outputs/<dataset>/runs/<run>/ (new only), without
+    weights/epoch*.pt unless all_weights. -> (copied, skipped, not_pulled {files, bytes, paths})."""
     src = jd / "runs"
+    not_pulled = {"files": 0, "bytes": 0, "paths": []}
     if not src.is_dir():
-        return [], []
+        return [], [], not_pulled
     ds = config.cryoai_root() / "training outputs" / dataset
     copied, skipped = [], []
     for rd in sorted(p for p in src.iterdir() if p.is_dir()):
@@ -299,11 +330,15 @@ def copy_runs(jd, dataset, copier):
         guard(part)
         guard(dest)
         part.parent.mkdir(parents=True, exist_ok=True)
-        C.copy_tree(rd, part, copier)                   # raises on failure; the partial copy stays in .pull_tmp
+        leave = left_on_share(rd, all_weights)
+        copy_run(rd, part, copier, leave)               # raises on failure; the partial copy stays in .pull_tmp
         dest.parent.mkdir(parents=True, exist_ok=True)
         part.rename(dest)
         copied.append(rd.name)
-    return copied, skipped
+        not_pulled["files"] += len(leave)
+        not_pulled["bytes"] += sum(p.stat().st_size for p in leave)
+        not_pulled["paths"] += [p.relative_to(src).as_posix() for p in leave]
+    return copied, skipped, not_pulled
 
 
 def registry_cmd(*args):
@@ -314,8 +349,9 @@ def registry_cmd(*args):
     return r.stdout
 
 
-def pull(share, who="pujan", copier="auto"):
-    """-> list of {job, status, copied, skipped}. Raises SyncError after logging what succeeded."""
+def pull(share, who="pujan", copier="auto", all_weights=False):
+    """-> list of {job, status, copied, skipped, not_pulled}. Raises SyncError after logging what succeeded.
+    weights/epoch*.pt stay on the share unless all_weights; not_pulled = {files, bytes, paths} (also in the ledger)."""
     share = Path(share)
     dd = share / C.D
     led_path = ledger_path()
@@ -335,16 +371,19 @@ def pull(share, who="pujan", copier="auto"):
     pulled, errors = [], []
     for jd, done, sha in todo:
         try:
-            copied, skipped = copy_runs(jd, done["dataset"], copier) if done.get("dataset") else ([], [])
-            pulled.append((jd.name, done, sha, copied, skipped))
+            copied, skipped, left = (copy_runs(jd, done["dataset"], copier, all_weights) if done.get("dataset")
+                                     else ([], [], {"files": 0, "bytes": 0, "paths": []}))
+            pulled.append((jd.name, done, sha, copied, skipped, left))
             print(f"[pull] {jd.name}: {done['status']}; copied {copied or 'no runs'}"
-                  + (f"; kept existing {skipped}" if skipped else ""))
+                  + (f"; kept existing {skipped}" if skipped else "")
+                  + (f"; left {left['files']} epoch checkpoint(s) ({left['bytes'] / 1e6:.0f} MB) on the share "
+                     f"(--all-weights copies them)" if left["files"] else ""))
         except (OSError, SyncError) as e:
             errors.append(f"{jd.name}: copy failed: {e}")
     if pulled:
         registry_cmd("import")
     out = []
-    for job_id, done, sha, copied, skipped in pulled:
+    for job_id, done, sha, copied, skipped, left in pulled:
         target = done["status"] if done["status"] in ("done", "cancelled") else "blocked"
         reason = done.get("reason") or ("blocked on the runner" if target == "blocked" else None)
         cur = registry_job(job_id)
@@ -368,8 +407,9 @@ def pull(share, who="pujan", copier="auto"):
         led_path.parent.mkdir(parents=True, exist_ok=True)
         with open(led_path, "a", encoding="utf-8") as f:
             f.write(json.dumps({"job": job_id, "done_sha256": sha, "status": target, "reason": reason,
-                                "copied": copied, "skipped": skipped, "pulled": C.now()}) + "\n")
-        out.append({"job": job_id, "status": target, "copied": copied, "skipped": skipped})
+                                "copied": copied, "skipped": skipped, "all_weights": all_weights,
+                                "not_pulled": left, "pulled": C.now()}) + "\n")
+        out.append({"job": job_id, "status": target, "copied": copied, "skipped": skipped, "not_pulled": left})
     if errors:
         raise SyncError("; ".join(errors))
     return out
@@ -463,7 +503,8 @@ def retry(job_id, share, force=False):
 
 
 # ---------------------------------------------------------------- local (the laptop trains its own job)
-def local(job_id, bundle, queue=LOCAL_QUEUE, allow_big=False, who="pujan", runner_argv=None, max_hours=None):
+def local(job_id, bundle, queue=LOCAL_QUEUE, allow_big=False, who="pujan", runner_argv=None, max_hours=None,
+          all_weights=False):
     """push to a local queue folder, run jobs/run_job.py on it for this job, pull. -> pull() output ([] when
     the runner refused to start). The same code paths as the desktop; only the folder is local."""
     from run_job import is_network_path
@@ -483,7 +524,7 @@ def local(job_id, bundle, queue=LOCAL_QUEUE, allow_big=False, who="pujan", runne
     if rc in (2, 3):
         raise SyncError(f"run_job.py exit {rc} ({'refused at start' if rc == 2 else 'another runner holds the lock'});"
                         f" {job_id} stays queued in {queue}: fix it, then `run_job.py --queue-dir {queue}` and `pull`")
-    return pull(queue, who, copier="shutil")
+    return pull(queue, who, copier="shutil", all_weights=all_weights)
 
 
 def main(argv=None):
@@ -496,6 +537,7 @@ def main(argv=None):
     lp.add_argument("--allow-big", action="store_true", help="y8m/l/x or imgsz > 640 on a small GPU (needs --max-hours)")
     lp.add_argument("--max-hours", type=float, help="the runner stops the trainer after this many hours")
     lp.add_argument("--who", default="pujan", help="people.json id for the set-status lines")
+    lp.add_argument("--all-weights", action="store_true", help="also copy weights/epoch*.pt when pulling")
     for name in ("push", "push-pack", "pull", "status", "retry", "release", "stop", "start", "cancel"):
         p = sub.add_parser(name)
         if name in ("push", "retry", "release", "cancel"):
@@ -514,12 +556,15 @@ def main(argv=None):
             p.add_argument("--hold", action="store_true", help="queue without READY; `release` starts it")
         if name in ("pull", "stop"):
             p.add_argument("--who", default="pujan", help="people.json id for the set-status lines")
+        if name == "pull":
+            p.add_argument("--all-weights", action="store_true", help="also copy runs/<run>/weights/epoch*.pt "
+                           "(~209 MB each; by default they stay on the share)")
         if name == "retry":
             p.add_argument("--force", action="store_true", help="also retry a done job that was never pulled")
     a = ap.parse_args(argv)
     try:
         if a.cmd == "local":
-            local(a.job_id, a.bundle, a.queue, a.allow_big, a.who, max_hours=a.max_hours)
+            local(a.job_id, a.bundle, a.queue, a.allow_big, a.who, max_hours=a.max_hours, all_weights=a.all_weights)
         elif a.cmd == "push":
             q = push(a.job_id, a.bundle, a.share, a.copier, max_hours=a.max_hours, hold=a.hold)
             print(f"[push] {'held (run `release` to start it)' if a.hold else 'queued'}: {q}")
@@ -537,7 +582,7 @@ def main(argv=None):
             if dst:
                 print(f"[start] STOP moved to {dst}: the watcher resumes within a minute")
         elif a.cmd == "pull":
-            pull(a.share, a.who, a.copier)
+            pull(a.share, a.who, a.copier, a.all_weights)
         elif a.cmd == "status":
             status(a.share)
         else:

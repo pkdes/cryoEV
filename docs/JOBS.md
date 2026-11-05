@@ -20,6 +20,7 @@ python jobs/sync.py push job_20261102_v6_y8m --bundle <zip> --share \\<desktop>\
 python jobs/sync.py release job_20261102_v6_y8m --share \\<desktop>\cj      # only after --hold
 python jobs/sync.py status --share \\<desktop>\cj                            # jobs, dataset cache, watcher state and heartbeat
 # 4. Bring results home: run folders -> <CryoAI>/training outputs/<dataset>/runs/, importer, job done|blocked
+#    (without weights/epoch*.pt; --all-weights copies those too)
 python jobs/sync.py pull --share \\<desktop>\cj
 # Pause / resume the watcher (it finishes the current job first; STOP is renamed, never deleted)
 python jobs/sync.py stop  --share \\<desktop>\cj
@@ -146,7 +147,9 @@ C:\cj\STOP                 pause request (`sync.py stop`); `start` renames it to
 - **Pull.**
   - It copies each run into `<dataset>\.pull_tmp\<run>` first, then renames it into `runs\<run>`.
   - An existing run folder is never overwritten (it is reported as kept).
-  - Pulled jobs are logged in `<CryoAI-laptop>\jobs\pulled.jsonl`, keyed by the DONE.json hash, so a second pull adds nothing.
+  - It leaves `runs\<run>\weights\epoch*.pt` on the share: the `save_period` checkpoints are ~209 MB each, about 2.4 of a run's 2.7 GB. `best.pt` and `last.pt` always come (`last.pt` is all a failed or cancelled run has). `--all-weights` copies everything, as before.
+  - Pulled jobs are logged in `<CryoAI-laptop>\jobs\pulled.jsonl`, keyed by the DONE.json hash, so a second pull adds nothing. Each line records `all_weights` and `not_pulled` (`files`, `bytes`, `paths` like `<run>/weights/epoch50.pt`). An epoch checkpoint needed later is copied by hand from `d\<job>\runs\<run>\weights\`; pulling again with `--all-weights` doesn't fetch it (the job is in the ledger and the run folder already exists).
+  - The registry importer reads `run.json` and never the weights, so the registry records are the same either way.
   - It writes the registry only through `registry.py import` and `registry.py set-status <job> done|blocked --reason ... --who pujan`.
 
 ## Dataset cache

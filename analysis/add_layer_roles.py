@@ -16,6 +16,9 @@ drops them before measuring; otherwise a VLDL outline around an EV would make it
 'inner-layer' and the VLDL 'multilayer'. --model, else the predictions folder's
 parent name; single-class models are unchanged.
 
+A missing predictions file is an error (one file per image; empty = no detections); long
+paths are read with the Windows long-path prefix (data_utils/longpath.py).
+
     python -m analysis.add_layer_roles \
         --morphology-csv <out>/morphology/<model>/morphology_all.csv \
         --predictions-dir <out>/predictions/<model>/predictions \
@@ -37,6 +40,7 @@ from PIL import Image
 
 from analysis.layer_count_stats import CONTAINMENT_THRESHOLD, MAX_SIZE_RATIO
 from analysis.multilayer_containment import classify_roles
+from data_utils.longpath import prediction_file
 from training.train_yolo import load_predictions_yolo_format
 
 
@@ -92,8 +96,8 @@ def main() -> None:
         image_path = args.images_dir / rel
         with Image.open(image_path) as im:
             w, h = im.size
-        masks, confs, classes = load_predictions_yolo_format(
-            args.predictions_dir / f'{image_path.stem}.txt', w, h)
+        masks, confs, classes = load_predictions_yolo_format(   # missing file = error
+            prediction_file(args.predictions_dir, image_path.stem, rel), w, h)
         if keep_classes is not None:   # EV class only, before roles (see docstring)
             ev = [i for i, c in enumerate(classes) if c in keep_classes]
             masks, confs = [masks[i] for i in ev], [confs[i] for i in ev]
