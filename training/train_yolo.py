@@ -448,7 +448,7 @@ def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int =
                            shear: float = 0.0, perspective: float = 0.0,
                            fliplr: float = 0.5, flipud: float = 0.5,
                            mosaic: float = 1.0, mixup: float = 0.15, copy_paste: float = 0.3,
-                           mem_fraction: float = 0.85, weights: str = None, cls: float = 0.5,
+                           mem_fraction: float = 0.85, weights: str = None, cls: float = 0.5, seed: int = 42,
                            **kwargs):
     """
     Train YOLO instance segmentation model with optimized hyperparameters for cryo-EM vesicles.
@@ -544,7 +544,7 @@ def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int =
 
             # System
             workers=workers,
-            seed=42,
+            seed=seed,
             deterministic=False,
 
             # Output

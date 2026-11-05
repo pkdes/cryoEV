@@ -274,7 +274,7 @@ def write_run_json(run_dir: Path, result: Dict, config: Dict, ended: str) -> Pat
         ultra = None
     bundle = bundle_id_of(DATASET_ROOT)
     keys = ('patience', 'workers', 'optimizer', 'augmentations', 'overlap_mask', 'mask_ratio', 'cache', 'cls',
-            'lr0', 'time')
+            'lr0', 'time', 'seed')
     rec = {
         'schema': 'run/1', 'id': run_dir.name, 'dataset': DATASET_ID,
         'bundle_id': bundle, 'job_bundle': bundle, 'cryoEV_commit': git_commit(),
@@ -422,7 +422,7 @@ def main():
                 'weights': config.get('weights'),
                 **({'time': config['time']} if config.get('time') else {}),
                 # Optional --single-run overrides; absent keys keep train_yolo's defaults.
-                **{k: config[k] for k in ('cache', 'cls', 'lr0') if config.get(k) is not None},
+                **{k: config[k] for k in ('cache', 'cls', 'lr0', 'seed') if config.get(k) is not None},
                 'hsv_h': 0.015 if augs_on else 0,
                 'hsv_s': 0.7 if augs_on else 0,
                 'hsv_v': 0.4 if augs_on else 0,
@@ -599,6 +599,8 @@ if __name__ == '__main__':
     parser.add_argument("--cache", choices=["ram", "disk"], help="Ultralytics image cache (decoded, resized images)")
     parser.add_argument("--cls", type=float, help="--single-run override for the classification loss gain (default 0.5)")
     parser.add_argument("--lr0", type=float, help="--single-run override for the initial learning rate (default 0.002)")
+    parser.add_argument("--seed", type=int, help="--single-run override for the training seed (default 42); repeats of "
+                        "one config with different seeds measure run-to-run spread")
     parser.add_argument("--eval-splits", default="val,train,test",
                         help="Splits for post-training metrics, overlays and the prediction cache")
     parser.add_argument("--predictions-only", action="store_true",
@@ -630,7 +632,7 @@ if __name__ == '__main__':
                                        ('run_num', cli_args.run_num),
                                        ('rect', None if cli_args.rect is None else bool(cli_args.rect)),
                                        ('cache', cli_args.cache), ('cls', cli_args.cls),
-                                       ('lr0', cli_args.lr0), ('imgsz', cli_args.imgsz),
+                                       ('lr0', cli_args.lr0), ('imgsz', cli_args.imgsz), ('seed', cli_args.seed),
                                        ('workers', cli_args.workers)] if v is not None}
         cfg = {**BEST_CONFIG, **overrides}
         if overrides:
@@ -638,7 +640,7 @@ if __name__ == '__main__':
                            + (f", fine-tuned from {Path(cfg['weights']).parent.name}" if cfg.get('weights') else "")
                            + (f", time cap {cfg['time']} h" if cfg.get('time') else "")
                            + ("" if cfg['rect'] else ", rect=False (mosaic/mixup on)")
-                           + "".join(f", {k}={cfg[k]}" for k in ('cls', 'lr0') if cfg.get(k) is not None))
+                           + "".join(f", {k}={cfg[k]}" for k in ('cls', 'lr0', 'seed') if cfg.get(k) is not None))
         EXPERIMENTS = [cfg]
     elif cli_args.queue:
         EXPERIMENTS = build_queue(cli_args.queue, cli_args.start_run_num,

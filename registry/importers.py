@@ -370,7 +370,7 @@ class Importer:
         bundle = j.get("job_bundle") or j.get("bundle_id")
         bundle = bundle if ids.is_id("bundle", bundle) else None
         st = j.get("status")
-        keep = ("arch", "imgsz", "batch", "epochs", "patience", "rect", "weights_init")
+        keep = ("arch", "imgsz", "batch", "epochs", "patience", "rect", "weights_init", "seed")
         return {"id": rid, "dataset": dataset, "job_bundle": bundle,
                 "job_bundle_gap": None if bundle else "no bundle id in run.json",
                 "config": {k: v for k, v in (j.get("config") or {}).items() if k in keep},
