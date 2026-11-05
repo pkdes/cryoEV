@@ -641,18 +641,22 @@ def validate_yolo_model(model_path: str, data_yaml: str, imgsz: int = 1024, batc
     return results
 
 
-def load_predictions_from_model(model_path: str, img_path: str, imgsz: int, 
-                                conf: float, iou: float, device: str) -> Tuple[List[np.ndarray], List[float]]:
+def load_predictions_from_model(model_path: str, img_path: str, imgsz: int,
+                                conf: float, iou: float, device: str,
+                                max_det: int = 300) -> Tuple[List[np.ndarray], List[float]]:
     """
     Load predictions directly from model with specified thresholds.
     Returns masks and their confidence scores.
+
+    max_det is ultralytics' per-image detection cap (its default, 300, truncates dense
+    fields). Weights are cached per path (_YOLO_CACHE), so a folder-wide loop loads once.
     """
-    from ultralytics import YOLO
     import cv2
-    
-    model = YOLO(model_path)
-    result = model.predict(source=str(img_path), imgsz=imgsz, conf=conf, iou=iou, 
-                          device=device, verbose=False, retina_masks=True)[0]
+
+    model = _cached_yolo(model_path)
+    result = model.predict(source=str(img_path), imgsz=imgsz, conf=conf, iou=iou,
+                          device=device, verbose=False, retina_masks=True,
+                          max_det=max_det)[0]
     
     img = Image.open(img_path)
     w, h = img.size
@@ -701,6 +705,14 @@ def load_gt_masks_from_labels(label_path: str, img_width: int, img_height: int) 
 _YOLO_CACHE = {}
 
 
+def _cached_yolo(model_path):
+    """One YOLO per weights path for the life of the process."""
+    if model_path not in _YOLO_CACHE:
+        from ultralytics import YOLO
+        _YOLO_CACHE[model_path] = YOLO(model_path)
+    return _YOLO_CACHE[model_path]
+
+
 def load_predictions_with_classes_from_model(model_path: str, img_path: str, imgsz: int,
                                              conf: float, iou: float, device: str,
                                              max_det: int = 300) -> Tuple[List[np.ndarray], List[float], List[int]]:
@@ -710,12 +722,9 @@ def load_predictions_with_classes_from_model(model_path: str, img_path: str, img
     truncates dense fields, so callers running over crowded images should raise it.
     Weights are cached per path so a folder-wide run loads each model once.
     """
-    from ultralytics import YOLO
     import cv2
 
-    if model_path not in _YOLO_CACHE:
-        _YOLO_CACHE[model_path] = YOLO(model_path)
-    model = _YOLO_CACHE[model_path]
+    model = _cached_yolo(model_path)
     # Multi-class models: class-agnostic NMS so one object can't come out as both
     # EV and Undetermined (a near-identical pair would read as a fake multilayer).
     result = model.predict(source=str(img_path), imgsz=imgsz, conf=conf, iou=iou,

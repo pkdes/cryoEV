@@ -5,7 +5,10 @@ Per model, writes to <out>/<model_id>/:
   predictions/<stem>.txt  -- standard prediction cache format ('class conf x1 y1 ...', normalized),
                              readable by rank_predictions.py, multilayer_role_analysis.py, etc.
   overlays/<stem>.png     -- predicted polygon outlines on the image
-Plus <out>/summary.csv: one row per image x model (n_detections, mean_conf).
+Plus <out>/summary.csv: one row per image x model (n_detections, mean_conf). These are RAW
+detections: for a multi-class model (models.yaml `classes:`, e.g. v5: EV + non-EV)
+n_detections and mean_conf cover every class. EV counts come from
+size_profile_from_predictions / add_layer_roles, which keep the EV class only.
 
 Each model runs at its own registered imgsz by default -- do not override it casually, or the
 comparison is skewed. --imgsz exists for one documented case: inputs that have been rescaled to

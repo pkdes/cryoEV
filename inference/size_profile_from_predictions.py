@@ -12,6 +12,12 @@ emits the identical schema, so `aggregate_size_results.py` and
 morphology fields are in nm). For a scale-matched export it is constant across
 images, which is the whole point of exporting at one spacing.
 
+Multi-class models (models.yaml `classes:`, e.g. v5 ev_nonev: 0 = EV, 1 = non-EV):
+only the EV class is measured, so object_id, counts and sizes are EV-only, and
+per_image_summary.csv gains n_nonev_detected / n_nonev_accepted. The model is
+--model, else the predictions folder's parent name (<out>/<model_id>/predictions).
+Single-class models: every prediction is measured and the outputs are unchanged.
+
 Example
 -------
 python -m inference.size_profile_from_predictions \
@@ -31,6 +37,7 @@ from statistics import mean, median
 from PIL import Image
 
 from analysis.morphology import plot_morphology_distributions, save_morphology_csv
+from inference.model_classes import ev_classes_for
 from training.train_yolo import load_predictions_yolo_format
 
 Image.MAX_IMAGE_PIXELS = None
@@ -57,8 +64,12 @@ def main() -> None:
     ap.add_argument("--pixel-size", type=float, default=None, help="nm/px of the predicted images")
     ap.add_argument("--confidence-threshold", type=float, default=0.5,
                     help="acceptance threshold applied after detection, as in batch_size_profile")
+    ap.add_argument("--model", default=None,
+                    help="model_id in models/models.yaml (default: the predictions folder's parent "
+                         "name when registered); a multi-class model keeps its EV class only")
     ap.add_argument("--no-plot", action="store_true")
     args = ap.parse_args()
+    keep_classes = ev_classes_for(args.model, args.predictions_dir)
 
     from analysis.morphology import analyze_instances
 
@@ -76,7 +87,13 @@ def main() -> None:
         with Image.open(image_path) as im:
             w, h = im.size
         txt = args.predictions_dir / f"{image_path.stem}.txt"
-        masks, confs, _ = load_predictions_yolo_format(txt, w, h)
+        masks, confs, classes = load_predictions_yolo_format(txt, w, h)
+        if keep_classes is not None:
+            n_nonev_detected = sum(1 for c in classes if c not in keep_classes)
+            n_nonev_accepted = sum(1 for c, cf in zip(classes, confs)
+                                   if c not in keep_classes and cf >= args.confidence_threshold)
+            ev = [i for i, c in enumerate(classes) if c in keep_classes]
+            masks, confs = [masks[i] for i in ev], [confs[i] for i in ev]
         n_detected = len(masks)
 
         keep = [i for i, c in enumerate(confs) if c >= args.confidence_threshold]
@@ -101,6 +118,9 @@ def main() -> None:
             "mean_equivalent_diameter": float(mean(diams)) if diams else "",
             "median_equivalent_diameter": float(median(diams)) if diams else "",
         })
+        if keep_classes is not None:
+            per_image_rows[-1]["n_nonev_detected"] = n_nonev_detected
+            per_image_rows[-1]["n_nonev_accepted"] = n_nonev_accepted
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     if all_records:
