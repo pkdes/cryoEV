@@ -43,7 +43,7 @@
     var l1 = el('span', 'cj-data-graph-l1');
     l1.appendChild(el('span', 'cj-data-graph-tag', n.kind));
     if (isProd(n)) l1.appendChild(el('span', 'cj-data-graph-st cj-data-graph-stprod', '★ production'));
-    else if (n.status != null) l1.appendChild(el('span', 'cj-data-graph-st', String(n.status).replace('_', ' ')));
+    else if (n.status != null) l1.appendChild(el('span', 'cj-data-graph-st', String(n.status).replaceAll('_', ' ')));
     b.appendChild(l1);
     b.appendChild(el('span', 'cj-data-graph-id', n.title));
     if (n.sub) {
@@ -144,7 +144,7 @@
     if (!f) return;
     wrap.scrollLeft = Math.max(0, f.offsetLeft - (wrap.clientWidth - f.offsetWidth) / 2);
     f.scrollIntoView({block: 'center', inline: 'nearest'});
-    f.focus({preventScroll: true});
+    if (f.tagName === 'A') f.focus({preventScroll: true});      // a box without a link is not focusable
   }
 
   function start(data) {

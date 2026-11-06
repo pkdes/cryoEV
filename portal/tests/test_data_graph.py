@@ -52,7 +52,16 @@ HID_JOB = "job_20261106_revise_ps_20261106_aaaa11"  # revise job named after the
 OUT_JOB = "job_20261106_annotate_out"               # names the hidden package only in its outputs
 LV_HID = "lv_20261106_fromhidden"                   # label version built from the hidden package: stays
 OWN_PS, OWN_PKG = "ps_20261106_bbbb22", "pred_ps_20261106_bbbb22"   # the advanced user's own
-HIDDEN_STRINGS = (HID_PS, HID_PKG, HID_RF, HID_JOB, OUT_JOB, "aaaa11")
+OWN_PART = "own_part1_20261106"                     # a lab part of the user's own prediction package
+LAB_PART = "lab_part1_20261106"                     # a lab part (kind part) of the HIDDEN prediction package
+NOTED = "rf_noted_20261106"                         # visible export whose note / status quote the hidden set
+SHORT_RF, SHORT_RF2, SHORT_DS = "rf_x", "rf_x_v2", "ds_from_rf_x_v2"   # QC: another's short-id export vs the lab's
+SHORT_JOB_OK, SHORT_JOB_HID = "job_build_rf_x_v2", "job_from_rf_x"       # ... a job on rf_x_v2 / one naming rf_x
+LATE_RF = "rf_owner_later_20261106"                 # first line owned by another, last line has no owner
+LATE_PS = "ps_20261106_cccc33"                      # adv's, but the last line has no owner (and no request.json)
+HISTORY_ONLY = "rf_history_only_20261106"           # in a file History reads and Data does not
+HIDDEN_STRINGS = (HID_PS, HID_PKG, HID_RF, HID_JOB, OUT_JOB, "aaaa11", LAB_PART, SHORT_JOB_HID, '"rf_x"', LATE_PS,
+                  HISTORY_ONLY)
 SAMPLE_PS = "ps_20261105_abc123"                    # the samples' prediction set (another owner, so hidden too)
 
 
@@ -65,24 +74,47 @@ def fixture_rows(with_hidden_ps=True) -> dict:
             {"schema": "roboflow_export/1", "id": LONELY, "logged": "2026-11-06T09:00:00", "status": "imported",
              "note": "a lonely export"},
             {"schema": "roboflow_export/1", "id": HID_RF, "logged": "2026-11-06T09:00:00", "owner": "otherperson",
-             "status": "imported", "note": "their export"}],
+             "status": "imported", "note": "their export"},
+            {"schema": "roboflow_export/1", "id": NOTED, "logged": "2026-11-06T09:00:00",
+             "status": "waiting_on_" + HID_PS, "note": "copied from " + HID_PS},
+            {"schema": "roboflow_export/1", "id": SHORT_RF, "logged": "2026-11-06T09:00:00", "owner": "otherperson",
+             "status": "imported"},
+            {"schema": "roboflow_export/1", "id": SHORT_RF2, "logged": "2026-11-06T09:00:00", "status": "imported",
+             "derived_from": SHORT_RF},
+            {"schema": "roboflow_export/1", "id": LATE_RF, "logged": "2026-11-06T09:00:00", "owner": "otherperson",
+             "status": "imported"},
+            {"schema": "roboflow_export/1", "id": LATE_RF, "logged": "2026-11-06T09:30:00", "status": "imported"}],
+        "dataset": [{"schema": "dataset/1", "id": SHORT_DS, "logged": "2026-11-06T09:10:00", "status": "built",
+                     "inputs": [{"entity": "roboflow_export", "id": SHORT_RF2, "role": "source"}]}],
         "prediction_set": [
             {"schema": "prediction_set/1", "id": OWN_PS, "logged": "2026-11-06T10:00:00", "owner": "adv",
-             "model": MODEL, "status": "done", "inputs": [{"entity": "model", "id": MODEL, "role": "model"}]}],
+             "model": MODEL, "status": "done", "inputs": [{"entity": "model", "id": MODEL, "role": "model"}]},
+            {"schema": "prediction_set/1", "id": LATE_PS, "logged": "2026-11-06T10:00:00", "owner": "adv",
+             "model": MODEL, "status": "running"},
+            {"schema": "prediction_set/1", "id": LATE_PS, "logged": "2026-11-06T10:30:00", "status": "done"}],
         "review_package": [
             {"schema": "review_package/1", "id": HID_PKG, "logged": "2026-11-06T10:00:00", "kind": "prediction",
              "owner": "otherperson", "prediction_set": HID_PS, "model": MODEL, "n_images": 4, "status": "in_review"},
             {"schema": "review_package/1", "id": OWN_PKG, "logged": "2026-11-06T10:00:00", "kind": "prediction",
-             "owner": "adv", "prediction_set": OWN_PS, "model": MODEL, "n_images": 2, "status": "in_review"}],
+             "owner": "adv", "prediction_set": OWN_PS, "model": MODEL, "n_images": 2, "status": "in_review"},
+            {"schema": "review_package/1", "id": LAB_PART, "logged": "2026-11-06T10:05:00", "kind": "part",
+             "parent": HID_PKG, "n_images": 2, "status": "in_review"},
+            {"schema": "review_package/1", "id": OWN_PART, "logged": "2026-11-06T10:05:00", "kind": "part",
+             "parent": OWN_PKG, "n_images": 1, "status": "in_review"}],
         "job": [
             {"schema": "job/1", "id": HID_JOB, "logged": "2026-11-06T11:00:00", "type": "revise", "status": "ready",
              "inputs": [{"entity": "model", "id": MODEL, "role": "predictions"}], "outputs": []},
             {"schema": "job/1", "id": OUT_JOB, "logged": "2026-11-06T11:00:00", "type": "annotate",
-             "status": "ready", "inputs": [], "outputs": [{"entity": "review_package", "id": HID_PKG}]}],
+             "status": "ready", "inputs": [], "outputs": [{"entity": "review_package", "id": HID_PKG}]},
+            {"schema": "job/1", "id": SHORT_JOB_OK, "logged": "2026-11-06T11:00:00", "type": "annotate",
+             "status": "ready", "inputs": [{"entity": "roboflow_export", "id": SHORT_RF2, "role": "base"}]},
+            {"schema": "job/1", "id": SHORT_JOB_HID, "logged": "2026-11-06T11:00:00", "type": "annotate",
+             "status": "ready", "inputs": [{"entity": "roboflow_export", "id": SHORT_RF, "role": "base"}]}],
         "label_version": [
             {"schema": "label_version/1", "id": LV_HID, "logged": "2026-11-06T12:00:00", "pkg": HID_PKG,
              "status": "active", "n_images_applied": 3,
-             "inputs": [{"entity": "review_package", "id": HID_PKG, "role": "edits"}]}]}
+             "inputs": [{"entity": "review_package", "id": HID_PKG, "role": "edits"},
+                        {"entity": "model", "id": MODEL, "role": "checked against " + HID_PS}]}]}
     if with_hidden_ps:
         rows["prediction_set"].append(
             {"schema": "prediction_set/1", "id": HID_PS, "logged": "2026-11-06T10:00:00", "owner": "otherperson",
@@ -102,7 +134,17 @@ def write_registry(root: Path, with_hidden_ps=True):
     for ent, recs in extra.items():
         if not (root / f"{ent}.jsonl").exists():
             (root / f"{ent}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
+    (root / "zz_extra.jsonl").write_text(json.dumps(       # History reads every *.jsonl; Data only <entity>.jsonl
+        {"schema": "roboflow_export/1", "id": HISTORY_ONLY, "logged": "2026-11-06T09:00:00", "status": "imported"})
+        + "\n", encoding="utf-8")
     clear_caches()
+
+
+def write_disk(laptop: Path):
+    """The user's own prediction set's request.json: its owner, which a part of its package inherits."""
+    req = laptop / "predict" / OWN_PS / "request.json"
+    req.parent.mkdir(parents=True, exist_ok=True)
+    req.write_text(json.dumps({"owner": "adv"}), encoding="utf-8")
 
 
 def clear_caches():
@@ -155,6 +197,7 @@ class Function(Roots, unittest.TestCase):
         cls.reg_absent = cls.tmp / "registry_no_child"
         write_registry(cls.reg)
         write_registry(cls.reg_absent, with_hidden_ps=False)
+        write_disk(cls.tmp / "CryoAI-laptop")
 
     @classmethod
     def tearDownClass(cls):
@@ -195,7 +238,8 @@ class Function(Roots, unittest.TestCase):
         self.assertIn(OWN_PKG, t)
         self.assertIn(LV_HID, t)                                # built from a hidden set: the node stays ...
         i = list(t).index(LV_HID)
-        self.assertEqual([e for e in g["edges"] if e[1] == i], [])      # ... its edge from the hidden package goes
+        im = list(t).index(MODEL)                               # ... its edge from the hidden package goes; the
+        self.assertEqual([e for e in g["edges"] if e[1] == i], [[im, i, "input"]])     # model's stays (role blanked)
         ia = [node_key(n) for n in self.graph(ADMIN)["nodes"]].index("label_version|" + LV_HID)
         self.assertTrue([e for e in self.graph(ADMIN)["edges"] if e[1] == ia])     # control: the admin has the edge
 
@@ -251,6 +295,83 @@ class Function(Roots, unittest.TestCase):
         g = D.lab_graph(D.read_registry(None)[0], ADMIN, self.tmp / "nope")
         self.assertEqual(g["error"], "registry folder not found")
 
+    def in_tree(self, v, kind, eid, reg=None):
+        records, _ = D.read_registry(reg or self.reg)
+        return D.lineage_tree(D.with_disk_packages(records), v, kind, eid) is not None
+
+    def test_short_hidden_id_does_not_hide_the_labs_records(self):
+        g = self.graph(ADV)
+        t = by_title(g)
+        for eid in (SHORT_RF2, SHORT_DS, SHORT_JOB_OK):
+            self.assertIn(eid, t)                               # the lab's rf_x_v2 and what was built from it
+        self.assertNotIn(SHORT_RF, t)                           # another person's rf_x
+        self.assertNotIn(SHORT_JOB_HID, t)                      # a job naming rf_x (exact value, a whole word)
+        self.assertTrue(self.in_tree(ADV, "images", SHORT_RF2))         # graph and tree agree
+        self.assertTrue(self.in_tree(ADV, "dataset", SHORT_DS))
+        self.assertFalse(self.in_tree(ADV, "images", SHORT_RF))
+        i2 = list(t).index(SHORT_RF2)
+        self.assertEqual([e for e in g["edges"] if e[1] == i2], [])        # its derived_from edge to rf_x goes
+        a = by_title(self.graph(ADMIN))
+        for eid in (SHORT_RF, SHORT_RF2, SHORT_DS, SHORT_JOB_OK, SHORT_JOB_HID):
+            self.assertIn(eid, a)                               # control
+        quotes = D.hidden_matcher({"rf_x", "", "ps_20261106_aaaa11"})
+        self.assertEqual([quotes(s) for s in ("rf_x", "from rf_x.", "rf_x_v2", "xrf_x", "", "pred_ps_20261106_aaaa11")],
+                         [True, True, False, False, False, True])
+
+    def test_visibility_follows_datas_last_line(self):
+        g = by_title(self.graph(ADV))
+        self.assertIn(LATE_RF, g)                               # last line has no owner: visible, as in the tree
+        self.assertTrue(self.in_tree(ADV, "images", LATE_RF))
+        self.assertNotIn(LATE_PS, g)                            # a private set with no known owner: admins only
+        self.assertFalse(self.in_tree(ADV, "images", LATE_PS))
+        self.assertNotIn(HISTORY_ONLY, g)                       # Data has no record: unknown owner, admins only
+        a = by_title(self.graph(ADMIN))
+        self.assertIn(LATE_PS, a)
+        self.assertIn(HISTORY_ONLY, a)                          # admin parity with History
+
+    def test_part_of_a_hidden_prediction_package(self):
+        g = by_title(self.graph(ADV))
+        self.assertNotIn(LAB_PART, g)
+        self.assertFalse(self.in_tree(ADV, "images", LAB_PART))
+        self.assertIn(OWN_PART, g)                              # a part of their own package (owner via request.json)
+        self.assertTrue(self.in_tree(ADV, "images", OWN_PART))
+        self.assertIn(LAB_PART, by_title(self.graph(ADMIN)))    # control
+        self.assertTrue(self.in_tree(ADMIN, "images", LAB_PART))
+
+    def test_note_status_and_role_quoting_a_hidden_id_are_blanked(self):
+        n = by_title(self.graph(ADV))[NOTED]
+        self.assertEqual((n["sub"], n["status"]), ("", ""))
+        a = self.graph(ADMIN)
+        self.assertEqual(by_title(a)[NOTED]["sub"], "copied from " + HID_PS)      # control: the admin sees the note
+        self.assertIn("checked against " + HID_PS, [e[2] for e in a["edges"]])
+        self.assertIn("input", [e[2] for e in self.graph(ADV)["edges"]])
+
+    def test_graph_built_once_per_registry_state_and_group(self):
+        clear_caches()
+        hpm = D._history_module()
+        real, calls = hpm.build_model, []
+        hpm.build_model = lambda *a: (calls.append(1), real(*a))[1]
+        try:
+            self.graph(ADV)
+            self.graph(ADV)
+            self.graph(viewer("adv", "basic"))                  # same hidden records: same group
+            self.assertEqual(len(calls), 1)
+            self.graph(ADMIN)
+            self.assertEqual(len(calls), 2)
+            f = self.reg / "model.jsonl"
+            saved = f.read_bytes()
+            try:
+                with open(f, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"schema": "model/1", "id": "m_late", "logged": "2026-11-06T13:00:00"}) + "\n")
+                D._registry_cache.clear()
+                self.assertIn("m_late", by_title(self.graph(ADMIN)))
+                self.assertEqual(len(calls), 3)
+            finally:
+                f.write_bytes(saved)
+                clear_caches()
+        finally:
+            hpm.build_model = real
+
     def test_registry_files_untouched(self):
         before = {f.name: f.read_bytes() for f in self.reg.iterdir()}
         self.graph(ADMIN)
@@ -267,6 +388,7 @@ class Base(Roots, unittest.TestCase):
         cls.adv_key = A.add_key(cls.env.roster, "adv", "advanced")
         cls.bas_key = A.add_key(cls.env.roster, "bas", "basic")
         write_registry(cls.env.registry)
+        write_disk(cls.env.tmp / "CryoAI-laptop")
         cls.env.write_live(T.live_doc())
         cls.p = T.Portal(cls.env.config())
         cls.tok = {"admin": T.login(cls.p.port, cls.env.key), "advanced": T.login(cls.p.port, cls.adv_key),

@@ -50,9 +50,11 @@ Rules:
     listed images (datasets and exports shown) that trace to no session, as a number only.
   - Lab graph: History's own reader and builders (registry/history_page.py read_registry, build_model ->
     graph_model, imported, never changed), run on a FILTERED registry: every prediction set, review package and
-    Roboflow export the viewer may not see (set_is_visible, the rule above) is removed BEFORE the graph is built,
-    and so is every job that names one (any value, or its own id, containing a hidden id) and any record whose id
-    contains a hidden id. So the fade-out and the node order never reflect a hidden record; a label version or
+    Roboflow export the viewer may not see (set_is_visible on Data's own record, the rule above; one Data does not
+    have is for admins only) is removed BEFORE the graph is built, and so is every job that quotes one (any value or
+    key, or its own id; ids under 6 characters as whole words only) and any record whose id is a hidden id or its
+    pred_ / _part<N> form. A part whose parent is a prediction package is private like its parent. A subtitle,
+    status or edge role quoting a hidden id is blanked. So the fade-out and the node order never reflect a hidden record; a label version or
     dataset built from a hidden set stays and only that edge goes. Each node sends only its id (History's box
     text), kind, column, faded flag, part-of, subtitle, status and its Data Lineage address; edges are
     [from, to, role]. ?focus names a node to highlight; a key the viewer may not see highlights nothing.
@@ -476,12 +478,13 @@ def is_private_set(entity: str, record: dict) -> bool:
     if entity == "prediction_set":
         return True
     return (entity == "review_package" and (record.get("kind") == "prediction" or bool(record.get("prediction_set"))
-                                            or str(record.get("id", "")).startswith("pred_")))
+                                            or str(record.get("id", "")).startswith("pred_")
+                                            or str(record.get("parent") or "").startswith("pred_")))  # a part of one
 
 
 def set_owner(entity: str, record: dict):
     """Owner id of a private set: the registry record, else the package's review_package.json, else the prediction
-    set's request.json; None when none says."""
+    set's request.json (for a part of a prediction package: its parent's set); None when none says."""
     def compute():
         owner = record.get("owner")
         if _text(owner):
@@ -495,7 +498,9 @@ def set_owner(entity: str, record: dict):
                 return meta["owner"]
         ps = set_id if entity == "prediction_set" else (
             _text(record.get("prediction_set")) or _text(meta.get("prediction_set"))
-            or (set_id[len("pred_"):] if set_id.startswith("pred_") else None))
+            or (set_id[len("pred_"):] if set_id.startswith("pred_") else None)
+            or (str(record.get("parent"))[len("pred_"):] if str(record.get("parent") or "").startswith("pred_")
+                else None))
         root = predict_folder()
         if root is not None and ps and PREDICTION_SET_ID.match(ps):
             owner = read_small_json(root / ps / "request.json").get("owner")
@@ -1648,7 +1653,9 @@ GRAPH_SHORT = {"roboflow_export": "export", "review_package": "package", "label_
                "prediction_set": "predictions"}                 # the box's tag, as History's drawGraph SHORT
 GRAPH_NODE_KEYS = ("title", "kind", "col", "hist", "part", "sub", "status", "url")   # everything a node sends
 SCRIPT = HERE.parent / "static" / "data.js"                    # served as /data/data.js (app.py serves only /cj/*)
-_graph_cache: dict = {}
+GRAPH_CACHE_N = 32                  # registry reads and built graphs kept (one graph per registry state per group)
+GRAPH_SHORT_ID = 6                  # a hidden id shorter than this is matched as a whole word, never as a substring
+_graph_cache: dict = {}             # key -> value, oldest first
 _history_module_cache = None
 
 
@@ -1663,55 +1670,118 @@ def _history_module():
     return _history_module_cache
 
 
+def _recall(key):
+    with _lock:
+        return _graph_cache.get(key)
+
+
+def _remember(key, value):
+    with _lock:
+        _graph_cache.pop(key, None)
+        _graph_cache[key] = value
+        while len(_graph_cache) > GRAPH_CACHE_N:
+            _graph_cache.pop(next(iter(_graph_cache)))
+
+
+def files_signature(paths) -> tuple:
+    """(path, mtime_ns, size) per file; a file that cannot be read counts as (path, None, None)."""
+    out = []
+    for p in paths:
+        try:
+            st = os.stat(p)
+            out.append((str(p), st.st_mtime_ns, st.st_size))
+        except OSError:
+            out.append((str(p), None, None))
+    return tuple(out)
+
+
 def history_registry(root) -> tuple:
-    """History's own read of <root>/*.jsonl -> ((stamp, current, history, stats) or None, error or None), one read
-    per root per REGISTRY_TTL_S. Records are shared between requests and never changed."""
+    """History's own read of <root>/*.jsonl (plus the label versions' owner files it reads) -> ((signature, current,
+    history, stats) or None, error or None). Read again only when one of those files changes (mtime_ns, size); a
+    failed read is not kept. Records are shared between requests and never changed."""
     if root is None:
         return None, "no registry folder configured"
     if not Path(root).is_dir():
         return None, "registry folder not found"
-
-    def compute():
-        try:
-            hp = _history_module()
-            current, history, stats = hp.read_registry(hp.input_files([Path(root)]))
-        except Exception as exc:                       # an unreadable registry must not take the page down
-            return None, f"registry not readable ({type(exc).__name__})"
-        return (time.monotonic(), current, history, stats), None
-    return cached(_graph_cache, ("read", str(root)), compute, REGISTRY_TTL_S)
+    hp = _history_module()
+    try:
+        files = hp.input_files([Path(root)])
+    except OSError as exc:
+        return None, f"registry not readable ({type(exc).__name__})"
+    sig = files_signature(files)                       # taken BEFORE the read: a write during it shows next time
+    hit = _recall(("read", str(root)))
+    if hit is not None and hit[0] == sig and files_signature(hit[1]) == hit[2]:
+        return hit[3], None
+    try:
+        current, history, stats = hp.read_registry(files)
+    except Exception as exc:                           # an unreadable registry must not take the page down
+        return None, f"registry not readable ({type(exc).__name__})"
+    owners = sorted({str(r["owner"]).partition("#")[0] for k, r in current.items()
+                     if k.split("|", 1)[0] in ("label_version", "inference_check") and _text(r.get("owner"))})
+    owner_sig = files_signature(owners)
+    base = (sig + owner_sig, current, history, stats)
+    _remember(("read", str(root)), (sig, owners, owner_sig, base))
+    return base, None
 
 
 def _strings_in(value):
-    """Every string inside a record value (nested dicts and lists included)."""
+    """Every string inside a record value (nested dicts and lists included, dict keys too)."""
     if isinstance(value, str):
         yield value
     elif isinstance(value, dict):
-        for v in value.values():
+        for k, v in value.items():
+            yield from _strings_in(k)
             yield from _strings_in(v)
     elif isinstance(value, (list, tuple)):
         for v in value:
             yield from _strings_in(v)
 
 
-def graph_hidden(viewer: Viewer, current: dict) -> tuple:
-    """-> (keys to leave out of the graph's INPUT, hidden set ids). A prediction set, review package or Roboflow
-    export the viewer may not see; a job that names one anywhere (inputs, outputs, package, its own id ...); any
-    record whose id contains a hidden id (its box would quote it). Fails closed: substring tests, not equality."""
+def hidden_matcher(hidden_ids):
+    """-> text -> True when the text quotes a hidden id: a substring test for ids of GRAPH_SHORT_ID characters or
+    more, a whole-word test for shorter ones (so a hidden 'rf_x' does not catch 'rf_x_v2'); empty ids never match."""
+    long_ids = [h for h in hidden_ids if len(h) >= GRAPH_SHORT_ID]
+    short = [h for h in hidden_ids if 0 < len(h) < GRAPH_SHORT_ID]
+    word = re.compile("|".join(rf"(?<![A-Za-z0-9_]){re.escape(h)}(?![A-Za-z0-9_])" for h in short)) if short else None
+
+    def quotes(text) -> bool:
+        text = str(text)
+        return any(h in text for h in long_ids) or bool(word and word.search(text))
+    return quotes
+
+
+def derived_ids(hidden_ids):
+    """Matches a record id that IS a hidden id or a known derived form: pred_<id>, <id>_part<N>, pred_<id>_part<N>."""
+    alts = "|".join(re.escape(h) for h in sorted(hidden_ids) if h)
+    return re.compile(rf"(?:pred_)?(?:{alts})(?:_part\d+)?") if alts else None
+
+
+def graph_hidden(records, viewer: Viewer, current: dict) -> tuple:
+    """-> (History keys to leave out of the graph's INPUT, hidden set ids). Visibility is decided on Data's own record
+    (records[entity][id], the last line, as the Lineage tree reads it): a prediction set, review package or Roboflow
+    export the viewer may not see, or one Data does not have (unknown owner: admins only). Then every job that quotes
+    a hidden id anywhere (any string or key, its own id too: hidden_matcher), and any other record whose id is a
+    hidden id or a derived form of one (derived_ids). A dataset or label version built from a hidden set stays."""
     drop, hidden_ids = set(), set()
-    for key, rec in current.items():
-        entity = key.split("|", 1)[0]
-        if entity in SET_ENTITIES and not set_is_visible(viewer, entity, rec):
+    for key in current:
+        entity, rid = key.split("|", 1)
+        if entity not in SET_ENTITIES:
+            continue
+        mine = records.get(entity, {}).get(rid)
+        if not (set_is_visible(viewer, entity, mine) if mine else viewer.may_see(None)):
             drop.add(key)
-            hidden_ids.add(str(rec.get("id")))
-    if not hidden_ids:
+            hidden_ids.add(rid)
+    quotes, derived = hidden_matcher(hidden_ids), derived_ids(hidden_ids)
+    if derived is None:
         return drop, hidden_ids
     for key, rec in current.items():
         if key in drop:
             continue
-        rid = key.split("|", 1)[1]
-        if any(h in rid for h in hidden_ids):
-            drop.add(key)
-        elif key.startswith("job|") and any(h in s for s in _strings_in(rec) for h in hidden_ids):
+        entity, rid = key.split("|", 1)
+        if entity == "job":
+            if quotes(rid) or any(quotes(s) for s in _strings_in(rec)):
+                drop.add(key)
+        elif derived.fullmatch(rid):
             drop.add(key)
     return drop, hidden_ids
 
@@ -1728,32 +1798,39 @@ def graph_url(walker: "Lineage", entity: str, rid: str):
 def lab_graph(records, viewer: Viewer, root, focus=None) -> dict:
     """History's lineage graph for this viewer: {schema, cols, nodes: [{GRAPH_NODE_KEYS}], edges: [[from, to, role]],
     focus: node index or None, error}. The registry is filtered BEFORE graph_model runs (graph_hidden), with History's
-    own read_registry / build_model, so an admin gets exactly History's graph."""
+    own read_registry / build_model, so an admin gets exactly History's graph.
+    Cost: build_model also builds History's image lookup and model pages (about 0.4 s on the lab registry, 11-2026);
+    the graph is kept per registry state (the files' mtime_ns + size) and per set of hidden records (a visibility
+    group), so it is built again only when the registry changes or a new group asks. A subtitle, status or edge role
+    that quotes a hidden id is blanked."""
     base, error = history_registry(root)
     if base is None:
         return {"schema": SCHEMA, "cols": [], "nodes": [], "edges": [], "focus": None, "error": error}
-    stamp, current, history, stats = base
-    drop, hidden_ids = graph_hidden(viewer, current)
-
-    def compute():
+    sig, current, history, stats = base
+    drop, hidden_ids = graph_hidden(records, viewer, current)
+    key = ("graph", str(root), sig, frozenset(drop))
+    graph = _recall(key)
+    if graph is None:
         kept = {k: r for k, r in current.items() if k not in drop}
         # sources and changes only feed History's image lookup and model pages, never the graph
-        return _history_module().build_model(kept, {k: history[k] for k in kept}, stats, [], [])["graph"]
-    graph = cached(_graph_cache, ("graph", str(root), stamp, frozenset(drop)), compute, REGISTRY_TTL_S)
+        graph = _history_module().build_model(kept, {k: history[k] for k in kept}, stats, [], [])["graph"]
+        _remember(key, graph)
+    quotes = hidden_matcher(hidden_ids)
     walker = Lineage(records, viewer, root)
     nodes, focus_index = [], None
-    for i, (key, col, hist, part, sub) in enumerate(graph["nodes"]):
-        entity, rid = key.split("|", 1)
-        if any(h in sub for h in hidden_ids):           # a subtitle (an export's note) never quotes a hidden id
-            sub = ""
-        status = current[key].get("status")
+    for i, (k, col, hist, part, sub) in enumerate(graph["nodes"]):
+        entity, rid = k.split("|", 1)
+        status = current[k].get("status")
+        status = None if status is None else str(status)
         nodes.append({"title": rid, "kind": GRAPH_SHORT.get(entity, entity), "col": col, "hist": hist, "part": part,
-                      "sub": sub, "status": None if status is None else str(status),
+                      "sub": "" if quotes(sub) else sub,        # an export's note may quote a hidden id
+                      "status": "" if status is not None and quotes(status) else status,
                       "url": graph_url(walker, entity, rid)})
-        if key == focus:
+        if k == focus:
             focus_index = i
-    return {"schema": SCHEMA, "cols": list(graph["cols"]), "nodes": nodes,
-            "edges": [list(e) for e in graph["edges"]], "focus": focus_index, "error": error}
+    edges = [[a, b, "input" if quotes(role) else role] for a, b, role in graph["edges"]]
+    return {"schema": SCHEMA, "cols": list(graph["cols"]), "nodes": nodes, "edges": edges, "focus": focus_index,
+            "error": error}
 
 
 def graph_focus_key(records, kind, entity_id):
