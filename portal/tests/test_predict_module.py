@@ -460,6 +460,170 @@ class StatusRules(unittest.TestCase):
         self.assertEqual((v["label"], v["detail"]), ("Running", "1 of 3 images done"))
 
 
+class PixelTolerance(unittest.TestCase):
+    """BUILD_CONTRACTS.md section 8: a sample's nm/px values within 1 % (spread / median) are one scale; each tile
+    keeps its own value; a typed value applies to all tiles of the sample (recorded); over 1 % refused."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.src_dir = self.tmp / "tiles"
+        self.src_dir.mkdir()
+        # A 1.000 / 1.009 (0.896 %), B 1.000 / 1.011 (1.094 %), C 1.4724 x2 (control: one value)
+        self.nm = {"a1.png": ("A", "1.000"), "a2.png": ("A", "1.009"), "b1.png": ("B", "1.000"),
+                   "b2.png": ("B", "1.011"), "c1.png": ("C", "1.4724"), "c2.png": ("C", "1.4724")}
+        for n in self.nm:
+            shutil.copyfile(GOLDEN / "images" / "0001.png", self.src_dir / n)
+        (self.src_dir / "MANIFEST.csv").write_text("output_name,sample_label,nm_per_px\n" + "".join(
+            f"{n},{s},{v}\n" for n, (s, v) in self.nm.items()), encoding="utf-8")
+        self.src = {"key": "k", "label": "Tol", "dir": self.src_dir, "manifest": self.src_dir / "MANIFEST.csv",
+                    "session": "20261027", "sample_column": None}
+        self.cfg = types.SimpleNamespace(state_dir=self.tmp / "state", registry=self.tmp / "reg",
+                                         cj_predict_root=str(self.tmp / "predict"))
+        self.user = {"id": "bas", "role": "basic"}
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def groups(self):
+        return {g["label"]: g for g in P.tiles_of(self.src)["groups"]}
+
+    def test_constant_pinned_to_results(self):
+        import importlib
+        RC = importlib.import_module("results.compute")
+        self.assertEqual(P.NM_TOLERANCE, RC.NM_TOLERANCE)
+        self.assertEqual(P.NM_TOLERANCE, 0.01)
+        for vals in ([1.4724], [1.47125, 1.4724], [1.0, 1.009], [1.0, 1.011], [1.0, 1.0, 1.02], [1.0, 1.005, 1.011],
+                     [0.7362, 1.4724], [2.0, 1.0, 1.0, 1.01]):
+            with self.subTest(vals=vals):
+                self.assertAlmostEqual(P.nm_spread(vals), RC.nm_spread(vals), places=15)
+                self.assertEqual(P.one_scale(vals), RC.one_scale(vals))
+
+    def test_grouping_boundary(self):
+        g = self.groups()
+        self.assertEqual((g["A"]["nm_range"], g["A"]["mixed"], g["A"]["nm"]), (True, False, None))
+        self.assertEqual((g["A"]["nm_min"], g["A"]["nm_max"]), (1.0, 1.009))
+        self.assertEqual(g["A"]["nm_of"], {"a1.png": 1.0, "a2.png": 1.009})
+        self.assertEqual((g["B"]["nm_range"], g["B"]["mixed"]), (False, True))
+        self.assertEqual((g["C"]["nm_range"], g["C"]["mixed"], g["C"]["nm"]), (False, False, 1.4724))   # control
+
+    def test_missing_value_still_needs_typing(self):
+        (self.src_dir / "MANIFEST.csv").write_text("output_name,sample_label,nm_per_px\na1.png,A,1.000\n"
+                                                   "a2.png,A,\n", encoding="utf-8")
+        for n in list(self.nm)[2:]:
+            (self.src_dir / n).unlink()
+        g = self.groups()["A"]
+        self.assertEqual((g["nm"], g["nm_range"], g["mixed"]), (None, False, False))
+
+    def test_form_shows_range_and_refuses_mixed(self):
+        t = P.tiles_of(self.src)
+        with mock.patch.object(P, "model_block", return_value=""):
+            page = P.page_session_form(self.cfg, self.user, self.src, t)
+        self.assertIn("1–1.009 nm/px across tiles, within 1 %; each tile keeps its own value", page)
+        a_input = re.search(r'<input[^>]*name="nm_g0"[^>]*>', page).group(0)
+        self.assertNotIn("required", a_input)                       # empty = each tile's own
+        self.assertIn('name="confirm" value="yes" required', page)  # the tick is still required
+        self.assertIn("differ by more than 1 % (1, 1.011 nm/px)", page)
+        self.assertNotIn('name="nm_g1"', page)                       # B: no input, its box disabled
+        self.assertIn('value="1.4724" required', page)              # C: as before
+
+    def submit(self, **form):
+        """session_submit with PS.create captured (the manifest it gets and its keywords); nothing starts."""
+        seen = {}
+
+        def fake_create(d_from, **kw):
+            with open(kw["manifest"], newline="", encoding="utf-8") as f:
+                seen["rows"] = {r["output_name"]: r for r in csv.DictReader(f)}
+            seen["kw"] = kw
+            d = self.tmp / "predict" / "ps_20261105_aaaaaa"
+            d.mkdir(parents=True, exist_ok=True)
+            return d
+
+        t = P.tiles_of(self.src)
+        data = {"confirm": "yes", "sig": t["sig"], "samples": ["g0", "g2"], "nm_g0": "", "nm_g2": "1.4724",
+                "how": "all", "model": MODEL}
+        data.update(form)
+        with mock.patch.object(P.PS, "create", side_effect=fake_create), \
+                mock.patch.object(P.PL, "start_detached"), mock.patch.object(P, "check_model", return_value=None), \
+                mock.patch.object(P, "check_active"):
+            P.session_submit(self.cfg, self.user, self.src, data)
+        return seen
+
+    def audit_lines(self):
+        p = self.cfg.state_dir / "audit" / "portal.jsonl"
+        return [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines()] if p.is_file() else []
+
+    def test_each_tile_keeps_its_own_value(self):
+        seen = self.submit()
+        self.assertEqual({n: float(r["nm_per_px"]) for n, r in seen["rows"].items()},
+                         {"a1.png": 1.0, "a2.png": 1.009, "c1.png": 1.4724, "c2.png": 1.4724})
+        self.assertEqual(seen["kw"]["nm_confirmed_by"], "bas")     # no silent defaults: who confirmed
+        self.assertTrue(seen["kw"]["nm_from_manifest"])
+        self.assertEqual(self.audit_lines(), [])                    # nothing typed: nothing to record
+
+    def test_typed_value_applies_to_all_tiles_and_is_recorded(self):
+        seen = self.submit(nm_g0="1.005")
+        self.assertEqual([float(seen["rows"][n]["nm_per_px"]) for n in ("a1.png", "a2.png")], [1.005, 1.005])
+        self.assertEqual(seen["kw"]["nm_confirmed_by"], "bas")
+        (rec,) = self.audit_lines()
+        self.assertEqual((rec["actor"], rec["action"], rec["target"]), ("bas", "predict.nm_override",
+                                                                         "ps_20261105_aaaaaa"))
+        self.assertEqual(rec["detail"], {"sample": "A", "typed_nm_per_px": 1.005, "manifest_nm_per_px": "1–1.009",
+                                         "tiles": 2})
+
+    def test_mixed_sample_refused_and_bad_typed_value(self):
+        with self.assertRaises(P.Refusal) as e:
+            self.submit(samples=["g1"])
+        self.assertIn("B: pixel sizes differ by more than 1 %", e.exception.msg)
+        with self.assertRaises(P.Refusal) as e:
+            self.submit(nm_g0="abc")
+        self.assertIn("enter the pixel size as a number", e.exception.msg)
+
+    def test_no_tick_refused(self):
+        with self.assertRaises(P.Refusal):
+            self.submit(confirm="")
+
+    def test_changed_values_change_the_signature(self):
+        sig = P.tiles_of(self.src)["sig"]
+        (self.src_dir / "MANIFEST.csv").write_text((self.src_dir / "MANIFEST.csv").read_text(encoding="utf-8")
+                                                   .replace("a2.png,A,1.009", "a2.png,A,1.008"), encoding="utf-8")
+        self.assertNotEqual(P.tiles_of(self.src)["sig"], sig)
+
+    def test_set_page_shows_the_range(self):
+        rows = [{"sample_label": "A", "nm_per_px": "1.0", "nm_confirmed_by": "bas"},
+                {"sample_label": "A", "nm_per_px": "1.009", "nm_confirmed_by": "bas"},
+                {"sample_label": "C", "nm_per_px": "1.4724", "nm_confirmed_by": "bas"}]
+        got = {s["label"]: s["nm_per_px"] for s in P.samples_of(rows)}
+        self.assertEqual(got, {"A": "1–1.009 (each image its own)", "C": "1.4724"})
+
+
+class PixelToleranceCreate(Base):
+    """Through the real jobs.predict_set.create: a sample within the 1 % tolerance must make a set whose images.csv
+    has each tile's own nm/px. EXPECTED TO FAIL until jobs/predict_set.py (B1's file, not F1's) adopts the
+    tolerance: create() still refuses any two distinct nm/px in a sample ("mixed nm/px"). When it passes, remove
+    the expectedFailure (an unexpected success fails the run, so this cannot be forgotten)."""
+
+    @unittest.expectedFailure
+    def test_range_sample_creates_a_set(self):
+        d = self.env.tmp / "sessions" / "tol_tiles"
+        d.mkdir(parents=True, exist_ok=True)
+        for n in ("t1.png", "t2.png"):
+            shutil.copyfile(GOLDEN / "images" / "0001.png", d / n)
+        (d / "MANIFEST.csv").write_text("output_name,sample_label,nm_per_px\nt1.png,Lipo,1.47125\nt2.png,Lipo,1.4724\n",
+                                        encoding="utf-8")
+        src = {"key": "tol", "label": "Tol", "dir": d, "manifest": d / "MANIFEST.csv", "session": "20261027",
+               "sample_column": None}
+        t = P.tiles_of(src)
+        cfg = types.SimpleNamespace(registry=self.env.registry, review_root=self.review, state_dir=self.env.state)
+        with mock.patch.object(P.PL, "start_detached"):
+            ps_dir = P.session_submit(cfg, {"id": "bas", "role": "basic"}, src,
+                                      {"confirm": "yes", "sig": t["sig"], "samples": ["g0"], "nm_g0": "",
+                                       "how": "all", "model": MODEL})
+        rows = read_rows(ps_dir / "images.csv")
+        self.assertEqual([(r["orig_name"], float(r["nm_per_px"]), r["nm_confirmed_by"]) for r in rows],
+                         [("t1.png", 1.47125, "bas"), ("t2.png", 1.4724, "bas")])
+
+
 class Limits(Base):
     def test_start_again_marks_the_set_before_spawning(self):
         ps = self.fake_set("bas", "running", updated=stamp(P.STALE_S + 60), pid=99999)

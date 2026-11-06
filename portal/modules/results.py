@@ -30,8 +30,9 @@ Rules:
     package exists (the shell checks the owner there).
   - Standalone CSV downloads start with # provenance lines; the zip (tables + README.txt) is the recommended one.
   - The set folder is resolved and must still be <predict root>/<ps_id> (a junction or link out of it = 404).
-  - A refused sample (mixed nm/px or tile size, no confirmed nm/px) is a notice with the reason; the other samples
-    are still shown. A whole-set refusal (predictions not finished) shows the notice only.
+  - A refused sample (nm/px spread over 1 %, mixed tile size, no confirmed nm/px) is a notice with the reason; the
+    other samples are still shown. A sample whose nm/px varies within 1 % (BUILD_CONTRACTS.md section 8) is counted;
+    its range is in "How these numbers were made", the CSV # lines, the README and a note under the sample table. A whole-set refusal (predictions not finished) shows the notice only.
   - Compute: one at a time (a second one waits, "queued"). It uses the review package's edits when
     <CryoAI-laptop>/review/pred_<ps_id>/ exists (annotation.prediction_package.reviewed_polygons, write=False, so
     the package is never written), else the model predictions. Writes only <ps>/results/ (compute_and_write).
@@ -67,6 +68,7 @@ FILES = {"per_sample.csv": "text/csv; charset=utf-8", "per_image.csv": "text/csv
          "results.json": "application/json"}
 NOT_FOUND = "No analysis with this name, or it is not yours."
 SMALL_BASE = 20              # reviewer % on fewer reviewer EVs than this is flagged "small sample"
+NM_TOLERANCE = 0.01          # = results.compute.NM_TOLERANCE (the text here; a test pins both equal)
 
 esc = html.escape
 
@@ -528,6 +530,10 @@ def sample_table(res: dict) -> str:
              "number; it does not depend on anyone's class labels.",
              "Inner layers of a multilayer EV are not counted as separate EVs. Non-EV: other objects the model "
              "found, counted separately."]
+    varied = [f"{k} ({lo:g}–{hi:g} nm/px)" for k, (lo, hi) in nm_ranges(res).items() if lo != hi]
+    if varied:
+        notes.append(f"Pixel size differs slightly between the images of {', '.join(varied)}, within "
+                     f"{NM_TOLERANCE * 100:g} %: counted as one sample; each image's diameters use its own value.")
     if reviewer:
         notes.append("Multilayer (reviewer): the share of EVs a reviewer called multilayer, on reviewed images "
                      f"only (n shows the base; under {SMALL_BASE} EVs it is marked small sample). Reviewer vs "
@@ -556,9 +562,37 @@ def image_table(res: dict) -> str:
             f'<thead><tr>{th}</tr></thead><tbody>{"".join(rows)}</tbody></table></div></details>')
 
 
+def nm_ranges(res: dict) -> dict:
+    """{counted sample: (min, max) nm/px used}: the sample's nm_per_px_min / _max, else (results written before
+    those fields) its images' own values."""
+    out = {}
+    for label, s in res["samples"].items():
+        lo, hi = s.get("nm_per_px_min"), s.get("nm_per_px_max")
+        if lo is None or hi is None:
+            vals = [float(i["nm_per_px"]) for i in res["images"].values()
+                    if i.get("sample_label") == label and i.get("nm_per_px") is not None]
+            if not vals:
+                continue
+            lo, hi = min(vals), max(vals)
+        out[label] = (float(lo), float(hi))
+    return out
+
+
+def nm_text(res: dict) -> str:
+    """'S1 1.4724; S2 1.47125–1.4724 (...)' for the provenance; '' when no sample was counted."""
+    rng = nm_ranges(res)
+    parts = [f"{k} {lo:g}" if lo == hi else f"{k} {lo:g}–{hi:g}" for k, (lo, hi) in rng.items()]
+    if not parts:
+        return ""
+    varied = any(lo != hi for lo, hi in rng.values())
+    return "; ".join(parts) + (f" (varies within {NM_TOLERANCE * 100:g} % between images of a sample; each "
+                               "image's diameters use its own value)" if varied else "")
+
+
 def provenance(res: dict, ps: dict) -> dict:
     imgs = res["images"].values()
     rule = res.get("rule") or {}
+    nm = nm_text(res)
     return {"Prediction set": ps["id"],
             "Model": str(res.get("model")),
             "Computed": when(res.get("computed")),
@@ -568,6 +602,7 @@ def provenance(res: dict, ps: dict) -> dict:
             "Checked by a person": (f"{sum(1 for i in imgs if i.get('reviewed'))} of {len(res['images'])} images "
                                     f"reviewed, {sum(1 for i in imgs if i.get('edited') and not i.get('reviewed'))}"
                                     " more edited"),
+            **({"Pixel size (nm per pixel)": nm} if nm else {}),
             "Not counted": str(res.get("refused") or "nothing")}
 
 
@@ -610,8 +645,10 @@ def csv_header(res: dict, ps: dict) -> bytes:
              f"reviewed={sum(1 for i in imgs if i.get('reviewed'))}/{len(res['images'])} images, "
              f"edited (not reviewed)={sum(1 for i in imgs if i.get('edited') and not i.get('reviewed'))}",
              f"# rule=conf>={rule.get('conf')}; {ev_rule(rule.get('ev_classes'))}; inner layers not counted; "
-             f"multilayer={rule.get('multilayer')}",
-             f"# not counted={res.get('refused') or 'nothing'}"]
+             f"multilayer={rule.get('multilayer')}"]
+    if nm_text(res):
+        lines.append(f"# nm_per_px={nm_text(res)}")
+    lines.append(f"# not counted={res.get('refused') or 'nothing'}")
     return ("\n".join(x.replace("\r", " ").replace("\n", " ") for x in lines) + "\n").encode("utf-8")
 
 
@@ -779,7 +816,9 @@ def readme(res: dict, ps: dict, user: dict) -> str:
               "  pct_multilayer_geometry   % of EVs whose outline contains another outline (the main number)",
               "  pct_multilayer_reviewer   % of EVs a reviewer called multilayer, reviewed images only (base: "
               "reviewer_ev)",
-              "  diam_nm_median / q1 / q3  area-equivalent diameter in nm",
+              "  diam_nm_median / q1 / q3  area-equivalent diameter in nm (each image converted with its own nm/px)",
+              "  nm_per_px_min / max       the pixel sizes used in the sample (they may differ by up to "
+              f"{NM_TOLERANCE * 100:g} %)",
               "  inner_layers_excluded     inner outlines of multilayer EVs, not counted as EVs",
               "  nonev_total               other objects, counted separately",
               "  reviewer_geometry_disagree  reviewed outlines where the reviewer's call differs from the geometry",

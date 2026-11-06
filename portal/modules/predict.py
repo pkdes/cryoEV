@@ -33,6 +33,10 @@ Rules:
     same 404.
   - nm/px is never defaulted: each sample's value is shown (from the manifest when it has one) and the person must
     tick "I confirm the pixel size"; their id goes into images.csv nm_confirmed_by. No tick: refused, nothing written.
+  - Pixel-size tolerance (BUILD_CONTRACTS.md section 8): a sample whose manifest nm/px values spread (max - min) by
+    at most NM_TOLERANCE (1 %) of their median is one scale. The form shows the range; left empty, each tile keeps
+    its own value in images.csv; a number typed there applies to all of that sample's tiles and is recorded in the
+    portal audit log (predict.nm_override). Over the tolerance: refused, as before.
   - Model: the registry's production model (also in models/models.yaml) by default; basic users get only that one.
   - Long work (create(), uploads to disk, the review package, results) runs in worker threads, never on the event
     loop. The predictor itself is a detached process (jobs.predict_local.start_detached); status.json says the rest.
@@ -88,6 +92,8 @@ MAX_ACTIVE_BASIC = 3                      # queued or running sets a basic user 
 SCRATCH_MAX_AGE_S = 3600                  # <root>/.portal/* older than this is swept at start
 CACHE_MAX = 256                           # entries kept in the spot-check cache and the finished-task table
 NM_MIN, NM_MAX = 0.01, 100.0              # a plausible nm/px (cryo-EM tiles); outside = a typo
+NM_TOLERANCE = 0.01                       # one sample's nm/px spread (max - min) <= this x median = one scale;
+                                          # = results.compute.NM_TOLERANCE (a test pins both equal)
 STALE_S = 300                             # predict_local refreshes `updated` every few s while running or waiting
 REFRESH_S = 5
 SPOT_N = 10
@@ -233,8 +239,28 @@ def _num(v):
     return x if math.isfinite(x) and x > 0 else None
 
 
+def nm_spread(values) -> float:
+    """(max - min) / median of nm/px values, one per tile (0.0 for a single value). = results.compute.nm_spread."""
+    vals = sorted(float(v) for v in values)
+    n = len(vals)
+    med = vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2
+    return (vals[-1] - vals[0]) / med
+
+
+def one_scale(values) -> bool:
+    """These nm/px values (one per tile of one sample) count as one scale: spread <= NM_TOLERANCE."""
+    return nm_spread(values) <= NM_TOLERANCE
+
+
+def nm_range_text(lo, hi) -> str:
+    return f"{lo:g}–{hi:g}"
+
+
 def tiles_of(src: dict) -> dict:
-    """{"groups": [{label, names, nm (None when missing or mixed), nm_values, mixed}], "sig", "n", "column"}.
+    """{"groups": [{label, names, nm, nm_values, nm_of, nm_min, nm_max, nm_range, mixed}], "sig", "n", "column"}.
+    nm: the one value when every tile has the same; None when missing (any tile), several or mixed. nm_of: tile
+    name -> its manifest value (None = missing). nm_range: several values, all tiles have one, spread within
+    NM_TOLERANCE (one scale; each tile keeps its own). mixed: the values spread more than that (refused).
     Groups come from the manifest's sample column; without a manifest, one group (label = the source label)."""
     names = sorted((p.name for p in src["dir"].iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXT
                     and not p.name.startswith(".")), key=str)
@@ -256,17 +282,24 @@ def tiles_of(src: dict) -> dict:
             label = (f"grid {v}" if col == "grid" and v and not v.lower().startswith("grid") else v) or "no sample"
         else:
             label = src["label"]
-        g = groups.setdefault(label, {"label": label, "names": [], "nm_values": set()})
+        g = groups.setdefault(label, {"label": label, "names": [], "nm_of": {}})
         g["names"].append(n)
-        g["nm_values"].add(_num(r.get(PS.NM_COLUMN)))
+        g["nm_of"][n] = _num(r.get(PS.NM_COLUMN))
     out = []
     for label in sorted(groups, key=str):
         g = groups[label]
-        vals = {v for v in g["nm_values"] if v is not None}
-        nm = next(iter(vals)) if len(vals) == 1 and None not in g["nm_values"] else None
-        out.append({"label": label, "names": g["names"], "nm": nm, "nm_values": sorted(vals),
-                    "mixed": len(vals) > 1})
-    sig = hashlib.sha1(json.dumps([[g["label"], len(g["names"])] for g in out]).encode()).hexdigest()[:12]
+        per_tile = [v for v in g["nm_of"].values() if v is not None]
+        missing = len(per_tile) < len(g["names"])
+        vals = sorted(set(per_tile))
+        mixed = len(vals) > 1 and not one_scale(per_tile)
+        out.append({"label": label, "names": g["names"], "nm_of": g["nm_of"],
+                    "nm": vals[0] if len(vals) == 1 and not missing else None, "nm_values": vals,
+                    "nm_min": vals[0] if vals else None, "nm_max": vals[-1] if vals else None,
+                    "nm_range": len(vals) > 1 and not mixed and not missing, "mixed": mixed})
+    # the values are in the signature too: a range group's tile values are not sent back by the form, so a manifest
+    # changed since the person confirmed the range must be seen again
+    sig = hashlib.sha1(json.dumps([[g["label"], len(g["names"]), g["nm_values"]] for g in out]).encode()
+                       ).hexdigest()[:12]
     return {"groups": out, "sig": sig, "n": len(names), "column": col}
 
 
@@ -353,8 +386,12 @@ def samples_of(rows) -> list:
         s["n"] += 1
         s["nm"].add(r.get("nm_per_px") or "")
         s["by"].add(r.get("nm_confirmed_by") or "")
-    return [{"label": s["label"], "n": s["n"], "nm_per_px": ", ".join(f"{float(v):g}" if _num(v) else "?"
-                                                                       for v in sorted(s["nm"])),
+    def nm_text(vals):
+        nums = sorted(_num(v) for v in vals if _num(v))
+        if len(nums) > 1 and len(nums) == len(vals):     # several values (within NM_TOLERANCE): each image its own
+            return f"{nm_range_text(nums[0], nums[-1])} (each image its own)"
+        return ", ".join(f"{float(v):g}" if _num(v) else "?" for v in sorted(vals))
+    return [{"label": s["label"], "n": s["n"], "nm_per_px": nm_text(s["nm"]),
              "confirmed_by": ", ".join(sorted(b for b in s["by"] if b)) or None} for s in by.values()]
 
 
@@ -837,21 +874,34 @@ def page_session_form(cfg, user, src: dict, t: dict, form=None, error=None) -> s
         gid = f"g{i}"
         nm_val = form.get(f"nm_{gid}", f"{g['nm']:g}" if g["nm"] else "")
         if g["mixed"]:
-            note = ('<span class="cj-predict-warn">Mixed pixel sizes in this sample (' +
-                    esc(", ".join(f"{v:g}" for v in g["nm_values"])) + ' nm/px): it can’t be analysed as one '
-                    'sample. Ask the admin.</span>')
+            note = ('<span class="cj-predict-warn">Pixel sizes in this sample differ by more than '
+                    f'{NM_TOLERANCE * 100:g} % (' + esc(", ".join(f"{v:g}" for v in g["nm_values"])) +
+                    ' nm/px): it can’t be analysed as one sample. Ask the admin.</span>')
             rows.append(f'<tr><td data-l="Sample"><label class="cj-predict-off"><input type="checkbox" disabled> '
                         f'{esc(g["label"])}</label></td><td data-l="Tiles" class="cj-num">{len(g["names"])}</td>'
                         f'<td data-l="nm/px">{note}</td></tr>')
             continue
-        src_note = NM_FROM_MANIFEST if g["nm"] else "not recorded: enter it"
+        if g["nm_range"]:
+            # several values within the tolerance: each tile keeps its own; a number typed here replaces them all
+            nm_val = form.get(f"nm_{gid}", "")
+            nm_cell = (f'<span class="cj-predict-range">{esc(nm_range_text(g["nm_min"], g["nm_max"]))} nm/px across '
+                       f'tiles, within {NM_TOLERANCE * 100:g} %; each tile keeps its own value</span> '
+                       f'<span class="cj-mut">({NM_FROM_MANIFEST})</span><br>'
+                       f'<input class="cj-predict-nm" name="nm_{gid}" inputmode="decimal" '
+                       f'aria-label="one nm per pixel for all tiles of {esc(g["label"])} (optional)" '
+                       f'placeholder="each tile’s own" value="{esc(nm_val)}">'
+                       f' <span class="cj-mut">leave empty, or type one value to use for all '
+                       f'{len(g["names"])} tiles</span>')
+        else:
+            src_note = NM_FROM_MANIFEST if g["nm"] else "not recorded: enter it"
+            nm_cell = (f'<input class="cj-predict-nm" name="nm_{gid}" inputmode="decimal" '
+                       f'aria-label="nm per pixel for {esc(g["label"])}" value="{esc(nm_val)}" required>'
+                       f' <span class="cj-mut">{src_note}</span>')
         rows.append(
             f'<tr><td data-l="Sample"><label><input type="checkbox" name="samples" value="{gid}" '
             f'data-n="{len(g["names"])}"{" checked" if gid in picked else ""}> {esc(g["label"])}</label></td>'
             f'<td data-l="Tiles" class="cj-num">{len(g["names"])}</td>'
-            f'<td data-l="nm/px"><input class="cj-predict-nm" name="nm_{gid}" inputmode="decimal" '
-            f'aria-label="nm per pixel for {esc(g["label"])}" value="{esc(nm_val)}" required>'
-            f' <span class="cj-mut">{src_note}</span></td></tr>')
+            f'<td data-l="nm/px">{nm_cell}</td></tr>')
     label_field = ""
     if t["column"] is None:
         label_field = (f'<label class="cj-predict-field"><span>Sample name (shown in the results)</span>'
@@ -1040,9 +1090,14 @@ def session_submit(cfg, user, src: dict, form: dict) -> Path:
         if gid not in (form.get("samples") or []):
             continue
         if g["mixed"]:
-            problems.append(f"{g['label']}: mixed pixel sizes; it can't be analysed as one sample")
+            problems.append(f"{g['label']}: pixel sizes differ by more than {NM_TOLERANCE * 100:g} %; it can't be "
+                            f"analysed as one sample")
             continue
-        nm, err = check_nm(form.get(f"nm_{gid}"), g["label"])
+        typed = str(form.get(f"nm_{gid}") or "").strip()
+        if g["nm_range"] and not typed:          # each tile keeps its own manifest value (confirmed by the tick)
+            chosen.append({**g, "nm_in": None})
+            continue
+        nm, err = check_nm(typed, g["label"])
         if err:
             problems.append(err)
         chosen.append({**g, "nm_in": nm})
@@ -1071,7 +1126,12 @@ def session_submit(cfg, user, src: dict, form: dict) -> Path:
         raise Refusal(f"{len(names)} tiles chosen; an analysis takes at most {MAX_FILES}. Choose “Only ... "
                       f"tiles” with a number up to {MAX_FILES}, or fewer samples.")
     label_of = {n: (label if label is not None else g["label"]) for g in chosen for n in g["names"]}
-    nm_of = {n: g["nm_in"] for g in chosen for n in g["names"]}
+    # a typed value applies to every tile of its sample; a range sample left empty keeps each tile's own value
+    nm_of = {n: (g["nm_in"] if g["nm_in"] is not None else g["nm_of"][n]) for g in chosen for n in g["names"]}
+    overrides = [{"sample": label_of[g["names"][0]], "typed_nm_per_px": g["nm_in"],
+                  "manifest_nm_per_px": nm_range_text(g["nm_min"], g["nm_max"]),
+                  "tiles": len(set(names) & set(g["names"]))}
+                 for g in chosen if g["nm_range"] and g["nm_in"] is not None]
     tmp = scratch(cfg, "sel")
     try:
         man = tmp / "MANIFEST.csv"
@@ -1080,10 +1140,28 @@ def session_submit(cfg, user, src: dict, form: dict) -> Path:
             w.writerow(["output_name", "sample_label", PS.NM_COLUMN])
             for n in names:
                 w.writerow([n, label_of[n], repr(float(nm_of[n]))])
-        return create_and_start(cfg, src["dir"], user, form["model"], names=names, manifest=man,
-                                session=src["session"])
+        ps_dir = create_and_start(cfg, src["dir"], user, form["model"], names=names, manifest=man,
+                                  session=src["session"])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    for o in overrides:
+        record_nm_override(cfg, user, ps_dir.name, o)
+    return ps_dir
+
+
+def record_nm_override(cfg, user, ps_id: str, detail: dict) -> bool:
+    """A person typed one nm/px for a sample whose tiles had several (within NM_TOLERANCE): every tile of it got the
+    typed value in images.csv. Recorded in the portal audit log (<state dir>/audit/portal.jsonl) as
+    predict.nm_override. -> written. Never fails the analysis (it already exists)."""
+    state = getattr(cfg, "state_dir", None)
+    if not state:
+        return False
+    try:
+        from portal import audit as PA
+        PA.audit(state, user.get("id"), "predict.nm_override", ps_id, detail)
+        return True
+    except (OSError, ImportError):
+        return False
 
 
 # ---------------------------------------------------------------- upload (multipart, streamed to disk)

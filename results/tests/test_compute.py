@@ -49,6 +49,7 @@ REVIEWER_NONE = {"reviewed_images": 0, "ev_reviewed_geometry": 0, "reviewer_ev":
 REVIEWER_S1 = {"reviewed_images": 1, "ev_reviewed_geometry": 2, "reviewer_ev": 2, "reviewer_mv": 1,
                "reviewer_inner": 0, "reviewer_nonev": 0, "pct_multilayer_reviewer": 50.0,
                "reviewer_geometry_disagree": 1}
+NM_RANGE_GOLDEN = {"nm_per_px_min": 1.4724, "nm_per_px_max": 1.4724}
 GEOMETRY = ["n_images", "ev_total", "ev_per_image_mean", "diam_nm_median", "diam_nm_q1", "diam_nm_q3",
             "pct_multilayer_geometry", "inner_layers_excluded", "nonev_total"]
 
@@ -64,6 +65,7 @@ def expected(name):
         img["edited"] = img["reviewed"]
     for s, e in exp["samples"].items():
         e.update(REVIEWER_S1 if (name == "expected_results_reviewed.json" and s == "S1") else REVIEWER_NONE)
+        e.update(NM_RANGE_GOLDEN)   # contract section 8: every golden image is 1.4724 nm/px (images.csv)
     return exp
 
 
@@ -357,6 +359,81 @@ class Refusals(unittest.TestCase):
         self.assertIsNone(res["refused"])
         self.assertEqual(set(res["samples"]), {"S1", "S2"})
         self.assertEqual(res["samples"]["S1"]["n_images"], 2)
+
+
+class PixelTolerance(unittest.TestCase):
+    """Contract section 8: within one sample, nm/px spread (max - min) <= 1 % of the median is one scale; each
+    image keeps its own nm/px. Spread > 1 % is still refused."""
+
+    def test_spread_function(self):
+        self.assertEqual(C.NM_TOLERANCE, 0.01)
+        self.assertEqual(C.nm_spread([1.4724]), 0.0)                       # control: one value, no spread
+        self.assertTrue(C.one_scale([1.4724, 1.4724, 1.4724]))
+        self.assertFalse(C.one_scale([0.7362, 1.4724]))                   # control: 2x apart
+        self.assertTrue(C.one_scale([1.000, 1.009]))                      # 0.009 / 1.0045 = 0.896 %
+        self.assertFalse(C.one_scale([1.000, 1.011]))                     # 0.011 / 1.0055 = 1.094 %
+        self.assertTrue(C.one_scale([1.47125, 1.4724]))                   # the real 20261027 liposome sample
+
+    def test_0_9_percent_accepted_with_range(self):
+        with TempPS() as t:
+            t.edit_images_csv("0001", nm_per_px="1.000")
+            t.edit_images_csv("0002", nm_per_px="1.009")
+            res = compute(t.ps)
+        self.assertIsNone(res["refused"])
+        s = res["samples"]["S1"]
+        self.assertEqual((s["nm_per_px_min"], s["nm_per_px_max"]), (1.0, 1.009))
+        self.assertEqual((res["images"]["0001"]["nm_per_px"], res["images"]["0002"]["nm_per_px"]), (1.0, 1.009))
+        self.assertEqual(s["ev_total"], 5)                                 # geometry counts don't depend on nm/px
+
+    def test_1_1_percent_refused(self):
+        with TempPS() as t:
+            t.edit_images_csv("0001", nm_per_px="1.000")
+            t.edit_images_csv("0002", nm_per_px="1.011")
+            res = compute(t.ps)
+        self.assertIn("'S1'", res["refused"])
+        self.assertIn("1.011", res["refused"])
+        self.assertIn("1 % tolerance", res["refused"])
+        self.assertNotIn("S1", res["samples"])
+        self.assertEqual(res["samples"]["S2"]["nm_per_px_min"], 1.4724)     # the other sample is still reported
+
+    def test_each_image_uses_its_own_nm_per_px(self):
+        """Known answer: two images of one sample with the SAME single EV outline (same pixel diameter d_px),
+        nm/px 1.000 and 1.009 -> diameters d and 1.009 d (0.9 % apart). With two values, numpy's percentiles
+        are d (1 + 0.009 p): Q1 = d (1 + 0.00225), median = d (1 + 0.0045), Q3 = d (1 + 0.00675)."""
+        one = (PS / "p" / MODEL / "predictions" / "0003.txt").read_text(encoding="utf-8").splitlines()[0]
+        self.assertTrue(one.startswith("0 "))                              # an EV-class outline, conf >= 0.5
+        _, _, roles_for, cm = C._chain()
+        load_txt = C._chain()[0]
+
+        def scene(nm1, nm2):
+            with TempPS() as t:
+                shutil.copyfile(t.ps / "images" / "0001.png", t.ps / "images" / "0002.png")
+                for image in ("0001", "0002"):
+                    (t.ps / "p" / MODEL / "predictions" / f"{image}.txt").write_text(one + "\n", encoding="utf-8")
+                t.edit_images_csv("0001", nm_per_px=nm1)
+                t.edit_images_csv("0002", nm_per_px=nm2)
+                per_image = {}
+                for r in C._read_images_csv(t.ps):
+                    if r["sample_label"] != "S1":
+                        continue
+                    w, h = C._image_size(t.ps, r["file"])
+                    objs = C._objects_from_predictions(t.ps / "p" / MODEL / "predictions", r["image"], w, h,
+                                                       load_txt)
+                    per_image[r["image"]] = C._measure(objs, C._nm_per_px(r), {0}, roles_for, cm)["_diam"]
+                return compute(t.ps), per_image
+
+        base, px = scene("1.000", "1.000")
+        self.assertEqual(px["0001"], px["0002"])                           # control: same outline, same diameter
+        d = px["0001"][0]
+        self.assertEqual(base["samples"]["S1"]["diam_nm_median"], round(d, 4))
+        res, per = scene("1.000", "1.009")
+        self.assertIsNone(res["refused"])
+        self.assertEqual(per["0001"], [d])
+        self.assertAlmostEqual(per["0002"][0] / per["0001"][0], 1.009, places=12)   # 0.9 % apart
+        s = res["samples"]["S1"]
+        self.assertEqual((s["ev_total"], s["n_images"]), (2, 2))
+        for f, k in (("diam_nm_q1", 0.25), ("diam_nm_median", 0.5), ("diam_nm_q3", 0.75)):
+            self.assertAlmostEqual(s[f], d * (1 + 0.009 * k), places=3, msg=f)
 
 
 class InputErrors(unittest.TestCase):
