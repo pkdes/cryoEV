@@ -298,6 +298,15 @@ const NEW_TIP = "new class: not in this package's categories (apply_review_edits
 // Flags from build_review_package.py. u: no match (old); x, lc, fx, flc: optional, newer packages only.
 const FLAG = {gu: "rgba(255,0,255,.55)", pu: "#facc15", x: "#f97316", lc: "rgba(226,232,240,.9)"};
 const $ = id => document.getElementById(id);
+// A prediction package (annotation/prediction_package.py) sets cand_conf, its lowest candidate confidence: the Editor's
+// prediction slider and the cards' confidence filter start there, so every candidate shows. Without it: as before.
+if (typeof D.cand_conf === "number" && isFinite(D.cand_conf)) {
+  const cc = String(D.cand_conf), tc = $("triConf"), sl = $("conf");
+  if (D.cand_conf < parseFloat(sl.min)) sl.min = cc;
+  sl.value = cc; $("confOut").textContent = parseFloat(sl.value).toFixed(2);
+  if (![...tc.options].some(o => o.value === cc)) tc.add(new Option("conf ≥ " + cc, cc), 0);
+  tc.value = cc;
+}
 const clone = o => JSON.parse(JSON.stringify(o));
 // Anything from an edit record or a claim (who, seed, a decision's class) is escaped before it goes into HTML.
 const esc = v => String(v == null ? "" : v).replace(/[&<>"']/g, ch => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"})[ch]);
@@ -669,17 +678,17 @@ function renderList() {
     const fl = FLAG_COUNTS.filter(([k]) => im[k]).map(([k, col, t]) => `<b style="color:${col}" title="${t}">${im[k]}</b>`).join("");
     const d = document.createElement("div"); d.className = "it" + (i === cur ? " cur" : "");
     d.innerHTML = `<span class="ok ${s}" title="${s}">${s === "reviewed" ? "✓" : s === "edited" ? "•" : ""}</span>` +
-      `<span class="nm" title="${im.file}">${im.file.replace(/_(jpg|png)\.rf\..*$/, "")}</span>` +
+      `<span class="nm" title="${esc(im.file)}">${esc(im.file.replace(/_(jpg|png)\.rf\..*$/, ""))}</span>` +
       (who.length ? `<span class="who" title="open now: ${esc(who.map(dispName).join(", "))}">👤${esc(who.map(dispName).join(","))}</span>` : "") +
       (septCount(im.file) ? `<span class="sept" title="${septCount(im.file)} decisions carried from the September review">Sept ${septCount(im.file)}</span>` : "") +
-      `<span class="badge">${im.split}</span><span class="fl" title="flags: ${FLAG_COUNTS.map(([k, , t]) => `${im[k] || 0} ${t}`).join(" · ")}">${fl}</span>`;
+      `<span class="badge">${esc(im.split)}</span><span class="fl" title="flags: ${FLAG_COUNTS.map(([k, , t]) => `${im[k] || 0} ${t}`).join(" · ")}">${fl}</span>`;
     d.onclick = () => { go(i); $("list").classList.remove("show"); };
     frag.appendChild(d);
   }
   box.appendChild(frag);
   const n = {unreviewed: 0, edited: 0, reviewed: 0}; D.images.forEach(im => n[statusOf(im)]++);
   $("qSum").textContent = `${order.length} shown · ${n.unreviewed} unreviewed · ${n.edited} edited · ${n.reviewed} reviewed`;
-  $("progress").innerHTML = `<b>${n.reviewed}</b> / ${D.images.length} reviewed · ${n.edited} edited<br><span style="color:var(--mute)">Predictions: ${D.run}</span>`;
+  $("progress").innerHTML = `<b>${n.reviewed}</b> / ${D.images.length} reviewed · ${n.edited} edited<br><span style="color:var(--mute)">Predictions: ${esc(D.run)}</span>`;
 }
 function flagText(o, pred) {
   const t = [];
@@ -725,7 +734,7 @@ function renderSide() {
   }
 }
 function legend() {
-  $("legend").innerHTML = CATS.map((c, k) => `<div${isNewCls(c) ? ` class="newcls" title="${NEW_TIP}"` : ""}><span style="background:${catColor(c)}"></span>${k < 9 ? k + 1 + ". " : ""}${c}${isNewCls(c) ? " (new class)" : ""}</div>`).join("");
+  $("legend").innerHTML = CATS.map((c, k) => `<div${isNewCls(c) ? ` class="newcls" title="${NEW_TIP}"` : ""}><span style="background:${catColor(c)}"></span>${k < 9 ? k + 1 + ". " : ""}${esc(c)}${isNewCls(c) ? " (new class)" : ""}</div>`).join("");
   const sw = st => `<span class="sw"><i style="border-top:${st}"></i></span>`;
   $("flagLegend").innerHTML = [
     [sw("1.5px dashed #22d3ee"), "prediction"],
@@ -1116,8 +1125,9 @@ const BIO = {
 };
 function makeBio(im, c, ctx) {
   const h = hash(im.file + c.key), pick = (arr, k) => arr[Math.floor(h / Math.pow(7, k)) % arr.length];
-  const fill = s => s.replace(/\{conf\}/g, ctx.conf).replace(/\{cls\}/g, ctx.cls).replace(/\{split\}/g, im.split)
-    .replace(/\{sample\}/g, ctx.sample).replace(/\{d\}/g, ctx.diam).replace(/\{n\}/g, ctx.nested);
+  // the caller escapes cls and sample; split is escaped here. Function replacements: a "$&" in a value stays literal
+  const fill = s => s.replace(/\{conf\}/g, () => ctx.conf).replace(/\{cls\}/g, () => ctx.cls).replace(/\{split\}/g, () => esc(im.split))
+    .replace(/\{sample\}/g, () => ctx.sample).replace(/\{d\}/g, () => ctx.diam).replace(/\{n\}/g, () => ctx.nested);
   const nS = s => (fill(s).match(/[.!?](\s|$)/g) || [1]).length, len = a => fill(a.join(" ")).length;
   const opens = c.kind === "p" ? BIO.predOpen : BIO.gtOpen, closes = c.kind === "p" ? BIO.predClose : BIO.gtClose;
   const open = pick(opens, 0);
@@ -1536,7 +1546,8 @@ function flyOff(dx, dy, then) {
 }
 let toastT = null;
 function toast(title, sub) {
-  const m = $("triMatch"); m.innerHTML = `<b>${title}</b><span>${sub}</span>`; m.hidden = false;
+  const m = $("triMatch"); m.innerHTML = "<b></b><span></span>"; m.firstChild.textContent = title; m.lastChild.textContent = sub;  // text: sub can hold a class name
+  m.hidden = false;
   m.classList.remove("pop"); void m.offsetWidth; m.classList.add("pop");
   clearTimeout(toastT); toastT = setTimeout(() => { m.hidden = true; }, 900);
 }
@@ -1545,7 +1556,7 @@ function react(kind, act, sub) {
   if (kind !== "skip" && act !== advance && !(kind === "nope" && clsMode()) && !needWho(() => react(kind, act, sub))) return;
   setStamp(kind, c); stamp.style.opacity = 1;
   const w = card.getBoundingClientRect().width;
-  if (kind === "yes") { flyOff(w * 1.5, 0, act); if (!pickedHere(c)) toast(c.kind === "p" ? brand().match : brand().keep, sub || (c.kind === "p" ? "added as " + esc(cardPredCls(c)) : "label kept")); }
+  if (kind === "yes") { flyOff(w * 1.5, 0, act); if (!pickedHere(c)) toast(c.kind === "p" ? brand().match : brand().keep, sub || (c.kind === "p" ? "added as " + cardPredCls(c) : "label kept")); }
   else if (kind === "nope") flyOff(-w * 1.5, 0, act);
   else flyOff(0, -1200, act);
 }
@@ -1578,7 +1589,7 @@ tcv.addEventListener("pointerup", ev => {
   if (!wasDrag) { tri.zoom = (tri.zoom + 1) % ZOOMS.length; triDraw(); return; }
   if (dy < -90 && Math.abs(dy) > Math.abs(dx)) flyOff(dx, -1200, advance);
   else if ((dx > 90 || (dx < -90 && !clsMode())) && !needWho()) cardReset(true);
-  else if (dx > 90) { const c = tri.queue[tri.pos]; flyOff(card.getBoundingClientRect().width * 1.5, dy, swipeYes); if (c && !pickedHere(c)) toast(c.kind === "p" ? brand().match : brand().keep, c.kind === "p" ? "added as " + esc(cardPredCls(c)) : "label kept"); }
+  else if (dx > 90) { const c = tri.queue[tri.pos]; flyOff(card.getBoundingClientRect().width * 1.5, dy, swipeYes); if (c && !pickedHere(c)) toast(c.kind === "p" ? brand().match : brand().keep, c.kind === "p" ? "added as " + cardPredCls(c) : "label kept"); }
   else if (dx < -90) flyOff(-card.getBoundingClientRect().width * 1.5, dy, swipeNo);  // class review: next
   else cardReset(true);
 });

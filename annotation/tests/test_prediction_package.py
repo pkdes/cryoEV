@@ -5,13 +5,16 @@ only read (checked byte-identical at the end).
 
   python -m unittest discover -s annotation/tests -v
 
-- build: labels (conf >= 0.50) vs candidates (0.25-0.50); stub COCO; sidecar; registry record; refusals.
-- reviewed.json: control (no edits: every image unreviewed, objects = the prediction files at conf >= 0.50, parsed
-  here independently); the golden review (0002: G deleted, F reclassed MV, reviewed) done through the multi server's
-  HTTP API as the page does it (cookie from ?k=, PUT of the whole record with pending decisions) == reviewed.json.
-- multi server: two packages with their own keys and cookies; unknown id 404; traversal 400/404; non-prefix folder
-  not served; a package added after start; index / data.js / images / claims for both; the CLI.
-- spot check: deterministic, spread over both sample labels, favours images with many candidates.
+- build: labels (conf >= 0.50) vs candidates (0.25-0.50); stub COCO; sidecar; registry record; images.csv checks;
+  built in a temp folder and renamed (nothing left behind on failure); refusals.
+- reviewed.json: control (no edits: every image unreviewed and unedited, objects = the prediction files at
+  conf >= 0.50, parsed here independently); the golden review (0002: G deleted, F reclassed MV, reviewed) done through
+  the multi server's HTTP API as the page does it (cookie from ?k=, PUT of the whole record with pending decisions)
+  == reviewed.json; card decisions without Reviewed count (edited true, reviewed false); the reviewer_class map.
+- multi server: two packages with their own keys and cookies; unknown id and wrong key both 403 with one body;
+  aliases (case) refused; nothing made for an unauthenticated request; incomplete package not served; traversal
+  400/404; non-prefix folder not served; a package added after start; index / data.js / images / claims; the CLI.
+- spot check: representative (proportional, >= 1 per sample, random samples when n < samples) and prioritised.
 """
 import hashlib
 import http.client
@@ -144,7 +147,10 @@ class BuildTests(Tmp):
         data = pp.read_datajs(pkg)
         self.assertEqual((data["id"], data["kind"], data["prediction_set"], data["model"], data["owner"]),
                          (PKG, "prediction", PS_ID, MODEL, "pujan"))
-        self.assertEqual(data["categories"], ["EV", "non-EV", "MV", "inner"])
+        self.assertEqual(sorted(data["categories"]), sorted(["EV", "Low conf EV", "MV", "inner", "Incomplete",
+                                                             "Overlapping", "VLDL", "non-EV"]))  # no "(new class)"
+        self.assertEqual(data["cand_conf"], 0.25)
+        self.assertEqual([p.name for p in self.root.iterdir()], [PKG])  # no .building_ / .old_ folder left
         self.assertEqual([im["split"] for im in data["images"]], ["S1", "S1", "S2"])
         self.assertEqual((pkg / "index.html").read_bytes(), (REPO / "annotation" / "review_tool" / "index.html").read_bytes())
         for im in data["images"]:
@@ -158,9 +164,8 @@ class BuildTests(Tmp):
         self.assertGreaterEqual(len(key), 20)
         rec = json.loads((pkg / pp.RECORD).read_text(encoding="utf-8"))
         self.assertEqual((rec["kind"], rec["owner"], rec["prediction_set"], rec["id"]), ("prediction", "pujan", PS_ID, PKG))
-        # registry-ready except base_kind: the schema's enum (pull | export) has no value for a prediction set yet
-        errs = check_record(rec, load_schemas())
-        self.assertEqual([e for e in errs if not e.startswith("$.base_kind")], [])
+        self.assertEqual(check_record(rec, load_schemas()), [])  # base_kind prediction_set: main 07f8288
+        self.assertEqual(rec["path"], str(pkg.resolve()))
         # rebuild without edits: same data, same key; with edits: refused
         self.build()
         self.assertEqual((pkg / ".review_key").read_text(encoding="utf-8"), key)
@@ -176,10 +181,19 @@ class BuildTests(Tmp):
             self.build(owner="Bad Owner")
         with self.assertRaises(ValueError):  # not done yet
             pp.build(copy_ps(self.tmp / "a", state="running"), self.root)
-        miss = copy_ps(self.tmp / "b")
+        miss = copy_ps(self.tmp / "b", "ps_20261105_bbbbbb")
         (miss / "p" / MODEL / "predictions" / "0002.txt").unlink()
         with self.assertRaises(FileNotFoundError):
             pp.build(miss, self.root)
+        self.assertEqual([p.name for p in self.root.iterdir()], [PKG])  # a failed build leaves nothing behind
+        for i, (image, file) in enumerate((("0001", "images/0001.tif"), ("0001", "../0001.png"), ("0001", "images/0002.png"),
+                                           ("x001", "images/x001.png"), ("0001", "C:/images/0001.png"))):
+            bad = copy_ps(self.tmp / f"csv{i}")
+            rows = (bad / "images.csv").read_text(encoding="utf-8").splitlines()
+            rows[1] = ",".join([image, file] + rows[1].split(",")[2:])
+            (bad / "images.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+            with self.assertRaises(ValueError, msg=file):
+                pp.build(bad, self.root)
 
     def test_sample_label_markup_is_not_put_in_split(self):
         ps = copy_ps(self.tmp / "c", sample_labels={"0001": "<img src=x onerror=alert(1)>"})
@@ -197,14 +211,16 @@ class ReviewedControlTests(Tmp):
         out = pp.reviewed_polygons(pkg)
         self.assertEqual(json.loads((pkg / "reviewed.json").read_text(encoding="utf-8")), out)
         self.assertEqual({k: v for k, v in out.items() if k != "images"},
-                         {"schema": "reviewed/1", "package": PKG, "prediction_set": PS_ID, "model": MODEL})
+                         {"schema": "reviewed/1", "package": PKG, "prediction_set": PS_ID, "model": MODEL,
+                          "unknown_labels": 0})
         self.assertEqual(sorted(out["images"]), ["0001", "0002", "0003"])
         for img, v in out["images"].items():
-            self.assertEqual((v["reviewed"], v["reviewed_by"]), (False, []))
+            self.assertEqual((v["reviewed"], v["edited"], v["reviewed_by"]), (False, False, []))
             want = [(c, s, p) for c, s, p in raw_predictions(img) if s >= 0.5]
             self.assertEqual(len(v["objects"]), len(want), img)
             for o, (c, s, p) in zip(v["objects"], want):
-                self.assertEqual((o["cls"], o["conf"], o["source"], o["reviewer_class"]), (c, s, "model", None))
+                self.assertEqual((o["cls"], o["conf"], o["source"], o["reviewer_label"], o["reviewer_class"]),
+                                 (c, s, "model", None, None))
                 self.assertLess(max_dist(o["poly"], p), 0.5)
         golden = json.loads((GOLDEN / "reviewed.json").read_text(encoding="utf-8"))
         for img in ("0001", "0003"):  # unreviewed in the golden scenario too
@@ -309,20 +325,60 @@ class ReviewThroughHttpTests(ServerCase):
         self.assertEqual((st, json.loads(raw)["0002.png"]), (200, rec))
         got = pp.reviewed_polygons(self.pkg)
         golden = json.loads((GOLDEN / "reviewed.json").read_text(encoding="utf-8"))
-        self.assertEqual({k: v for k, v in got.items() if k != "images"},
+        self.assertEqual({k: v for k, v in got.items() if k not in ("images", "unknown_labels")},
                          {k: v for k, v in golden.items() if k != "images"})
+        self.assertEqual(got["unknown_labels"], 0)
         self.assertEqual(sorted(got["images"]), sorted(golden["images"]))
         for img in golden["images"]:
             assert_same_image(self, got["images"][img], golden["images"][img])
+        self.assertEqual({i: v["edited"] for i, v in got["images"].items()}, {"0001": False, "0002": True, "0003": False})
+        self.assertEqual(sorted(o["reviewer_label"] for o in got["images"]["0002"]["objects"]),
+                         ["EV", "MV", "non-EV", "non-EV"])
         # package B is untouched by A's review
         self.assertFalse(any(v["reviewed"] for v in pp.reviewed_polygons(self.pkg_b)["images"].values()))
 
-    def test_edits_on_an_unreviewed_image_do_not_count(self):
+    def test_card_decisions_without_reviewed_count(self):
+        """The phone cards never press Reviewed: their decisions still show (edited true, reviewed false)."""
         cookie = self.login(PKG, self.key)
-        g = self.label_id(self.pkg, "0002.png", 300, 100)
-        self.put_decisions(cookie, PKG, "0002.png", [(f"g{g}", "del", None)])
-        v = pp.reviewed_polygons(self.pkg)["images"]["0002"]
-        self.assertEqual((v["reviewed"], len(v["objects"])), (False, 5))
+        g, f = self.label_id(self.pkg, "0002.png", 300, 100), self.label_id(self.pkg, "0002.png", 100, 100)
+        self.put_decisions(cookie, PKG, "0002.png", [(f"g{g}", "del", None), (f"g{f}", "keep:MV", None)])
+        self.put_decisions(cookie, PKG, "0001.png", [("p0", "add:EV", None)])  # the 0.30 candidate, accepted on a card
+        out = pp.reviewed_polygons(self.pkg)
+        v = out["images"]["0002"]
+        self.assertEqual((v["reviewed"], v["edited"], v["reviewed_by"]), (False, True, ["pujan"]))
+        golden = json.loads((GOLDEN / "reviewed.json").read_text(encoding="utf-8"))["images"]["0002"]
+        assert_same_image(self, dict(v, reviewed=True), golden)  # the same objects as the golden review
+        v1 = out["images"]["0001"]
+        self.assertEqual((v1["reviewed"], v1["edited"], len(v1["objects"])), (False, True, 5))
+        self.assertIn((0, 0.30, "model", "EV"), [(o["cls"], o["conf"], o["source"], o["reviewer_class"])
+                                                 for o in v1["objects"]])
+        self.assertEqual((out["images"]["0003"]["edited"], out["images"]["0003"]["reviewed"]), (False, False))
+
+    def test_reviewed_without_decisions(self):
+        cookie = self.login(PKG, self.key)
+        self.put_decisions(cookie, PKG, "0003.png", ["reviewed"])
+        v = pp.reviewed_polygons(self.pkg)["images"]["0003"]
+        self.assertEqual((v["reviewed"], v["edited"], v["reviewed_by"]), (True, False, []))  # authors of decisions
+        self.assertEqual([(o["cls"], o["reviewer_label"], o["reviewer_class"]) for o in v["objects"]],
+                         [(0, "EV", "EV")] * 3)
+
+    def test_reviewer_class_map_and_unknown_labels(self):
+        cookie = self.login(PKG, self.key)
+        lid = {n: self.label_id(self.pkg, "0002.png", x, y) for n, x, y in
+               (("F", 100, 100), ("G", 300, 100), ("H", 100, 300), ("I", 290, 290), ("J", 290, 290))}
+        lid["J"] = next(g["id"] for g in pp.read_datajs(self.pkg)["images"][1]["gt"]
+                        if g["id"] != lid["I"] and abs(g["p"][0][0] * W - 318) < 1)
+        drawn = [[0.1, 0.9, 0.15, 0.9, 0.15, 0.95, 0.1, 0.95]]
+        self.put_decisions(cookie, PKG, "0002.png", [
+            (f"g{lid['F']}", "keep:Low conf EV", None), (f"g{lid['G']}", "keep:VLDL", None),
+            (f"g{lid['H']}", "keep:Incomplete", None), (f"g{lid['I']}", "keep:Weird", None),
+            (f"g{lid['J']}", "keep:Overlapping", None), ("nz1", "new:Other thing", drawn)])
+        out = pp.reviewed_polygons(self.pkg)
+        got = sorted((o["reviewer_label"], o["reviewer_class"], o["cls"]) for o in out["images"]["0002"]["objects"])
+        self.assertEqual(got, sorted([("Low conf EV", "EV", 0), ("VLDL", "nonEV", 1), ("Incomplete", "EV", 0),
+                                      ("Weird", None, 1),         # unknown: the model object's class (I is non-EV)
+                                      ("Overlapping", "EV", 0), ("Other thing", None, 0)]))  # drawn, unknown: 0
+        self.assertEqual(out["unknown_labels"], 2)
 
     def test_candidate_accepted_drawn_and_reshaped_objects(self):
         cookie = self.login(PKG, self.key)
@@ -384,12 +440,17 @@ class MultiServerTests(ServerCase):
     def test_redirect_unknown_and_traversal(self):
         st, _, r = self.req("GET", f"/{PKG}?k={self.key}")
         self.assertEqual((st, r.getheader("Location")), (301, f"/{PKG}/?k={self.key}"))
+        self.assertEqual(self.req("GET", f"/{PKG}")[0], 403)  # no redirect without the key
         self.assertEqual(self.req("GET", "/", key=self.key)[0], 404)
-        self.assertEqual(self.req("GET", "/pred_ps_20990101_ffffff/", key=self.key)[0], 404)
-        self.assertEqual(self.req("GET", "/pred_ps_20990101_ffffff/data.js", key=self.key)[0], 404)
+        # an unknown id answers exactly as a wrong key does: ids can't be enumerated
+        unknown = [self.req(m, "/pred_ps_20990101_ffffff/data.js", key=self.key)[:2] for m in ("GET", "PUT")]
+        wrong = [self.req(m, f"/{PKG}/data.js", key="not-the-key")[:2] for m in ("GET", "PUT")]
+        self.assertEqual(unknown, wrong)
+        self.assertEqual([s for s, _ in unknown], [403, 403])
+        self.assertEqual(self.req("GET", "/pred_ps_20990101_ffffff/", key=self.key)[0], 403)
         # a package folder without the prefix is not served (the real review's packages stay with their own server)
         shutil.copytree(self.pkg, self.root / "prelipo_like_review")
-        self.assertEqual(self.req("GET", "/prelipo_like_review/data.js", key=self.key)[0], 404)
+        self.assertEqual(self.req("GET", "/prelipo_like_review/data.js", key=self.key)[0], 403)
         secret = self.key.encode()
         for path in ("/../review/" + PKG + "/data.js", "/..", f"/{PKG}/../{PKG_B}/data.js", f"/{PKG}/images/../.review_key",
                      f"/{PKG}/images/..\\.review_key", f"/{PKG}/images/0001.jpg:x", "/%2e%2e/x", f"/{PKG}/%2e%2e/.review_key",
@@ -411,7 +472,37 @@ class MultiServerTests(ServerCase):
         self.assertEqual(self.req("GET", f"/{late.name}/data.js", key=key)[0], 403)
         self.assertEqual(self.req("GET", f"/{late.name}/data.js", key="rotated-key-123")[0], 200)
         shutil.rmtree(late)
-        self.assertEqual(self.req("GET", f"/{late.name}/data.js", key="rotated-key-123")[0], 404)
+        self.assertEqual(self.req("GET", f"/{late.name}/data.js", key="rotated-key-123")[0], 403)
+
+    def test_aliases_and_nothing_made_without_the_key(self):
+        cache = self.srv.RequestHandlerClass.packages._cache
+        self.assertEqual(cache, {})
+        for key in (None, "wrong", self.key_b):
+            self.assertEqual(self.req("GET", f"/{PKG}/api/edits", key=key)[0], 403)
+            self.assertEqual(self.req("PUT", f"/{PKG}/api/edits?f=0001.png", {"dec": {}, "t": 1}, key=key)[0], 403)
+        self.assertEqual(cache, {})
+        self.assertFalse((self.pkg / "edits").exists())  # make_handler's mkdir only runs for a keyed request
+        # another spelling of the folder (case on Windows; 8.3 names likewise) is not a second package
+        for alias in ("pred_" + PS_ID.upper(), PKG.replace("abc123", "ABC123")):  # the prefix still matches
+            st = self.req("GET", f"/{alias}/data.js", key=self.key)[0]
+            self.assertEqual(st, 403, alias)
+        self.assertEqual(cache, {})
+        self.assertEqual(self.req("GET", f"/{PKG}/api/edits", key=self.key)[0], 200)
+        self.assertEqual(list(cache), [self.pkg.resolve()])
+        self.assertTrue((self.pkg / "edits").is_dir())
+
+    def test_incomplete_package_not_served(self):
+        part = self.root / "pred_ps_20261107_aaaaaa"
+        shutil.copytree(self.pkg, part)
+        key = (part / ".review_key").read_text(encoding="utf-8")
+        (part / "review_package.json").unlink()  # the builder writes it last
+        self.assertEqual(self.req("GET", f"/{part.name}/data.js", key=key)[0], 403)
+        (part / "review_package.json").write_text("{}", encoding="utf-8")
+        self.assertEqual(self.req("GET", f"/{part.name}/data.js", key=key)[0], 200)
+        (part / ".review_key").unlink()  # no key file: not served (the server never makes one)
+        self.assertEqual(self.req("GET", f"/{part.name}/data.js", key=key)[0], 403)
+        self.assertEqual(self.req("GET", f"/{part.name}/data.js", key="")[0], 403)
+        self.assertFalse((part / ".review_key").exists())
 
 
 def free_port() -> int:
@@ -437,7 +528,9 @@ class CliTests(Tmp):
         self.assertTrue((pkg / "reviewed.json").is_file())
         r = subprocess.run(env_py + ["annotation.prediction_package", "spotcheck", "--pkg", str(pkg), "--n", "2"],
                            cwd=REPO, capture_output=True, text=True, timeout=120)
-        self.assertEqual((r.returncode, json.loads(r.stdout.strip().splitlines()[-1])), (0, ["0001", "0003"]))
+        self.assertEqual((r.returncode, json.loads(r.stdout.strip().splitlines()[-1])),
+                         (0, pp.spot_check(pkg, 2, write=False)))
+        self.assertEqual(json.loads((pkg / "spotcheck.json").read_text(encoding="utf-8"))["mode"], "representative")
         port = free_port()
         log = open(self.tmp / "server.log", "wb")
         proc = subprocess.Popen(env_py + ["annotation.multi_review_server", "--root", str(self.root), "--port", str(port)],
@@ -465,35 +558,59 @@ class CliTests(Tmp):
 
 
 class SpotCheckTests(Tmp):
-    def test_deterministic_and_spread_over_samples(self):
-        pkg = self.build()
-        a, b = pp.spot_check(pkg, 2), pp.spot_check(pkg, 2)
-        self.assertEqual(a, b)
-        self.assertEqual(pp.spot_check(PS, 2, write=False), a)  # from the prediction set: the same answer
-        meta = json.loads((pkg / pp.META).read_text(encoding="utf-8"))
-        self.assertEqual({meta["images"][i]["sample_label"] for i in a}, {"S1", "S2"})
-        # S1's 0001 has the 0.30 candidate: weight 2 vs 0002's 1; over seeds it is picked more often
-        firsts = [pp.spot_check(pkg, 2, seed=s, write=False) for s in range(60)]
-        self.assertGreater(sum("0001" in f for f in firsts), sum("0002" in f for f in firsts))
-        self.assertEqual(sorted(pp.spot_check(pkg, 99)), ["0001", "0002", "0003"])  # n capped at the image count
-        sc = json.loads((pkg / "spotcheck.json").read_text(encoding="utf-8"))
-        self.assertEqual((sc["schema"], sc["package"], sc["n"]), ("spotcheck/1", PKG, 3))
-        self.assertTrue({"image", "sample_label", "n_candidates", "n_labels"} <= set(sc["images"][0]))
-
-    def test_favours_images_with_many_candidates(self):
-        """A synthetic package sidecar: in S1, image a has 10 candidates and 9 images have none; S2 has 10 images."""
+    def synthetic(self, sizes, cands=None):
+        """A package sidecar only (spot_check reads nothing else): sizes {sample: n images}; cands {image: n}."""
         pkg = self.root / "pred_ps_20261105_000000"
-        pkg.mkdir()
-        imgs = {"a": {"sample_label": "S1", "candidates": [{}] * 10, "labels": []}}
-        imgs.update({f"s1_{k}": {"sample_label": "S1", "candidates": [], "labels": []} for k in range(9)})
-        imgs.update({f"s2_{k}": {"sample_label": "S2", "candidates": [], "labels": [{}]} for k in range(10)})
+        pkg.mkdir(exist_ok=True)
+        imgs = {f"{s}_{k:02d}": {"sample_label": s, "candidates": [{}] * (cands or {}).get(f"{s}_{k:02d}", 0),
+                                 "labels": []} for s, n in sizes.items() for k in range(n)}
         (pkg / pp.META).write_text(json.dumps({"package": pkg.name, "prediction_set": "ps_20261105_000000",
                                                "images": imgs}), encoding="utf-8")
-        picks = [pp.spot_check(pkg, 2, seed=s, write=False) for s in range(100)]
+        return pkg, imgs
+
+    def test_golden_deterministic_spread_and_labelled(self):
+        pkg = self.build()
+        for mode in pp.SPOT_MODES:
+            a = pp.spot_check(pkg, 2, mode=mode)
+            self.assertEqual(a, pp.spot_check(pkg, 2, mode=mode))
+            self.assertEqual(pp.spot_check(PS, 2, write=False, mode=mode), a)  # from the prediction set: the same
+            meta = json.loads((pkg / pp.META).read_text(encoding="utf-8"))
+            self.assertEqual({meta["images"][i]["sample_label"] for i in a}, {"S1", "S2"})
+            sc = json.loads((pkg / "spotcheck.json").read_text(encoding="utf-8"))
+            self.assertEqual((sc["schema"], sc["package"], sc["n"], sc["mode"], sc["rule"]),
+                             ("spotcheck/1", PKG, 2, mode, pp.SPOT_MODES[mode]))
+            self.assertEqual(sorted(pp.spot_check(pkg, 99, mode=mode, write=False)), ["0001", "0002", "0003"])
+        self.assertEqual(pp.spot_check.__defaults__[-1], "representative")
+        with self.assertRaises(ValueError):
+            pp.spot_check(pkg, 2, mode="best")
+
+    def test_representative_is_proportional_and_uniform(self):
+        pkg, imgs = self.synthetic({"A": 30, "B": 10, "C": 2}, cands={"A_00": 50})
+        sample = lambda i: imgs[i]["sample_label"]
+        for seed in range(20):
+            got = pp.spot_check(pkg, 8, seed=seed, write=False)
+            # exact 5.71 / 1.90 / 0.38; C raised to 1, then the largest remainders: A 5, B 2, C 1
+            self.assertEqual(sorted(map(sample, got)), ["A"] * 5 + ["B"] * 2 + ["C"])
+            self.assertEqual(len(set(got)), 8)
+        self.assertEqual(sorted(map(sample, pp.spot_check(pkg, 3, write=False))), ["A", "B", "C"])
+        # uniform within a sample: A_00's 50 candidates don't matter here (1 of 30 -> ~6 of 200 draws of 6)
+        n_a00 = sum("A_00" in pp.spot_check(pkg, 8, seed=s, write=False) for s in range(200))
+        self.assertLess(n_a00, 80)
+        # n < samples: samples chosen at random, not the first ones alphabetically
+        pkg, imgs = self.synthetic({s: 3 for s in "ABCDE"})
+        chosen = [tuple(sorted(map(sample, pp.spot_check(pkg, 2, seed=s, write=False)))) for s in range(40)]
+        self.assertTrue(all(len(set(c)) == 2 for c in chosen))
+        self.assertGreater(len(set(chosen)), 4)
+        self.assertGreater(sum("E" in c for c in chosen), 5)
+
+    def test_prioritised_favours_images_with_many_candidates(self):
+        """In S1, image S1_00 has 10 candidates and 9 images have none; S2 has 10 images."""
+        pkg, imgs = self.synthetic({"S1": 10, "S2": 10}, cands={"S1_00": 10})
+        picks = [pp.spot_check(pkg, 2, seed=s, write=False, mode="prioritised") for s in range(100)]
         self.assertTrue(all(sorted(imgs[i]["sample_label"] for i in p) == ["S1", "S2"] for p in picks))
-        n_a = sum("a" in p for p in picks)
-        self.assertGreater(n_a, 35)  # weight 11 of 20 in S1: expected ~55 of 100; a uniform pick would give ~10
-        self.assertEqual(pp.spot_check(pkg, 4, seed=7, write=False), pp.spot_check(pkg, 4, seed=7, write=False))
+        self.assertGreater(sum("S1_00" in p for p in picks), 35)  # weight 11 of 20: ~55; uniform would give ~10
+        rep = sum("S1_00" in pp.spot_check(pkg, 2, seed=s, write=False) for s in range(100))
+        self.assertLess(rep, 25)  # representative: uniform, ~10
 
 
 if __name__ == "__main__":

@@ -5,13 +5,16 @@ review_server.py is wrapped, not changed; the real review (review_server.py on :
 
   python -m annotation.multi_review_server [--root <CryoAI-laptop>/review] [--port 8767] [--host 127.0.0.1]
 
-- Packages: folders <root>/<prefix>*/ with data.js (default prefix pred_: prediction packages only, so this server
-  never writes the edits of a package another server has open). A package added after start is found on its first
-  request; a rebuilt data.js or a new .review_key is picked up on the next one.
-- Auth: each package keeps its own key (<pkg>/.review_key, made when missing): ?k=<key> once, then a cookie
-  review_key_<port>_<pkg id> (one per package, since every package shares this port), or X-Review-Key.
-- Errors: /<id>/ for an unknown id -> 404; a malformed id or a path with .., \\ or : -> 400; / -> 404 (no listing).
-  /<id> redirects to /<id>/ so the page's relative URLs (data.js, images/, api/...) stay inside the package.
+- Packages: complete folders <root>/<prefix>*/ (data.js + review_package.json), reached under exactly their own
+  name (no case or short-name aliases). Default prefix pred_: prediction packages only, so this server never writes
+  the edits of a package another server has open. A package added after start is found on its first request; a
+  rebuilt data.js or a new .review_key is picked up on the next one.
+- Auth: each package keeps its own key (<pkg>/.review_key; no key, not served): ?k=<key> once, then a cookie
+  review_key_<port>_<pkg id> (one per package, since every package shares this port), or X-Review-Key. The key is
+  checked here before anything is made for the package (handler, cache entry, edits/ folder).
+- Errors: an unknown id and a wrong key both get 403, so ids can't be enumerated; a malformed id or a path with
+  .., \\ or : -> 400; / -> 404 (no listing). /<id> (with its key) redirects to /<id>/ so the page's relative URLs
+  (data.js, images/, api/...) stay inside the package.
 """
 import argparse
 import json
@@ -19,9 +22,10 @@ import re
 import secrets
 import sys
 import threading
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
@@ -32,43 +36,59 @@ PORT = 8767
 PREFIX = "pred_"
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 BAD_PATH = ("..", "\\", ":")
+COMPLETE = "review_package.json"  # prediction_package.build writes it last (and builds in a temp folder anyway)
+
+
+def cookie_name(port: int, pkg_id: str) -> str:
+    """review_key_<port>_<pkg id>: every package shares this port, so each needs its own cookie."""
+    return f"{rs.cookie_name(port)}_{pkg_id}"
 
 
 def package_dir(root: Path, pkg_id: str, prefix: str = PREFIX) -> Path | None:
-    """<root>/<pkg_id> when pkg_id is a well-formed id with the prefix and that folder holds data.js, else None."""
+    """The resolved <root>/<pkg_id> when pkg_id is a well-formed id with the prefix, the folder is complete
+    (data.js and review_package.json, which the builder writes last) and it is reached under exactly that name: on a
+    case-insensitive disk /PRED_x/ or an 8.3 short name would otherwise be a second package with its own lock."""
     if not (ID_RE.match(pkg_id or "") and ".." not in pkg_id and pkg_id.startswith(prefix)):
         return None
-    p = Path(root) / pkg_id
-    return p if (p / "data.js").is_file() and p.resolve().parent == Path(root).resolve() else None
+    root = Path(root).resolve()
+    p = (root / pkg_id).resolve()
+    if p.parent != root or p.name != pkg_id:
+        return None
+    return p if (p / "data.js").is_file() and (p / COMPLETE).is_file() else None
 
 
 def package_key(pkg: Path) -> str:
-    """The package's access key from <pkg>/.review_key; one is made (and saved) when there is none."""
+    """The package's access key from <pkg>/.review_key, "" when there is none (then the package is not served)."""
     f = Path(pkg) / ".review_key"
-    key = f.read_text(encoding="utf-8").strip() if f.is_file() else ""
-    if not key:
-        key = secrets.token_urlsafe(18)
-        f.write_text(key, encoding="utf-8")
-    return key
+    try:
+        return f.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 class Packages:
-    """pkg id -> handler class for that package, made on first use and remade when data.js or .review_key change."""
+    """pkg id -> handler class for that package, made on the first request with its key and remade when data.js or
+    .review_key change. Cached by resolved folder; nothing is cached or created for an unknown id or a wrong key."""
 
     def __init__(self, root: Path, prefix: str = PREFIX, people=None):
         self.root, self.prefix = Path(root), prefix
         self.people = rs.load_people() if people is None else list(people)
         self._cache, self._lock = {}, threading.Lock()
 
-    def handler(self, pkg_id: str):
+    def handler(self, pkg_id: str, given):
+        """The package's handler class when `given` is its key, else None (unknown id and wrong key alike)."""
         pkg = package_dir(self.root, pkg_id, self.prefix)
+        key = package_key(pkg) if pkg else ""
+        # bytes: compare_digest refuses non-ASCII str, and a ?k= can hold anything
+        ok = secrets.compare_digest(str(given or "").encode(), (key or "\0no package\0").encode()) and bool(key)
+        if not ok:
+            return None
         with self._lock:
-            if pkg is None:
-                self._cache.pop(pkg_id, None)
+            try:
+                sig = ((pkg / "data.js").stat().st_mtime_ns, (pkg / ".review_key").stat().st_mtime_ns)
+            except OSError:
                 return None
-            key = package_key(pkg)
-            sig = ((pkg / "data.js").stat().st_mtime_ns, (pkg / ".review_key").stat().st_mtime_ns)
-            hit = self._cache.get(pkg_id)
+            hit = self._cache.get(pkg)
             if hit and hit[0] == sig:
                 return hit[1]
             data = json.loads((pkg / "data.js").read_text(encoding="utf-8").split("=", 1)[1].strip().rstrip(";"))
@@ -76,11 +96,11 @@ class Packages:
                                     self.people, rs.is_sandbox(pkg))
 
             def _cookie(h, _id=pkg_id):  # one cookie per package: they all share this port
-                return f"{rs.cookie_name(h.server.server_address[1])}_{_id}"
+                return cookie_name(h.server.server_address[1], _id)
 
             cls = type(f"Pkg_{pkg_id}", (Dispatch, inner), {"_cookie": _cookie, "pkg_id": pkg_id, "packages": self,
                                                             "log_message": inner.log_message})
-            self._cache[pkg_id] = (sig, cls)
+            self._cache[pkg] = (sig, cls)
             return cls
 
     def ids(self):
@@ -94,10 +114,22 @@ class Dispatch(BaseHTTPRequestHandler):
     timeout = rs.SOCKET_TIMEOUT
     packages: Packages = None
 
-    def _plain(self, code, text, extra=None):
+    def _given_key(self, query, pkg_id):
+        """The key this request brings for pkg_id: ?k=, else X-Review-Key, else this package's cookie."""
+        given = parse_qs(query).get("k", [None])[0] or self.headers.get("X-Review-Key")
+        if given is not None:
+            return given
+        try:
+            cookie = SimpleCookie(self.headers.get("Cookie", ""))
+        except Exception:  # a malformed header: no cookie
+            return None
+        name = cookie_name(self.server.server_address[1], pkg_id)
+        return cookie[name].value if name in cookie else None
+
+    def _plain(self, code, text, extra=None, ctype="text/plain; charset=utf-8"):
         body = text.encode()
         self.send_response(code)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         for k, v in (extra or {}).items():
@@ -119,9 +151,12 @@ class Dispatch(BaseHTTPRequestHandler):
         if not ID_RE.match(pkg_id) or ".." in pkg_id or any(b in url.path for b in BAD_PATH):
             self._plain(400, "bad path")
             return False
-        cls = self.packages.handler(pkg_id)
-        if cls is None:
-            self._plain(404, "unknown package")
+        cls = self.packages.handler(pkg_id, self._given_key(url.query, pkg_id))
+        if cls is None:  # unknown id or wrong key: one answer, as review_server gives it, so ids can't be listed
+            if self.command in ("GET", "HEAD"):
+                self._plain(403, "Access key required: open the full link that includes ?k=...")
+            else:
+                self._plain(403, json.dumps({"error": "access key required"}), ctype="application/json")
             return False
         if len(parts) == 2:  # /<id> -> /<id>/, keeping ?k=
             self._plain(301, "moved", {"Location": f"/{pkg_id}/" + (f"?{url.query}" if url.query else "")})
@@ -130,7 +165,7 @@ class Dispatch(BaseHTTPRequestHandler):
         self.__class__ = cls
         return True
 
-    def log_message(self, fmt, *args):  # before dispatch (400/404/301): the same redaction as review_server
+    def log_message(self, fmt, *args):  # before dispatch (400/403/404/301): the same redaction as review_server
         msg = re.sub(r"([?&]k=)[^&\s\"]*", r"\1***", fmt % args)
         print(f"{self.address_string()} {msg}", flush=True)
 
