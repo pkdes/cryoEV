@@ -30,7 +30,9 @@ moves the 3d tiles + MANIFEST.csv into <out>. The native-resolution copies the e
 
 Refused (ConvertError; CLI exit 2, {"ok": false, "kind": "refused"}), nothing left in <out>: no repo; an unknown or
 non-session recipe; an input that is not a montage; a sidecar without a finite, positive PixelSpacing (nm/px is never
-defaulted: cryoem_core's own fallback is never reached); an MRC stack or idoc missing; two montages that would get the
+defaulted: cryoem_core's own fallback is never reached); an MRC stack or idoc missing; a sidecar whose [Image = ...]
+names a tile that is not a plain file name inside its own folder (an absolute, UNC or '..' name; checked before any
+tile is opened); two montages that would get the
 same name; <out> not empty; a montage whose estimated peak memory (~14 bytes per montage pixel) exceeds the RAM free
 now; --gpu with the GPU busy or missing (the same check as jobs/predict_local.py); with the default recipe, a sampling
 outside 0.5x-2x of the recipe session's own (name --recipe to override); no tile written. Montages coarser than
@@ -326,6 +328,25 @@ def sidecar_a_px(path: Path, core):
     return ps if math.isfinite(ps) and ps > 0 else None
 
 
+def tile_ref_problem(side: Path, name) -> str | None:
+    """A tile a sidecar names ([Image = <name>]) must be a plain file name beside the sidecar: no drive, no folder,
+    no UNC share, not '..'. Checked by its spelling first (a UNC or absolute name is never touched, so no network or
+    other folder is reached), then its resolved path must be inside the sidecar's own folder (a link out is refused).
+    -> why not, or None."""
+    name = "" if name is None else str(name)
+    if (not name or name in (".", "..") or any(c in name for c in "\\/:")
+            or any(ord(c) < 32 for c in name)):
+        return f"tile name {name[:80]!r} is not a plain file name beside it (refused: no paths in a sidecar)"
+    try:
+        here = Path(side).parent.resolve()
+        where = (here / name).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return f"tile name {name[:80]!r} can't be resolved beside it"
+    if os.path.normcase(str(where.parent)) != os.path.normcase(str(here)):
+        return f"tile {name[:80]!r} leads outside the sidecar's folder (refused)"
+    return None
+
+
 def check_montage(m, core):
     """(A/px, estimated peak bytes, warnings) for one montage, or ConvertError. Sets the placement convention."""
     ps = sidecar_a_px(m.idoc_path, core)
@@ -337,6 +358,11 @@ def check_montage(m, core):
         raise ConvertError(f"{m.idoc_path.name}: the sidecar lists no tiles")
     warnings = []
     tiff = any(pc.get("_file") for pc in pieces)
+    for pc in pieces:                       # before any tile is looked at: never open a file outside the folder
+        if pc.get("_section") == "Image" or "_file" in pc:
+            why = tile_ref_problem(m.idoc_path, pc.get("_file"))
+            if why:
+                raise ConvertError(f"{m.idoc_path.name}: {why}")
     if tiff:
         files = [pc["_file"] for pc in pieces if pc.get("_file")]
         lost = [f for f in files if not (m.idoc_path.parent / f).is_file()]

@@ -1,0 +1,209 @@
+// Predict module (portal/modules/predict.py serves this file as /predict/predict.js). No inline script anywhere.
+// - Set page (#cj-predict-set[data-live="1"]) and conversion page (#cj-predict-conv[data-live="1"]): every few seconds
+//   GET the page's JSON (same origin) and swap in the fragments, rendered and escaped by the server; stops when nothing
+//   is left to do.
+// - Forms: show what is selected, check the upload caps before sending, disable the button while it works.
+// - Uploads (form[data-cj-upload]): one request per file, or per piece of at most `chunk` bytes of a big file, into an
+//   upload session (POST /predict/api/upload), then one "create" request. A dropped connection is retried, and pressing
+//   the button again resumes where it stopped (the session id is kept in sessionStorage). Without JavaScript the form
+//   posts as a plain multi-file form (small sets only; the server says so).
+(function () {
+  'use strict';
+  if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
+
+  function swap(id, frag) {
+    var box = document.getElementById(id);
+    if (!box || typeof frag !== 'string') return;
+    var t = document.createElement('template');
+    t.innerHTML = frag;
+    box.replaceChildren(t.content);
+  }
+
+  function poller(root, url, ids) {
+    var every = Math.max(2, parseInt(root.dataset.every, 10) || 5) * 1000, busy = false, timer = null;
+    var note = document.getElementById('cj-predict-err');
+    var tick = function () {
+      if (busy || document.hidden) return;
+      busy = true;
+      fetch(url, {cache: 'no-store', credentials: 'same-origin'})
+        .then(function (r) { if (!r.ok) throw new Error('status ' + r.status); return r.json(); })
+        .then(function (j) {
+          var h = (j && j.html) || {};
+          Object.keys(ids).forEach(function (k) { swap(ids[k], h[k]); });
+          if (note) { note.textContent = ''; note.hidden = true; }
+          if (!j.live && timer) { clearInterval(timer); timer = null; }
+        })
+        .catch(function (e) {
+          if (note) { note.textContent = 'Could not refresh (' + e.message + '); showing the last state.'; note.hidden = false; }
+        })
+        .then(function () { busy = false; });
+    };
+    if (root.dataset.live === '1') timer = setInterval(tick, every);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden && timer) tick(); });
+  }
+
+  var set = document.getElementById('cj-predict-set');
+  if (set && set.dataset.ps) {
+    poller(set, '/predict/api/set/' + encodeURIComponent(set.dataset.ps) + '?html=1',
+           {status: 'cj-predict-status', actions: 'cj-predict-actions'});
+  }
+  var conv = document.getElementById('cj-predict-conv');
+  if (conv && conv.dataset.cid) {
+    poller(conv, '/predict/api/convert/' + encodeURIComponent(conv.dataset.cid) + '?html=1',
+           {status: 'cj-predict-cstatus', result: 'cj-predict-cresult'});
+  }
+
+  document.addEventListener('submit', function (e) {
+    var f = e.target;
+    if (!f || f.tagName !== 'FORM') return;
+    if (f.dataset.sent === '1') { e.preventDefault(); return; }
+    f.dataset.sent = '1';
+    var b = f.querySelector('button[type="submit"]');
+    if (b) { b.disabled = true; if (b.dataset.busy) b.textContent = b.dataset.busy; }
+  });
+
+  var sess = document.getElementById('cj-predict-session');
+  if (sess) {
+    var out = document.getElementById('cj-predict-sel'), max = parseInt(sess.dataset.max, 10) || 200;
+    var count = sess.querySelector('input[name="count"]');
+    var update = function () {
+      var n = 0;
+      sess.querySelectorAll('input[name="samples"]:checked').forEach(function (c) { n += parseInt(c.dataset.n, 10) || 0; });
+      var mode = sess.querySelector('input[name="how"]:checked');
+      if (mode && mode.value === 'count') {
+        var k = parseInt(count.value, 10);
+        if (k > 0) n = Math.min(n, k);
+      }
+      out.textContent = n + ' tile' + (n === 1 ? '' : 's') + ' will be analysed' + (n > max ? ' (too many: at most ' + max + ')' : '') + '.';
+    };
+    sess.addEventListener('input', update);
+    sess.addEventListener('change', update);
+    if (count) count.addEventListener('focus', function () {
+      var r = sess.querySelector('input[name="how"][value="count"]');
+      if (r) r.checked = true;
+      update();
+    });
+    update();
+  }
+
+  // ---------------------------------------------------------------- uploads, one file (piece) per request
+  function mb(n) { return (n / 1048576).toFixed(1) + ' MB'; }
+  function wait(ms) { return new Promise(function (ok) { setTimeout(ok, ms); }); }
+  function answer(r) {
+    return r.json().catch(function () { return {}; }).then(function (j) {
+      j = (j && typeof j === 'object') ? j : {};
+      j._status = r.status;
+      return j;
+    });
+  }
+  function post(url, body, type) {
+    return fetch(url, {method: 'POST', credentials: 'same-origin', cache: 'no-store',
+                       headers: {'Content-Type': type || 'application/json'},
+                       body: type ? body : JSON.stringify(body || {})});
+  }
+
+  document.querySelectorAll('form[data-cj-upload]').forEach(function (form) {
+    var kind = form.dataset.cjUpload, input = form.querySelector('input[type="file"]');
+    var info = form.querySelector('[data-cj-upload-info]'), box = form.querySelector('[data-cj-upload-msg]');
+    var btn = form.querySelector('button[type="submit"]'), idle = btn ? btn.textContent : '';
+    var maxFiles = parseInt(form.dataset.maxFiles, 10), maxBytes = parseInt(form.dataset.maxBytes, 10);
+    var store = 'cj-predict-upload-' + kind;
+    if (!input) return;
+
+    var check = function () {
+      var fs = Array.prototype.slice.call(input.files || []), big = fs.filter(function (f) { return f.size > maxBytes; });
+      var total = fs.reduce(function (a, f) { return a + f.size; }, 0);
+      var msg = fs.length + ' file' + (fs.length === 1 ? '' : 's') + ', ' + mb(total);
+      var bad = '';
+      if (fs.length > maxFiles) bad = 'At most ' + maxFiles + ' files.';
+      else if (big.length) bad = big[0].name + ' is over ' + Math.round(maxBytes / 1048576) + ' MB.';
+      if (info) info.textContent = bad ? msg + '. ' + bad : msg;
+      input.setCustomValidity(bad);
+    };
+    input.addEventListener('change', check);
+
+    function say(text) { if (box) { box.textContent = text || ''; box.hidden = !text; } }
+    function progress(text) { if (info) info.textContent = text; }
+    function busy(on) {
+      if (!btn) return;
+      btn.disabled = on;
+      btn.textContent = on && btn.dataset.busy ? btn.dataset.busy : idle;
+    }
+    function remember(id) { try { if (id) sessionStorage.setItem(store, id); else sessionStorage.removeItem(store); } catch (x) { /* private mode */ } }
+    function remembered() { try { return sessionStorage.getItem(store); } catch (x) { return null; } }
+
+    function sendAll(st, files) {
+      var id = st.upload, chunk = st.chunk, total = files.reduce(function (a, f) { return a + f.size; }, 0);
+      var sentOf = function (s) {
+        return files.reduce(function (a, f) {
+          return a + ((s.done || []).indexOf(f.name) >= 0 ? f.size : ((s.received || {})[f.name] || 0));
+        }, 0);
+      };
+      var one = function (f, idx, s, tries) {
+        if ((s.done || []).indexOf(f.name) >= 0) return Promise.resolve(s);
+        var off = (s.received || {})[f.name] || 0, end = Math.min(f.size, off + chunk);
+        progress('Sending file ' + (idx + 1) + ' of ' + files.length + ' (' + f.name + '): ' +
+                 Math.floor(100 * sentOf(s) / Math.max(1, total)) + ' % of ' + mb(total));
+        return post('/predict/api/upload/' + encodeURIComponent(id) + '/file?name=' + encodeURIComponent(f.name) +
+                    '&offset=' + off, f.slice(off, end), 'application/octet-stream')
+          .then(answer, function () { return null; })
+          .then(function (j) {
+            if (j === null) {                                   // the connection dropped: ask where it stopped
+              if (tries >= 4) throw {error: 'The connection dropped. Press the button again to resume where it stopped.'};
+              return wait(1000 * Math.pow(2, tries))
+                .then(function () { return fetch('/predict/api/upload/' + encodeURIComponent(id), {cache: 'no-store', credentials: 'same-origin'}); })
+                .then(answer, function () { return {_status: 0}; })
+                .then(function (s2) { return one(f, idx, s2._status === 200 ? s2 : s, tries + 1); });
+            }
+            if (j._status === 200 || j._status === 409) return one(f, idx, j, 0);   // 409: resume from j.received
+            throw j;
+          });
+      };
+      var i = 0, s = st;
+      var next = function () {
+        if (i >= files.length) return Promise.resolve(id);
+        return one(files[i], i, s, 0).then(function (s2) { s = s2; i += 1; return next(); });
+      };
+      return next();
+    }
+
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      e.stopPropagation();                                      // not the plain-form handler below
+      if (form.dataset.sending === '1') return;
+      var files = Array.prototype.slice.call(input.files || []);
+      var fields = {};
+      new FormData(form).forEach(function (v, k) { if (typeof v === 'string') fields[k] = v; });
+      form.dataset.sending = '1';
+      busy(true);
+      say('');
+      progress('Starting…');
+      post('/predict/api/upload', {kind: kind, fields: fields, resume: remembered(),
+                                   files: files.map(function (f) { return {name: f.name, size: f.size}; })})
+        .then(answer)
+        .then(function (st) {
+          if (st._status !== 200) throw st;
+          remember(st.upload);
+          return sendAll(st, files);
+        })
+        .then(function (id) {
+          progress('All ' + files.length + ' file' + (files.length === 1 ? '' : 's') + ' sent; starting…');
+          return post('/predict/api/upload/' + encodeURIComponent(id) + '/create', {}).then(answer);
+        })
+        .then(function (j) {
+          if (j._status !== 200 || !j.href) throw j;
+          remember(null);
+          progress('Done: opening…');
+          location.assign(j.href);
+        })
+        .catch(function (j) {
+          if (j && j.dropped) remember(null);
+          say((j && j.error) || 'The upload stopped. Press the button again to resume where it stopped.');
+          progress('');
+          check();
+          busy(false);
+          form.dataset.sending = '0';
+        });
+    });
+  });
+})();

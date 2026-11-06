@@ -29,6 +29,7 @@ Sandbox: NOT under the shell. It stays on its own origin (:8443); the nav links 
 | `static/header.js` | The top bar: grid-atlas wordmark, nav from `modules.json` filtered by role, server dots, user chip |
 | `static/live.js` | `CJLive`: the History Live-tab charts as a small library (see below) |
 | `static/review.js` | The review shell: mirrors the frame's URL into the address bar; links out of the tool open in the window |
+| `static/predict.js` | Predict's script (served by the module as `/predict/predict.js`): status refresh, form counts, one-file-per-request uploads |
 | `static/brand.json` | `{"name": "CJ", ...}`: renaming the portal = editing this one file |
 | `templates/base.html` | The page every shell page uses (`{{title}} {{active}} {{body}}`; the bar placeholder) |
 | `templates/home.html` | Home's body (plain `{{name}}` placeholders, filled by `app.render_home`) |
@@ -125,6 +126,42 @@ Nothing else is touched: the review servers, the history server, the monitor and
   and advanced users open their own; the admin-only `/review` rule covers only the real package. An unknown id, a
   package without a key, or one that isn't yours all get the same 404; so does anything else under `/review/`.
 - `X-Frame-Options`: `SAMEORIGIN` for `/review/*`, `DENY` everywhere else.
+
+## Predict (`/predict/`, every role)
+The full contract is the module docstring in `modules/predict.py`. In short:
+- **Where the images come from.** (1) A processed session: the session folders under the scan roots
+  (`CJ_PREDICT_SCAN_ROOTS`, default the processing root) that have `3. Processed images/3d. Tiles no scalebar*`, plus
+  the admin's hand list (`CJ_PREDICT_SOURCES`), with **Admin > Predict sessions** (hide, rename). Sessions are named by
+  their full registry id (`20261027`, `20260827-2`). (2) Uploaded tiles (8-bit PNG/JPEG, up to 200 files of 100 MB).
+  (3) Raw montages converted on the laptop (below).
+- **Every analysis:** pick samples, see each sample's nm/px and tick "I confirm the pixel size" (never defaulted), at
+  most 200 tiles. Basic users get the production model only and at most 3 analyses waiting or running.
+- **Uploads go one file per request** (a big file in pieces of at most 32 MB): a Cloudflare free tunnel caps a request
+  at about 100 MB. The page's script opens an upload session (`POST /predict/api/upload` with the file list: fields,
+  caps and free disk checked before a byte is sent, the declared size held on the disk), sends each file, then asks
+  for "create". A dropped connection is retried; pressing the button again resumes where it stopped. A refusal (cap,
+  disk, content, fields) keeps nothing; a session never finished is removed after an hour, with its disk hold. Without
+  JavaScript the tile form posts as one request, for at most 90 MB in total (else refused, saying why).
+- **Raw conversion** (`CJ_PROCESSING_REPO` = the lab's processing repo, read only; unset = off):
+  - *Upload raw images* (admin, advanced): each `.mrc` with its `.mrc.mdoc`, or an `.idoc` with its `.tif` tiles, plus
+    an optional `sample_key.csv`; a session id (`YYYYMMDD` or `YYYYMMDD-n`) and a recipe.
+  - *Pick a raw session* (admin): a session folder under the scan roots with no 3d tiles yet; tick montages. The
+    folder is only read.
+  - Recipe: `default` (convert_raw's default, 20261012, with a warning on the page) or one of the repo's session
+    recipes that `jobs/convert_raw.py`'s static check accepts. GPU only when ticked and free; the CPU otherwise.
+  - The portal runs `python -m jobs.convert_raw` detached, one conversion at a time (the others wait, queued), into
+    `<predict root>/raw_tiles/<session id>_<6 hex>/` (`convert.json`, `status.json` queued/running/done/failed with the
+    converter's JSON result and warnings, `convert.log`, `tiles/`). When done, `tiles/` is a Predict source seen only
+    by its owner and the admin.
+  - Uploaded raw files are kept `CJ_RAW_KEEP_DAYS` (default 7; 0 = removed at once) after the conversion ends, done
+    or failed; the admin can delete them sooner. At most 2 conversions per person waiting or running; a conversion
+    needs about twice its raw size free on the disk.
+  - Admin: **Stop** (kills the converter), **Retry** (a failed one whose inputs remain). A converter running over 2 h,
+    or with a log silent for 20 min, is stopped by itself. Its process is known by pid and start time, so a reused pid
+    is never mistaken for it.
+  - Every `[Image = …]` in an uploaded `.idoc` / `.mrc.mdoc` must be a bare file name that was uploaded with it (no
+    drive, folder, UNC share or `..`); `jobs/convert_raw.py` checks again before opening any tile.
+- Basic users get 403 on everything raw. Everything shown is escaped; paths and raw errors are on admin-only lines.
 
 ## Live charts (`/cj/live.js`)
 `CJLive.render(el, liveJson, {compact})` draws a `live.json` snapshot (jobs/monitor.py): `compact: false` = every queue

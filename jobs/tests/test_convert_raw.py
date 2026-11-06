@@ -415,6 +415,48 @@ class StubRepo(unittest.TestCase):
         self.assertEqual(res["compute"], "CPU")
         self.assertTrue(any("ran on the CPU" in w for w in res["warnings"]), res["warnings"])
 
+    def test_sidecar_tile_names_stay_in_the_folder(self):
+        """[Image = ...] naming an absolute, UNC or '..' path (in an .idoc or an .mrc.mdoc) is refused before any
+        tile is opened; a plain name beside the sidecar passes (control)."""
+        secret = self.tmp / "secret.tif"
+        Image.fromarray(np.zeros((12, 16), np.uint16)).save(secret)
+        head = "PixelSpacing = 7.362\nImageSize = 16 12\n\n"
+        bad = {"absolute": str(secret), "unc": r"\\gpu-desktop\share\x.tif", "dotdot": "../secret.tif",
+               "dotdot-back": r"..\secret.tif", "drive-relative": "C:secret.tif", "empty": ""}
+        for why, ref in bad.items():
+            for side_name in ("grid9-1.idoc", "grid9-pos1.mrc.mdoc"):
+                with self.subTest(why=why, sidecar=side_name):
+                    shutil.rmtree(self.raw)
+                    self.raw.mkdir()
+                    if side_name.endswith(".mrc.mdoc"):
+                        (self.raw / side_name[:-len(".mdoc")]).write_bytes(b"\0" * 16)
+                    side = self.raw / side_name
+                    side.write_text(head + f"[Image = {ref}]\nPieceCoordinates = 0 0 0\n", encoding="utf-8")
+                    out = self.tmp / "out"
+                    core = self._core()
+                    m = CR.find_montages([side], core)[0][0]
+                    # no tile is looked at (a UNC name would reach the network): any file check fails the test
+                    with unittest.mock.patch.object(Path, "is_file", side_effect=AssertionError("tile opened")), \
+                            unittest.mock.patch.object(Path, "exists", side_effect=AssertionError("tile opened")):
+                        with self.assertRaisesRegex(CR.ConvertError, "not a plain file name|outside"):
+                            CR.check_montage(m, core)
+                    with self.assertRaisesRegex(CR.ConvertError, "not a plain file name|outside"):
+                        self.convert([side], out)
+                    self.assertFalse(out.exists())
+        # control: a plain tile name beside the idoc passes the check and converts
+        shutil.rmtree(self.raw)
+        self.raw.mkdir()
+        Image.fromarray(np.zeros((12, 16), np.uint16)).save(self.raw / "grid9-10000.tif")
+        (self.raw / "grid9-1.idoc").write_text(head + "[Image = grid9-10000.tif]\nPieceCoordinates = 0 0 0\n",
+                                               encoding="utf-8")
+        m = CR.find_montages([self.raw / "grid9-1.idoc"], self._core())[0][0]
+        self.assertEqual(CR.check_montage(m, self._core())[0], 7.362)
+        self.assertEqual(CR.tile_ref_problem(self.raw / "grid9-1.idoc", "grid9-10000.tif"), None)
+
+    def _core(self):
+        _edt, core = CR.import_pipeline(self.repo)
+        return core
+
     def test_missing_repo_is_refused(self):
         with self.assertRaisesRegex(CR.ConvertError, "processing repo"):
             CR.convert([self.raw], self.tmp / "o", processing_repo_dir=self.tmp / "nowhere")
