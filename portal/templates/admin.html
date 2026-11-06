@@ -1,0 +1,70 @@
+<style>
+/* Admin module (portal/modules/admin.py). cj.css tokens only; every class is cj-admin-*. Phone first. */
+.cj-admin{min-width:0}
+.cj-admin-sub{display:flex;flex-wrap:wrap;gap:4px;margin:0 0 14px;border-bottom:1px solid var(--line)}
+.cj-page .cj-admin-sub a{display:inline-flex;align-items:center;min-height:40px;padding:0 12px;color:var(--mut);
+  text-decoration:none;font-weight:500}
+.cj-page .cj-admin-sub a:hover{color:var(--fg)}
+.cj-page .cj-admin-sub a[aria-current="page"]{color:var(--fg);box-shadow:inset 0 -2px 0 var(--acc)}
+.cj-page .cj-admin-sub a:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
+.cj-admin-cols{display:grid;grid-template-columns:1fr;gap:16px;align-items:start;margin-top:12px}
+@media (min-width:900px){.cj-admin-cols{grid-template-columns:minmax(300px,380px) 1fr}}
+.cj-main .cj-admin-cols .cj-sec{margin:0 0 8px}
+.cj-admin-n{display:inline-block;min-width:1.7em;padding:0 6px;border-radius:999px;background:var(--line);
+  color:var(--fg);font-size:.75rem;text-align:center;letter-spacing:0}
+.cj-admin-form{display:flex;flex-direction:column;gap:6px}
+.cj-admin-lbl{font-size:.8rem;font-weight:600;color:var(--mut)}
+.cj-admin-in{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:8px;
+  min-height:44px;padding:8px 10px;width:100%;min-width:0}
+.cj-admin-in:focus-visible{outline:2px solid var(--acc);outline-offset:1px;border-color:var(--acc)}
+select.cj-admin-in{width:auto;min-width:9em}
+.cj-admin-linkbox{font-family:var(--cj-mono);font-size:.85rem;resize:vertical;word-break:break-all}
+.cj-admin-btn{font:inherit;font-weight:600;min-height:44px;padding:8px 14px;border-radius:8px;cursor:pointer;
+  border:1px solid var(--line);background:var(--card);color:var(--fg)}
+.cj-admin-btn:hover{border-color:var(--acc)}
+.cj-admin-btn:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.cj-admin-btn.cj-admin-primary{background:var(--acc);border-color:var(--acc);color:var(--card)}
+.cj-admin-btn.cj-admin-dangerbtn{background:var(--warnbg);border-color:var(--warn);color:var(--warn)}
+.cj-admin-form .cj-admin-btn{margin-top:6px}
+.cj-page a.cj-admin-link{display:inline-flex;align-items:center;min-height:44px;font-weight:500}
+.cj-page a.cj-admin-danger{color:var(--warn)}
+.cj-admin-roles{margin:4px 0 0;padding-left:18px}
+.cj-admin-roles li{margin:2px 0}
+.cj-admin-people{list-style:none;margin:0;padding:0;display:grid;gap:10px;
+  grid-template-columns:repeat(auto-fill,minmax(min(100%,320px),1fr))}
+.cj-admin-person{background:var(--card);border:1px solid var(--line);border-radius:var(--cj-r);padding:12px 14px;
+  display:flex;flex-direction:column;gap:6px;min-width:0}
+.cj-admin-top{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;min-width:0}
+.cj-admin-meta{margin:0}
+.cj-admin-acts{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px}
+.cj-admin-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px}
+.cj-admin-chip{flex:none;font-size:.75rem;font-weight:600;line-height:1.5;padding:1px 8px;border-radius:999px;
+  border:1px solid transparent;white-space:nowrap}
+.cj-admin-chip.cj-admin-t-acc{background:var(--accbg);color:var(--acc)}
+.cj-admin-chip.cj-admin-t-ok{background:var(--prodbg);color:var(--prod)}
+.cj-admin-chip.cj-admin-t-warn{background:var(--warnbg);color:var(--warn)}
+.cj-admin-chip.cj-admin-t-off{border-color:var(--line);color:var(--mut)}
+.cj-admin-note{margin:8px 0;padding:8px 12px;border-radius:8px;border-left:4px solid var(--prod);background:var(--prodbg);
+  color:var(--fg);overflow-wrap:anywhere}
+.cj-admin-note.cj-admin-t-warn{border-left-color:var(--warn);background:var(--warnbg)}
+.cj-admin-gone{margin-top:14px}
+.cj-admin-gone summary{cursor:pointer;min-height:44px;display:flex;align-items:center;color:var(--mut);font-weight:600}
+.cj-admin-key,.cj-admin-confirm{max-width:640px;margin-top:10px}
+.cj-admin-warnlist{margin:4px 0 0;padding-left:18px}
+.cj-admin-warnlist li{margin:4px 0}
+.cj-admin-panels{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(min(100%,340px),1fr));margin-top:10px}
+.cj-admin-lines{list-style:none;margin:0;padding:0}
+.cj-admin-line{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;padding:8px 0;border-top:1px solid var(--line);
+  min-width:0}
+.cj-admin-line:first-child{border-top:0}
+.cj-admin-line .cj-admin-meta{flex:1 0 100%}
+.cj-admin-auds{list-style:none;margin:10px 0 0;padding:0 14px;gap:0}
+.cj-admin-aud{display:flex;flex-wrap:wrap;gap:2px 12px;padding:9px 0;border-top:1px solid var(--line);min-width:0}
+.cj-admin-aud:first-child{border-top:0}
+.cj-admin-aud>span:last-child{flex:1 1 16em;min-width:0;overflow-wrap:anywhere}
+</style>
+<div class="cj-admin" id="cj-admin">
+{{sub}}
+{{content}}
+</div>
+<script src="/admin/admin.js" defer></script>
