@@ -97,19 +97,22 @@ def cells(page: str, sample: str) -> dict:
     m = re.search(r'<tr data-sample="%s">(.*?)</tr>' % re.escape(sample), page, re.S)
     assert m, sample
     out = {}
-    for k, v, sub in re.findall(r'data-k="(\w+)"><span class="cj-results-v">(.*?)</span>'
-                                r'(?:<small class="cj-results-sub">(.*?)</small>)?', m.group(1)):
+    for k, v, flag, sub in re.findall(r'data-k="(\w+)"><span class="cj-results-v">(.*?)</span>'
+                                      r'(?: <span class="cj-results-chip[^"]*">([^<]*)</span>)?'
+                                      r'(?:<small class="cj-results-sub">(.*?)</small>)?', m.group(1)):
         out[k] = (v, sub)
+        if flag:
+            out[k + ".flag"] = flag
     return out
 
 
 def image_rows(page: str) -> dict:
     out = {}
-    for img, body in re.findall(r'<tr data-image="(\d+)">(.*?)</tr>', page, re.S):
+    for img, attrs, body in re.findall(r'<tr data-image="(\d+)"([^>]*)>(.*?)</tr>', page, re.S):
         tds = re.findall(r"<td[^>]*>(.*?)</td>", body, re.S)
         chip = re.sub(r"<[^>]+>", "", tds[2])
         out[img] = {"sample": tds[1], "chip": chip, "ev": int(tds[3]), "multilayer": int(tds[4]),
-                    "inner": int(tds[5]), "nonev": int(tds[6])}
+                    "inner": int(tds[5]), "nonev": int(tds[6]), "muted": "cj-results-off" in attrs}
     return out
 
 
@@ -229,7 +232,9 @@ class Golden(Base):
         self.assertNotIn("Multilayer (reviewer)", page)                       # no reviewed image: no columns
         self.assertIn("Model only: none of these images were checked by a person.", page)
         self.assertIn(f'href="/predict/{NOEDIT}/"', page)
-        self.assertIn("Review a suggested spot-check", page)
+        self.assertIn("Spot-check a suggested subset", page)
+        self.assertNotIn("/review/pred_", page)                     # no review package: no review link
+        self.assertIn(' nm</text>', page)                           # units on the chart ticks
         self.assertNotIn('id="cj-results-refused"', page)
 
     def test_reviewed_numbers_columns_and_banner(self):
@@ -246,7 +251,10 @@ class Golden(Base):
         self.assertEqual(int(s1["reviewer_geometry_disagree"][0]), r1["reviewer_geometry_disagree"])
         self.assertEqual(s2["pct_multilayer_reviewer"], ("–", "none reviewed"))
         self.assertIn("<b>1 of 3 images reviewed.</b> The other 2 are model only.", page)
-        self.assertIn("Review the 2 suggested images", page)                   # spotcheck.json n
+        self.assertIn("Spot-check the 2 suggested images", page)               # spotcheck.json n
+        self.assertEqual(s1.get("pct_multilayer_reviewer.flag"), "small sample")     # reviewer_ev 2 < 20
+        self.assertEqual(s1["reviewer_geometry_disagree"][1], "disagreement")        # 1: singular
+        self.assertIn("EV = class 0 (EV)", page)
         self.assertIn("1 of 3 images reviewed, 0 more edited", page)          # provenance
 
     def test_edited_not_reviewed(self):
@@ -266,7 +274,23 @@ class Golden(Base):
         self.assertEqual(re.findall(r'<tr data-sample="([^"]+)">', page), [R.esc(XSS)])   # S2 still shown
         self.assertNotIn(XSS, page)                                                  # escaped everywhere
         self.assertIn(R.esc(XSS), page)
-        self.assertEqual(len(image_rows(page)), 3)
+        rows = image_rows(page)
+        self.assertEqual(len(rows), 3)
+        for img in ("0001", "0002"):                                   # S1 refused: not counted, muted
+            self.assertEqual((rows[img]["chip"], rows[img]["muted"]), ("Not counted (sample refused)", True))
+        self.assertEqual((rows["0003"]["chip"], rows["0003"]["muted"]), ("Model only", False))   # control
+
+    def test_edited_only_headline(self):
+        d = make_set(self.root, "ps_20261105_abc777")
+        self.addCleanup(shutil.rmtree, d, True)
+        rv = golden_reviewed("ps_20261105_abc777")
+        rv["images"]["0002"].update(reviewed=False, edited=True)
+        compute_and_write(d, rv)
+        page = self.page("ps_20261105_abc777")
+        self.assertIn("<b>Not reviewed; 1 image edited (edits are counted).</b>", page)
+        self.assertNotIn("Model only: none", page)
+        self.assertNotIn("Multilayer (reviewer)", page)
+        self.assertEqual(image_rows(page)["0002"]["chip"], "Edited")
 
     def test_whole_set_refused(self):
         d = make_set(self.root, "ps_20261105_abc999", state="running")
@@ -278,7 +302,59 @@ class Golden(Base):
         self.assertNotIn('id="cj-results-samples"', page)
 
 
+    def test_out_of_date_after_review_edits(self):
+        ps_id = "ps_20261105_abc888"
+        d = make_set(self.root, ps_id)
+        self.addCleanup(shutil.rmtree, d, True)
+        compute_and_write(d)
+        pkg = self.review / f"pred_{ps_id}"
+        (pkg / "edits").mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, pkg, True)
+        (pkg / "review_package.json").write_text("{}", encoding="utf-8")
+        edit = pkg / "edits" / "0001.png.json"
+        edit.write_text("{}", encoding="utf-8")
+        done = (d / "results" / "results.json").stat().st_mtime
+        os.utime(pkg / "review_package.json", (done - 600, done - 600))
+
+        os.utime(edit, (done - 300, done - 300))                  # control: edits older than the results
+        page = self.page(ps_id)
+        self.assertNotIn('id="cj-results-stale"', page)
+        self.assertIn(f'href="/review/pred_{ps_id}/"', page)      # package exists: "Review these images"
+        self.assertIn("Review these images", page)
+        self.assertFalse(self.status(ps_id)["out_of_date"])
+        self.assertNotIn("Out of date", self.get("/results/", "owner")[2].decode())
+
+        os.utime(edit, (done + 120, done + 120))                  # an edit after the results were written
+        page = self.page(ps_id)
+        self.assertIn(f"These results are older than the latest review edits (last edit {R.hhmm(done + 120)}).",
+                      page)
+        self.assertIn("Compute again.", page)
+        self.assertTrue(self.status(ps_id)["out_of_date"])
+        idx = self.get("/results/", "owner")[2].decode()
+        card = re.search(r'href="/results/%s/">(.*?)</a>' % ps_id, idx, re.S).group(1)
+        self.assertIn("Out of date", card)
+
+        compute_and_write(d)                                      # computed again: current
+        os.utime(d / "results" / "results.json", (done + 300, done + 300))
+        self.assertNotIn('id="cj-results-stale"', self.page(ps_id))
+
+
 class Access(Base):
+    def test_set_reached_through_a_junction_is_404(self):
+        if os.name != "nt":
+            raise unittest.SkipTest("junctions are Windows only")
+        import _winapi
+        outside = self.tmp / "outside"
+        make_set(outside, "ps_20261105_aaa777")
+        self.addCleanup(shutil.rmtree, outside, True)
+        link = self.root / "ps_20261105_aaa777"
+        _winapi.CreateJunction(str(outside / "ps_20261105_aaa777"), str(link))
+        self.addCleanup(os.rmdir, link)
+        self.assertTrue((link / "request.json").is_file())          # the junction works on disk
+        self.assertEqual(self.get("/results/ps_20261105_aaa777/", "owner")[0], 404)
+        self.assertNotIn("aaa777", self.get("/results/", "owner")[2].decode())
+        self.assertEqual(self.get(f"/results/{TODO1}/", "owner")[0], 200)      # control: a real folder
+
     def test_module_declaration(self):
         self.assertEqual((R.PREFIX, R.ROLES), ("/results", ("admin", "advanced", "basic")))
         st, h, _ = self.get("/results")
@@ -346,7 +422,19 @@ class Access(Base):
                 self.assertEqual(T.hget(h, "x-content-type-options"), "nosniff")
                 self.assertTrue(T.hget(h, "content-type").startswith(ctype))
                 self.assertEqual(T.hget(h, "cache-control"), "no-store")
-                self.assertEqual(body, (rdir / name).read_bytes())          # the files as written, unchanged
+                disk = (rdir / name).read_bytes()
+                if name.endswith(".csv"):                                     # provenance # lines, then the file
+                    head, rest = body[:len(body) - len(disk)], body[len(body) - len(disk):]
+                    self.assertEqual(rest, disk)
+                    lines = head.decode().splitlines()
+                    self.assertTrue(lines and all(x.startswith("# ") for x in lines), lines)
+                    self.assertIn("model=v5_evnonev_y8m_20261029", head.decode())
+                    self.assertIn("reviewed=0/3 images", head.decode())
+                    self.assertIn("rule=conf>=0.5; EV = class 0 (EV)", head.decode())
+                    rows = list(csv.DictReader(x for x in body.decode().splitlines() if not x.startswith("#")))
+                    self.assertTrue(rows)
+                else:
+                    self.assertEqual(body, disk)                              # results.json as written
         st, h, body = self.get(f"/results/{REVIEWED}/download/results_{REVIEWED}.zip", "owner")
         self.assertEqual(st, 200)
         self.assertEqual(T.hget(h, "content-disposition"), f'attachment; filename="results_{REVIEWED}.zip"')
@@ -443,6 +531,21 @@ class Compute(Base):
         self.assertIn("ValueError: reviewed json images differ &lt;x&gt;", admin)
         self.assertNotIn("ValueError", owner)                             # detail for admins only
         self.assertNotIn(str(self.root), owner)
+
+    def test_failed_recompute_keeps_earlier_results(self):
+        def boom(ps_dir, reviewed):
+            raise RuntimeError("disk full")
+
+        self.patch_compute(boom)
+        before = (self.root / EDITED / "results" / "results.json").read_bytes()
+        computed = json.loads(before)["computed"]
+        self.assertEqual(self.post(f"/results/{EDITED}/compute", "owner")[0], 303)
+        self.wait_state(EDITED, ("error",))
+        page = self.page(EDITED, "owner")
+        self.assertIn("Computing the results failed.", page)
+        self.assertIn(f"The results below are from the earlier computation (computed {R.when(computed)}).", page)
+        self.assertIn('id="cj-results-samples"', page)                    # the earlier results still shown
+        self.assertEqual((self.root / EDITED / "results" / "results.json").read_bytes(), before)
 
     def test_review_package_is_the_source(self):
         """Control: an unedited package gives exactly the no-edit numbers, and the package is not written."""

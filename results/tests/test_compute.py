@@ -395,6 +395,29 @@ class Outputs(unittest.TestCase):
                 imgs = {r["image"]: r for r in csv.DictReader(fh)}
             self.assertEqual([imgs[i]["reviewed"] for i in ("0001", "0002", "0003")], ["false", "true", "false"])
 
+    def test_write_order_and_stray_tmp(self):
+        """results.json is written last (the commit marker); a stray *.tmp from an interrupted write is removed."""
+        C = sys.modules["results.compute"]                 # the module (results.compute the name is the function)
+        res = compute(PS)
+        order, real = [], C._atomic_write
+
+        def rec(path, text):
+            order.append(Path(path).name)
+            real(path, text)
+
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "results"
+            out.mkdir()
+            (out / "results.json.tmp").write_text("half", encoding="utf-8")
+            (out / "per_image.csv.tmp").write_text("half", encoding="utf-8")
+            C._atomic_write = rec
+            try:
+                write_results(res, out)
+            finally:
+                C._atomic_write = real
+            self.assertEqual(order, ["per_image.csv", "per_sample.csv", "results.json"])
+            self.assertEqual(sorted(p.name for p in out.iterdir()), ["per_image.csv", "per_sample.csv", "results.json"])
+
     def test_cli(self):
         with TempPS() as t:
             r = subprocess.run([sys.executable, "-m", "results", "--ps", str(t.ps), "--reviewed", str(REVIEWED)],

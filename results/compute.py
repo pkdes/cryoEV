@@ -375,14 +375,18 @@ def _csv_text(header: list[str], rows: list[list]) -> str:
 
 
 def write_results(result: dict, out_dir) -> Path:
-    """results.json, per_image.csv and per_sample.csv under `out_dir` (each replaced atomically)."""
+    """per_image.csv, per_sample.csv, then results.json under `out_dir` (each replaced atomically). results.json is
+    written LAST: it is the commit marker (readers trust the CSVs only next to a results.json at least as new).
+    Stray *.tmp files from an interrupted earlier write are removed first."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    _atomic_write(out_dir / "results.json", json.dumps(result, indent=1) + "\n")
+    for stray in out_dir.glob("*.tmp"):
+        stray.unlink(missing_ok=True)
     _atomic_write(out_dir / "per_image.csv", _csv_text(
         ["image"] + IMAGE_FIELDS, [[k] + [v[f] for f in IMAGE_FIELDS] for k, v in result["images"].items()]))
     _atomic_write(out_dir / "per_sample.csv", _csv_text(
         ["sample_label"] + SAMPLE_FIELDS, [[k] + [v[f] for f in SAMPLE_FIELDS] for k, v in result["samples"].items()]))
+    _atomic_write(out_dir / "results.json", json.dumps(result, indent=1) + "\n")
     return out_dir
 
 

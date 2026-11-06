@@ -16,7 +16,16 @@ Rules:
     set and someone else's set get the same 404 page (no hint which).
   - Honest about review: the banner says how many images a person checked ("Model only" when none), the reviewer
     columns appear only when an image was reviewed, and each image is marked reviewed / edited / model only.
-  - Geometry multilayer % is the headline; the reviewer % is shown beside it with its base (n EVs on n images).
+  - Geometry multilayer % is the headline; the reviewer % is shown beside it with its base (n EVs on n images),
+    flagged "small sample" under SMALL_BASE reviewer EVs.
+  - Out of date: when the review package (<review root>/pred_<ps_id>/edits/*.json, or its build) is newer than
+    results.json (written last by results.write_results, so its mtime = when the results were committed), a banner
+    says so and the index chip reads "Out of date". After a failed recompute the earlier results stay, labelled.
+  - Images of a refused sample are listed muted, "Not counted (sample refused)".
+  - Links: the spot-check subset at /predict/<ps_id>/; "Review these images" at /review/pred_<ps_id>/ when the
+    package exists (the shell checks the owner there).
+  - Standalone CSV downloads start with # provenance lines; the zip (tables + README.txt) is the recommended one.
+  - The set folder is resolved and must still be <predict root>/<ps_id> (a junction or link out of it = 404).
   - A refused sample (mixed nm/px or tile size, no confirmed nm/px) is a notice with the reason; the other samples
     are still shown. A whole-set refusal (predictions not finished) shows the notice only.
   - Compute: one at a time (a second one waits, "queued"). It uses the review package's edits when
@@ -53,6 +62,7 @@ SCHEMA = "results/1"
 FILES = {"per_sample.csv": "text/csv; charset=utf-8", "per_image.csv": "text/csv; charset=utf-8",
          "results.json": "application/json"}
 NOT_FOUND = "No analysis with this name, or it is not yours."
+SMALL_BASE = 20              # reviewer % on fewer reviewer EVs than this is flagged "small sample"
 
 esc = html.escape
 
@@ -81,11 +91,48 @@ def predict_root(cfg) -> Path | None:
 
 
 def review_root(cfg) -> Path | None:
-    p = getattr(cfg, "review_root", None)
-    if p:
-        return Path(p)
+    """cfg.review_root (portal Config; None there = no review root), else <CryoAI-laptop>/review."""
+    if hasattr(cfg, "review_root"):
+        return Path(cfg.review_root) if cfg.review_root else None
     lap = _laptop()
     return lap / "review" if lap else None
+
+
+def package_dir(cfg, ps_id: str) -> Path | None:
+    """<review root>/pred_<ps_id> when that package is complete (review_package.json is written last), else None."""
+    root = review_root(cfg)
+    pkg = root / f"pred_{ps_id}" if root else None
+    return pkg if pkg is not None and (pkg / "review_package.json").is_file() else None
+
+
+def review_change(cfg, ps_id: str) -> tuple:
+    """(newest mtime of the package's edits/*.json or its build, 'edit' | 'build') or (None, None)."""
+    pkg = package_dir(cfg, ps_id)
+    if pkg is None:
+        return None, None
+    best, kind = None, None
+    try:
+        for p in (pkg / "edits").glob("*.json"):
+            t = p.stat().st_mtime
+            if best is None or t > best:
+                best, kind = t, "edit"
+        t = (pkg / "review_package.json").stat().st_mtime
+        if best is None or t > best:
+            best, kind = t, "build"
+    except OSError:
+        pass
+    return best, kind
+
+
+def stale_info(cfg, ps: dict) -> dict | None:
+    """{"at": mtime, "kind": "edit" | "build"} when the review package changed after results.json was written
+    (results.json is written last, so its mtime is when the results were committed); else None."""
+    try:
+        done = (ps["dir"] / "results" / "results.json").stat().st_mtime
+    except OSError:
+        return None
+    at, kind = review_change(cfg, ps["id"])
+    return {"at": at, "kind": kind} if at is not None and at > done else None
 
 
 def _read_json(p: Path):
@@ -100,7 +147,13 @@ def load_set(cfg, ps_id: str, user: dict, can_see) -> dict | None:
     root = predict_root(cfg)
     if not PS_RE.match(ps_id or "") or root is None:
         return None
-    d = root / ps_id
+    try:                             # resolved, and still <root>/<ps_id>: no junction / link out of the root
+        root = root.resolve()
+        d = (root / ps_id).resolve()
+    except OSError:
+        return None
+    if d.parent != root or d.name != ps_id:
+        return None
     req = _read_json(d / "request.json") if d.is_dir() else None
     if not isinstance(req, dict) or req.get("ps") != ps_id or not can_see(user, req.get("owner")):
         return None
@@ -132,8 +185,7 @@ def _compute_fn():
 
 def reviewed_source(cfg, ps_id: str):
     """The review package's current edits as reviewed/1 (not written anywhere), or None without a package."""
-    root = review_root(cfg)
-    pkg = root / f"pred_{ps_id}" if root else None
+    pkg = package_dir(cfg, ps_id)
     if pkg is None or not (pkg / "prediction_package.json").is_file():
         return None
     fn = REVIEWED
@@ -179,9 +231,10 @@ def predictions_ready(ps: dict) -> bool:
     return bool(ps["status"]) and ps["status"].get("state") == "done"
 
 
-def status_doc(ps: dict) -> dict:
+def status_doc(cfg, ps: dict) -> dict:
     j = job_state(ps)
     has = (ps["dir"] / "results" / "results.json").is_file()
+    stale = stale_info(cfg, ps) if has else None
     if j:
         state = j["state"]
     elif has:
@@ -190,7 +243,7 @@ def status_doc(ps: dict) -> dict:
         state = "waiting"
     else:
         state = "none"
-    return {"ps": ps["id"], "state": state, "has_results": has,
+    return {"ps": ps["id"], "state": state, "has_results": has, "out_of_date": bool(stale),
             "error": j.get("error") if j else None}
 
 
@@ -223,17 +276,31 @@ def plural(n, one, many=None) -> str:
 
 
 def when(iso) -> str:
+    """An ISO time as the portal's local time (an offset is converted; a naive time is taken as local)."""
     try:
-        return datetime.fromisoformat(str(iso)).strftime("%Y-%m-%d %H:%M")
+        return datetime.fromisoformat(str(iso)).astimezone().strftime("%Y-%m-%d %H:%M")
     except ValueError:
         return str(iso or "unknown")
+
+
+def hhmm(ts: float) -> str:
+    """A file time: HH:MM today, else YYYY-MM-DD HH:MM (local)."""
+    t = datetime.fromtimestamp(ts).astimezone()
+    return t.strftime("%H:%M") if t.date() == datetime.now().astimezone().date() else t.strftime("%Y-%m-%d %H:%M")
+
+
+def ev_rule(classes) -> str:
+    cs = list(classes or [])
+    return "EV = " + (", ".join(f"class {c}" + (" (EV)" if c == 0 else "") for c in cs) if cs else "?")
 
 
 def chip(label, tone) -> str:
     return f'<span class="cj-results-chip cj-results-t-{esc(tone)}">{esc(label)}</span>'
 
 
-def image_chip(img: dict) -> str:
+def image_chip(img: dict, counted=True) -> str:
+    if not counted:
+        return chip("Not counted (sample refused)", "off")
     if img.get("reviewed"):
         return chip("Reviewed", "ok")
     if img.get("edited"):
@@ -241,11 +308,12 @@ def image_chip(img: dict) -> str:
     return chip("Model only", "model")
 
 
-def td(label, value, cls="", k=None, sub=None) -> str:
+def td(label, value, cls="", k=None, sub=None, flag=None) -> str:
     kk = f' data-k="{esc(k)}"' if k else ""
     s = f'<small class="cj-results-sub">{esc(sub)}</small>' if sub else ""
+    f = (" " + chip(flag, "warn")) if flag else ""
     c = f' class="{cls}"' if cls else ""
-    return f'<td data-label="{esc(label)}"{c}{kk}><span class="cj-results-v">{esc(value)}</span>{s}</td>'
+    return f'<td data-label="{esc(label)}"{c}{kk}><span class="cj-results-v">{esc(value)}</span>{f}{s}</td>'
 
 
 # ---------------------------------------------------------------- charts (inline SVG; x in %, so it fits any width)
@@ -290,7 +358,7 @@ def diam_chart(samples: dict) -> str:
     for i, t in enumerate(ticks):
         anchor = "start" if i == 0 else ("end" if i == len(ticks) - 1 else "middle")
         parts.append(f'<text class="cj-results-axis" x="{x(t):.2f}%" y="{h - 6}" text-anchor="{anchor}">'
-                     f'{esc(fnum(t, 0) if float(t).is_integer() else fnum(t))}</text>')
+                     f'{esc((fnum(t, 0) if float(t).is_integer() else fnum(t)) + " nm")}</text>')
     for n, (label, s) in enumerate(rows):
         y0 = top + n * row_h
         yl, ym = y0 + 14, y0 + 30
@@ -321,30 +389,37 @@ def chart_summary(rows) -> str:
 
 
 # ---------------------------------------------------------------- page parts
-def honesty(res: dict, ps_id: str, spot_n) -> str:
+def honesty(res: dict, ps_id: str, spot_n, has_pkg: bool) -> str:
     imgs = res["images"].values()
     n = len(res["images"])
     n_rev = sum(1 for i in imgs if i.get("reviewed"))
     n_edit = sum(1 for i in imgs if i.get("edited") and not i.get("reviewed"))
-    link = (f'<a class="cj-results-btn cj-results-btn-s" href="/predict/{esc(ps_id)}/">'
-            + esc(f"Review the {spot_n} suggested images" if spot_n else "Review a suggested spot-check")
-            + "</a>")
+    links = [f'<a class="cj-results-btn cj-results-btn-s" href="/predict/{esc(ps_id)}/">'
+             + esc(f"Spot-check the {spot_n} suggested images" if spot_n else "Spot-check a suggested subset")
+             + "</a>"]
+    if has_pkg:
+        links.append(f'<a class="cj-results-btn cj-results-btn-s" href="/review/pred_{esc(ps_id)}/">'
+                     f'{esc("Review these images")}</a>')
     if n == 0:
         return ""
-    if n_rev == 0:
+    edits = (f"{plural(n_edit, 'image')} {'has' if n_edit == 1 else 'have'} edits but "
+             f"{'was' if n_edit == 1 else 'were'} not marked reviewed: the edits are counted, "
+             "the image counts as not reviewed.") if n_edit else ""
+    if n_rev == 0 and n_edit:
+        head, tone = f"Not reviewed; {plural(n_edit, 'image')} edited (edits are counted).", "warn"
+        text = "No image was marked reviewed, so there is no reviewer column; the rest are model only."
+    elif n_rev == 0:
         head, tone = "Model only: none of these images were checked by a person.", "warn"
         text = "The numbers come straight from the model. Checking a few images makes them more trustworthy."
     elif n_rev < n:
         head, tone = f"{n_rev} of {n} images reviewed.", "part"
-        text = f"The other {n - n_rev} are model only."
+        text = (f"The other {n - n_rev} are not reviewed. " + edits) if n_edit else \
+            f"The other {n - n_rev} are model only."
     else:
-        head, tone, text, link = f"All {n} images reviewed by a person.", "ok", "", ""
-    if n_edit:
-        text += " " + (f"{plural(n_edit, 'image')} {'has' if n_edit == 1 else 'have'} edits but "
-                       f"{'was' if n_edit == 1 else 'were'} not marked reviewed: the edits are counted, "
-                       "the image counts as not reviewed.")
+        head, tone, text, links = f"All {n} images reviewed by a person.", "ok", "", links[1:]
     return (f'<div class="cj-results-banner cj-results-b-{tone}" role="status" id="cj-results-honesty">'
-            f'<p><b>{esc(head)}</b> {esc(text.strip())}</p>{link}</div>')
+            f'<p><b>{esc(head)}</b> {esc(text.strip())}</p>'
+            f'<span class="cj-results-links">{"".join(links)}</span></div>')
 
 
 def refused_notice(res: dict) -> str:
@@ -389,12 +464,15 @@ def sample_table(res: dict) -> str:
                     k="pct_multilayer_geometry")]
         if reviewer:
             if n_rev:
-                base = (f"n = {plural(int(s.get('reviewer_ev') or 0), 'EV')} on "
+                rev_ev = int(s.get("reviewer_ev") or 0)
+                base = (f"n = {plural(rev_ev, 'EV')} on "
                         f"{plural(int(s.get('reviewed_images') or n_rev), 'reviewed image')}")
+                dis = int(s.get("reviewer_geometry_disagree") or 0)
                 cells.append(td("Multilayer (reviewer)", fpct(s.get("pct_multilayer_reviewer")),
-                                k="pct_multilayer_reviewer", sub=base))
-                cells.append(td("Reviewer vs geometry", fint(s.get("reviewer_geometry_disagree")),
-                                k="reviewer_geometry_disagree", sub="disagreements"))
+                                k="pct_multilayer_reviewer", sub=base,
+                                flag="small sample" if rev_ev < SMALL_BASE else None))
+                cells.append(td("Reviewer vs geometry", fint(dis), k="reviewer_geometry_disagree",
+                                sub="disagreement" if dis == 1 else "disagreements"))
             else:
                 cells.append(td("Multilayer (reviewer)", "–", k="pct_multilayer_reviewer", sub="none reviewed"))
                 cells.append(td("Reviewer vs geometry", "–", k="reviewer_geometry_disagree"))
@@ -407,8 +485,8 @@ def sample_table(res: dict) -> str:
              "found, counted separately."]
     if reviewer:
         notes.append("Multilayer (reviewer): the share of EVs a reviewer called multilayer, on reviewed images "
-                     "only (n shows the base). Reviewer vs geometry: reviewed outlines where the reviewer's call "
-                     "differs from the geometry.")
+                     f"only (n shows the base; under {SMALL_BASE} EVs it is marked small sample). Reviewer vs "
+                     "geometry: reviewed outlines where the reviewer's call differs from the geometry.")
     return (f'<div class="cj-results-wrap"><table class="cj-results-tab cj-results-stack" id="cj-results-samples">'
             f'<thead><tr>{th}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
             + "".join(f'<p class="cj-mut cj-results-note">{esc(n)}</p>' for n in notes))
@@ -421,8 +499,10 @@ def image_table(res: dict) -> str:
     head = ["Image", "Sample", "Checked", "EVs", "Multi­layer", "Inner", "Non-EV"]   # soft hyphen: phone
     rows = []
     for k, i in imgs.items():
-        rows.append(f'<tr data-image="{esc(str(k))}"><td class="cj-num">{esc(str(k))}</td>'
-                    f'<td class="cj-results-l">{esc(str(i.get("sample_label")))}</td><td>{image_chip(i)}</td>'
+        counted = i.get("sample_label") in res["samples"]
+        cls = "" if counted else ' class="cj-results-off"'
+        rows.append(f'<tr data-image="{esc(str(k))}"{cls}><td class="cj-num">{esc(str(k))}</td>'
+                    f'<td class="cj-results-l">{esc(str(i.get("sample_label")))}</td><td>{image_chip(i, counted)}</td>'
                     f'<td>{esc(fint(i.get("ev")))}</td><td>{esc(fint(i.get("multilayer")))}</td>'
                     f'<td>{esc(fint(i.get("inner")))}</td><td>{esc(fint(i.get("nonev")))}</td></tr>')
     th = "".join(f'<th scope="col">{esc(h)}</th>' for h in head)
@@ -438,7 +518,7 @@ def provenance(res: dict, ps: dict) -> dict:
             "Model": str(res.get("model")),
             "Computed": when(res.get("computed")),
             "Counting rule": (f"outlines at confidence {rule.get('conf')} or more (on images nobody edited); "
-                              f"EV classes {rule.get('ev_classes')}; inner layers not counted; "
+                              f"{ev_rule(rule.get('ev_classes'))}; inner layers not counted; "
                               f"multilayer = {rule.get('multilayer')}"),
             "Checked by a person": (f"{sum(1 for i in imgs if i.get('reviewed'))} of {len(res['images'])} images "
                                     f"reviewed, {sum(1 for i in imgs if i.get('edited') and not i.get('reviewed'))}"
@@ -448,11 +528,29 @@ def provenance(res: dict, ps: dict) -> dict:
 
 def downloads(ps_id: str) -> str:
     base = f"/results/{esc(ps_id)}/download/"
-    items = [(f"results_{ps_id}.zip", "Everything (zip, with a README of how it was made)"),
-             ("per_sample.csv", "Per sample (CSV)"), ("per_image.csv", "Per image (CSV)"),
+    items = [("per_sample.csv", "Per sample (CSV)"), ("per_image.csv", "Per image (CSV)"),
              ("results.json", "All numbers (JSON)")]
-    return ('<ul class="cj-results-dl">' + "".join(
-        f'<li><a href="{base}{esc(f)}" download>{esc(t)}</a></li>' for f, t in items) + "</ul>")
+    return (f'<p class="cj-results-dlmain"><a class="cj-results-btn" href="{base}{esc(f"results_{ps_id}.zip")}" '
+            f'download>{esc("Download everything (zip)")}</a> <span class="cj-mut">'
+            f'{esc("Recommended: the tables, all numbers and a README of how they were made.")}</span></p>'
+            '<ul class="cj-results-dl">' + "".join(
+                f'<li><a href="{base}{esc(f)}" download>{esc(t)}</a></li>' for f, t in items) + "</ul>"
+            f'<p class="cj-mut cj-results-note">{esc("Single CSV files start with # lines saying how they were made.")}'
+            "</p>")
+
+
+def csv_header(res: dict, ps: dict) -> bytes:
+    """The provenance comment lines put on top of a standalone CSV download (the file on disk is unchanged)."""
+    imgs = res["images"].values()
+    rule = res.get("rule") or {}
+    lines = [f"# CJ results for prediction set {ps['id']}",
+             f"# model={res.get('model')}, computed={res.get('computed')}, "
+             f"reviewed={sum(1 for i in imgs if i.get('reviewed'))}/{len(res['images'])} images, "
+             f"edited (not reviewed)={sum(1 for i in imgs if i.get('edited') and not i.get('reviewed'))}",
+             f"# rule=conf>={rule.get('conf')}; {ev_rule(rule.get('ev_classes'))}; inner layers not counted; "
+             f"multilayer={rule.get('multilayer')}",
+             f"# not counted={res.get('refused') or 'nothing'}"]
+    return ("\n".join(x.replace("\r", " ").replace("\n", " ") for x in lines) + "\n").encode("utf-8")
 
 
 def compute_form(ps_id: str, label: str, primary=True) -> str:
@@ -471,7 +569,7 @@ def spot_count(cfg, ps_id: str):
 def render_set(cfg, ps: dict, user: dict) -> str:
     ps_id, admin = ps["id"], user.get("role") == "admin"
     res, problem = read_results(ps)
-    st, job = status_doc(ps), job_state(ps)
+    st, job = status_doc(cfg, ps), job_state(ps)
     req = ps["request"]
     out = [f'<p class="cj-mut cj-results-crumb"><a href="/results/">Results</a> / '
            f'<span class="cj-wrap">{esc(ps_id)}</span></p>',
@@ -488,10 +586,20 @@ def render_set(cfg, ps: dict, user: dict) -> str:
                    f'<p class="cj-mut" id="cj-results-pollerr" hidden></p>'
                    f'<noscript><p>{esc("Reload this page in a minute.")}</p></noscript></div>')
     elif job and job["state"] == "error":
+        earlier = (f'<p>{esc("The results below are from the earlier computation (computed " + when(res.get("computed")) + ").")}</p>'
+                   if res is not None else "")
         out.append(f'<div class="cj-results-banner cj-results-b-warn" role="alert" id="cj-results-job">'
                    f'<p><b>{esc(job["error"])}</b> {esc("Try again; if it fails again, tell the admin.")}</p>'
+                   + earlier
                    + (f'<p class="cj-mut cj-wrap">{esc(job["detail"])}</p>' if admin and job.get("detail") else "")
                    + "</div>")
+    stale = stale_info(cfg, ps) if res is not None else None
+    if stale:
+        at = hhmm(stale["at"])
+        head = (f"These results are older than the latest review edits (last edit {at})." if stale["kind"] == "edit"
+                else f"These results are older than the review package (built {at}).")
+        out.append(f'<div class="cj-results-banner cj-results-b-warn" role="alert" id="cj-results-stale">'
+                   f'<p><b>{esc(head)}</b> {esc("Compute again.")}</p></div>')
     if problem:
         out.append(f'<div class="cj-results-banner cj-results-b-warn" role="alert"><p>{esc(problem)}</p></div>')
 
@@ -516,7 +624,7 @@ def render_set(cfg, ps: dict, user: dict) -> str:
                        + compute_form(ps_id, "Compute results") + "</div>")
         return "".join(out)
 
-    out.append(honesty(res, ps_id, spot_count(cfg, ps_id)))
+    out.append(honesty(res, ps_id, spot_count(cfg, ps_id), package_dir(cfg, ps_id) is not None))
     out.append(refused_notice(res))
     if res["samples"]:
         out.append('<h2 class="cj-sec">Per sample</h2>')
@@ -563,7 +671,7 @@ def render_index(cfg, user: dict, can_see) -> str:
         return "".join(out)
     items = []
     for ps in sets:
-        st = status_doc(ps)
+        st = status_doc(cfg, ps)
         s = ps["status"] or {}
         n = s.get("n_total")
         word = {"ready": ("Results ready", "ok"), "none": ("Not computed yet", "model"),
@@ -571,6 +679,8 @@ def render_index(cfg, user: dict, can_see) -> str:
                 "error": ("Computing failed", "warn"),
                 "waiting": ("Model failed" if s.get("state") == "failed" else "Model still running", "model")}
         label, tone = word.get(st["state"], ("?", "model"))
+        if st["state"] == "ready" and st["out_of_date"]:
+            label, tone = "Out of date", "warn"
         meta = " · ".join(v for v in (when(ps["request"].get("created")) if ps["request"].get("created") else None,
                                       plural(int(n), "image") if isinstance(n, int) else None,
                                       f"model {ps['request'].get('model')}") if v)
@@ -593,7 +703,8 @@ def readme(res: dict, ps: dict, user: dict) -> str:
     lines += [f"{k}: {v}" for k, v in provenance(res, ps).items()]
     lines += [f"Downloaded: {datetime.now().astimezone().isoformat(timespec='seconds')} by {user.get('id')}", "",
               "Files",
-              "  per_sample.csv  one row per counted sample (refused samples are left out; see 'Not counted')",
+              "  per_sample.csv  one row per counted sample (refused samples are left out; see 'Not counted');",
+              "                  the CSVs in this zip have no # header lines (this README is their provenance)",
               "  per_image.csv   one row per image; columns reviewed / edited say whether a person checked it",
               "                  (reviewed = true), changed it without marking it reviewed (edited = true), or",
               "                  neither (model only)",
@@ -696,7 +807,7 @@ def routes(ctx) -> list:
         ps = get_set(request)
         if ps is None:
             return ctx.json({"error": "not found"}, status=404)
-        return ctx.json(status_doc(ps))
+        return ctx.json(status_doc(ctx.cfg, ps))
 
     def download(request: Request):
         ps = get_set(request)
@@ -704,15 +815,16 @@ def routes(ctx) -> list:
         if ps is None:
             return not_found(request)
         rdir = ps["dir"] / "results"
+        res, _ = read_results(ps)               # results.json is written last: without it nothing is complete
+        if res is None:
+            return not_found(request)
         if name in FILES:
             p = rdir / name
             if not p.is_file():
                 return not_found(request)
-            return attachment(p.read_bytes(), f"{ps['id']}_{name}", FILES[name])
+            head = csv_header(res, ps) if name.endswith(".csv") else b""
+            return attachment(head + p.read_bytes(), f"{ps['id']}_{name}", FILES[name])
         if name == f"results_{ps['id']}.zip":
-            res, _ = read_results(ps)
-            if res is None:
-                return not_found(request)
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
                 z.writestr("README.txt", readme(res, ps, ctx.user(request)))
