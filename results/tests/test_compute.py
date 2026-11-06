@@ -41,11 +41,14 @@ MODEL = "v5_evnonev_y8m_20261029"
 # reviewed; its outlines F (cls 0, reviewer MV), H (cls 1, nonEV), I (cls 1, nonEV), J (cls 0, EV, inside I).
 # Geometry EVs there: F and J (J is not inside another EV-class outline) -> ev_reviewed_geometry 2.
 # Reviewer: EV+MV calls = F, J -> 2; MV = F -> 1; inner 0; 1/2 = 50 %. Disagree: F is MV by the reviewer but
-# geometry-standalone -> 1 (J: EV vs standalone agrees; nonEV calls are not compared).
+# geometry-standalone -> 1 (J: EV vs standalone agrees; H and I are nonEV calls on class-1 outlines: agree,
+# and reviewer_nonev counts only nonEV calls on EV-class outlines -> 0).
 REVIEWER_NONE = {"reviewed_images": 0, "ev_reviewed_geometry": 0, "reviewer_ev": 0, "reviewer_mv": 0,
-                 "reviewer_inner": 0, "pct_multilayer_reviewer": None, "reviewer_geometry_disagree": 0}
+                 "reviewer_inner": 0, "reviewer_nonev": 0, "pct_multilayer_reviewer": None,
+                 "reviewer_geometry_disagree": 0}
 REVIEWER_S1 = {"reviewed_images": 1, "ev_reviewed_geometry": 2, "reviewer_ev": 2, "reviewer_mv": 1,
-               "reviewer_inner": 0, "pct_multilayer_reviewer": 50.0, "reviewer_geometry_disagree": 1}
+               "reviewer_inner": 0, "reviewer_nonev": 0, "pct_multilayer_reviewer": 50.0,
+               "reviewer_geometry_disagree": 1}
 GEOMETRY = ["n_images", "ev_total", "ev_per_image_mean", "diam_nm_median", "diam_nm_q1", "diam_nm_q3",
             "pct_multilayer_geometry", "inner_layers_excluded", "nonev_total"]
 
@@ -57,6 +60,8 @@ def load(name):
 def expected(name):
     """A fixture expectation plus the hand-derived reviewer columns."""
     exp = load(name)
+    for i, img in exp["images"].items():   # `edited` (added after QC): reviewed.json's flag, missing = reviewed
+        img["edited"] = img["reviewed"]
     for s, e in exp["samples"].items():
         e.update(REVIEWER_S1 if (name == "expected_results_reviewed.json" and s == "S1") else REVIEWER_NONE)
     return exp
@@ -173,6 +178,7 @@ class Golden(unittest.TestCase):
         rv["images"]["0002"].update(reviewed=False, edited=True)
         got, as_reviewed = compute(PS, rv), compute(PS, REVIEWED)
         self.assertEqual(got["images"]["0002"], dict(as_reviewed["images"]["0002"], reviewed=False))
+        self.assertEqual((got["images"]["0002"]["edited"], got["images"]["0001"]["edited"]), (True, False))
         s, r = got["samples"]["S1"], as_reviewed["samples"]["S1"]
         self.assertEqual({f: s[f] for f in GEOMETRY}, {f: r[f] for f in GEOMETRY})
         self.assertEqual(s["n_reviewed"], 0)
@@ -194,7 +200,7 @@ class Golden(unittest.TestCase):
                          for i in ("0001", "0002", "0003")}}
         got, base = compute(PS, rv), compute(PS)
         for i, img in base["images"].items():
-            self.assertEqual(got["images"][i], dict(img, reviewed=True))
+            self.assertEqual(got["images"][i], dict(img, reviewed=True, edited=True))
         for s, smp in base["samples"].items():
             self.assertEqual({f: got["samples"][s][f] for f in GEOMETRY}, {f: smp[f] for f in GEOMETRY})
             self.assertEqual(got["samples"][s]["ev_reviewed_geometry"], smp["ev_total"])
@@ -256,8 +262,30 @@ class ReviewerLabels(unittest.TestCase):
         for f in GEOMETRY + ["ev_reviewed_geometry"]:
             self.assertEqual(got["samples"]["S1"][f], base["samples"]["S1"][f], f)
         s = got["samples"]["S1"]
-        self.assertEqual((s["reviewer_ev"], s["reviewer_mv"], s["reviewer_inner"], s["pct_multilayer_reviewer"],
-                          s["reviewer_geometry_disagree"]), (0, 0, 1, None, 1))   # F inner vs standalone
+        self.assertEqual((s["reviewer_ev"], s["reviewer_mv"], s["reviewer_inner"], s["reviewer_nonev"],
+                          s["pct_multilayer_reviewer"], s["reviewer_geometry_disagree"]),
+                         (0, 0, 1, 1, None, 2))   # F inner vs standalone; J nonEV but geometry EV
+
+    def test_nonev_call_on_ev_outline_disagrees(self):
+        """Hand-checked: J (class 0, geometry standalone EV) called nonEV -> reviewer_nonev 1; disagree = F (MV vs
+        standalone) + J (nonEV vs EV) = 2; reviewer_ev = F only = 1, reviewer_mv 1 -> 100 %. Geometry unchanged."""
+        got = self.relabel({"EV": "nonEV"})
+        s = got["samples"]["S1"]
+        self.assertEqual((s["reviewer_nonev"], s["reviewer_geometry_disagree"], s["reviewer_ev"],
+                          s["pct_multilayer_reviewer"], s["ev_total"]), (1, 2, 1, 100.0, 4))
+
+    def test_nonev_call_on_inner_layer_disagrees(self):
+        """Reviewed 0001 (A contains B): B, a geometry inner layer, called nonEV -> nonev 1, disagree 1; A called MV
+        agrees with multilayer."""
+        rv = load("reviewed.json")
+        e = rv["images"]["0001"]
+        e["reviewed"] = True
+        size = lambda o: max(x for x, _ in o["poly"]) - min(x for x, _ in o["poly"])   # noqa: E731
+        ev_objs = sorted((o for o in e["objects"] if o["cls"] == 0), key=size)   # B r25, C r30, A r40
+        ev_objs[0]["reviewer_class"], ev_objs[2]["reviewer_class"] = "nonEV", "MV"
+        s = compute(PS, rv)["samples"]["S1"]
+        self.assertEqual((s["reviewed_images"], s["reviewer_nonev"], s["reviewer_mv"], s["reviewer_geometry_disagree"],
+                          s["inner_layers_excluded"]), (2, 1, 2, 2, 1))   # disagree: B here + F on 0002
 
     def test_call_on_nonev_outline_disagrees(self):
         s = self.relabel({"I": "EV"})["samples"]["S1"]   # I is class 1: no geometry role

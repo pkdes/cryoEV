@@ -29,9 +29,13 @@ or add one), so deletions and redraws move the geometry numbers. Only `reviewed:
 n_reviewed / reviewed_images and the reviewer columns; an edited-but-not-reviewed image (e.g. the phone card
 flow) moves the geometry numbers only. `reviewer_label` (raw) is not read; `reviewer_class` is.
 `reviewer_class` labels NEVER move the geometry headline; they feed only the reviewer columns:
-reviewer_ev (EV + MV calls), reviewer_mv, reviewer_inner, pct_multilayer_reviewer = reviewer_mv / reviewer_ev,
-and reviewer_geometry_disagree (EV/MV/inner calls whose geometry role is not standalone / multilayer /
-inner-layer respectively; a call on a non-EV-class outline always disagrees; nonEV calls are not compared).
+reviewer_ev (EV + MV calls), reviewer_mv, reviewer_inner, reviewer_nonev (nonEV calls on EV-class outlines),
+pct_multilayer_reviewer = reviewer_mv / reviewer_ev, and reviewer_geometry_disagree: EV/MV/inner calls whose
+geometry role is not standalone / multilayer / inner-layer respectively (a call on a non-EV-class outline
+always disagrees), plus nonEV calls on EV-class outlines (geometry counts them as an EV or an inner layer:
+the model-grading signal). A nonEV call on a non-EV-class outline agrees.
+Per image, `edited` is reviewed.json's `edited` flag (a missing key = `reviewed`; false without reviewed.json),
+so a page can show "edited but not marked reviewed".
 Images neither edited nor reviewed always come from the prediction .txt at conf >= 0.5, never from
 reviewed.json, so editing one image cannot shift another.
 
@@ -72,8 +76,8 @@ REVIEWER_ROLE = {"EV": "standalone", "MV": "multilayer", "inner": "inner-layer"}
 SAMPLE_FIELDS = ["n_images", "n_reviewed", "ev_total", "ev_per_image_mean", "diam_nm_median", "diam_nm_q1",
                  "diam_nm_q3", "pct_multilayer_geometry", "inner_layers_excluded", "nonev_total",
                  "reviewed_images", "ev_reviewed_geometry", "reviewer_ev", "reviewer_mv", "reviewer_inner",
-                 "pct_multilayer_reviewer", "reviewer_geometry_disagree"]
-IMAGE_FIELDS = ["sample_label", "reviewed", "nm_per_px", "ev", "multilayer", "inner", "nonev"]
+                 "reviewer_nonev", "pct_multilayer_reviewer", "reviewer_geometry_disagree"]
+IMAGE_FIELDS = ["sample_label", "reviewed", "edited", "nm_per_px", "ev", "multilayer", "inner", "nonev"]
 IMAGES_CSV_COLUMNS = {"image", "file", "sample_label", "nm_per_px", "nm_confirmed_by"}
 _TINY = 16   # below this many pixels, ask analysis.morphology whether the chain would keep the outline
 
@@ -218,7 +222,9 @@ def _measure(objs: list[_Obj], nm_per_px: float | None, ev_ids, roles_for, compu
             "_rev_ev": sum(rc in ("EV", "MV") for rc, _ in calls),
             "_rev_mv": sum(rc == "MV" for rc, _ in calls),
             "_rev_inner": sum(rc == "inner" for rc, _ in calls),
-            "_disagree": sum(rc in REVIEWER_ROLE and g != REVIEWER_ROLE[rc] for rc, g in calls)}
+            "_rev_nonev": sum(rc == "nonEV" and g is not None for rc, g in calls),
+            "_disagree": sum((rc in REVIEWER_ROLE and g != REVIEWER_ROLE[rc]) or (rc == "nonEV" and g is not None)
+                             for rc, g in calls)}
 
 
 # ---- per sample -------------------------------------------------------------------------------------------
@@ -250,6 +256,7 @@ def _sample(imgs: list[dict]) -> dict:
         "reviewer_ev": rev_ev,
         "reviewer_mv": rev_mv,
         "reviewer_inner": sum(i["_rev_inner"] for i in rev),
+        "reviewer_nonev": sum(i["_rev_nonev"] for i in rev),
         "pct_multilayer_reviewer": _r(100.0 * rev_mv / rev_ev) if rev_ev else None,
         "reviewer_geometry_disagree": sum(i["_disagree"] for i in rev),
     }
@@ -326,7 +333,8 @@ def compute(ps_dir, reviewed_json=None) -> dict:
         objs = (_objects_from_reviewed(entry, image, w, h, to_mask) if (is_rev or is_edited)
                 else _objects_from_predictions(pred_dir, image, w, h, load))
         m = _measure(objs, nm, ev_ids, roles_for, compute_morphology)
-        per_image[image] = {"sample_label": r["sample_label"], "reviewed": is_rev, "nm_per_px": nm,
+        per_image[image] = {"sample_label": r["sample_label"], "reviewed": is_rev, "edited": is_edited,
+                            "nm_per_px": nm,
                             **m, "_size": (w, h), "_image": image}
 
     by_sample = {}
