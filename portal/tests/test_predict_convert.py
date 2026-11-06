@@ -233,6 +233,10 @@ class World:
         (self.scan / "20261103").mkdir()
         (self.scan / "20261103" / "grid3-1.idoc").write_text(MDOC.replace("[ZValue = 0]", "[Image = grid3-10000.tif]"),
                                                              encoding="utf-8")
+        # 20261104: a raw session whose idoc names a file outside its folder (must never reach the converter)
+        (self.scan / "20261104").mkdir()
+        (self.scan / "20261104" / "grid4-1.idoc").write_text(
+            MDOC.replace("[ZValue = 0]", "[Image = ..\\..\\secret.tif]"), encoding="utf-8")
         d3 = self.scan / "20261027" / "3. Processed images" / "3d. Tiles no scalebar - 14.7 A-px PNG"
         d3.mkdir(parents=True)
         shutil.copyfile(GOLDEN / "images" / "0001.png", d3 / "t1.png")
@@ -640,9 +644,10 @@ class Visibility(Base):
                 self.assertEqual(listed, st == 200)
         self.assertIn("converted by adv", self.page("/predict/new/", "admin"))
         self.assertNotIn("converted by", self.page("/predict/new/", "advanced"))
-        # the uploaded raw files are gone once done; the tiles stay
+        # the uploaded raw files are kept CJ_RAW_KEEP_DAYS (default 7) after the end; the tiles stay
         d = self.w.root / P.RAW_TILES / cid
-        self.assertFalse((d / "input").exists())
+        self.assertTrue((d / "input" / "grid1-pos1.mrc").is_file())
+        self.assertIn("The uploaded raw files are kept until", self.page(f"/predict/convert/{cid}/", "advanced"))
         self.assertEqual(len(list((d / "tiles").glob("*.png"))), 3)
         # the normal Predict flow: sample groups from the key (escaped), nm/px shown, the tick required
         form = self.page(path, "advanced")
@@ -925,6 +930,272 @@ class NoJS(Base):
             self.assertEqual(re.findall(r"<script(?![^>]*\ssrc=)[^>]*>", page), [], path)
             self.assertEqual(re.findall(r"<[a-z][^>]*\son[a-z]+\s*=", page), [], path)
             self.assertNotIn(XSS, page)
+
+
+IDOC_HEAD = "PixelSpacing = 7.362\nImageSize = 64 64\nMontage = 1\n\n"
+TIF = b"II*\x00" + b"\0" * 60
+
+
+def idoc_with(*names) -> bytes:
+    return (IDOC_HEAD + "".join(f"[Image = {n}]\nPieceCoordinates = 0 0 0\n\n" for n in names)).encode("latin-1")
+
+
+class SidecarPaths(Base):
+    """QC MUST: an uploaded (or picked) sidecar's [Image = ...] must be a bare name of an uploaded file; an absolute,
+    UNC or '..' name never reaches the converter."""
+
+    def raw_up(self, files, expect_piece=200, expect_create=200):
+        r = self.jpost("/predict/api/upload", {"kind": "raw", "fields": {"session": "20261101"},
+                                               "files": [{"name": n, "size": len(b)} for n, b in files]}, "advanced")
+        self.assertEqual(r.status_code, 200, r.text)
+        uid = r.json()["upload"]
+        codes = [self.piece(uid, n, 0, b, "advanced") for n, b in files]
+        bad = [c for c in codes if c.status_code != 200]
+        if expect_piece != 200:
+            self.assertEqual(bad[0].status_code, expect_piece, bad[0].text)
+            return bad[0].json()
+        self.assertEqual(bad, [])
+        c = self.jpost(f"/predict/api/upload/{uid}/create", {}, "advanced")
+        self.assertEqual(c.status_code, expect_create, c.text)
+        return c.json()
+
+    def test_paths_in_image_entries_refused(self):
+        secret = str(self.w.tmp / "secret.tif")
+        cases = {"absolute": secret, "unc": r"\\gpu-desktop\share\x.tif", "dotdot": r"..\..\x.tif",
+                 "dotdot-slash": "../x.tif", "drive": "C:x.tif", "empty": ""}
+        for why, ref in cases.items():
+            for side in ("grid3-1.idoc", "grid1-pos1.mrc.mdoc"):
+                with self.subTest(why=why, sidecar=side):
+                    files = [(side, idoc_with("t1.tif", ref))]
+                    files.append(("grid1-pos1.mrc", mrc_bytes()) if side.endswith(".mrc.mdoc") else ("t1.tif", TIF))
+                    j = self.raw_up(files, expect_piece=400)
+                    self.assertIn("not a plain file name", j["error"])
+                    self.assertTrue(j["dropped"])
+        # a bare name that was not uploaded: refused at create, nothing kept
+        j = self.raw_up([("grid3-1.idoc", idoc_with("t1.tif", "t2.tif")), ("t1.tif", TIF)], expect_create=400)
+        self.assertIn("'t2.tif' that was not uploaded", j["error"])
+        self.assertEqual(self.convs(), [])
+        self.assertEqual(self.argv_lines(), [])                        # the converter never ran
+        # control: a valid idoc with its tiles converts
+        j = self.raw_up([("grid3-1.idoc", idoc_with("t1.tif", "t2.tif")), ("t1.tif", TIF), ("t2.tif", TIF)])
+        cid = CID_RE.match(j["href"]).group(1)
+        self.assertEqual(self.wait_conv(cid)["state"], "done")
+
+    def test_session_pick_with_a_path_refused(self):
+        key = self.raw_key("20261104")
+        before = self.convs()
+        r = self.form(f"/predict/new/raw/sessions/{key}/", {"montages": ["grid4-1.idoc"], "recipe": "default"})
+        self.assertEqual(r.status_code, 400, r.text[:500])
+        self.assertIn("not a plain file name", r.text)
+        self.assertEqual(self.convs(), before)
+
+    def test_sidecar_reader_matches_the_core(self):
+        p = self.w.tmp / "x.idoc"
+        p.write_bytes(b"PixelSpacing = 1\n[T = SerialEM: x]\n[Image = a.tif]\n  [Image=b.tif ]  \n"
+                      b"[ZValue = 0]\n[Image = c=d.tif]\n[MontSection = 0]\n")
+        self.assertEqual(P.sidecar_images(p), ["a.tif", "b.tif", "c"])   # cut at the 2nd "=", as parse_metadata
+
+
+class Stuck(Base):
+    """QC SHOULD 2: Stop / Retry (admin), a maximum runtime, and a reused pid is not the converter."""
+
+    def gated(self):
+        os.environ["FAKE_CONVERT_GATE"] = str(self.w.gate)
+        self.w.gate.unlink(missing_ok=True)
+        cid = self.started(self.pick_session())
+        wait_for(lambda: self.status(cid).get("state") == "running", 20, what="running")
+        return cid
+
+    def test_stop_and_retry(self):
+        cid = self.gated()
+        st = self.status(cid)
+        self.assertTrue(P.proc_alive(st))
+        for who in ("advanced", "basic"):
+            self.assertEqual(self.form(f"/predict/convert/{cid}/stop", {}, who).status_code, 403)
+        self.assertIn('action="/predict/convert/%s/stop"' % cid, self.page(f"/predict/convert/{cid}/"))
+        r = self.form(f"/predict/convert/{cid}/stop", {})
+        self.assertEqual(r.status_code, 303)
+        st2 = self.status(cid)
+        self.assertEqual((st2["state"], st2["kind"], st2["error"]), ("failed", "stopped", "Stopped by the admin."))
+        wait_for(lambda: not P.PL.pid_alive(st["pid"]), 15, what="the converter killed")
+        page = self.page(f"/predict/convert/{cid}/")
+        self.assertIn("Stopped: Stopped by the admin.", page)
+        self.assertIn('action="/predict/convert/%s/retry"' % cid, page)
+        self.w.gate.touch()
+        self.assertEqual(self.form(f"/predict/convert/{cid}/retry", {}, "advanced").status_code, 403)
+        self.assertEqual(self.form(f"/predict/convert/{cid}/retry", {}).status_code, 303)
+        st3 = self.wait_conv(cid)
+        self.assertEqual((st3["state"], st3["retries"]), ("done", 1))
+        r = self.form(f"/predict/convert/{cid}/retry", {})                 # done: nothing to retry
+        self.assertEqual(r.status_code, 409)
+
+    def test_max_runtime_and_silent_log(self):
+        for patch, text in (({"CONVERT_MAX_S": 0}, "It ran for over"),
+                            ({"CONVERT_STALE_S": -1}, "No progress for")):
+            with self.subTest(patch=patch):
+                cid = self.gated()
+                pid = self.status(cid)["pid"]
+                with mock.patch.multiple(P, **patch):
+                    P.kick(None)
+                st = self.status(cid)
+                self.assertEqual((st["state"], st["kind"]), ("failed", "timeout"))
+                self.assertIn(text, st["error"])
+                wait_for(lambda: not P.PL.pid_alive(pid), 15, what="the converter killed")
+        self.assertIsNone(P.overdue(self.w.root, {"started": P.now_iso()}))
+
+    def test_a_reused_pid_is_not_the_converter(self):
+        me = os.getpid()                                                # alive, but not a converter
+        made = P.proc_created(me)
+        self.assertIsNotNone(made)
+        self.assertTrue(P.proc_alive({"pid": me, "pid_created": made}))  # control: the right start time
+        self.assertFalse(P.proc_alive({"pid": me, "pid_created": made - 3600}))
+        self.assertFalse(P.proc_alive({"pid": me, "started": "2020-01-01T00:00:00"}))
+        d = self.w.root / P.RAW_TILES / "20261101_abcdef"
+        d.mkdir(parents=True)
+        PS_ = P.PS
+        PS_.write_json_atomic(d / "convert.json", {"schema": "cj_convert/1", "id": d.name, "owner": "tester",
+                                                   "session": "20261101", "recipe": "default", "gpu": False,
+                                                   "source": {"kind": "session"}, "inputs": [], "created": P.now_iso()})
+        PS_.write_json_atomic(d / "status.json", {"state": "running", "pid": me, "pid_created": made - 3600,
+                                                  "started": P.now_iso()})
+        P.kick(None)
+        st = self.status(d.name)
+        self.assertEqual((st["state"], st["error"]), ("failed", "The converter stopped without a result."))
+        self.assertTrue(P.PL.pid_alive(me))                             # never killed: it was not the converter
+
+
+class Retention(Base):
+    """QC SHOULD 3: uploaded raw inputs kept CJ_RAW_KEEP_DAYS after the end (done or failed), the admin's delete,
+    and at most 2 conversions per person queued or running."""
+
+    def tearDown(self):
+        os.environ.pop("CJ_RAW_KEEP_DAYS", None)
+        super().tearDown()
+
+    def test_kept_then_swept_and_deleted_on_demand(self):
+        cid = self.converted("advanced", session="20261101", recipe="20261101")
+        d = self.w.root / P.RAW_TILES / cid
+        self.assertTrue((d / "input").is_dir())
+        # admin: delete now (advanced may not)
+        self.assertEqual(self.form(f"/predict/convert/{cid}/inputs", {}, "advanced").status_code, 403)
+        self.assertIn('action="/predict/convert/%s/inputs"' % cid, self.page(f"/predict/convert/{cid}/"))
+        self.assertEqual(self.form(f"/predict/convert/{cid}/inputs", {}).status_code, 303)
+        self.assertFalse((d / "input").exists())
+        self.assertTrue(self.status(cid)["inputs_removed"])
+        self.assertTrue((d / "tiles" / "MANIFEST.csv").is_file())
+        # older than the keep time: swept (done and failed alike)
+        os.environ["FAKE_CONVERT_MODE"] = "refuse"
+        failed = self.converted_any("advanced")
+        os.environ.pop("FAKE_CONVERT_MODE")
+        ok = self.converted("advanced", session="20261101", recipe="20261101")
+        for c in (failed, ok):
+            self.assertTrue((self.w.root / P.RAW_TILES / c / "input").is_dir())
+            st = self.status(c)
+            st["finished"] = "2026-01-01T00:00:00"
+            P.PS.write_json_atomic(self.w.root / P.RAW_TILES / c / "status.json", st)
+        os.environ["CJ_RAW_KEEP_DAYS"] = "7"
+        P.kick(None)
+        for c in (failed, ok):
+            self.assertFalse((self.w.root / P.RAW_TILES / c / "input").exists(), c)
+
+    def converted_any(self, who) -> str:
+        st, r = self.upload(who, "raw", {"session": "20261101", "recipe": "20261101"}, self.raw_files())
+        cid = CID_RE.match(r.json()["href"]).group(1)
+        self.wait_conv(cid)
+        return cid
+
+    def test_keep_zero_removes_at_the_end(self):
+        os.environ["CJ_RAW_KEEP_DAYS"] = "0"
+        ok = self.converted_any("advanced")
+        os.environ["FAKE_CONVERT_MODE"] = "refuse"
+        failed = self.converted_any("advanced")
+        for c in (ok, failed):
+            wait_for(lambda: not (self.w.root / P.RAW_TILES / c / "input").exists(), 10, what=f"{c} inputs gone")
+        self.assertEqual((self.status(ok)["state"], self.status(failed)["state"]), ("done", "failed"))
+        self.assertEqual(P.keep_days(None), 0.0)
+        os.environ["CJ_RAW_KEEP_DAYS"] = "nonsense"
+        self.assertEqual(P.keep_days(None), 7.0)
+
+    def test_two_per_person(self):
+        os.environ["FAKE_CONVERT_GATE"] = str(self.w.gate)
+        self.w.gate.unlink(missing_ok=True)
+        files = self.raw_files()
+        for _ in range(2):
+            st, r = self.upload("advanced", "raw", {"session": "20261101"}, files)
+            self.assertEqual(r.status_code, 200, r.text)
+        st, _ = self.upload("advanced", "raw", {"session": "20261101"}, files, expect=429)
+        self.assertIn("already have 2 conversions", st["error"])
+        self.upload("adv2", "raw", {"session": "20261101"}, files, create=False)    # someone else: fine
+        for _ in range(2):
+            self.assertEqual(self.pick_session().status_code, 303)
+        r = self.pick_session()
+        self.assertEqual(r.status_code, 429)
+        self.assertIn("already have 2 conversions", r.text)
+        self.w.gate.touch()
+
+    def test_disk_checked_before_converting(self):
+        with mock.patch.object(P, "disk_free", return_value=P.FREE_MARGIN_BYTES + 10):
+            r = self.pick_session()
+        self.assertEqual(r.status_code, 507)
+        self.assertIn("Not enough disk space on the server to convert", r.text)
+        self.assertEqual(self.convs(), [])
+
+
+class UploadRules(Base):
+    """QC SHOULD 4-6: bad piece requests keep the session; name rules; the converted-source cache."""
+
+    def test_bad_requests_keep_the_session(self):
+        data = tile_bytes(1)
+        r = self.jpost("/predict/api/upload", {"kind": "tiles", "fields": {"sample_label": "S", "nm_per_px": "1.4724",
+                                                                           "confirm": "yes", "model": MODEL},
+                                               "files": [{"name": "t.png", "size": len(data)}]}, "basic")
+        uid = r.json()["upload"]
+        for path, status, text in ((f"/predict/api/upload/{uid}/file?name=other.png&offset=0", 400,
+                                    "is not one of the files"),
+                                   (f"/predict/api/upload/{uid}/file?name=t.png&offset=abc", 400, "offset")):
+            rr = self.tc.post(path, content=data[:100], headers=self.h("basic", **{
+                "Content-Type": "application/octet-stream"}))
+            self.assertEqual(rr.status_code, status, rr.text)
+            self.assertIn(text, rr.json()["error"])
+            self.assertFalse(rr.json()["dropped"])
+            self.assertEqual(self.get(f"/predict/api/upload/{uid}", "basic").status_code, 200)
+        self.assertEqual(self.piece(uid, "t.png", 50, data[:10], "basic").status_code, 409)
+        self.assertEqual(self.piece(uid, "t.png", 0, data, "basic").status_code, 200)        # still usable
+        self.jpost(f"/predict/api/upload/{uid}/cancel", {}, "basic")
+
+    def test_names_by_kind(self):
+        fields = {"sample_label": "S", "nm_per_px": "1.4724", "confirm": "yes", "model": MODEL}
+        for kind, f, names, text in (
+                ("tiles", fields, ["x.txt"], "not a PNG or JPEG file name"),
+                ("tiles", fields, ["x.tif"], "not a PNG or JPEG file name"),
+                ("tiles", fields, ["a.png", "a.png.part"], ".part"),
+                ("raw", {"session": "20261101"}, ["a.mrc", "a.mrc.mdoc", "a.mrc.part"], ".part"),
+                ("raw", {"session": "20261101"}, ["a.png"], "not a raw montage file")):
+            with self.subTest(names=names):
+                who = "basic" if kind == "tiles" else "advanced"
+                st, _ = self.upload(who, kind, f, [(n, b"x" * 10) for n in names], expect=400)
+                self.assertIn(text, st["error"])
+
+    def test_converted_sources_cached_by_status_mtime(self):
+        cid = self.converted("advanced", session="20261101", recipe="20261101")
+        admin = {"id": "tester", "role": "admin"}
+        calls = []
+        real = P.PSRC.check_folder
+
+        def counting(d, *a, **k):
+            calls.append(Path(d).parent.name)
+            return real(d, *a, **k)
+        P._SRC_CACHE.clear()
+        with mock.patch.object(P.PSRC, "check_folder", side_effect=counting):
+            P.converted_sources(None, admin, lambda u, o: True)
+            n = calls.count(cid)
+            P.converted_sources(None, admin, lambda u, o: True)
+            self.assertEqual(calls.count(cid), n)                        # cached
+            time.sleep(0.05)
+            P.write_conv_status(self.w.root / P.RAW_TILES / cid, note="touched")
+            P.converted_sources(None, admin, lambda u, o: True)
+            self.assertEqual(calls.count(cid), n + 1)                    # status changed: checked again
+        self.assertEqual(n, 1)
 
 
 def launch(p):

@@ -152,7 +152,15 @@ The full contract is the module docstring in `modules/predict.py`. In short:
   - The portal runs `python -m jobs.convert_raw` detached, one conversion at a time (the others wait, queued), into
     `<predict root>/raw_tiles/<session id>_<6 hex>/` (`convert.json`, `status.json` queued/running/done/failed with the
     converter's JSON result and warnings, `convert.log`, `tiles/`). When done, `tiles/` is a Predict source seen only
-    by its owner and the admin; uploaded raw files are then removed.
+    by its owner and the admin.
+  - Uploaded raw files are kept `CJ_RAW_KEEP_DAYS` (default 7; 0 = removed at once) after the conversion ends, done
+    or failed; the admin can delete them sooner. At most 2 conversions per person waiting or running; a conversion
+    needs about twice its raw size free on the disk.
+  - Admin: **Stop** (kills the converter), **Retry** (a failed one whose inputs remain). A converter running over 2 h,
+    or with a log silent for 20 min, is stopped by itself. Its process is known by pid and start time, so a reused pid
+    is never mistaken for it.
+  - Every `[Image = …]` in an uploaded `.idoc` / `.mrc.mdoc` must be a bare file name that was uploaded with it (no
+    drive, folder, UNC share or `..`); `jobs/convert_raw.py` checks again before opening any tile.
 - Basic users get 403 on everything raw. Everything shown is escaped; paths and raw errors are on admin-only lines.
 
 ## Live charts (`/cj/live.js`)

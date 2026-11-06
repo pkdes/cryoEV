@@ -16,6 +16,9 @@ Predict module (CJ portal, journey J1): a person runs the production model on th
     GET  /predict/new/raw/sessions/       admin: raw session folders under the scan roots with no 3d tiles yet
     GET  /predict/new/raw/sessions/<key>/ admin: pick montages of one; POST: convert (the folder is only read)
     GET  /predict/convert/<id>/           one conversion: status (auto-refresh), warnings, then "Analyse these tiles"
+    POST /predict/convert/<id>/stop       admin: kill a running converter (or drop a queued one) -> failed "stopped"
+    POST /predict/convert/<id>/retry      admin: a failed conversion whose inputs are still there is queued again
+    POST /predict/convert/<id>/inputs     admin: delete its uploaded raw files now
     GET  /predict/<ps>/                   the set: status (auto-refresh), Review / Results, spot-check list
     POST /predict/<ps>/review             build the prediction review package in a thread (if missing)
     POST /predict/<ps>/results            compute results/results.json in a thread (if missing or older than edits)
@@ -37,9 +40,15 @@ Predict module (CJ portal, journey J1): a person runs the production model on th
                                            sidecar, TIFF, sample key)
     POST /predict/api/upload/<id>/create  every file there -> the prediction set (tiles) or the conversion (raw)
     POST /predict/api/upload/<id>/cancel
-  A session lives in <root>/.portal/us_<12 hex>/ (upload.json + files/); only its owner reaches it. A refusal (cap,
-  disk, content, fields) removes it ("nothing was kept"); a dropped connection or a missing piece does not. A session
-  never finished (no "create") is removed SCRATCH_MAX_AGE_S after its last request, and its disk hold released.
+  A session lives in <root>/.portal/us_<12 hex>/ (upload.json + files/); only its owner reaches it. Names: tiles
+  .png/.jpg/.jpeg, raw the raw set; never a name ending in .part. A size or content violation, or a full disk, removes
+  it ("nothing was kept"); a bad request (unknown name, bad offset: 400; wrong offset: 409), a dropped connection or
+  a missing piece does not. A session never finished (no "create") is removed SCRATCH_MAX_AGE_S after its last
+  request, and its disk hold released.
+  Sidecars: every [Image = <name>] of an uploaded .idoc / .mrc.mdoc (read as cryoem_core.metadata.parse_metadata
+  reads it) must be a bare file name (no \\ / :, not . or ..) and one of the uploaded files; a picked session's
+  sidecars must name bare files too. Else refused: cryoem_core would open whatever path it names (another folder, a
+  UNC share). jobs/convert_raw.py checks the same again before any tile is opened.
 
 Sessions people may pick (portal/predict_sources.py): the session folders found under the scan roots
 (CJ_PREDICT_SCAN_ROOTS, default the processing root) that have `3. Processed images/3d. Tiles no scalebar*`, plus the
@@ -49,18 +58,23 @@ only by its owner and the admin (ctx.can_see).
 
 Raw conversion (BUILD_CONTRACTS.md section 10): `python -m jobs.convert_raw` as a detached one-shot subprocess with
 the processing repo from CJ_PROCESSING_REPO, one at a time (MAX_CONVERT_RUNNING; the others wait queued; a watcher
-thread starts the next and records the end). Output in <root>/raw_tiles/<session id>_<6 hex>/ (the name starts with
+thread starts the next and records the end), at most MAX_CONV_PER_USER queued or running per person, and only with
+DISK_FACTOR x the raw input free on the disk. Output in <root>/raw_tiles/<session id>_<6 hex>/ (the name starts with
 the session id: Predict reads the id from it):
     convert.json   {"schema": "cj_convert/1", id, owner, session, recipe, gpu, source, inputs, sample_key, created}
     status.json    {state: queued|running|done|failed, updated, pid, started, finished, error, kind, warnings,
                     result (convert_raw's JSON), n_tiles}
     convert.out    the converter's stdout (one JSON object); convert.log its stderr (the pipeline's progress)
-    input/         the uploaded raw files (removed once the conversion is done)
+    input/         the uploaded raw files: kept CJ_RAW_KEEP_DAYS (default 7; 0 = removed at once) after the
+                   conversion ends, done or failed, then swept; the admin may delete them sooner
     tiles/         the converter's --out: PNG tiles + MANIFEST.csv, the Predict source once done
   The recipe is "default" (convert_raw's DEFAULT_RECIPE; the page warns) or one of the processing repo's session
   recipes that convert_raw's static check accepts (the portal never runs one). The GPU is used only when ticked and the
   GPU check passes (else refused, saying why); the CPU otherwise. A session folder the admin picks is never written:
   the converter reads it and writes only under raw_tiles/.
+  Stuck: a converter running over CONVERT_MAX_S, or whose log is silent for CONVERT_STALE_S, is killed and marked
+  failed ("timeout"). Its process is known by pid AND start time (pid_created), so a reused pid is never taken for
+  it (nor killed).
 
 Configuration (environment, read per request; Config attributes of the same lower-case name win when present):
   CJ_PREDICT_SCAN_ROOTS, CJ_PREDICT_SOURCES   the session list (portal/predict_sources.py)
@@ -68,6 +82,7 @@ Configuration (environment, read per request; Config attributes of the same lowe
   CJ_REVIEW_ROOT       prediction review packages, when cfg.review_root (the shell's /review/<pkg_id>/ root) is unset
                        (default <CryoAI-laptop>/review)
   CJ_PROCESSING_REPO   the lab's processing repo (read only) for raw conversion; unset = no raw conversion
+  CJ_RAW_KEEP_DAYS     days uploaded raw files are kept after their conversion ends (default 7; 0 = not kept)
   The registry is the portal's (cfg.registry).
 
 Rules:
@@ -168,6 +183,12 @@ CONVERT_JSON, CONVERT_OUT, CONVERT_LOG = "convert.json", "convert.out", "convert
 CONVERT_INPUT, CONVERT_TILES, CONVERT_LOCK = "input", "tiles", ".convert.lock"
 SCHEMA_CONVERT, SCHEMA_CONVERT_VIEW = "cj_convert/1", "cj_predict_convert/1"
 MAX_CONVERT_RUNNING = 1                   # one montage render holds GBs of RAM: the others wait, queued
+MAX_CONV_PER_USER = 2                     # one person's conversions queued or running at once
+CONVERT_MAX_S = 2 * 3600                  # a running conversion is stopped (failed, "timeout") after this ...
+CONVERT_STALE_S = 20 * 60                 # ... or when its log has been silent this long
+PID_START_SLACK_S = 120                   # a pid whose process started further from `started` is someone else
+KEEP_SETTING, KEEP_DEFAULT_DAYS = "CJ_RAW_KEEP_DAYS", 7   # uploaded raw input/ kept after the end (0 = not)
+DISK_FACTOR = 2                           # free disk a conversion needs: this x its raw input (+ the margin)
 CONVERT_POLL_S = 2.0                      # the watcher thread's beat while a conversion is queued or running
 RECIPE_TTL_S = 60.0
 RAW_EXT = (".mrc.mdoc", ".mrc", ".idoc", ".tif", ".tiff", ".csv")
@@ -193,9 +214,10 @@ esc = html.escape
 class Refusal(Exception):
     """A request we refuse with a message for the person (plain words) and an HTTP status."""
 
-    def __init__(self, msg, status=400, tech=None):
+    def __init__(self, msg, status=400, tech=None, drop=False):
         super().__init__(msg)
         self.msg, self.status, self.tech = msg, status, tech
+        self.drop = drop                   # an upload piece: this refusal ends the upload session (size, content)
 
 
 # ---------------------------------------------------------------- configuration
@@ -1740,8 +1762,70 @@ def write_conv_status(d: Path, **fields) -> dict:
     return st
 
 
+def keep_days(cfg) -> float:
+    """CJ_RAW_KEEP_DAYS: days an uploaded conversion keeps its raw input/ after it ends (done or failed); 0 = removed
+    as soon as it ends. Default KEEP_DEFAULT_DAYS; an unreadable value = the default."""
+    v = _setting(cfg, KEEP_SETTING)
+    try:
+        x = float(v) if v not in (None, "") else KEEP_DEFAULT_DAYS
+    except (TypeError, ValueError):
+        return float(KEEP_DEFAULT_DAYS)
+    return max(0.0, x) if math.isfinite(x) else float(KEEP_DEFAULT_DAYS)
+
+
+def _existing(p: Path) -> Path:
+    p = Path(p)
+    while not p.exists() and p.parent != p:
+        p = p.parent
+    return p
+
+
+def input_bytes(meta: dict) -> int:
+    """The raw bytes a conversion reads: recorded at creation, else estimated from its sidecars (the MRC beside an
+    .mrc.mdoc; for an .idoc, the tiles it names that are plain files beside it)."""
+    if isinstance(meta.get("input_bytes"), int):
+        return meta["input_bytes"]
+    total = 0
+    for s in meta.get("inputs") or []:
+        side = Path(s)
+        try:
+            total += side.stat().st_size
+            if side.name.lower().endswith(".mrc.mdoc"):
+                mrc = side.with_name(side.name[:-len(".mdoc")])
+                total += mrc.stat().st_size if mrc.is_file() else 0
+            else:
+                for n in sidecar_images(side):
+                    if image_ref_problem(n) is None and (side.parent / n).is_file():
+                        total += (side.parent / n).stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def check_disk_for(where: Path, nbytes: int):
+    """A conversion writes its work copies and tiles next to the predict root: refuse (507) unless about
+    DISK_FACTOR x its raw input is free on top of FREE_MARGIN_BYTES and the uploads in flight."""
+    free = disk_free(_existing(where))
+    with _RES_LOCK:
+        held = sum(_RESERVED.values())
+    need = DISK_FACTOR * int(nbytes or 0) + FREE_MARGIN_BYTES
+    if free - held < need:
+        raise Refusal(f"Not enough disk space on the server to convert these (about "
+                      f"{DISK_FACTOR * int(nbytes or 0) / 2 ** 30:.1f} GB needed). Ask the admin.", 507,
+                      tech=f"{free} bytes free, {held} held by uploads, need {need}")
+
+
+def check_conv_cap(cfg, user):
+    """At most MAX_CONV_PER_USER conversions of one person queued or running."""
+    mine = [1 for _, meta, st in all_conversions(cfg)
+            if meta.get("owner") == user.get("id") and st.get("state") in ("queued", "running")]
+    if len(mine) >= MAX_CONV_PER_USER:
+        raise Refusal(f"You already have {MAX_CONV_PER_USER} conversions waiting or running. Start another when "
+                      f"one of them is done.", 429)
+
+
 def new_conversion(cfg, user, fields: dict, *, source: dict, inputs=None, upload_files: Path | None = None,
-                   sample_key=None) -> Path:
+                   sample_key=None, nbytes=None) -> Path:
     """Make <root>/raw_tiles/<session>_<6 hex>/ with convert.json + status queued (uploaded files moved into
     input/), then start it when nothing else runs. -> the folder."""
     root = raw_root(cfg)
@@ -1767,9 +1851,10 @@ def new_conversion(cfg, user, fields: dict, *, source: dict, inputs=None, upload
                 "recipe": fields["recipe"], "gpu": bool(fields["gpu"]), "source": source,
                 "inputs": [str(x) for x in inputs or []], "sample_key": str(sample_key) if sample_key else None,
                 "created": now_iso()}
+        meta["input_bytes"] = int(nbytes) if nbytes is not None else input_bytes(meta)
         PS.write_json_atomic(d / CONVERT_JSON, meta)
-        write_conv_status(d, state="queued", pid=None, started=None, finished=None, error=None, kind=None,
-                          warnings=[], result=None, n_tiles=None)
+        write_conv_status(d, state="queued", pid=None, pid_created=None, started=None, finished=None, error=None,
+                          kind=None, warnings=[], result=None, n_tiles=None)
     except BaseException:
         shutil.rmtree(d, ignore_errors=True)
         raise
@@ -1791,15 +1876,96 @@ def convert_argv(d: Path, meta: dict, repo: Path) -> list:
     return argv + ["--processing-repo", str(repo)]
 
 
+# -- the converter's process: identity by pid AND start time (a pid can be reused by another program)
+def proc_created(pid) -> float | None:
+    """The start time (epoch s) of process pid, or None when it can't be read (no psutil, gone, no access)."""
+    try:
+        import psutil
+        return float(psutil.Process(int(pid)).create_time())
+    except Exception:
+        return None
+
+
+def proc_alive(st: dict) -> bool:
+    """The converter recorded in status.json is still running: its pid is alive AND that process started when the
+    converter did (pid_created; else within PID_START_SLACK_S of `started`). A reused pid is not it."""
+    pid = st.get("pid")
+    if not pid or not PL.pid_alive(pid):
+        return False
+    t = proc_created(pid)
+    if t is None:
+        return True                                     # can't tell: trust the pid (the max runtime still applies)
+    if st.get("pid_created") is not None:
+        try:
+            return abs(t - float(st["pid_created"])) <= 2.0
+        except (TypeError, ValueError):
+            pass
+    started = _parse_local(st.get("started"))
+    return started is None or abs(t - started) <= PID_START_SLACK_S
+
+
+def kill_proc(st: dict) -> bool:
+    """Kill the converter (and anything it started) when proc_alive(st). -> killed."""
+    if not proc_alive(st):
+        return False
+    pid = int(st["pid"])
+    try:
+        import psutil
+        p = psutil.Process(pid)
+        for c in p.children(recursive=True):
+            try:
+                c.kill()
+            except psutil.Error:
+                pass
+        p.kill()
+        p.wait(10)
+        return True
+    except ImportError:
+        pass
+    except Exception:
+        return not PL.pid_alive(pid)
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=30,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        else:
+            os.kill(pid, 9)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return not PL.pid_alive(pid)
+
+
+def overdue(d: Path, st: dict, now=None) -> str | None:
+    """Why a running conversion should be stopped: over CONVERT_MAX_S since it started, or its log silent for
+    CONVERT_STALE_S. None while it is fine."""
+    now = time.time() if now is None else now
+    started = _parse_local(st.get("started"))
+    if started is None:
+        return None
+    if now - started > CONVERT_MAX_S:
+        return f"It ran for over {CONVERT_MAX_S / 3600:g} h, so it was stopped."
+    try:
+        last = max(started, (d / CONVERT_LOG).stat().st_mtime)
+    except OSError:
+        last = started
+    if now - last > CONVERT_STALE_S:
+        return f"No progress for {CONVERT_STALE_S // 60} min (its log stopped), so it was stopped."
+    return None
+
+
 def start_conversion(cfg, d: Path, meta: dict) -> dict:
     """Spawn the converter detached (no console window; it outlives the portal): stdout -> convert.out, stderr ->
-    convert.log. -> the new status."""
+    convert.log. -> the new status. Refused (failed) without a processing repo, a montage or the disk it needs."""
     repo, why = processing_repo(cfg)
     if repo is None:
         return write_conv_status(d, state="failed", kind="refused", finished=now_iso(),
                                  error=f"Raw conversion is not set up: {why}")
     if not meta.get("inputs"):
         return write_conv_status(d, state="failed", kind="refused", finished=now_iso(), error="No montage to convert.")
+    try:
+        check_disk_for(d, input_bytes(meta))
+    except Refusal as e:
+        return write_conv_status(d, state="failed", kind="refused", finished=now_iso(), error=e.msg)
     kw = {}
     if os.name == "nt":
         kw["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
@@ -1813,7 +1979,7 @@ def start_conversion(cfg, d: Path, meta: dict) -> dict:
     except OSError as e:
         return write_conv_status(d, state="failed", kind="failed", finished=now_iso(),
                                  error=f"could not start the converter: {type(e).__name__}: {e}")
-    return write_conv_status(d, state="running", pid=p.pid, started=now_iso())
+    return write_conv_status(d, state="running", pid=p.pid, pid_created=proc_created(p.pid), started=now_iso())
 
 
 def converter_result(d: Path):
@@ -1843,34 +2009,66 @@ def log_tail(d: Path, n=4000) -> str:
 
 
 def finalize(d: Path, meta: dict, st: dict) -> dict:
-    """A running conversion: its result once printed (done / failed), failed when its process is gone without one;
-    else unchanged. Uploaded inputs are removed once done (the tiles are what Predict uses)."""
+    """A running conversion: its result once printed (done / failed); failed when its process is gone without one;
+    stopped (killed, failed "timeout") when overdue(); else unchanged."""
     res = converter_result(d)
     if res is None:
-        if PL.pid_alive(st.get("pid")):
-            return st
+        if proc_alive(st):
+            why = overdue(d, st)
+            if why is None:
+                return st
+            kill_proc(st)
+            return write_conv_status(d, state="failed", kind="timeout", pid=None, finished=now_iso(), error=why)
         res = converter_result(d)                       # it may have printed just before it ended
         if res is None:
             return write_conv_status(d, state="failed", kind="failed", pid=None, finished=now_iso(),
                                      error="The converter stopped without a result.")
     warnings = [str(w) for w in (res.get("warnings") or [])]
     if res.get("ok"):
-        st = write_conv_status(d, state="done", pid=None, finished=now_iso(), error=None, kind=None,
-                               warnings=warnings, result=res, n_tiles=res.get("n_tiles"))
-        if (meta.get("source") or {}).get("kind") == "upload":
-            shutil.rmtree(d / CONVERT_INPUT, ignore_errors=True)
-        return st
+        return write_conv_status(d, state="done", pid=None, finished=now_iso(), error=None, kind=None,
+                                 warnings=warnings, result=res, n_tiles=res.get("n_tiles"))
     return write_conv_status(d, state="failed", pid=None, finished=now_iso(), kind=res.get("kind") or "failed",
                              error=str(res.get("error") or "unknown error"), warnings=warnings, result=res)
 
 
+def inputs_kept_until(cfg, d: Path, st: dict) -> float | None:
+    """When an ended conversion's uploaded input/ goes (epoch s), or None (none kept, or not ended)."""
+    if st.get("state") not in ("done", "failed") or not (d / CONVERT_INPUT).exists():
+        return None
+    fin = _parse_local(st.get("finished")) or time.time()
+    return fin + keep_days(cfg) * 86400
+
+
+def remove_inputs(d: Path) -> bool:
+    """Delete a conversion's uploaded raw files (input/). Callers hold the runner lock."""
+    if not (d / CONVERT_INPUT).exists():
+        return False
+    shutil.rmtree(d / CONVERT_INPUT, ignore_errors=True)
+    write_conv_status(d, inputs_removed=now_iso())
+    return True
+
+
+def sweep_inputs(cfg, items) -> int:
+    """Remove input/ of ended conversions past CJ_RAW_KEEP_DAYS (0: at once). Callers hold the runner lock."""
+    n = 0
+    for d, _meta, st in items:
+        until = inputs_kept_until(cfg, d, st)
+        if until is not None and time.time() >= until:
+            n += remove_inputs(d)
+    return n
+
+
+def runner_lock(cfg):
+    return PS.locked(raw_root(cfg) / CONVERT_LOCK)
+
+
 def kick(cfg) -> int:
-    """Record finished conversions and start queued ones (at most MAX_CONVERT_RUNNING at once), under the runner
-    lock. -> how many are still queued or running."""
+    """Record finished (or overdue) conversions, start queued ones (at most MAX_CONVERT_RUNNING at once) and sweep
+    old inputs, under the runner lock. -> how many are still queued or running."""
     root = raw_root(cfg)
     if not root.is_dir():
         return 0
-    with PS.locked(root / CONVERT_LOCK):
+    with runner_lock(cfg):
         items = all_conversions(cfg)
         running = 0
         for i, (d, meta, st) in enumerate(items):
@@ -1879,16 +2077,72 @@ def kick(cfg) -> int:
                 items[i] = (d, meta, st)
                 running += st.get("state") == "running"
         pending = running
-        for d, meta, st in items:
+        for i, (d, meta, st) in enumerate(items):
             if st.get("state") != "queued":
                 continue
             if running < MAX_CONVERT_RUNNING:
                 st = start_conversion(cfg, d, meta)
+                items[i] = (d, meta, st)
                 running += st.get("state") == "running"
                 pending += st.get("state") == "running"
             else:
                 pending += 1
+        sweep_inputs(cfg, items)
     return pending
+
+
+# -- the admin's actions on one conversion
+def stop_conversion(cfg, d: Path) -> str:
+    """Admin "Stop": kill a running converter (or drop a queued one) and mark it failed ("stopped")."""
+    with runner_lock(cfg):
+        st = _read_json(d / PS.STATUS) or {}
+        if st.get("state") == "running":
+            kill_proc(st)
+            write_conv_status(d, state="failed", kind="stopped", pid=None, finished=now_iso(),
+                              error="Stopped by the admin.")
+            return "stopped"
+        if st.get("state") == "queued":
+            write_conv_status(d, state="failed", kind="stopped", pid=None, finished=now_iso(),
+                              error="Stopped by the admin before it started.")
+            return "stopped"
+    return "not running"
+
+
+def can_retry(meta: dict, d: Path, st: dict) -> bool:
+    if st.get("state") != "failed":
+        return False
+    if (meta.get("source") or {}).get("kind") == "upload":
+        return (d / CONVERT_INPUT).is_dir()
+    return all(Path(p).is_file() for p in meta.get("inputs") or [])
+
+
+def retry_conversion(cfg, d: Path, meta: dict) -> str:
+    """Admin "Retry": a failed conversion whose inputs are still there goes back to the queue (its tiles/ and
+    result cleared; the log is kept and appended to)."""
+    with runner_lock(cfg):
+        st = _read_json(d / PS.STATUS) or {}
+        if not can_retry(meta, d, st):
+            raise Refusal("This conversion can’t be tried again (it is not stopped, or its raw files were removed: "
+                          "upload them again).", 409)
+        shutil.rmtree(d / CONVERT_TILES, ignore_errors=True)
+        try:
+            (d / CONVERT_OUT).unlink()
+        except OSError:
+            pass
+        write_conv_status(d, state="queued", pid=None, pid_created=None, started=None, finished=None, error=None,
+                          kind=None, warnings=[], result=None, n_tiles=None, retries=int(st.get("retries") or 0) + 1)
+    kick(cfg)
+    ensure_watcher(cfg)
+    return "queued"
+
+
+def delete_inputs_now(cfg, d: Path) -> bool:
+    """Admin "Delete raw files now" on an ended conversion."""
+    with runner_lock(cfg):
+        st = _read_json(d / PS.STATUS) or {}
+        if st.get("state") in ("queued", "running"):
+            raise Refusal("Stop the conversion first.", 409)
+        return remove_inputs(d)
 
 
 _WATCH: dict = {}                     # raw root -> {"dirty": bool}: one watcher thread per root
@@ -1924,9 +2178,14 @@ def ensure_watcher(cfg):
     threading.Thread(target=loop, name="cj-predict-convert-watch", daemon=True).start()
 
 
+_SRC_CACHE: dict = {}                 # (tiles folder, status.json mtime_ns) -> check_folder() of a done conversion
+_SRC_LOCK = threading.Lock()
+
+
 def converted_sources(cfg, user, can_see) -> list:
     """The finished conversions this person may see (owner, admin) as Predict sources: [{key, label, dir, manifest,
-    session (from the folder name), sample_column, problem, owner, conversion}]."""
+    session (from the folder name), sample_column, problem, owner, conversion}]. The folder check is cached per
+    status.json mtime (a done conversion's tiles no longer change)."""
     out = []
     for d, meta, st in list_conversions(cfg, user, can_see):
         if st.get("state") != "done":
@@ -1934,7 +2193,18 @@ def converted_sources(cfg, user, can_see) -> list:
         m = RAW_ID_RE.match(d.name)
         tiles = d / CONVERT_TILES
         man = tiles / PSRC.MANIFEST
-        chk = PSRC.check_folder(tiles)
+        try:
+            key = (str(tiles), (d / PS.STATUS).stat().st_mtime_ns)
+        except OSError:
+            continue
+        with _SRC_LOCK:
+            chk = _SRC_CACHE.get(key)
+        if chk is None:
+            chk = PSRC.check_folder(tiles)
+            with _SRC_LOCK:
+                _SRC_CACHE[key] = chk
+                while len(_SRC_CACHE) > CACHE_MAX:
+                    _SRC_CACHE.pop(next(iter(_SRC_CACHE)))
         out.append({"key": PSRC.source_key(tiles),
                     "label": f"{PSRC.default_label(m.group(1))} · converted ({meta.get('recipe')} recipe, "
                              f"{when(meta.get('created'))})",
@@ -2024,9 +2294,21 @@ def session_convert(cfg, user, s: dict, form: dict) -> Path:
         raise Refusal("Tick at least one montage.")
     if len(picked) != len(set(form.get("montages") or [])):
         raise Refusal("The session’s files changed since this page was opened. Check the montages again.")
+    check_conv_cap(cfg, user)
+    problems = []                         # a sidecar naming a path (absolute, UNC, ..): never handed to the converter
+    for r in picked:
+        try:
+            problems += sidecar_problems(s["dir"] / r)
+        except OSError as e:
+            problems.append(f"{r}: can't be read ({type(e).__name__})")
+    if problems:
+        raise Refusal(f"Not converted ({len(problems)} problem(s)):\n" + "\n".join(problems[:12]))
+    inputs = [str(s["dir"] / r) for r in picked]
+    nbytes = input_bytes({"inputs": inputs})
+    check_disk_for(raw_root(cfg), nbytes)
     check_gpu(fields)
     return new_conversion(cfg, user, fields, source={"kind": "session", "folder": s["folder"], "montages": picked},
-                          inputs=[str(s["dir"] / r) for r in picked], sample_key=listing["sample_key"])
+                          inputs=inputs, sample_key=listing["sample_key"], nbytes=nbytes)
 
 
 # ---------------------------------------------------------------- upload sessions (one file or piece per request)
@@ -2137,6 +2419,10 @@ def declared_files(kind: str, files) -> dict:
         if safe.lower() in seen:
             raise Refusal(f"Two files are named {safe!r}; each name must be unique.")
         seen.add(safe.lower())
+        if safe.lower().endswith(PART):                  # never the name of another file's partial copy
+            raise Refusal(f"File name not accepted: {name[:80]!r} (it ends in {PART}). Rename it and upload again.")
+        if kind == "tiles" and not safe.lower().endswith(IMAGE_EXT):
+            raise Refusal(f"{safe}: not a PNG or JPEG file name. Upload processed .png / .jpg tiles.")
         if kind == "raw" and not safe.lower().endswith(RAW_EXT):
             raise Refusal(f"{safe}: not a raw montage file. Upload .mrc files with their .mrc.mdoc, or an .idoc with "
                           f"its .tif tiles (and, if you have it, the session’s sample key .csv).")
@@ -2197,6 +2483,7 @@ def upload_start(cfg, user, body) -> dict:
     decl = declared_files(kind, body.get("files"))
     raw = check_upload_fields(cfg, user, kind, fields)
     if raw:
+        check_conv_cap(cfg, user)
         check_gpu(raw)
     tmp = predict_root(cfg) / PORTAL_TMP
     resume = body.get("resume")
@@ -2237,6 +2524,45 @@ MRC_MAGIC = b"MAP"
 TIFF_MAGIC = (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+")
 
 
+SIDECAR_EXT = (".idoc", ".mdoc")
+
+
+def sidecar_images(path: Path) -> list:
+    """Every [Image = <name>] of a SerialEM .idoc / .mrc.mdoc, read exactly as cryoem_core.metadata.parse_metadata
+    reads it (a line starting with "[" and holding "=": the section type before the first "=", the name between the
+    first and second "=", "]" and spaces trimmed). Latin-1, so every byte is kept and no path character is lost."""
+    out = []
+    with open(path, "rb") as f:
+        text = f.read().decode("latin-1")
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("[") and "=" in line:
+            if line.split("=")[0].strip()[1:].strip() == "Image":
+                out.append(line.split("=")[1].strip().rstrip("]").strip())
+    return out
+
+
+def image_ref_problem(name: str) -> str | None:
+    """A tile name in a sidecar must be a bare file name: no \\ / : (no drive, folder or UNC share), not . or ..,
+    not empty, no control characters."""
+    if not name or name in (".", "..") or any(c in name for c in "\\/:") or any(ord(c) < 32 for c in name):
+        return f"names a tile {name[:80]!r} that is not a plain file name (no paths allowed)"
+    return None
+
+
+def sidecar_problems(path: Path, declared=None) -> list:
+    """Problems with the tiles a sidecar names: each must be a bare file name and, for an upload (declared = the
+    uploaded names), one of the uploaded files."""
+    out = []
+    for name in sidecar_images(path):
+        why = image_ref_problem(name)
+        if why is None and declared is not None and name not in declared:
+            why = f"names a tile {name[:80]!r} that was not uploaded with it"
+        if why:
+            out.append(f"{path.name}: {why}")
+    return list(dict.fromkeys(out))
+
+
 def raw_problem(path: Path) -> str | None:
     """A raw upload file checked by its content: an MRC stack, a SerialEM sidecar, a TIFF tile, a sample key."""
     n = path.name.lower()
@@ -2251,6 +2577,9 @@ def raw_problem(path: Path) -> str | None:
     elif n.endswith((".mdoc", ".idoc")):
         if b"\x00" in head or b"PixelSpacing" not in head or not (b"[ZValue" in head or b"[Image" in head):
             return f"{path.name}: not a SerialEM {n.rsplit('.', 1)[-1]} file (by content: no PixelSpacing and tiles)"
+        bad = sidecar_problems(path)                     # a path in [Image = ...]: refused at once
+        if bad:
+            return bad[0]
     elif n.endswith((".tif", ".tiff")):
         if head[:4] not in TIFF_MAGIC:
             return f"{path.name}: not a TIFF (by content)"
@@ -2280,7 +2609,8 @@ class Resync(Exception):
 
 async def receive_piece(request: Request, d: Path, uid: str) -> dict:
     """One piece of one file: ?name=&offset=, body = the bytes. Appends to <name>.part; the complete file is renamed
-    and content-checked. Raises Refusal (the caller drops the session unless keep), Resync, ClientDisconnect."""
+    and content-checked. Raises Refusal (the caller drops the session only when drop is set or the disk is full:
+    a size or content violation; a bad request leaves it as it is), Resync, ClientDisconnect."""
     meta = await run_in_threadpool(_read_json, d / UPLOAD_META)
     if not isinstance(meta, dict):
         raise Refusal("This upload is gone. Start again.", 404)
@@ -2304,9 +2634,9 @@ async def receive_piece(request: Request, d: Path, uid: str) -> dict:
     except ValueError:
         raise Refusal("Each piece must say its length (Content-Length).", 411)
     if length < 1 or length > CHUNK_BYTES:
-        raise Refusal(f"One request carries at most {CHUNK_BYTES // 2 ** 20} MB. Nothing was kept.", 413)
+        raise Refusal(f"One request carries at most {CHUNK_BYTES // 2 ** 20} MB. Nothing was kept.", 413, drop=True)
     if offset + length > size:
-        raise Refusal(f"{name}: more bytes than its size. Nothing was kept.", 400)
+        raise Refusal(f"{name}: more bytes than its size. Nothing was kept.", 400, drop=True)
     res = upload_reservation(uid, d, meta)
     await run_in_threadpool(res.check)
     fh = await run_in_threadpool(open, part, "ab")
@@ -2317,7 +2647,7 @@ async def receive_piece(request: Request, d: Path, uid: str) -> dict:
                 continue
             got += len(piece)
             if got > length:
-                raise Refusal("A piece was longer than it said. Nothing was kept.", 400)
+                raise Refusal("A piece was longer than it said. Nothing was kept.", 400, drop=True)
             buf += piece
             if len(buf) >= WRITE_BATCH:
                 await run_in_threadpool(fh.write, bytes(buf))
@@ -2343,7 +2673,7 @@ async def receive_piece(request: Request, d: Path, uid: str) -> dict:
         await run_in_threadpool(os.replace, part, final)
         problem = await run_in_threadpool(file_problem, meta["kind"], final)
         if problem:
-            raise Refusal(f"{problem}. Nothing was kept.", 400)
+            raise Refusal(f"{problem}. Nothing was kept.", 400, drop=True)
         meta["done"] = list(meta.get("done") or []) + [name]
         await run_in_threadpool(PS.write_json_atomic, d / UPLOAD_META, meta)
     return upload_state(d, meta)
@@ -2363,18 +2693,20 @@ def upload_create(cfg, user, d: Path, meta: dict) -> str:
         ps_dir = create_and_start(cfg, d / UPLOAD_FILES, user, fields["model"], sample_label=label, nm=nm)
         return f"/predict/{ps_dir.name}/"
     raw = raw_fields(cfg, user, fields)
+    check_conv_cap(cfg, user)
+    # every sidecar's [Image = ...]: a bare name, and one of the uploaded files (else cryoem_core would open whatever
+    # path it names on the server: an absolute path, a UNC share, ../)
+    problems = []
+    for n in meta["declared"]:
+        if n.lower().endswith(SIDECAR_EXT):
+            problems += sidecar_problems(d / UPLOAD_FILES / n, set(meta["declared"]))
+    if problems:
+        raise Refusal(f"Not converted ({len(problems)} problem(s)). Nothing was kept:\n" + "\n".join(problems[:12]))
+    check_disk_for(raw_root(cfg), sum(meta["declared"].values()))
     check_gpu(raw)
-    names = [n for n in meta["declared"] if n.lower().endswith(".idoc")]
-    for n in names:                                       # an .idoc whose tiles were not uploaded: say so now
-        try:
-            listed_tiles = re.findall(r"^\s*\[Image\s*=\s*(.+?)\s*\]", (d / UPLOAD_FILES / n).read_text(
-                encoding="utf-8", errors="replace"), re.M)
-        except OSError:
-            listed_tiles = []
-        if listed_tiles and not any(t in meta["declared"] for t in listed_tiles):
-            raise Refusal(f"{n}: none of the .tif tiles it lists were uploaded (it lists e.g. {listed_tiles[0]}).")
     conv = new_conversion(cfg, user, raw, upload_files=d / UPLOAD_FILES,
-                          source={"kind": "upload", "files": list(meta["declared"])})
+                          source={"kind": "upload", "files": list(meta["declared"])},
+                          nbytes=sum(meta["declared"].values()))
     return f"/predict/convert/{conv.name}/"
 
 
@@ -2396,6 +2728,7 @@ def conv_status_view(meta: dict, st: dict, admin: bool, paths=()) -> dict:
     elif state == "failed":
         msg = _plain(str(st.get("error") or ""), paths)
         out.update(label="Stopped", detail=(f"Not converted: {msg}" if st.get("kind") == "refused" else
+                                            f"Stopped: {msg}" if st.get("kind") in ("stopped", "timeout") else
                                             "The conversion failed. Ask the admin (they can see the details)."))
     if admin:
         bits = [f"{k} {st.get(k)}" for k in ("pid", "kind", "error", "started", "finished") if st.get(k)]
@@ -2442,6 +2775,24 @@ def conv_fragments(cfg, user, can_see, d: Path, meta: dict, st: dict) -> dict:
     if warns:
         parts.append('<h2 class="cj-sec">Warnings</h2><div class="cj-card"><ul class="cj-predict-warns">'
                      + "".join(f"<li>{esc(w)}</li>" for w in warns) + '</ul></div>')
+    until = inputs_kept_until(cfg, d, st)
+    if until is not None:
+        parts.append(f'<p class="cj-mut">The uploaded raw files are kept until '
+                     f'{esc(when(datetime.fromtimestamp(until).isoformat(timespec="seconds")))}, then removed.</p>')
+    if admin:
+        acts = []
+        base = f'/predict/convert/{esc(d.name)}'
+        if st.get("state") in ("queued", "running"):
+            acts.append(f'<form method="post" action="{base}/stop" class="cj-predict-inline">'
+                        f'<button class="cj-predict-btn" type="submit">Stop</button></form>')
+        if can_retry(meta, d, st):
+            acts.append(f'<form method="post" action="{base}/retry" class="cj-predict-inline">'
+                        f'<button class="cj-predict-btn" type="submit">Retry</button></form>')
+        if until is not None:
+            acts.append(f'<form method="post" action="{base}/inputs" class="cj-predict-inline">'
+                        f'<button class="cj-predict-btn" type="submit">Delete raw files now</button></form>')
+        if acts:
+            parts.append(f'<div class="cj-card cj-predict-adminacts"><b>Admin</b>{"".join(acts)}</div>')
     if admin and st.get("state") in ("failed", "running", "done"):
         tail = log_tail(d)
         if tail:
@@ -2637,8 +2988,8 @@ def unreadable_page(src: dict, e: Refusal, user) -> str:
 def routes(ctx) -> list:
     cfg = ctx.cfg
     sweep_scratch(cfg)                               # at start (routes() runs once, before the portal serves)
-    try:                                             # a conversion left queued / running by a portal that stopped
-        if any(st.get("state") in ("queued", "running") for _, _, st in all_conversions(cfg)):
+    try:                                             # a conversion left queued / running by a portal that stopped;
+        if kick(cfg):                                # old raw inputs swept
             ensure_watcher(cfg)
     except Exception:                                # no root configured or not there yet
         pass
@@ -2674,6 +3025,11 @@ def routes(ctx) -> list:
 
     # ---- pages (sync: Starlette runs them in a worker thread)
     def index(request: Request):
+        try:
+            if kick(cfg):                            # records ends, sweeps old raw inputs (cheap: a few small files)
+                ensure_watcher(cfg)
+        except Exception as e:                       # noqa: BLE001 - the list still shows
+            print(f"[predict] kick: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         return ctx.page(request, "Predict", page_mine(cfg, ctx.user(request), ctx.can_see), active="predict")
 
     def new(request: Request):
@@ -2801,6 +3157,28 @@ def routes(ctx) -> list:
         return ctx.page(request, "Raw conversion", page_convert(cfg, user, ctx.can_see, d, meta, st),
                         active="predict")
 
+    def convert_action(kind):
+        def act(request: Request):            # sync: a kill or a few file changes under the runner lock
+            user = ctx.user(request)
+            if user.get("role") != "admin":
+                return forbidden(request, "Only the admin can stop, retry or clean up a conversion.")
+            d, meta, _st = load_conversion(cfg, user, ctx.can_see, request.path_params["cid"])
+            if d is None:
+                return not_found(request)
+            try:
+                if kind == "stop":
+                    stop_conversion(cfg, d)
+                elif kind == "retry":
+                    retry_conversion(cfg, d, meta)
+                else:
+                    delete_inputs_now(cfg, d)
+            except Refusal as e:
+                return refused_page(request, "Raw conversion", wrap(
+                    f'<div class="cj-predict"><p class="cj-mut"><a href="/predict/convert/{esc(d.name)}/">← Back</a>'
+                    f'</p>{msg_box(e.msg)}</div>'), e.status)
+            return RedirectResponse(f"/predict/convert/{d.name}/", status_code=303)
+        return act
+
     def set_page(request: Request):
         user = ctx.user(request)
         d, req = load_set(cfg, user, ctx.can_see, request.path_params["ps"])
@@ -2921,8 +3299,11 @@ def routes(ctx) -> list:
             except ClientDisconnect:                     # the page resumes from what arrived
                 return Response(status_code=400)
             except Refusal as e:
-                await run_in_threadpool(drop_upload, d, uid)
-                return refusal_json(e, user, True)
+                # a size or content violation (or a full disk) ends the session; a bad request leaves it as it is
+                drop = e.drop or e.status == 507
+                if drop:
+                    await run_in_threadpool(drop_upload, d, uid)
+                return refusal_json(e, user, drop)
             except OSError as e:
                 await run_in_threadpool(drop_upload, d, uid)
                 return refusal_json(Refusal(os_error_text(e), 500, tech=f"{type(e).__name__}: {e}"), user, True)
@@ -2973,6 +3354,9 @@ def routes(ctx) -> list:
             Route(PREFIX + "/new/raw/sessions/{key}/", raw_session_page, methods=["GET"]),
             Route(PREFIX + "/new/raw/sessions/{key}/", raw_session_post, methods=["POST"]),
             Route(PREFIX + "/convert/{cid}/", convert_page, methods=["GET"]),
+            Route(PREFIX + "/convert/{cid}/stop", convert_action("stop"), methods=["POST"]),
+            Route(PREFIX + "/convert/{cid}/retry", convert_action("retry"), methods=["POST"]),
+            Route(PREFIX + "/convert/{cid}/inputs", convert_action("inputs"), methods=["POST"]),
             Route(PREFIX + "/api/mine", api_mine, methods=["GET"]),
             Route(PREFIX + "/api/set/{ps}", api_set, methods=["GET"]),
             Route(PREFIX + "/api/convert/{cid}", api_convert, methods=["GET"]),
