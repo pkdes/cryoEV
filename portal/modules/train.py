@@ -7,8 +7,10 @@ Train module (CJ portal): a new training job, the live training run, and past ru
     POST /train/queue            CJ_TRAIN_QUEUE on: create the job; off: the same preview, nothing written (409)
     GET  /train/api/options      datasets, base models, presets, the queue setting (schema cj_train/1)
     GET  /train/api/runs         past training jobs and runs with their metrics and models
-    GET  /train/api/live.json    live/live.json for this page: training only; no paths, machines or raw reasons
-                                 for non-admins (advanced users can't open /history/live/live.json)
+    GET  /train/api/live.json    live/live.json for this page (advanced users can't open /history/live/live.json):
+                                 admins get it whole, as History shows it; everyone else only the jobs whose
+                                 registry record is a `train` job (nothing at all while the registry can't be
+                                 read: fail closed, as Jobs), and no share path, machine, detail or raw reason
 
 What "queue" creates. Today a training job is three steps by hand (docs/JOBS.md): (1) `registry.py job new --type
 train ...` (registry.new_job), (2) `training/make_job_bundle.py` (a CLI main() only: no callable function), (3)
@@ -29,7 +31,10 @@ Defaults: the F5 preset takes epochs, imgsz, batch, patience, rect and seed from
 (run.jsonl config; seed 42 = run_experiments.py's default when the run has none), else the documented values.
 Only what existing jobs varied is exposed: epochs, imgsz, seed and max hours (the job's time cap).
 
-Plain words first; registry paths, weights paths, commands and raw errors only for admins.
+Plain words first; registry paths, weights paths, commands and raw errors only for admins (the preview's note
+shows "--weights (the base model's file)" to others; the note written to the registry is always the full one).
+Live training: admins see the full CJLive view (watcher, queue, charts); others the compact one (running training
+only), so no queue or watcher terms.
 """
 from __future__ import annotations
 
@@ -84,6 +89,7 @@ PRESETS = {
     "laptop": {"label": "Laptop GPU: a small model at 640 px", "where": "laptop", "size": "s",
                "epochs": 300, "imgsz": 640, "seed": 42, "max_hours": 4.0,
                "fixed": {"batch": 4, "patience": None, "rect": 0, "workers": 2},
+               "limits": {"epochs": 300, "max_hours": 12.0},     # longer runs would tie up the laptop
                "about": "y8s at 640 px, batch 4, 2 workers (docs/JOBS.md, \"Training on the laptop\")."},
 }
 WHERE_WORD = {"desktop": "the desktop GPU computer", "laptop": "the laptop's GPU"}
@@ -248,6 +254,40 @@ def list_path(root, ds: dict) -> Path | None:
     return p
 
 
+_list_cache: dict = {}
+LIST_PROBLEM = {"missing": "no image list", "changed": "its image list changed since it was recorded",
+                "count": "its image list doesn't match its recorded size"}
+
+
+def list_state(root, ds: dict) -> tuple:
+    """-> (image list path or None, problem or None): "missing" | "changed" (sha256 differs from the record) |
+    "count" (the number of images in it differs from image_list.n). Hash and count are cached per file version."""
+    lp = list_path(root, ds)
+    try:
+        st = lp.stat() if lp is not None and lp.is_file() else None
+    except OSError:
+        st = None
+    if st is None:
+        return None, "missing"
+    key = (str(lp), st.st_mtime_ns, st.st_size)
+    hit = _list_cache.get(key)
+    if hit is None:
+        try:
+            raw = lp.read_bytes()
+            hit = (hashlib.sha256(raw).hexdigest(), len(registry_module().read_image_list(lp)))
+        except (OSError, UnicodeDecodeError):
+            return None, "missing"
+        _list_cache[key] = hit
+    il = _d(ds.get("image_list"))
+    want = _s(il.get("sha256"))
+    if want and hit[0] != want:
+        return lp, "changed"
+    n = _num(il.get("n"))
+    if n is not None and int(n) != hit[1]:
+        return lp, "count"
+    return lp, None
+
+
 def split_counts(ds: dict) -> dict:
     """{train, valid, test: images} as trained (counts_trained), else the export's counts."""
     ct = _d(ds.get("counts_trained"))
@@ -275,10 +315,11 @@ def counts_text(c: dict) -> str:
 def dataset_rows(data: dict, root, admin: bool) -> list:
     out = []
     for i, ds in _d(data.get("dataset")).items():
-        lp = list_path(root, ds)
-        usable = bool(lp and lp.is_file())
+        lp, problem = list_state(root, ds)
+        usable = problem is None
         row = {"id": i, "source": source_text(ds), "counts": split_counts(ds),
                "n_list": _d(ds.get("image_list")).get("n"), "status": _s(ds.get("status")), "usable": usable,
+               "problem": LIST_PROBLEM.get(problem),
                "created": _s(ds.get("created")) or "", "label_version": _s(ds.get("label_version")),
                "export": _s(ds.get("export")) or _s(_d(ds.get("source")).get("id"))}
         if admin:
@@ -375,16 +416,17 @@ def plan(cfg, form: dict, user: dict, fresh: bool = False) -> tuple:
     elif ds is None:
         errs.append("That dataset is not in the registry.")
     else:
-        lp = list_path(root, ds)
-        if lp is None or not lp.is_file():
+        lp, problem = list_state(root, ds)
+        if problem == "missing":
             errs.append("That dataset has no image list in the registry, so a job can't be made from it.")
+        elif problem == "changed":
+            errs.append("That dataset's image list has changed since it was recorded, so it can't be used."
+                        + (f" ({lp})" if admin else ""))
+        elif problem == "count":
+            errs.append("That dataset's image list doesn't hold the number of images recorded for it, so it can't "
+                        "be used." + (f" ({lp})" if admin else ""))
+        if problem:
             lp = None
-        else:
-            want = _s(_d(ds.get("image_list")).get("sha256"))
-            if want and hashlib.sha256(lp.read_bytes()).hexdigest() != want:
-                errs.append("That dataset's image list has changed since it was recorded, so it can't be used."
-                            + (f" ({lp})" if admin else ""))
-                lp = None
     base = (form.get("base") or "").strip()
     model, size = None, None
     if not base:
@@ -420,6 +462,10 @@ def plan(cfg, form: dict, user: dict, fresh: bool = False) -> tuple:
             errs.append(f"Max hours must be a number between {LIMITS['max_hours'][0]:g} and "
                         f"{LIMITS['max_hours'][1]:g}.")
             max_hours = None
+    for k, cap in (_d(preset.get("limits")) if preset else {}).items():
+        v = {"epochs": epochs, "max_hours": max_hours}[k]
+        if v is not None and v > cap:
+            errs.append(f"{'Epochs' if k == 'epochs' else 'Max hours'} can be at most {cap:g} on the laptop.")
     if preset is not None and preset["where"] == "laptop":
         if size is not None and size not in LAPTOP_SIZES:
             errs.append(f"A {SIZES.get(size, size)} model is too big for the laptop's GPU: use the desktop preset, "
@@ -572,29 +618,39 @@ def read_live(registry) -> tuple:
     return None, err
 
 
-def live_for(live, admin: bool):
-    """Training only (a running predict job is left out); for non-admins no share path, machine, detail or raw
-    reason (they may contain paths)."""
+def live_for(live, admin: bool, reg_jobs=None, reg_ok: bool = False):
+    """live.json for this page. Admins: as it is (what History shows). Everyone else, failing closed as Jobs does:
+    only jobs whose registry record is a `train` job (someone else's predict job and a queue job missing from the
+    registry are left out; every job while the registry can't be read), in running, jobs[], finished[] and
+    watcher.job alike; no share path, machine, detail or raw reason."""
     if not isinstance(live, dict):
         return None
     out = {k: live.get(k) for k in ("schema", "generated", "generated_utc", "interval_s")}
     out["monitor"] = {"machine": _d(live.get("monitor")).get("machine")} if admin else {}
+    reg_jobs = _d(reg_jobs)
+
+    def keep(jid) -> bool:
+        return admin or (reg_ok and isinstance(jid, str) and _d(reg_jobs.get(jid)).get("type") == "train")
+
+    def clean(j):
+        j = dict(_d(j))
+        if not admin and j.get("reason"):
+            j["reason"] = "stopped early (an admin can see why)"
+        return j
     qs = []
     for n, q in enumerate(_l(live.get("queues")), 1):
         q = _d(q)
         run = _d(q.get("running"))
-        run = None if not run or run.get("kind") == "predict" else dict(run)
-        qq = {"share": q.get("share") if admin else f"GPU computer {n}", "reach": q.get("reach"),
-              "detail": q.get("detail") if admin else None, "running": run,
-              "watcher": dict(_d(q.get("watcher"))), "jobs": [dict(_d(j)) for j in _l(q.get("jobs"))],
-              "finished": [dict(_d(f)) for f in _l(q.get("finished"))]}
+        run = dict(run) if run and keep(run.get("job")) else None
+        w = dict(_d(q.get("watcher")))
         if not admin:
-            for k in ("machine", "detail"):
-                qq["watcher"].pop(k, None)
-            for j in qq["jobs"] + qq["finished"]:
-                if j.get("reason"):
-                    j["reason"] = "stopped early (an admin can see why)"
-        qs.append(qq)
+            wj = w.get("job")
+            w = {k: w.get(k) for k in ("display", "state", "age_s", "stale")}
+            w["job"] = wj if keep(wj) else None
+        qs.append({"share": q.get("share") if admin else f"GPU computer {n}", "reach": q.get("reach"),
+                   "detail": q.get("detail") if admin else None, "running": run, "watcher": w,
+                   "jobs": [clean(j) for j in _l(q.get("jobs")) if keep(_d(j).get("job"))],
+                   "finished": [clean(f) for f in _l(q.get("finished")) if keep(_d(f).get("job"))]})
     out["queues"] = qs
     return out
 
@@ -610,17 +666,36 @@ def live_stale(live) -> bool:
 
 # ---------------------------------------------------------------- past runs
 RUN_NOTE = re.compile(r"\brun (\S+)")
+RUN_TIME = re.compile(r"^(\d{4}-\d{2}-\d{2})_(\d{2})(\d{2})(\d{2})_")
+ENDED = ("done", "blocked", "cancelled")
 
 
-def run_rows(data: dict, admin: bool) -> list:
-    """Training jobs (registry) and runs, newest first: job -> run (the pull's status note "run <id> (...)"),
-    run -> dataset -> source (label version or export), run -> models made from it."""
+def run_when(job, run_id, run) -> tuple:
+    """-> (ISO time, "started" | "recorded"): the run's start, else the time in its id (YYYY-MM-DD_HHMMSS_...),
+    else when the registry line was written (labelled "recorded": not when it trained)."""
+    if _s(run.get("started")):
+        return run["started"], "started"
+    m = RUN_TIME.match(run_id or "")
+    if m:
+        return f"{m.group(1)}T{m.group(2)}:{m.group(3)}:{m.group(4)}", "started"
+    return _s((job or {}).get("logged")) or _s(run.get("logged")) or "", "recorded"
+
+
+def run_rows(data: dict, admin: bool, live=None) -> list:
+    """Training jobs (registry) and runs, newest first: job -> run (the pull's status note "run <id> (...)", else
+    live.json finished[].run), run -> dataset -> source (label version or export), run -> models made from it.
+    Only registry `train` jobs make rows, so the live.json fallback never adds a job."""
     runs, jobs, models, dss = (_d(data.get(k)) for k in ("run", "job", "model", "dataset"))
     by_run = {}
     for mid, m in models.items():
         if _s(m.get("run")):
             by_run.setdefault(m["run"], []).append({"id": mid, "status": _s(m.get("status")) or "registered"})
     rows, linked = [], set()
+    live_run = {}
+    for q in _l(_d(live).get("queues")):
+        for f in _l(_d(q).get("finished")):
+            if _s(_d(f).get("job")) and _s(_d(f).get("run")):
+                live_run.setdefault(f["job"], f["run"])
 
     def row(job, run_id):
         run = _d(runs.get(run_id)) if run_id else {}
@@ -632,8 +707,8 @@ def run_rows(data: dict, admin: bool) -> list:
         ds = _d(dss.get(dsid)) if dsid else {}
         met = _d(run.get("metrics"))
         size = ARCH_RE.search(str(cfg.get("arch") or ""))
-        return {"when": _s(run.get("started")) or _s((job or {}).get("logged")) or _s(run.get("logged")) or "",
-                "job": (job or {}).get("id"), "job_status": (job or {}).get("status"),
+        when, kind = run_when(job, run_id if run else None, run)
+        return {"when": when, "when_kind": kind, "job": (job or {}).get("id"), "job_status": (job or {}).get("status"),
                 "where": (job or {}).get("where"), "run": run_id if run else None,
                 "run_status": _s(run.get("status")), "dataset": dsid,
                 "dataset_source": source_text(ds) if ds else None,
@@ -646,12 +721,15 @@ def run_rows(data: dict, admin: bool) -> list:
                 "models": by_run.get(run_id, []) if run_id else [],
                 "reason": (_s((job or {}).get("blocked_reason")) if admin else
                            ("stopped early" if (job or {}).get("blocked_reason") else None)),
-                "machine": _s(run.get("machine")) if admin else None}
+                "machine": _s(run.get("machine")) if admin else None,
+                "run_not_linked": bool(job and not run and job.get("status") in ENDED)}
     for jid, j in jobs.items():
         if j.get("type") != "train":
             continue
         m = RUN_NOTE.search(str(j.get("note") or ""))
         rid = m.group(1) if m and m.group(1) in runs else None
+        if rid is None and live_run.get(jid) in runs:
+            rid = live_run[jid]
         if rid:
             linked.add(rid)
         rows.append(row(j, rid))
@@ -686,7 +764,7 @@ def form_html(data, form: dict, admin: bool, root) -> str:
     sel_p = form.get("preset") or "f5"
 
     def ds_label(r):
-        bad = "" if r["usable"] else " (no image list: can't be used)"
+        bad = "" if r["usable"] else f" ({r['problem']}: can't be used)"
         return f"{r['id']}{bad}"
 
     ds_opts = options_html(ds, sel_ds, ds_label, lambda r: r["id"], lambda r: not r["usable"])
@@ -701,7 +779,7 @@ def form_html(data, form: dict, admin: bool, root) -> str:
         f'<li data-ds="{esc(r["id"])}"><b class="cj-train-wrap">{esc(r["id"])}</b>'
         f'<span class="cj-mut">From {esc(r["source"])} · {esc(counts_text(r["counts"]))}'
         + (f' · {esc(str(r["n_list"]))} images in its list' if _num(r.get("n_list")) is not None else "")
-        + ("" if r["usable"] else " · no image list: can't be used") + "</span></li>" for r in ds)
+        + ("" if r["usable"] else f" · {esc(r['problem'] or '')}: can't be used") + "</span></li>" for r in ds)
     p_info = "".join(
         f'<li><b>{esc(v["label"])}</b><span class="cj-mut">{esc(v["about"])} Defaults: {v["epochs"]} epochs, '
         f'{v["imgsz"]} px, seed {v["seed"]}, at most {v["max_hours"]:g} h.'
@@ -743,6 +821,9 @@ def form_html(data, form: dict, admin: bool, root) -> str:
         f'</form>')
 
 
+WEIGHTS_ARG = re.compile(r"--weights \S+")
+
+
 def plan_html(cfg, p: dict, admin: bool, on: bool, state: str, created=None) -> str:
     """state: preview (after Check) | refused (Queue while off) | created."""
     c = p["counts"]
@@ -760,13 +841,15 @@ def plan_html(cfg, p: dict, admin: bool, on: bool, state: str, created=None) -> 
     if created is None:
         shown = {"logged": "(the time it is written)", **shown}
         shown = {k: shown[k] for k in ["schema", "id", "logged"] + [k for k in rec if k not in ("schema", "id")]}
+    if not admin and isinstance(shown.get("note"), str):
+        shown["note"] = WEIGHTS_ARG.sub("--weights (the base model's file)", shown["note"])
     js = esc(json.dumps(shown, indent=1, ensure_ascii=False))
     if state == "created":
-        head = (f'<h2 class="cj-sec">Queued</h2><p class="cj-train-ok" role="status">Job <b>{esc(p["job"])}</b> was '
+        head = (f'<h3 class="cj-sec">Queued</h3><p class="cj-train-ok" role="status">Job <b>{esc(p["job"])}</b> was '
                 f'created in the registry (status: ready). An audit line was written.</p>')
         foot = ""
     else:
-        head = ('<h2 class="cj-sec">Summary</h2>'
+        head = ('<h3 class="cj-sec">Summary</h3>'
                 + ('<p class="cj-train-warn" role="status">Queueing is off, so nothing was written.</p>'
                    if state == "refused" else ""))
         if on:
@@ -797,10 +880,11 @@ def errors_html(errs) -> str:
             + "".join(f"<li>{esc(e)}</li>" for e in errs) + "</ul></div>")
 
 
-def live_html(cfg, admin: bool) -> str:
-    live, err = read_live(getattr(cfg, "registry", None))
-    lv = live_for(live, admin)
-    lines = []
+def live_html(admin: bool, live, err, data, reg_err) -> str:
+    """Server text first (no JS), then CJLive: full for admins, compact (running training only) for others. The
+    last finished training sits outside the CJLive box (CJLive replaces the box's content)."""
+    lv = live_for(live, admin, _d(data).get("job"), reg_err is None)
+    lines, after = [], ""
     if lv is None:
         lines.append(f'<p class="cj-mut">No live status from the GPU computers{(": " + esc(err)) if admin and err else "."}</p>')
     else:
@@ -816,25 +900,26 @@ def live_html(cfg, admin: bool) -> str:
                 lines.append(f'<p><b>{esc(str(r.get("job") or "?"))}</b> <span class="cj-mut">{esc(ep)}, about '
                              f'{esc(dur(r.get("eta_s")))} left</span></p>')
         else:
-            lines.append('<p class="cj-mut">No training is running.</p>')
+            lines.append('<p class="cj-mut">No job running.</p>')
         fin = [f for q in lv["queues"] for f in _l(q.get("finished"))]
         fin.sort(key=lambda f: str(f.get("ended") or ""), reverse=True)
-        if fin:
+        if fin and not admin:                           # admins see every finished job in the full view
             f = fin[0]
             m = _d(f.get("metrics"))
-            lines.append(f'<p class="cj-mut">Last finished: <b>{esc(str(f.get("job") or "?"))}</b> '
-                         f'({esc(str(f.get("status") or "?"))}'
-                         + (f", val mask mAP50-95 {esc(f3(m.get('mask_map50_95')))}" if m else "") + ")</p>")
-    text = "".join(lines)
+            after = (f'<p class="cj-mut cj-train-last">Last finished training: <b>{esc(str(f.get("job") or "?"))}</b> '
+                     f'({esc(str(f.get("status") or "?"))}'
+                     + (f", val mask mAP50-95 {esc(f3(m.get('mask_map50_95')))}" if m else "") + ")</p>")
+    mode = "full" if admin else "compact"
     return (f'<script type="application/json" id="cj-train-live-data">{script_json(lv)}</script>'
-            f'<div class="cj-train-live" id="cj-train-live" data-cj-live="full" data-cj-live-json="cj-train-live-data" '
-            f'data-cj-live-src="{PREFIX}/api/live.json" data-cj-live-every="30">{text}</div>')
+            f'<div class="cj-train-live" id="cj-train-live" data-cj-live="{mode}" '
+            f'data-cj-live-json="cj-train-live-data" data-cj-live-src="{PREFIX}/api/live.json" '
+            f'data-cj-live-every="30">{"".join(lines)}</div>{after}')
 
 
-def runs_html(data, err, admin: bool) -> str:
+def runs_html(data, err, admin: bool, live=None) -> str:
     if err:
         return f'<p class="cj-mut">The registry can’t be read{(": " + esc(err)) if admin else "."}</p>'
-    rows = run_rows(data, admin)
+    rows = run_rows(data, admin, live)
     if not rows:
         return '<p class="cj-mut">No training runs in the registry yet.</p>'
     tone = {"done": "ok", "finished": "ok", "ready": "wait", "in_progress": "run", "blocked": "warn",
@@ -847,6 +932,8 @@ def runs_html(data, err, admin: bool) -> str:
             who.append(f'<b class="cj-train-wrap">{esc(r["job"])}</b>')
         if r["run"]:
             who.append(f'<span class="cj-mut cj-train-wrap">run {esc(r["run"])}</span>')
+        elif r["run_not_linked"]:
+            who.append('<span class="cj-mut">run not linked</span>')
         ds = (f'<span class="cj-train-wrap">{esc(r["dataset"])}</span>' if r["dataset"] else '<span class="cj-mut">unknown</span>')
         if r["dataset_source"]:
             ds += f'<span class="cj-mut cj-train-wrap">from {esc(r["dataset_source"])}</span>'
@@ -864,7 +951,10 @@ def runs_html(data, err, admin: bool) -> str:
             extra += f'<span class="cj-mut cj-train-wrap">{esc(r["reason"])}</span>'
         if admin and r["machine"]:
             extra += f'<span class="cj-mut cj-train-wrap">on {esc(r["machine"])}</span>'
-        trs.append(f'<tr><td data-k="When">{esc(r["when"][:16].replace("T", " ") or "?")}</td>'
+        when = esc(r["when"][:16].replace("T", " ") or "?")
+        if r["when_kind"] == "recorded":
+            when = f'<span class="cj-mut">recorded</span><span>{when}</span>'
+        trs.append(f'<tr><td data-k="When">{when}</td>'
                    f'<td data-k="Job / run">{"".join(who)}{chip(st, tone.get(st, ""))}{extra}</td>'
                    f'<td data-k="Dataset">{ds}</td><td data-k="Settings">{esc(sets)}</td>'
                    f'<td data-k="Val mask mAP50-95">{met}</td><td data-k="Model">{mods}</td></tr>')
@@ -886,8 +976,9 @@ def page_body(cfg, user, form=None, result="", status_note="") -> str:
                  f'<p class="cj-mut">The registry can’t be read, so no job can be made'
                  f'{(": " + esc(err)) if admin else "."}</p>')
     tpl = TEMPLATE.read_text(encoding="utf-8")
-    parts = {"banner": banner + status_note, "result": result, "form": form_part, "live": live_html(cfg, admin),
-             "runs": runs_html(data, err, admin)}
+    live, live_err = read_live(root)
+    parts = {"banner": banner + status_note, "result": result, "form": form_part,
+             "live": live_html(admin, live, live_err, data, err), "runs": runs_html(data, err, admin, live)}
     return re.sub(r"\{\{(banner|result|form|live|runs)\}\}", lambda m: parts[m.group(1)], tpl)
 
 
@@ -952,13 +1043,17 @@ def routes(ctx) -> list:
 
     def runs(request: Request):
         user = ctx.user(request)
-        data, err = read_registry(getattr(ctx.cfg, "registry", None))
+        root = getattr(ctx.cfg, "registry", None)
+        data, err = read_registry(root)
+        live, _ = read_live(root)
         return ctx.json({"schema": SCHEMA, "problem": (err if is_admin(user) else "registry not readable")
-                         if err else None, "runs": [] if err else run_rows(data, is_admin(user))})
+                         if err else None, "runs": [] if err else run_rows(data, is_admin(user), live)})
 
     def live(request: Request):
-        doc, _ = read_live(getattr(ctx.cfg, "registry", None))
-        lv = live_for(doc, is_admin(ctx.user(request)))
+        root = getattr(ctx.cfg, "registry", None)
+        doc, _ = read_live(root)
+        data, err = read_registry(root)
+        lv = live_for(doc, is_admin(ctx.user(request)), _d(data).get("job"), err is None)
         if lv is None:
             return ctx.json({"problem": "no live snapshot"}, 404)
         return ctx.json(lv)

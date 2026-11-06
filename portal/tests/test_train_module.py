@@ -45,6 +45,9 @@ EVIL_EXPORT = "rf export <b>bold</b> & \"q\""
 EVIL_MODEL = "m_<i>it</i>"
 TODAY = datetime.now().strftime("%Y%m%d")
 REG_PY = T.REPO / "registry" / "registry.py"
+DATED_RUN = "2026-10-01_101010_y8n_640_4b_3ep_Run_7"
+PRED_JOB = "job_20261105_pred_other"
+UNKNOWN_JOB = "job_20261105_not_in_registry"
 
 
 def jl(path: Path, recs):
@@ -74,6 +77,10 @@ def build_registry(root: Path):
          "source": {"kind": "roboflow_export", "id": "x"}, "split": {}, "counts": {}, "classes": [],
          "images_sha256": None, "status": "trained",
          "image_list": {"file": "lists/ds_test_v1.tsv", "sha256": "0" * 64, "n": 10}},
+        {"schema": "dataset/1", "id": "ds_badn", "created": "2026-07-01T00:00:00", "logged": "2026-07-01T09:00:00",
+         "source": {"kind": "roboflow_export", "id": "z"}, "split": {}, "counts": {}, "classes": [],
+         "images_sha256": None, "status": "trained",
+         "image_list": {"file": "lists/ds_test_v1.tsv", "sha256": sha, "n": 11}},
         {"schema": "dataset/1", "id": "ds_escape", "created": "2026-08-01T00:00:00", "logged": "2026-08-01T09:00:00",
          "source": {"kind": "roboflow_export", "id": "y"}, "split": {}, "counts": {}, "classes": [],
          "images_sha256": None, "status": "trained", "image_list": {"file": "../outside.tsv", "n": 1}}])
@@ -88,7 +95,12 @@ def build_registry(root: Path):
          "metrics": {"mask_map50": 0.903, "mask_map50_95": 0.618}, "logged": "2026-11-05T10:58:35"},
         {"schema": "run/1", "id": "run_small", "dataset": "ds_test_v1", "status": "finished",
          "started": "2026-09-24T13:42:21", "config": {"arch": "yolov8n-seg", "imgsz": 1440, "batch": 24, "epochs": 300},
-         "logged": "2026-10-30T09:00:00"}])
+         "logged": "2026-10-30T09:00:00"},
+        {"schema": "run/1", "id": DATED_RUN, "dataset": "ds_test_v1", "status": "finished",
+         "config": {"arch": "yolov8n-seg", "imgsz": 640, "batch": 4, "epochs": 3},
+         "metrics": {"mask_map50": 0.5, "mask_map50_95": 0.3}, "logged": "2026-10-30T09:00:00"},
+        {"schema": "run/1", "id": "run_nodate", "dataset": "ds_test_v1", "status": "finished",
+         "config": {"arch": "yolov8n-seg", "imgsz": 640}, "logged": "2026-06-30T09:00:00"}])
     jl(root / "model.jsonl", [
         {"schema": "model/1", "id": SMALL, "run": "run_small", "dataset": "ds_test_v1",
          "weights": f"models/{SMALL}/best.pt", "status": "registered", "logged": "2026-10-30T09:00:00"},
@@ -100,6 +112,15 @@ def build_registry(root: Path):
         {"schema": "job/1", "id": "job_20261104_demo_seed1", "logged": "2026-11-05T10:58:35", "name": "demo_seed1",
          "type": "train", "where": "desktop", "status": "done", "n_images": 10, "who": None, "inputs": [],
          "outputs": [], "note": "run run_seed1 (gpu-desktop)"},
+        {"schema": "job/1", "id": "job_20261103_vialive", "logged": "2026-11-03T10:00:00", "name": "vialive",
+         "type": "train", "where": "desktop", "status": "done", "n_images": 10, "who": None, "inputs": [],
+         "outputs": []},
+        {"schema": "job/1", "id": "job_20261102_nolink", "logged": "2026-11-02T10:00:00", "name": "nolink",
+         "type": "train", "where": "desktop", "status": "done", "n_images": 10, "who": None, "inputs": [],
+         "outputs": []},
+        {"schema": "job/1", "id": PRED_JOB, "logged": "2026-11-05T09:00:00", "name": "pred_other",
+         "type": "predict", "where": "desktop", "status": "in_progress", "n_images": 3, "who": "someone_else",
+         "inputs": [], "outputs": []},
         {"schema": "job/1", "id": f"job_{TODAY}_taken", "logged": "2026-11-05T10:00:00", "name": "taken",
          "type": "train", "where": "desktop", "status": "ready", "n_images": 10, "who": None, "inputs": [],
          "outputs": []}])
@@ -135,7 +156,9 @@ def live_doc(share: Path) -> dict:
                  {"job": "job_20261103_broken", "state": "blocked", "reason": "C:\\cj\\work\\x failed", "pulled": True}]
     q["finished"] = [{"job": "job_20261104_demo_seed1", "status": "done", "ended": "2026-11-04T21:49:42",
                       "run": "run_seed1", "pulled": True, "metrics": {"mask_map50_95": 0.618, "mask_map50": 0.903},
-                      "best_epoch": 140, "reason": None}]
+                      "best_epoch": 140, "reason": None},
+                     {"job": "job_20261103_vialive", "status": "done", "ended": "2026-10-01T11:00:00",
+                      "run": DATED_RUN, "pulled": True, "metrics": {"mask_map50_95": 0.3}}]
     return d
 
 
@@ -248,10 +271,52 @@ class Roles(Base):
         _, _, opts = self.get("/train/api/options", "advanced")
         self.assertNotIn("weights", json.loads(opts)["models"][0])
 
-    def test_live_leaves_out_predict(self):
-        doc = live_doc(self.share)
-        doc["queues"][0]["running"] = {"job": "job_x_pred", "kind": "predict", "n_done": 1, "n_total": 3}
-        self.assertIsNone(TR.live_for(doc, True)["queues"][0]["running"])
+    def private_doc(self):
+        """Someone else's predict job running, queued-done and finished, plus a queue job not in the registry."""
+        d = live_doc(self.share)
+        q = d["queues"][0]
+        q["running"] = {"job": PRED_JOB, "kind": "predict", "n_done": 1, "n_total": 3}
+        q["watcher"]["job"] = PRED_JOB
+        q["jobs"] = q["jobs"] + [{"job": PRED_JOB, "state": "running"}, {"job": UNKNOWN_JOB, "state": "queued"}]
+        q["finished"] = q["finished"] + [{"job": PRED_JOB, "status": "done", "ended": "2026-11-05T09:30:00"},
+                                         {"job": UNKNOWN_JOB, "status": "blocked", "reason": "x"}]
+        return d
+
+    def test_live_hides_other_jobs_from_non_admins(self):
+        self.env.write_live(self.private_doc())
+        try:
+            for role, path in (("advanced", "/train/api/live.json"), ("advanced", "/train/"),
+                               ("admin", "/train/api/live.json"), ("admin", "/train/")):
+                with self.subTest(role=role, path=path):
+                    st, _, body = self.get(path, role)
+                    self.assertEqual(st, 200)
+                    text = body.decode()
+                    for hidden in (PRED_JOB, UNKNOWN_JOB):
+                        if role == "admin":                         # the control: admins see every job
+                            self.assertIn(hidden, text)
+                        else:
+                            self.assertNotIn(hidden, text)
+                    self.assertIn("job_20261104_demo_seed1", text)  # a train job: shown to both
+            _, _, body = self.get("/train/api/live.json", "advanced")
+            q = json.loads(body)["queues"][0]
+            self.assertIsNone(q["running"])
+            self.assertIsNone(q["watcher"]["job"])
+            self.assertEqual(sorted(q["watcher"]), ["age_s", "display", "job", "stale", "state"])
+            self.assertEqual([j["job"] for j in q["jobs"]], ["job_20261104_demo_seed1"])
+            self.assertEqual([f["job"] for f in q["finished"]], ["job_20261104_demo_seed1", "job_20261103_vialive"])
+            _, _, page = self.get("/train/", "advanced")
+            self.assertIn(b'data-cj-live="compact"', page)
+            self.assertIn(b"No job running.", page)
+            _, _, page = self.get("/train/")
+            self.assertIn(b'data-cj-live="full"', page)
+            # the registry can't be read: no job at all for non-admins (fail closed); admins unchanged
+            doc = self.private_doc()
+            out = TR.live_for(doc, False, {}, False)
+            self.assertEqual(out["queues"][0]["jobs"] + out["queues"][0]["finished"], [])
+            self.assertIsNone(out["queues"][0]["watcher"]["job"])
+            self.assertEqual(len(TR.live_for(doc, True, {}, False)["queues"][0]["jobs"]), 4)
+        finally:
+            self.env.write_live(live_doc(self.share))
 
 
 class Validation(Base):
@@ -284,6 +349,9 @@ class Validation(Base):
         self.assertFalse(ds["ds_lv_nolist"]["usable"])
         self.assertEqual(ds["ds_lv_nolist"]["source"], "label version lv_20261101_0900")
         self.assertFalse(ds["ds_escape"]["usable"])                 # a list outside the registry is never read
+        self.assertFalse(ds["ds_badsha"]["usable"])
+        self.assertFalse(ds["ds_badn"]["usable"])
+        self.assertEqual(ds["ds_badn"]["problem"], "its image list doesn't match its recorded size")
 
     def test_errors(self):
         cases = [
@@ -308,6 +376,9 @@ class Validation(Base):
             (dict(name="taken"), "already exists today"),
             (dict(preset="laptop"), "too big for the laptop"),            # y8m base on the laptop
             (dict(preset="laptop", base=TR.YOLO, imgsz="1024"), "Image size 1024 is too big"),
+            (dict(preset="laptop", base=TR.YOLO, epochs="301"), "Epochs can be at most 300 on the laptop."),
+            (dict(preset="laptop", base=TR.YOLO, max_hours="12.5"), "Max hours can be at most 12 on the laptop."),
+            (dict(dataset="ds_badn"), "doesn't hold the number of images recorded"),
         ]
         for kw, want in cases:
             with self.subTest(**kw):
@@ -318,9 +389,23 @@ class Validation(Base):
         self.assertEqual(errs, [])
         self.assertEqual((p["size"], p["imgsz"], p["where"], p["max_hours"]), ("s", 640, "laptop", 4.0))
         self.assertNotIn("--weights", p["run_experiments_args"])
+        errs, p = self.plan(preset="laptop", base=TR.YOLO, epochs="300", max_hours="12")
+        self.assertEqual(errs, [])
         errs, p = self.plan(preset="laptop", base=SMALL)
         self.assertEqual(errs, [])
         self.assertEqual(p["size"], "n")
+
+    def test_preview_note_hides_weights_path_from_non_admins(self):
+        st, _, body = self.post("/train/check", self.good(name="note_adv"), "advanced")
+        self.assertEqual(st, 200)
+        note = json.loads(html.unescape(JSON_RE.search(body.decode()).group(1)))["note"]
+        self.assertIn("--weights (the base model's file)", note)
+        self.assertNotIn("models/", body.decode())
+        st, _, body = self.post("/train/check", self.good(name="note_adm"))
+        note = json.loads(html.unescape(JSON_RE.search(body.decode()).group(1)))["note"]
+        self.assertIn(f"--weights models/{PROD}/best.pt", note)
+        errs, p = TR.plan(self.env.config(), self.good(name="note_adv"), {"id": "adv", "role": "advanced"})
+        self.assertIn(f"--weights models/{PROD}/best.pt", p["record"]["note"])     # what Queue stores: the full note
 
     def test_raw_errors_admin_only(self):
         errs, _ = self.plan(role="advanced", base=EVIL_MODEL)
@@ -504,6 +589,18 @@ class Escaping(Base):
         self.assertIsNone(prod["job"])
         self.assertEqual(prod["models"], [{"id": PROD, "status": "production"}])
         self.assertEqual(rows[0]["when"][:10], "2026-11-05")                # newest first (today's ready job)
+        via = [r for r in rows if r["job"] == "job_20261103_vialive"][0]
+        self.assertEqual(via["run"], DATED_RUN)                             # linked through live.json finished[]
+        self.assertEqual((via["when"], via["when_kind"]), ("2026-10-01T10:10:10", "started"))   # from the run id
+        self.assertEqual(via["mask_map50_95"], 0.3)
+        nolink = [r for r in rows if r["job"] == "job_20261102_nolink"][0]
+        self.assertTrue(nolink["run_not_linked"])
+        self.assertIsNone(nolink["run"])
+        nodate = [r for r in rows if r["run"] == "run_nodate"][0]
+        self.assertEqual((nodate["when"], nodate["when_kind"]), ("2026-06-30T09:00:00", "recorded"))
+        _, _, page = self.get("/train/")
+        self.assertIn(b"run not linked", page)
+        self.assertIn(b'<span class="cj-mut">recorded</span>', page)
         _, _, body = self.get("/train/api/runs", "advanced")
         self.assertNotIn("gpu-desktop", body.decode())
 
@@ -542,7 +639,7 @@ class Browser(Base):
         if cls.own_shots:
             shutil.rmtree(cls.shots, ignore_errors=True)
 
-    def session(self, width, scheme):
+    def session(self, width, scheme, key=None):
         ctx = self.browser.new_context(viewport={"width": width, "height": 900}, color_scheme=scheme)
         origin = self.p.origin
         rec = {"requests": [], "foreign": [], "errors": [], "console": []}
@@ -552,7 +649,7 @@ class Browser(Base):
         page.on("request", lambda r: rec["requests"].append(r.url))
         page.on("pageerror", lambda e: rec["errors"].append(str(e)))
         page.on("console", lambda m: m.type == "error" and rec["console"].append(m.text))
-        page.goto(f"{origin}/login?k={self.env.key}")
+        page.goto(f"{origin}/login?k={key or self.env.key}")
         self.assertEqual(page.url, origin + "/")
         return ctx, page, rec
 
@@ -577,7 +674,7 @@ class Browser(Base):
                         page.wait_for_load_state("networkidle")
                         page.wait_for_selector("#cj-bar")
                         page.wait_for_selector("#cj-train-live .cj-lv-run")          # CJLive drew the running job
-                        self.assertEqual(page.locator(".cj-train-runs tbody tr").count(), 4)
+                        self.assertEqual(page.locator(".cj-train-runs tbody tr").count(), 7)
                         self.check(page, rec, scheme)
                         page.screenshot(path=str(self.shots / f"train_{width}_{scheme}.png"), full_page=True)
                         page.select_option("#cj-train-preset", "laptop")
@@ -594,6 +691,27 @@ class Browser(Base):
                     finally:
                         ctx.close()
         self.assertEqual(snap(self.env.registry, self.share), before)
+
+    def test_advanced_compact_live(self):
+        doc = live_doc(self.share)
+        doc["queues"][0]["running"]["job"] = "job_20261104_demo_seed1"      # a registry train job: shown
+        self.env.write_live(doc)
+        try:
+            for scheme in ("light", "dark"):
+                ctx, page, rec = self.session(390, scheme, self.adv_key)
+                try:
+                    page.goto(self.p.origin + "/train/")
+                    page.wait_for_load_state("networkidle")
+                    page.wait_for_selector("#cj-train-live .cj-lv-snap")
+                    live = page.text_content("#cj-train-live")
+                    for word in ("Watcher", "heartbeat", "Queue", "q/"):
+                        self.assertNotIn(word, live)
+                    self.check(page, rec, scheme)
+                    page.screenshot(path=str(self.shots / f"train_advanced_390_{scheme}.png"), full_page=True)
+                finally:
+                    ctx.close()
+        finally:
+            self.env.write_live(live_doc(self.share))
 
 
 if __name__ == "__main__":
