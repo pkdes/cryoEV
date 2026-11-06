@@ -82,6 +82,9 @@ Configuration (environment, read per request; Config attributes of the same lowe
   CJ_REVIEW_ROOT       prediction review packages, when cfg.review_root (the shell's /review/<pkg_id>/ root) is unset
                        (default <CryoAI-laptop>/review)
   CJ_PROCESSING_REPO   the lab's processing repo (read only) for raw conversion; unset = no raw conversion
+  CJ_RAW_ROOT          where the whole raw pipeline lives (raw-upload .portal staging + raw_tiles/), e.g. a NAS or an
+                       external drive (cfg.raw_root wins); default = the predict root. Old <predict root>/raw_tiles
+                       conversions stay listed and swept. Prediction sets made from it copy tiles (never link).
   CJ_RAW_KEEP_DAYS     days uploaded raw files are kept after their conversion ends (default 7; 0 = not kept)
   The registry is the portal's (cfg.registry).
 
@@ -1169,8 +1172,11 @@ def check_model(cfg, user, model) -> str | None:
     return None
 
 
-def scratch(cfg, kind) -> Path:
-    d = predict_root(cfg) / PORTAL_TMP / f"{kind}_{secrets.token_hex(6)}"
+def scratch(cfg, kind, raw=False) -> Path:
+    """A fresh scratch folder under <root>/.portal; raw=True: under the raw root (a raw upload stays on the drive its
+    conversion will use, so the move into raw_tiles/<id>/input is one os.replace on one drive)."""
+    base = raw_base(cfg) if raw else predict_root(cfg)
+    d = base / PORTAL_TMP / f"{kind}_{secrets.token_hex(6)}"
     d.mkdir(parents=True)
     return d
 
@@ -1712,15 +1718,42 @@ def gpu_box(checked=False) -> str:
 
 
 # ---------------------------------------------------------------- raw conversion: records and the runner
+def raw_base(cfg) -> Path:
+    """The folder holding the whole raw pipeline (.portal staging of raw uploads + raw_tiles/): cfg.raw_root, else
+    CJ_RAW_ROOT, else the predict root (today's behaviour)."""
+    v = getattr(cfg, "raw_root", None) or os.environ.get("CJ_RAW_ROOT")
+    return Path(v) if v else predict_root(cfg)
+
+
 def raw_root(cfg) -> Path:
-    return predict_root(cfg) / RAW_TILES
+    return raw_base(cfg) / RAW_TILES
+
+
+def _same_path(a: Path, b: Path) -> bool:
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def raw_roots(cfg) -> list:
+    """Where conversions are listed from: the raw root, then (when CJ_RAW_ROOT moved it) the old
+    <predict root>/raw_tiles, whose conversions stay listed, swept and usable."""
+    new, old = raw_root(cfg), predict_root(cfg) / RAW_TILES
+    return [new] if _same_path(new, old) else [new, old]
+
+
+def tmp_dirs(cfg) -> list:
+    """The .portal scratch folders: the predict root's, and the raw root's when that is somewhere else."""
+    a, b = predict_root(cfg) / PORTAL_TMP, raw_base(cfg) / PORTAL_TMP
+    return [a] if _same_path(a, b) else [a, b]
 
 
 def conv_dir(cfg, cid) -> Path | None:
     if not isinstance(cid, str) or not RAW_ID_RE.match(cid):
         return None
-    d = raw_root(cfg) / cid
-    return d if (d / CONVERT_JSON).is_file() else None
+    for root in raw_roots(cfg):
+        d = root / cid
+        if (d / CONVERT_JSON).is_file():
+            return d
+    return None
 
 
 def load_conversion(cfg, user, can_see, cid) -> tuple:
@@ -1734,11 +1767,12 @@ def load_conversion(cfg, user, can_see, cid) -> tuple:
 
 def all_conversions(cfg) -> list:
     """[(folder, convert.json, status)] of every conversion, oldest first."""
-    root = raw_root(cfg)
-    try:
-        dirs = [p for p in root.iterdir() if p.is_dir() and RAW_ID_RE.match(p.name)]
-    except OSError:
-        return []
+    dirs = []
+    for root in raw_roots(cfg):
+        try:
+            dirs += [p for p in root.iterdir() if p.is_dir() and RAW_ID_RE.match(p.name)]
+        except OSError:
+            continue
     out = []
     for d in dirs:
         meta = _read_json(d / CONVERT_JSON)
@@ -1842,7 +1876,7 @@ def new_conversion(cfg, user, fields: dict, *, source: dict, inputs=None, upload
     try:
         if upload_files is not None:
             inp = d / CONVERT_INPUT
-            os.replace(upload_files, inp)                 # same drive: both under the predict root
+            os.replace(upload_files, inp)                 # same drive: staging (.portal) and raw_tiles/ are both under the raw root
             names = sorted(p.name for p in inp.iterdir() if p.is_file())
             inputs = [str(inp / n) for n in names if n.lower().endswith((".mrc.mdoc", ".idoc"))]
             keys = [n for n in names if n.lower().endswith(".csv")]
@@ -2059,14 +2093,19 @@ def sweep_inputs(cfg, items) -> int:
 
 
 def runner_lock(cfg):
-    return PS.locked(raw_root(cfg) / CONVERT_LOCK)
+    root = raw_root(cfg)
+    if not root.is_dir():
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError:                                   # raw drive away: old conversions still need a lock
+            root = raw_roots(cfg)[-1]
+    return PS.locked(root / CONVERT_LOCK)
 
 
 def kick(cfg) -> int:
     """Record finished (or overdue) conversions, start queued ones (at most MAX_CONVERT_RUNNING at once) and sweep
     old inputs, under the runner lock. -> how many are still queued or running."""
-    root = raw_root(cfg)
-    if not root.is_dir():
+    if not any(r.is_dir() for r in raw_roots(cfg)):
         return 0
     with runner_lock(cfg):
         items = all_conversions(cfg)
@@ -2320,8 +2359,11 @@ _UP_ALOCKS: dict = {}                   # upload id -> asyncio.Lock (one request
 def upload_dir(cfg, uid) -> Path | None:
     if not isinstance(uid, str) or not UPLOAD_RE.match(uid):
         return None
-    d = predict_root(cfg) / PORTAL_TMP / uid
-    return d if (d / UPLOAD_META).is_file() else None
+    for tmp in tmp_dirs(cfg):
+        d = tmp / uid
+        if (d / UPLOAD_META).is_file():
+            return d
+    return None
 
 
 def load_upload(cfg, user, uid) -> tuple:
@@ -2485,7 +2527,6 @@ def upload_start(cfg, user, body) -> dict:
     if raw:
         check_conv_cap(cfg, user)
         check_gpu(raw)
-    tmp = predict_root(cfg) / PORTAL_TMP
     resume = body.get("resume")
     if isinstance(resume, str):
         d, meta = load_upload(cfg, user, resume)
@@ -2494,15 +2535,17 @@ def upload_start(cfg, user, body) -> dict:
             PS.write_json_atomic(d / UPLOAD_META, meta)
             return upload_state(d, meta)
     # one open session per person and kind: an earlier one (other files) is given up
-    try:
-        mine = [p for p in tmp.iterdir() if UPLOAD_RE.match(p.name)]
-    except OSError:
-        mine = []
+    mine = []
+    for tmp in tmp_dirs(cfg):
+        try:
+            mine += [p for p in tmp.iterdir() if UPLOAD_RE.match(p.name)]
+        except OSError:
+            continue
     for p in mine:
         m = _read_json(p / UPLOAD_META)
         if isinstance(m, dict) and m.get("owner") == user.get("id") and m.get("kind") == kind:
             drop_upload(p, p.name)
-    d = scratch(cfg, "us")
+    d = scratch(cfg, "us", raw=(kind == "raw"))
     uid = d.name
     res = Reservation(d, sum(decl.values()))
     try:
@@ -2957,12 +3000,13 @@ def sweep_scratch(cfg, max_age_s=SCRATCH_MAX_AGE_S) -> int:
         except OSError:
             pass
         return time.time() - t
-    try:
-        tmp = predict_root(cfg) / PORTAL_TMP
-        old = [p for p in tmp.iterdir() if p.is_dir() and p.name.startswith(("up_", "sel_", "us_"))
-               and age(p) > max_age_s]
-    except Exception:                                # no root configured or not there yet: nothing to sweep
-        return 0
+    old = []
+    for tmp in tmp_dirs(cfg):                        # the predict root's .portal and the raw root's
+        try:
+            old += [p for p in tmp.iterdir() if p.is_dir() and p.name.startswith(("up_", "sel_", "us_"))
+                    and age(p) > max_age_s]
+        except Exception:                            # no root configured or not there yet: nothing to sweep
+            continue
     for p in old:
         if UPLOAD_RE.match(p.name):
             drop_upload(p, p.name)

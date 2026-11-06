@@ -162,6 +162,11 @@ The full contract is the module docstring in `modules/predict.py`. In short:
     is never mistaken for it.
   - Every `[Image = …]` in an uploaded `.idoc` / `.mrc.mdoc` must be a bare file name that was uploaded with it (no
     drive, folder, UNC share or `..`); `jobs/convert_raw.py` checks again before opening any tile.
+  - **`CJ_RAW_ROOT`** (env; `cfg.raw_root` wins) moves the whole raw pipeline to another folder, e.g. a NAS or an
+    external drive: the raw-upload staging (`<raw root>/.portal`) and `<raw root>/raw_tiles/`. The 2x-free check runs on
+    that drive. Unset = the predict root, as before. Conversions already under `<predict root>/raw_tiles` stay listed
+    and swept (retention, stale scratch). A prediction set made from a conversion copies its tiles (no hard link across
+    drives). **Admin > Health** shows free GB for both drives and warns under 20 GB.
 - Basic users get 403 on everything raw. Everything shown is escaped; paths and raw errors are on admin-only lines.
 
 ## Live charts (`/cj/live.js`)
