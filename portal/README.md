@@ -78,8 +78,9 @@ Nothing else is touched: the review servers, the history server, the monitor and
 - **Plug-in modules** declare `ROLES` in their own file; the Gate enforces them for their whole `PREFIX`.
 - **Core pages** (`/review`, `/history`) have built-in defaults in `app.py` (`CORE_ROLES`: admin only). A
   `modules.json` entry replaces a default only when it is valid (a local route and a non-empty list of known roles);
-  a missing entry, `route: null` or bad roles leave the default (fail closed). A `modules.json` that can't be read or
-  parsed **stops the portal** at start.
+  a missing entry, `route: null` or bad roles leave the default (fail closed); a core prefix can be set only by its
+  own entry (`id` `review` / `history`). A `modules.json` that can't be read or parsed, or has two entries on one
+  prefix, **stops the portal** at start.
 - The rules are read **once at start**: after changing roles in `modules.json`, restart the portal. Display (home
   cards, `/cj/modules.json`) is read per request, so it can be ahead of the rules until then; access never is.
 - Home's status cards and the nav's server dots come from History's `live.json`, so only roles that may open
@@ -111,8 +112,9 @@ Nothing else is touched: the review servers, the history server, the monitor and
   address bar (`history.replaceState`), so reload, bookmarks and Back work; a same-origin link out of the tool opens in
   the window (only ever to an absolute URL of this origin).
 - `/review/app/<path>` is proxied to `<upstream>/<path>`. A top-level document GET of the tool's page (a copied
-  `/review/app/?...` link) answers 302 `/review/?<query minus k>`; the frame's own loads and every other request reach
-  the tool.
+  `/review/app/?...` link: `Sec-Fetch-Dest: document`, or HTML asked with a Referer that isn't the shell) answers 302
+  `/review/?<query minus k>`; the frame's own loads, requests without a Referer and every other request reach the
+  tool. If the frame ever shows `/review/` itself, the window is left alone (no loop).
 - `/review/<anything else>` answers 404: kept free for the multi-package route `/review/<pkg_id>/` (wave 2:
   `app.review_mount(base, proxy)` mounts a shell + app pair; package ids are never `app`).
 - `X-Frame-Options`: `SAMEORIGIN` for `/review/*`, `DENY` everywhere else.
@@ -143,8 +145,8 @@ data-cj-live-src="/history/live/live.json" data-cj-live-every="30">`. History ke
   `Forwarded`, `Tailscale-*`, `Cf-*`, `Cookie`, `X-Review-Key` never pass); any `k` is removed from the query (on
   the review server a query `k` outranks the header); the real package's key goes as `X-Review-Key`, the user as
   `X-CJ-User`; upstream `Set-Cookie` and hop-by-hop headers are dropped, and the proxy's own HTTP client keeps no
-  cookies. An upstream `Location` is kept under `/review/app/`; one starting with `//` or with dot segments becomes
-  `/review/app/`. Body cap 25 MB (413), upstream timeout 30 s, 502 page when the review server is down.
+  cookies. An upstream `Location` is kept under `/review/app/`; any other absolute URL (a scheme that isn't the
+  upstream), one starting with `//`, or one with dot segments becomes `/review/app/`. Body cap 25 MB (413), upstream timeout 30 s, 502 page when the review server is down.
 - **Sandbox is not proxied:** it shares the real package's localStorage key (`cryoev-review:<id>`), so on one origin
   the real review would upload sandbox edits. Fix that (a distinct package id or storage key) before ever moving it
   under the shell.

@@ -68,6 +68,7 @@ REVIEW_BASE = "/review"           # the real review: shell at /review/, tool pro
 MANIFEST = HERE / "modules.json"
 CORE_ROLES = {"/review": ("admin",), "/history": ("admin",)}   # built-in defaults; modules.json may only replace
                                                                 # one with a valid entry (manifest_rules)
+CORE_IDS = {"/review": "review", "/history": "history"}       # the only entry that may set each core prefix
 TPL_RE = re.compile(r"\{\{(\w+)\}\}")
 # module icons (24 x 24, stroked; design direction A)
 ICONS = {
@@ -336,8 +337,9 @@ def manifest_rules(mods, taken=()) -> list:
     """Gate rules for the core pages: [(prefix, roles)]. Starts from the built-in CORE_ROLES (fail closed); a
     modules.json entry with a local route below "/" and valid roles sets its prefix (replacing a default only then).
     A missing, route-less or invalid entry leaves the default. A plug-in module's own ROLES win: its prefix is in
-    `taken`."""
-    rules, seen = dict(CORE_ROLES), set()
+    `taken`. A core prefix (/review, /history) may be set only by its own entry (id "review" / "history"); two
+    entries on one prefix raise ValueError (refuse to start)."""
+    rules, owner = dict(CORE_ROLES), {}
     for m in mods:
         if not isinstance(m, dict):
             continue
@@ -345,10 +347,12 @@ def manifest_rules(mods, taken=()) -> list:
         if m.get("external") or not isinstance(r, str) or not r.startswith("/") or r.startswith("//") or r == "/":
             continue
         prefix = "/" + r.strip("/").split("/")[0]
+        if prefix in owner:
+            raise ValueError(f"modules.json: {owner[prefix]!r} and {m.get('id')!r} both map to {prefix}")
+        owner[prefix] = m.get("id")
         roles = valid_roles(m.get("roles"))
-        if roles is None or prefix in seen:
+        if roles is None or (prefix in CORE_IDS and m.get("id") != CORE_IDS[prefix]):
             continue
-        seen.add(prefix)
         rules[prefix] = roles
     return [(p, r) for p, r in rules.items() if p not in taken]
 
@@ -516,7 +520,7 @@ def review_mount(base: str, proxy: P.ReviewProxy, title: str = "Review") -> list
             return False
         ref = request.headers.get("referer")                # older browsers: framed loads come from the shell page
         if not ref:
-            return True
+            return False                                    # unknown: serve the tool (a redirect could loop)
         u = urlsplit(ref)
         return not (u.netloc.lower() == (request.headers.get("host") or "").lower() and u.path.startswith(base + "/"))
 

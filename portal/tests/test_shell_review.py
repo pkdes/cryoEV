@@ -222,8 +222,16 @@ class ShellRoles(unittest.TestCase):
                     [{"id": "review", "route": "/review/", "roles": []}],
                     [{"id": "review", "route": "/review/", "roles": ["basic", "root"]}],
                     [{"id": "review", "route": "/review/", "roles": "basic"}],
-                    [{"id": "review", "route": "//review/", "roles": ["basic"]}], ["junk", 3]):
+                    [{"id": "review", "route": "//review/", "roles": ["basic"]}], ["junk", 3],
+                    [{"id": "zz", "route": "/history/x", "roles": ["basic"]}],          # a core prefix: own id only
+                    [{"id": "zz", "route": "/review/", "roles": ["admin", "basic"]}]):
             self.assertEqual(APP.manifest_rules(bad), defaults, bad)
+        stray = {"id": "zz", "route": "/history/x", "roles": ["basic"]}
+        history = {"id": "history", "route": "/history/", "roles": ["admin"]}
+        for mods in ([stray, history], [history, stray],
+                     [{"id": "jobs", "route": "/jobs/", "roles": ["admin"]}, {"id": "j2", "route": "/jobs/x", "roles": ["basic"]}]):
+            with self.assertRaises(ValueError, msg=mods):                                 # two entries, one prefix
+                APP.manifest_rules(mods)
         rules = APP.manifest_rules(APP.load_manifest())                               # the shipped file
         self.assertIn(("/review", ("admin",)), rules)
         self.assertIn(("/history", ("admin",)), rules)
@@ -266,8 +274,10 @@ class FailClosed(unittest.TestCase):
         null_route = [dict(m, route=None) if m["id"] in ("review", "history") else m for m in shipped]
         bad_roles = [dict(m, roles=["basic", "root"]) if m["id"] == "review" else m for m in shipped]
         empty_roles = [dict(m, roles=[]) if m["id"] == "review" else m for m in shipped]
+        stray_only = [m for m in shipped if m["id"] != "history"] + [{"id": "zz", "route": "/history/x",
+                                                                       "roles": ["basic"]}]
         for name, mods in (("empty", []), ("no review", no_review), ("route null", null_route),
-                           ("bad roles", bad_roles), ("empty roles", empty_roles)):
+                           ("bad roles", bad_roles), ("empty roles", empty_roles), ("stray history", stray_only)):
             with self.subTest(manifest=name):
                 p, up, basic = self.portal_with(json.dumps({"modules": mods}))
                 self.assertEqual(self.statuses(p, basic), [403, 403, 403])
@@ -284,7 +294,9 @@ class FailClosed(unittest.TestCase):
         env = T.Env()
         self.addCleanup(env.cleanup)
         man = env.tmp / "modules.json"
-        for text in (None, "{not json", "[]", '{"modules": {"a": 1}}', '{"modules": ["x"]}'):
+        stray = [{"id": "zz", "route": "/history/x", "roles": ["basic"]}] + APP.load_manifest()   # before history
+        for text in (None, "{not json", "[]", '{"modules": {"a": 1}}', '{"modules": ["x"]}',
+                     json.dumps({"modules": stray})):
             with self.subTest(text=text):
                 if text is None:
                     man.unlink(missing_ok=True)
@@ -332,7 +344,6 @@ class ToShell(unittest.TestCase):
         n = len(self.up.seen)
         shell_ref = f"{self.p.origin}/review/?mode=cards"
         cases = [{"Sec-Fetch-Dest": "document"}, {"Sec-Fetch-Dest": "document", "Referer": shell_ref},
-                 {"Accept": "text/html,application/xhtml+xml"},
                  {"Accept": "text/html", "Referer": f"{self.p.origin}/"},
                  {"Accept": "text/html", "Referer": "http://elsewhere.example/review/"}]
         for hdrs in cases:
@@ -349,6 +360,8 @@ class ToShell(unittest.TestCase):
         for hdrs, path in (({"Sec-Fetch-Dest": "iframe"}, "/review/app/?mode=cards"),
                            ({"Accept": "text/html", "Referer": shell_ref}, "/review/app/?mode=cards"),
                            ({}, "/review/app/?mode=cards"),                      # no browser headers at all
+                           ({"Accept": "text/html,application/xhtml+xml"}, "/review/app/?mode=cards"),  # no Referer,
+                           ({"Accept": "text/html"}, "/review/app/index.html"),  # no Sec-Fetch-Dest: unknown -> tool
                            ({"Sec-Fetch-Dest": "document"}, "/review/app/data.js"),   # only the tool's page moves
                            ({"Sec-Fetch-Dest": "empty"}, "/review/app/api/edits")):
             st, _, _ = self.get(path, hdrs)
@@ -361,7 +374,9 @@ class LocationRewrite(unittest.TestCase):
         up, pre = "http://127.0.0.1:8766", "/review/app"
         for value, want in (("/y", "/review/app/y"), ("http://127.0.0.1:8766/x?a=1", "/review/app/x?a=1"),
                             ("http://127.0.0.1:8766", "/review/app/"), ("y?a=1", "y?a=1"),
-                            ("https://elsewhere.example/x", "https://elsewhere.example/x"),
+                            ("https://elsewhere.example/x", "/review/app/"), ("http:evil.com", "/review/app/"),
+                            ("HTTP:evil.com", "/review/app/"), ("HTTP://127.0.0.1:8766/x", "/review/app/"),
+                            ("javascript:alert(1)", "/review/app/"), ("x-y.z+1:rest", "/review/app/"),
                             ("//evil.example/x", "/review/app/"), ("/\\evil.example", "/review/app/"),
                             ("http://127.0.0.1:8766//evil.example/x", "/review/app/"),
                             ("/a/../../history/history.html", "/review/app/"), ("/%2e%2e/x", "/review/app/"),

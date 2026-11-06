@@ -21,6 +21,7 @@ page at /review/ frames <prefix>/.
 from __future__ import annotations
 
 import html
+import re
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from urllib.parse import unquote, unquote_plus
 
@@ -40,6 +41,7 @@ HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", 
        "trailers", "transfer-encoding", "upgrade"}
 DROP_RESPONSE = HOP | {"set-cookie", "set-cookie2", "server", "date"}
 BODY_METHODS = {"PUT", "POST", "DELETE", "PATCH"}
+SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
 
 class BadPath(ValueError):
@@ -97,6 +99,8 @@ def rewrite_location(value: str, upstream: str, prefix: str = PREFIX) -> str:
     segments, empty segments or odd characters (it could climb out of `prefix`) becomes `prefix`/ instead."""
     if value.startswith(upstream):
         value = value[len(upstream):] or "/"
+    if SCHEME_RE.match(value):                      # any other absolute URL (http:evil, HTTP://x, javascript:...)
+        return prefix + "/"
     if value.startswith("//") or value.startswith("\\") or value.startswith("/\\"):
         return prefix + "/"
     if value.startswith("/") or "://" not in value.split("?", 1)[0]:

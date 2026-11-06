@@ -229,6 +229,25 @@ class Shell(unittest.TestCase):
         finally:
             ctx.close()
 
+    def test_frame_on_the_shell_base_does_not_loop(self):
+        """If the frame lands on /review/ itself, the window stays where it is (no reload of the shell, no loop)."""
+        ctx, page, rec = self.session(1280)
+        try:
+            page.goto(self.p.origin + "/review/?mode=cards")
+            page.wait_for_load_state("networkidle")
+            page.evaluate("window.cjMarker = 1")                       # gone if the window reloads
+            frame = page.frame(url=lambda u: "/review/app/" in u)
+            frame.evaluate("location.href = '/review/?mode=classes'")
+            page.wait_for_function("""() => { try { return document.getElementById('cj-review-frame')
+                                     .contentWindow.location.pathname === '/review/'; } catch (e) { return false; } }""")
+            page.wait_for_load_state("networkidle")
+            page.wait_for_timeout(300)
+            self.assertEqual(page.evaluate("window.cjMarker"), 1)
+            self.assertEqual(page.url, self.p.origin + "/review/?mode=cards")
+            self.clean(rec)
+        finally:
+            ctx.close()
+
     def test_copied_tool_link_opens_in_the_shell(self):
         """A /review/app/ link opened as the whole page (e.g. copied from the tool) lands in the shell, k dropped."""
         ctx, page, rec = self.session(1280)

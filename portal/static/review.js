@@ -23,6 +23,7 @@
     try { l = w.location; if (!l || l.href === 'about:blank') return; } catch (e) { return; }   // not same-origin: leave
     if (l.origin !== location.origin) return;
     var p = l.pathname;
+    if (p === base) return;                         // the frame shows the shell itself: never reload into a loop
     if (p.indexOf(app) !== 0) { go(l.href, true); return; }
     var sub = p.slice(app.length);
     if (sub === '' || sub === 'index.html') {
