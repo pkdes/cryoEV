@@ -149,7 +149,7 @@ def sources_safe(cfg):
     try:
         return sources(cfg), None
     except (OSError, ValueError) as e:
-        return [], f"CJ_PREDICT_SOURCES unreadable: {type(e).__name__}: {e}"
+        return [], f"Session list unreadable: {type(e).__name__}: {e}"
 
 
 # ---------------------------------------------------------------- models
@@ -599,11 +599,13 @@ def wrap(body: str) -> str:
     return _PH.sub(lambda m: body, tpl)
 
 
-def source_text(req: dict, srcs) -> str:
+def source_text(req: dict, srcs, admin=False) -> str:
+    """A source with a problem (hidden, incompatible) lends its label only when admin=True (callers pass nothing
+    yet, so for everyone it is "Session <id>" alone)."""
     src = req.get("source") or {}
     if src.get("kind") == "upload":
         return "Uploaded images"
-    label = next((s["label"] for s in srcs if src.get("dir") and
+    label = next((s["label"] for s in srcs if src.get("dir") and (admin or not s.get("problem")) and
                   os.path.normcase(str(s["dir"].resolve())) == os.path.normcase(str(src.get("dir")))), None)
     return f"Session {src.get('session') or '?'}" + (f" ({label})" if label else "")
 

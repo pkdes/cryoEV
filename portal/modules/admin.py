@@ -761,7 +761,7 @@ def render_revoke(pid, me, why, tok) -> str:
 
 
 def session_name(r) -> str:
-    return f'{r["session"]}{r.get("suffix") or ""}'
+    return str(r["session"])
 
 
 def public_source(r) -> dict:
@@ -845,6 +845,18 @@ def render_predict(m: dict, tok, msg_html="") -> str:
                  f'<tbody>{"".join(row(r, i) for i, r in enumerate(rows))}</tbody></table></div>')
     else:
         table = '<p class="cj-mut">No session with model-ready tiles was found.</p>'
+    orphans = m.get("orphans") or []
+    if orphans:
+        items = "".join(
+            f'<li class="cj-admin-line"><b class="cj-num">{esc(o["key"])}</b>'
+            f'{chip("hidden", "warn") if o["hidden"] else ""}'
+            f'<span class="cj-mut cj-admin-meta">{esc(o["label"] or "no name set")}'
+            f'{" · set by " + esc(str(o["by"])) if o.get("by") else ""}'
+            f'{" · " + esc(str(o["changed"])) if o.get("changed") else ""}</span></li>' for o in orphans)
+        table += (f'<details class="cj-admin-gone" open><summary>Settings for sessions no longer found '
+                  f'({len(orphans)})</summary><p class="cj-mut">These names or hide settings match no session folder '
+                  f'now (moved, renamed or removed). They apply again if the folder comes back under the same session '
+                  f'and 3d folder name.</p><ul class="cj-admin-lines">{items}</ul></details>')
     skipped = m.get("skipped") or []
     if skipped:
         names = ", ".join(s["folder"] for s in skipped)
@@ -1022,29 +1034,32 @@ def routes(ctx) -> list:
         r.status_code = status
         return r
 
-    async def form(request: Request):
-        """-> (fields, None) or (None, error response). urlencoded only; the token must match this session."""
+    async def form(request: Request, tab: str = "people"):
+        """-> (fields, None) or (None, error response on `tab`). urlencoded only; the token must match this
+        session."""
+        back = {"people": ("/", "People"), "predict": ("/predict", "Predict sessions")}[tab]
         ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
         if ctype != "application/x-www-form-urlencoded":
-            return None, show(request, "Admin", "people", note("Send the form from the Admin page.", "warn"), 415)
+            return None, show(request, "Admin", tab, note("Send the form from the Admin page.", "warn"), 415)
         try:
             n = int(request.headers.get("content-length") or 0)
         except ValueError:
             n = MAX_FORM + 1
         if n > MAX_FORM:
-            return None, show(request, "Admin", "people", note("That form is too large.", "warn"), 413)
+            return None, show(request, "Admin", tab, note("That form is too large.", "warn"), 413)
         body = await request.body()
         if len(body) > MAX_FORM:
-            return None, show(request, "Admin", "people", note("That form is too large.", "warn"), 413)
+            return None, show(request, "Admin", tab, note("That form is too large.", "warn"), 413)
         try:
             q = parse_qs(body.decode("utf-8"), keep_blank_values=True, max_num_fields=10)
         except (UnicodeDecodeError, ValueError):
-            return None, show(request, "Admin", "people", note("That form could not be read.", "warn"), 400)
+            return None, show(request, "Admin", tab, note("That form could not be read.", "warn"), 400)
         f = {k: v[0].strip() for k, v in q.items() if v}
         if not hmac.compare_digest(f.get("t", "").encode(), token(request).encode()):
-            return None, show(request, "Admin", "people",
+            return None, show(request, "Admin", tab,
                               note("This form has expired. Reload the page and try again.", "warn")
-                              + f'<p><a class="cj-admin-link" href="{PREFIX}/">Back to People</a></p>', 403)
+                              + f'<p><a class="cj-admin-link" href="{PREFIX}{back[0]}">Back to {back[1]}</a></p>',
+                              403)
         return f, None
 
     def people_page(request, msg_html="", status=200):
@@ -1209,7 +1224,7 @@ def routes(ctx) -> list:
         return text, ("predict_source_renamed", key, {"session": sid, "from": r["label"], "to": want})
 
     async def predict_post(request: Request, kind: str):
-        f, err = await form(request)
+        f, err = await form(request, "predict")
         if err:
             return err
         actor, key = me(request), f.get("key", "")
@@ -1246,6 +1261,7 @@ def routes(ctx) -> list:
     def api_predict(request: Request):
         m = PSRC.merged(ctx.cfg, fresh=True)
         return ctx.json({"schema": "cj_admin_predict/1", "sources": [public_source(r) for r in m["sources"]],
+                         "orphans": m["orphans"],
                          "skipped": [{"folder": s["folder"], "reason": s["reason"]} for s in m["skipped"]],
                          "roots": [{"root": str(r["root"]), "problem": r["problem"]} for r in m["roots"]],
                          "list_error": m["list_error"], "overrides_error": m["overrides_error"]})

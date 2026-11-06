@@ -8,12 +8,14 @@ Discovery (read only; nothing under a scan root is ever written):
                           (processing_root()). "off" (or "none") scans nothing.
   A session folder is a direct child of a root named YYYYMMDD or YYYYMMDD-N (anything after a space or "_" is
   ignored). Its model-ready tiles are `3. Processed images/3d. Tiles no scalebar*` (no scalebar, 8-bit PNG/JPEG).
+  Symlinks are skipped, and so is any session or 3d folder whose real path is not inside the root's real path (a
+  junction pointing elsewhere is listed as skipped, never followed).
   Compatible = that folder holds at least one image and a MANIFEST.csv with an image-name column and a nm_per_px
   column with at least one readable value for those images (and a PNG tile, when there is one, is 8-bit).
   Anything else is listed for the admin with the reason and is never offered to people. Session folders without a
   3d folder are listed as "no model-ready tiles".
-  The session is the folder's date (20260827-2 -> session 20260827, label suffix "-2"); the default label is
-  "Session 27 Aug 2026" (+ " -2").
+  The session is the folder's id as the registry has it (20260827-2 -> session "20260827-2"); the default label
+  is "Session 27 Aug 2026" (+ " -2").
   The scan is cached for CACHE_TTL_S, keyed on the roots and their mtimes; one scan at a time (callers that miss
   the cache while a scan runs wait for it). Blocking: call it off the event loop (every caller in predict.py and
   admin.py runs in a worker thread).
@@ -21,13 +23,17 @@ Discovery (read only; nothing under a scan root is ever written):
 Overrides: <state dir>/predict_sources.json
     {"schema": "cj_predict_sources/1", "sources": {"<key>": {"hidden": bool, "label": str, "changed": iso,
                                                              "by": portal id}}}
-  key = sha1(normcase(str(dir)))[:10], as predict.sources() always made it. Default: shown, default label. Every
+  key: a discovered folder's is sha1(normcase("<session folder>/<3d folder>"))[:10] (root-relative: it survives a
+  change in how the root is spelled); a hand-list folder the scan does not find keeps sha1(normcase(str(dir)))[:10],
+  as predict.sources() always made it. Overrides whose key matches nothing are listed for the admin (orphans).
+  Default: shown, default label. Every
   change is one read-modify-write under a thread lock plus an OS lock (<file>.lock, data_utils/oslock.py), written
   atomically (temp file + os.replace, retried briefly). An unreadable overrides file raises ValueError: Predict then
   offers nothing (never shows a hidden session by accident) and the admin sees why; it is never overwritten.
 
 Merging: the hand list first (its order, its fields win: label, session, sample_column, manifest), then the
-discovered sources not on it, newest session first; de-duplicated by key. Overrides apply to both. A hidden source
+discovered sources not on it, newest session first; de-duplicated by real path (a hand-list folder the scan
+also finds takes the discovered key and session id: the folder name is the registry's id). Overrides apply to both. A hidden source
 stays in predict.sources() with problem = HIDDEN, so Predict shows it to the admin only ("Not available") and
 never lets anyone start an analysis on it.
 """
@@ -65,7 +71,7 @@ SCHEMA = "cj_predict_sources/1"
 LOCK_WAIT_S = 5.0
 REPLACE_TRIES = 20                                          # os.replace / read retries, 50 ms apart (Windows)
 LABEL_MAX = 80
-LABEL_BAD = re.compile(r"[\x00-\x1f\x7f]")
+LABEL_BAD = re.compile("[\x00-\x1f\x7f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")   # controls, bidi
 HIDDEN = "hidden by the admin (Admin, Predict sessions)"
 
 _scan_lock = threading.Lock()
@@ -80,7 +86,26 @@ def _setting(cfg, name):
 
 
 def source_key(d) -> str:
+    """A hand-list folder's key (the absolute path, as before discovery)."""
     return hashlib.sha1(os.path.normcase(str(d)).encode("utf-8")).hexdigest()[:10]
+
+
+def found_key(folder: str, sub: str) -> str:
+    """A discovered folder's key: root-relative, so it survives a change in how the root is spelled."""
+    return hashlib.sha1(os.path.normcase(os.path.join(folder, sub)).encode("utf-8")).hexdigest()[:10]
+
+
+def real(p) -> str:
+    try:
+        return os.path.normcase(os.path.realpath(str(p)))
+    except (OSError, ValueError):
+        return os.path.normcase(os.path.abspath(str(p)))
+
+
+def inside(p, root_real: str) -> bool:
+    """The real path of p is strictly inside root_real (a normcased real path)."""
+    r = real(p)
+    return r.startswith(root_real.rstrip("\\/") + os.sep)
 
 
 def scan_roots(cfg) -> list:
@@ -100,8 +125,9 @@ def scan_roots(cfg) -> list:
     return list(dict.fromkeys(Path(p.strip()) for p in parts if p.strip()))
 
 
-def session_of(folder: str):
-    """'20260827-2' -> ('20260827', '-2'); not a session folder (or not a real date) -> None."""
+def session_of(folder: str) -> str | None:
+    """'20260827-2' -> '20260827-2' (the registry's session id); '20261105 EV prep' -> '20261105'; not a session
+    folder (or not a real date) -> None."""
     m = SESSION_DIR_RE.match(folder)
     if not m:
         return None
@@ -109,11 +135,13 @@ def session_of(folder: str):
         datetime.strptime(m.group(1), "%Y%m%d")
     except ValueError:
         return None
-    return m.group(1), m.group(2) or ""
+    return m.group(1) + (m.group(2) or "")
 
 
-def default_label(session: str, suffix: str = "") -> str:
-    d = datetime.strptime(session, "%Y%m%d").date()
+def default_label(session: str) -> str:
+    """'20261027' -> 'Session 27 Oct 2026'; '20260827-2' -> 'Session 27 Aug 2026 -2'."""
+    d = datetime.strptime(session[:8], "%Y%m%d").date()
+    suffix = session[8:]
     return f"Session {d.day} {MONTHS[d.month - 1]} {d.year}" + (f" {suffix}" if suffix else "")
 
 
@@ -198,43 +226,63 @@ def _mtime(p: Path):
         return None
 
 
+def _dirs(path) -> list:
+    """Names of the real (not symlinked) folders in path, newest name first. OSError when path can't be listed."""
+    return sorted((e.name for e in os.scandir(path) if e.is_dir(follow_symlinks=False)), reverse=True)
+
+
 def scan(roots) -> dict:
-    """{"found": [source], "skipped": [{folder, root, reason}], "roots": [{root, problem}]}. Never raises."""
-    found, skipped, rinfo = [], [], []
+    """{"found": [source], "skipped": [{folder, root, reason}], "roots": [{root, problem}]}. Never raises.
+    Reads only; follows no link out of a root."""
+    found, skipped, rinfo, seen = [], [], [], set()
     for root in roots:
         root = Path(root)
         try:
-            kids = sorted((e.name for e in os.scandir(root) if e.is_dir()), reverse=True)
+            kids = _dirs(root)
         except OSError as e:
             rinfo.append({"root": root, "problem": "folder not found" if isinstance(e, FileNotFoundError)
                           else f"can't be read ({type(e).__name__})"})
             continue
         rinfo.append({"root": root, "problem": None})
+        rr = real(root)
         for name in kids:
-            ses = session_of(name)
-            if ses is None:
+            session = session_of(name)
+            if session is None:
                 continue
-            session, suffix = ses
+            if not inside(root / name, rr):
+                skipped.append({"folder": name, "root": root, "reason": "links outside the scanned folder"})
+                continue
             proc = root / name / PROCESSED
             try:
-                tiles = sorted(e.name for e in os.scandir(proc) if e.is_dir() and e.name.startswith(TILES_PREFIX))
+                tiles = [t for t in _dirs(proc) if t.startswith(TILES_PREFIX)]
             except OSError:
                 tiles = []
+            outside = [t for t in tiles if not inside(proc / t, rr)]
+            tiles = sorted(t for t in tiles if t not in outside)
             if not tiles:
-                skipped.append({"folder": name, "root": root, "reason": "no model-ready tiles (no 3d folder)"})
+                skipped.append({"folder": name, "root": root, "reason": "links outside the scanned folder" if outside
+                                else "no model-ready tiles (no 3d folder)"})
                 continue
             for sub in tiles:
                 d = proc / sub
-                label = default_label(session, suffix)
+                rd = real(d)
+                label = default_label(session)
                 if len(tiles) > 1:
                     tail = sub[len(TILES_PREFIX):].strip(" -") or sub
                     label += f" ({tail})"
                 chk = check_folder(d)
                 man = d / MANIFEST
-                found.append({"key": source_key(d), "dir": d, "manifest": man if man.is_file() else None,
-                              "session": session, "suffix": suffix, "folder": name, "subfolder": sub, "root": root,
-                              "default_label": label, "sample_column": None, **chk})
-    found.sort(key=lambda s: (s["session"], s["suffix"], s["subfolder"]), reverse=True)
+                found.append({"key": found_key(name, sub), "dir": d, "real": rd,
+                              "manifest": man if man.is_file() else None, "session": session, "folder": name,
+                              "subfolder": sub, "root": root, "default_label": label, "sample_column": None, **chk})
+    # the same real folder reached twice (a link inside the root): keep the entry reached without a link
+    found.sort(key=lambda s: os.path.normcase(os.path.abspath(str(s["dir"]))) != s["real"])
+    for s in found:
+        if s["real"] in seen:
+            s["dup"] = True
+        seen.add(s["real"])
+    found = [s for s in found if not s.get("dup")]
+    found.sort(key=lambda s: (s["session"][:8], s["session"][8:], s["subfolder"]), reverse=True)
     return {"found": found, "skipped": skipped, "roots": rinfo}
 
 
@@ -324,7 +372,10 @@ def load_overrides(state_dir) -> dict:
         raise ValueError(f"{OVERRIDES} can't be read ({type(e).__name__})")
     if not isinstance(doc, dict) or not isinstance(doc.get("sources"), dict):
         raise ValueError(f"{OVERRIDES} has no sources table")
-    return {k: v for k, v in doc["sources"].items() if isinstance(v, dict)}
+    bad = [k for k, v in doc["sources"].items() if not isinstance(v, dict)]
+    if bad:
+        raise ValueError(f"{OVERRIDES} has {len(bad)} entr{'y' if len(bad) == 1 else 'ies'} that are not tables")
+    return dict(doc["sources"])
 
 
 def _os_replace(src, dst):
@@ -399,50 +450,73 @@ def set_override(state_dir, key: str, *, hidden=None, label=None, actor=None) ->
 
 
 # ---------------------------------------------------------------- merged view
+def _combine(hand: list, found: list) -> list:
+    """-> [(key, hand item or None, found source or None)]: the hand list first (its order), then the found sources
+    not on it. One entry per folder (by real path); a folder the scan finds keeps its root-relative key."""
+    by_real = {}
+    for f in found:
+        by_real.setdefault(f["real"], f)
+    out, keys, reals = [], set(), set()
+    for h in hand:
+        r = real(h["dir"])
+        f = by_real.get(r)
+        key = f["key"] if f else h["key"]
+        if key in keys or r in reals:
+            continue
+        keys.add(key)
+        reals.add(r)
+        out.append((key, h, f))
+    for f in found:
+        if f["key"] in keys or f["real"] in reals:
+            continue
+        keys.add(f["key"])
+        reals.add(f["real"])
+        out.append((f["key"], None, f))
+    return out
+
+
 def merged(cfg, fresh=False) -> dict:
-    """Everything the admin sees: {"sources": [row], "skipped", "roots", "list_error", "overrides_error"}.
-    row = {key, label, default_label, dir, manifest, session, suffix, sample_column, origin (found / listed / both),
-           tiles, samples, nm_min, nm_max, compatible, reason, hidden, listed_problem}. Never raises."""
+    """Everything the admin sees: {"sources": [row], "orphans", "skipped", "roots", "list_error", "overrides_error"}.
+    row = {key, label, default_label, dir, manifest, session, sample_column, origin (found / listed / both), tiles,
+           samples, nm_min, nm_max, compatible, reason, hidden, listed_problem}. orphans = overrides whose key matches
+    no row: [{key, label, hidden, changed, by}]. Never raises."""
     disc = discover(cfg, fresh)
     try:
         hand, list_error = listed(cfg), None
     except (OSError, ValueError) as e:
         hand, list_error = [], f"{LIST_SETTING} unreadable: {type(e).__name__}: {e}"
     try:
-        ovr, ovr_error = load_overrides(cfg.state_dir), None
+        ovr, ovr_error = load_overrides(getattr(cfg, "state_dir", None)), None
     except ValueError as e:
         ovr, ovr_error = {}, str(e)
-    rows, seen = [], {}
-    for h in hand:
-        if h["key"] in seen:
-            continue
-        f = next((s for s in disc["found"] if s["key"] == h["key"]), None)
-        chk = f if f else (check_folder(h["dir"], h["manifest"], h["sample_column"]) if h["dir"].is_dir() else
-                           {"tiles": 0, "samples": None, "nm_min": None, "nm_max": None})
-        row = {"key": h["key"], "label": h["label"], "default_label": h["label"], "dir": h["dir"],
-               "manifest": h["manifest"], "session": h["session"], "suffix": (f or {}).get("suffix", ""),
-               "sample_column": h["sample_column"], "origin": "both" if f else "listed",
-               "tiles": chk["tiles"], "samples": chk["samples"], "nm_min": chk["nm_min"], "nm_max": chk["nm_max"],
-               "compatible": h["problem"] is None, "reason": h["problem"], "listed_problem": h["problem"]}
-        seen[h["key"]] = row
-        rows.append(row)
-    for s in disc["found"]:
-        if s["key"] in seen:
-            continue
-        row = {"key": s["key"], "label": s["default_label"], "default_label": s["default_label"], "dir": s["dir"],
-               "manifest": s["manifest"], "session": s["session"], "suffix": s["suffix"],
-               "sample_column": None, "origin": "found", "tiles": s["tiles"], "samples": s["samples"],
-               "nm_min": s["nm_min"], "nm_max": s["nm_max"], "compatible": s["compatible"], "reason": s["reason"],
-               "listed_problem": None}
-        seen[s["key"]] = row
-        rows.append(row)
+    rows = []
+    for key, h, f in _combine(hand, disc["found"]):
+        if h is not None:
+            chk = f if f else (check_folder(h["dir"], h["manifest"], h["sample_column"]) if h["dir"].is_dir() else
+                               {"tiles": 0, "samples": None, "nm_min": None, "nm_max": None})
+            rows.append({"key": key, "label": h["label"], "default_label": h["label"], "dir": h["dir"],
+                         "manifest": h["manifest"], "session": f["session"] if f else h["session"],
+                         "sample_column": h["sample_column"],
+                         "origin": "both" if f else "listed", "tiles": chk["tiles"], "samples": chk["samples"],
+                         "nm_min": chk["nm_min"], "nm_max": chk["nm_max"], "compatible": h["problem"] is None,
+                         "reason": h["problem"], "listed_problem": h["problem"]})
+        else:
+            rows.append({"key": key, "label": f["default_label"], "default_label": f["default_label"],
+                         "dir": f["dir"], "manifest": f["manifest"], "session": f["session"], "sample_column": None,
+                         "origin": "found", "tiles": f["tiles"], "samples": f["samples"], "nm_min": f["nm_min"],
+                         "nm_max": f["nm_max"], "compatible": f["compatible"], "reason": f["reason"],
+                         "listed_problem": None})
     for row in rows:
         o = ovr.get(row["key"]) or {}
         row["hidden"] = bool(o.get("hidden"))
         if isinstance(o.get("label"), str) and o["label"].strip():
             row["label"] = o["label"]
-    return {"sources": rows, "skipped": disc["skipped"], "roots": disc["roots"], "list_error": list_error,
-            "overrides_error": ovr_error}
+    keys = {r["key"] for r in rows}
+    orphans = [{"key": k, "label": o.get("label") if isinstance(o.get("label"), str) else None,
+                "hidden": bool(o.get("hidden")), "changed": o.get("changed"), "by": o.get("by")}
+               for k, o in sorted(ovr.items()) if k not in keys]
+    return {"sources": rows, "orphans": orphans, "skipped": disc["skipped"], "roots": disc["roots"],
+            "list_error": list_error, "overrides_error": ovr_error}
 
 
 def for_predict(cfg) -> list:
@@ -450,19 +524,15 @@ def for_predict(cfg) -> list:
     its row with problem = HIDDEN; an incompatible discovered one has its reason as the problem. Raises OSError /
     ValueError when the hand list or the overrides file can't be read (predict.sources_safe shows the admin why)."""
     hand = listed(cfg)
-    ovr = load_overrides(getattr(cfg, "state_dir", None)) if getattr(cfg, "state_dir", None) else {}
-    out, seen = [], set()
-    for h in hand:
-        if h["key"] not in seen:
-            seen.add(h["key"])
-            out.append(dict(h))
-    for s in discover(cfg)["found"]:
-        if s["key"] in seen:
-            continue
-        seen.add(s["key"])
-        out.append({"key": s["key"], "label": s["default_label"], "dir": s["dir"], "manifest": s["manifest"],
-                    "session": s["session"], "sample_column": None,
-                    "problem": None if s["compatible"] else s["reason"]})
+    ovr = load_overrides(getattr(cfg, "state_dir", None))
+    out = []
+    for key, h, f in _combine(hand, discover(cfg)["found"]):
+        if h is not None:
+            out.append({**h, "key": key, "session": f["session"] if f else h["session"]})
+        else:
+            out.append({"key": key, "label": f["default_label"], "dir": f["dir"], "manifest": f["manifest"],
+                        "session": f["session"], "sample_column": None,
+                        "problem": None if f["compatible"] else f["reason"]})
     for it in out:
         o = ovr.get(it["key"]) or {}
         if isinstance(o.get("label"), str) and o["label"].strip():

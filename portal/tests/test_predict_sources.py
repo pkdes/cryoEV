@@ -73,6 +73,23 @@ def manifest(d: Path, rows, head=("output_name", "grid", "sample_label", "nm_per
         w.writerows(rows)
 
 
+def fkey(d: Path) -> str:
+    """The key of a discovered 3d folder: root-relative (<session folder>/<3d folder>)."""
+    return PSRC.found_key(d.parent.parent.name, d.name)
+
+
+def junction(link: Path, target: Path) -> bool:
+    """mklink /J link target (Windows); False when it can't be made (then the test skips)."""
+    if os.name != "nt":
+        try:
+            os.symlink(target, link, target_is_directory=True)
+            return True
+        except OSError:
+            return False
+    r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True)
+    return r.returncode == 0 and link.exists()
+
+
 def make_root(root: Path) -> dict:
     """A processed-data root like the lab's, every case of discovery in it. -> {name: tile dir}."""
     out = {}
@@ -183,7 +200,7 @@ class EnvCase(unittest.TestCase):
 class Discovery(EnvCase):
     def test_compatible_found_and_incompatible_reported_with_reason(self):
         m = PSRC.merged(self.cfg())
-        by = {PSRC.source_key(d): n for n, d in self.dirs.items()}
+        by = {fkey(d): n for n, d in self.dirs.items()}
         rows = {by[r["key"]]: r for r in m["sources"]}
         self.assertEqual(set(rows), set(self.dirs))
         self.assertEqual({n for n, r in rows.items() if r["compatible"]}, {"a", "b"})
@@ -199,21 +216,22 @@ class Discovery(EnvCase):
         self.assertEqual(m["roots"], [{"root": self.root, "problem": None}])
         # newest first; non-session folders ignored
         self.assertEqual([r["session"] for r in m["sources"]],
-                         ["20261027", "20261016", "20261015", "20261014", "20261013", "20261012", "20260827"])
+                         ["20261027", "20261016", "20261015", "20261014", "20261013", "20261012", "20260827-2"])
 
     def test_suffix_and_default_label(self):
         rows = {r["key"]: r for r in PSRC.merged(self.cfg())["sources"]}
-        b, a = rows[PSRC.source_key(self.dirs["b"])], rows[PSRC.source_key(self.dirs["a"])]
-        self.assertEqual((b["session"], b["suffix"]), ("20260827", "-2"))
+        b, a = rows[fkey(self.dirs["b"])], rows[fkey(self.dirs["a"])]
+        self.assertEqual(b["session"], "20260827-2")                        # the registry's session id
         self.assertEqual(b["default_label"], "Session 27 Aug 2026 -2")
         self.assertEqual(a["label"], "Session 27 Oct 2026")
-        self.assertEqual(PSRC.session_of("20260827-2"), ("20260827", "-2"))
-        self.assertEqual(PSRC.session_of("20261105 EV prep"), ("20261105", ""))
+        self.assertEqual(PSRC.session_of("20260827-2"), "20260827-2")
+        self.assertEqual(PSRC.session_of("20261105 EV prep"), "20261105")
+        self.assertEqual(PSRC.default_label("20260827-2"), "Session 27 Aug 2026 -2")
         self.assertIsNone(PSRC.session_of("20261399"))
         self.assertIsNone(PSRC.session_of("notes"))
         self.assertEqual(PSRC.default_label("20261105"), "Session 5 Nov 2026")
         it = next(s for s in P.sources(self.cfg()) if s["key"] == b["key"])
-        self.assertEqual(it["session"], "20260827")
+        self.assertEqual(it["session"], "20260827-2")
         self.assertTrue(PS.SESSION_RE.match(it["session"]))
 
     def test_two_tile_folders_in_one_session_get_distinct_labels(self):
@@ -227,12 +245,12 @@ class Discovery(EnvCase):
         items = P.sources(self.cfg())
         self.assertTrue(all(set(it) == SHAPE for it in items))
         by = {it["key"]: it for it in items}
-        a = by[PSRC.source_key(self.dirs["a"])]
+        a = by[fkey(self.dirs["a"])]
         self.assertIsNone(a["problem"])
         self.assertEqual(a["manifest"], self.dirs["a"] / "MANIFEST.csv")
         self.assertEqual(a["dir"], self.dirs["a"])
-        self.assertEqual(by[PSRC.source_key(self.dirs["noman"])]["problem"], "no MANIFEST.csv")
-        self.assertIsNone(by[PSRC.source_key(self.dirs["noman"])]["manifest"])
+        self.assertEqual(by[fkey(self.dirs["noman"])]["problem"], "no MANIFEST.csv")
+        self.assertIsNone(by[fkey(self.dirs["noman"])]["manifest"])
         # predict.py reads a discovered source as it reads a listed one
         t = P.tiles_of(a)
         self.assertEqual(t["n"], 3)
@@ -297,10 +315,76 @@ class Discovery(EnvCase):
         for it in P.sources(self.cfg()):
             if not it["problem"]:
                 P.tiles_of(it)
-        PSRC.set_override(self.state, PSRC.source_key(self.dirs["a"]), hidden=True, label="x", actor="t")
+        PSRC.set_override(self.state, fkey(self.dirs["a"]), hidden=True, label="x", actor="t")
         P.sources(self.cfg())
         self.assertEqual(snapshot(self.root), before)
         self.assertTrue((self.state / "predict_sources.json").is_file())
+
+
+class Links(EnvCase):
+    def test_junctions_out_of_the_root_are_not_followed(self):
+        outside = self.tmp / "outside"
+        d = tile_dir(outside, "20261103")
+        (d / "t.png").write_bytes(png())
+        manifest(d, [["t.png", 1, "S", "1.47"]])
+        if not junction(self.root / "20261103", outside / "20261103"):
+            self.skipTest("can't make a junction here")
+        proc = self.root / "20261104" / "3. Processed images"
+        proc.mkdir(parents=True)
+        self.assertTrue(junction(proc / "3d. Tiles no scalebar - linked", d))
+        inner = self.root / "20261105"                                     # a link that stays inside the root
+        self.assertTrue(junction(inner, self.root / "20261027"))
+        m = PSRC.merged(self.cfg(), fresh=True)
+        sessions = [r["session"] for r in m["sources"]]
+        self.assertNotIn("20261103", sessions)
+        self.assertNotIn("20261104", sessions)
+        reasons = {s["folder"]: s["reason"] for s in m["skipped"]}
+        self.assertEqual(reasons["20261103"], "links outside the scanned folder")
+        self.assertEqual(reasons["20261104"], "links outside the scanned folder")
+        # inside the root: allowed, but the same real folder is listed once
+        self.assertEqual(sum(1 for r in m["sources"] if r["tiles"] == 3 and r["samples"] == 2), 1)
+        self.assertIn("20261027", sessions)                                 # the folder itself, not the link
+        self.assertNotIn("20261105", sessions)
+        self.assertFalse(any(str(r["dir"]).startswith(str(outside)) for r in m["sources"]))
+
+    def test_keys_survive_root_spelling(self):
+        k1 = {r["session"]: r["key"] for r in PSRC.merged(self.cfg(), fresh=True)["sources"]}
+        self.assertEqual(k1["20261027"], PSRC.found_key("20261027", TILES))
+        PSRC.set_override(self.state, k1["20261027"], hidden=True, label="Kept", actor="t")
+        spellings = [str(self.root) + os.sep, self.root.as_posix()]
+        if os.name == "nt":
+            spellings.append(str(self.root).upper())
+        link = self.tmp / "via_link"
+        if junction(link, self.root):
+            spellings.append(str(link))
+        for sp in spellings:
+            with self.subTest(root=sp):
+                os.environ["CJ_PREDICT_SCAN_ROOTS"] = sp
+                rows = {r["session"]: r for r in PSRC.merged(self.cfg(), fresh=True)["sources"]}
+                self.assertEqual({k: r["key"] for k, r in rows.items()}, k1)
+                self.assertEqual((rows["20261027"]["label"], rows["20261027"]["hidden"]), ("Kept", True))
+                it = next(i for i in P.sources(self.cfg()) if i["key"] == k1["20261027"])
+                self.assertEqual(it["problem"], PSRC.HIDDEN)
+
+    def test_hand_list_dedups_by_real_path(self):
+        spell = str(self.dirs["a"]).upper() if os.name == "nt" else str(self.dirs["a"])
+        os.environ["CJ_PREDICT_SOURCES"] = json.dumps([{"label": "Hand A", "dir": spell, "session": "20261027"},
+                                                       {"label": "Hand A again", "dir": str(self.dirs["a"])}])
+        items = P.sources(self.cfg())
+        a = [it for it in items if it["label"].startswith("Hand A")]
+        self.assertEqual(len(a), 1)
+        self.assertEqual(a[0]["key"], fkey(self.dirs["a"]))                 # a found folder keeps its found key
+        self.assertEqual(len(items), len(self.dirs))
+        # scan off: the hand list's own (absolute-path) key, as before
+        os.environ["CJ_PREDICT_SCAN_ROOTS"] = "off"
+        self.assertEqual(P.sources(self.cfg())[0]["key"], PSRC.source_key(Path(spell)))
+
+    def test_orphaned_overrides_are_listed(self):
+        PSRC.set_override(self.state, "0123456789", label="Old run", hidden=True, actor="t")
+        PSRC.set_override(self.state, fkey(self.dirs["a"]), label="Here", actor="t")
+        m = PSRC.merged(self.cfg())
+        self.assertEqual([o["key"] for o in m["orphans"]], ["0123456789"])
+        self.assertEqual((m["orphans"][0]["label"], m["orphans"][0]["hidden"]), ("Old run", True))
 
 
 class BackCompat(EnvCase):
@@ -341,7 +425,17 @@ class BackCompat(EnvCase):
             P.sources(self.cfg())
         srcs, err = P.sources_safe(self.cfg())
         self.assertEqual(srcs, [])
-        self.assertIn("unreadable", err)
+        self.assertTrue(err.startswith("Session list unreadable: "), err)
+
+    def test_source_text_never_names_a_hidden_source(self):
+        k = fkey(self.dirs["a"])
+        PSRC.set_override(self.state, k, label="Secret name", hidden=True, actor="t")
+        srcs = P.sources(self.cfg())
+        req = {"source": {"kind": "session", "session": "20261027", "dir": str(self.dirs["a"].resolve())}}
+        self.assertEqual(P.source_text(req, srcs), "Session 20261027")
+        self.assertEqual(P.source_text(req, srcs, admin=True), "Session 20261027 (Secret name)")
+        PSRC.set_override(self.state, k, hidden=False, actor="t")
+        self.assertEqual(P.source_text(req, P.sources(self.cfg())), "Session 20261027 (Secret name)")
 
     def test_merge_dedup_hand_list_wins(self):
         os.environ["CJ_PREDICT_SOURCES"] = json.dumps([{"label": "Hand B", "dir": str(self.dirs["b"]),
@@ -350,10 +444,11 @@ class BackCompat(EnvCase):
         keys = [it["key"] for it in items]
         self.assertEqual(len(keys), len(set(keys)))
         self.assertEqual(items[0]["label"], "Hand B")                        # the hand list first, its fields
-        self.assertEqual(keys.count(PSRC.source_key(self.dirs["b"])), 1)
+        self.assertEqual(keys.count(fkey(self.dirs["b"])), 1)
         self.assertEqual(len(items), len(self.dirs))
         row = next(r for r in PSRC.merged(self.cfg())["sources"] if r["key"] == keys[0])
-        self.assertEqual((row["origin"], row["tiles"], row["suffix"]), ("both", 2, "-2"))
+        self.assertEqual((row["origin"], row["tiles"], row["session"]), ("both", 2, "20260827-2"))
+        self.assertEqual(items[0]["session"], "20260827-2")                 # the folder id wins over the hand list
         # a different spelling of the same folder is the same key (normcase), so still one row
         if os.name == "nt":
             os.environ["CJ_PREDICT_SOURCES"] = json.dumps([{"label": "Hand B", "dir": str(self.dirs["b"]).upper()}])
@@ -362,7 +457,7 @@ class BackCompat(EnvCase):
 
 class Overrides(EnvCase):
     def test_hide_show_label_persist_and_apply_to_both(self):
-        ka, kb = PSRC.source_key(self.dirs["a"]), PSRC.source_key(self.dirs["b"])
+        ka, kb = fkey(self.dirs["a"]), fkey(self.dirs["b"])
         os.environ["CJ_PREDICT_SOURCES"] = json.dumps([{"label": "Hand B", "dir": str(self.dirs["b"])}])
         PSRC.set_override(self.state, ka, hidden=True, actor="tester")
         PSRC.set_override(self.state, kb, label="  Liposomes   run 2 ", actor="tester")
@@ -382,8 +477,9 @@ class Overrides(EnvCase):
         self.assertEqual({it["key"]: it for it in P.sources(self.cfg())}[kb]["label"], "Hand B")
 
     def test_bad_input_changes_nothing(self):
-        k = PSRC.source_key(self.dirs["a"])
-        for bad in ("x" * (PSRC.LABEL_MAX + 1), "a\x00b", "line\nbreak"):
+        k = fkey(self.dirs["a"])
+        for bad in ("x" * (PSRC.LABEL_MAX + 1), "a\x00b", "line\nbreak", "abc\u202edcba", "x\u2066y\u2069",
+                    "rtl\u200f"):
             with self.assertRaises(ValueError):
                 PSRC.set_override(self.state, k, label=bad)
         for key in ("", "../../x", "ABCDEF1234", "abc", None):
@@ -394,7 +490,10 @@ class Overrides(EnvCase):
     def test_unreadable_file_fails_closed_and_is_never_overwritten(self):
         self.state.mkdir(parents=True)
         f = self.state / "predict_sources.json"
-        for text in ("{broken", json.dumps({"sources": []}), "[]"):
+        for text in ("{broken", json.dumps({"sources": []}), "[]",
+                     json.dumps({"schema": PSRC.SCHEMA, "sources": {fkey(self.dirs["a"]): True}}),
+                     json.dumps({"schema": PSRC.SCHEMA, "sources": {"0123456789": {"hidden": True},
+                                                                    fkey(self.dirs["b"]): "hidden"}})):
             f.write_text(text, encoding="utf-8")
             with self.assertRaises(ValueError):
                 P.sources(self.cfg())
@@ -402,13 +501,13 @@ class Overrides(EnvCase):
             self.assertEqual(srcs, [])                                       # never a hidden session by accident
             self.assertTrue(err)
             with self.assertRaises(ValueError):
-                PSRC.set_override(self.state, PSRC.source_key(self.dirs["a"]), hidden=True)
+                PSRC.set_override(self.state, fkey(self.dirs["a"]), hidden=True)
             self.assertEqual(f.read_text(encoding="utf-8"), text)
             self.assertTrue(PSRC.merged(self.cfg())["overrides_error"])
         self.assertEqual([p.name for p in self.state.iterdir() if p.name.endswith(".tmp")], [])
 
     def test_write_failure_leaves_no_temp_and_changes_nothing(self):
-        k = PSRC.source_key(self.dirs["a"])
+        k = fkey(self.dirs["a"])
         PSRC.set_override(self.state, k, label="Before")
         real = PSRC._os_replace
 
@@ -525,8 +624,8 @@ class PortalCase(unittest.TestCase):
                     "basic": A.add_key(cls.env.roster, "bas", "basic")}
         cls.p = T.Portal(cls.env.config())
         cls.tok = {r: T.login(cls.p.port, k) for r, k in cls.keys.items()}
-        cls.ka, cls.kb = PSRC.source_key(cls.dirs["a"]), PSRC.source_key(cls.dirs["b"])
-        cls.knoman = PSRC.source_key(cls.dirs["noman"])
+        cls.ka, cls.kb = fkey(cls.dirs["a"]), fkey(cls.dirs["b"])
+        cls.knoman = fkey(cls.dirs["noman"])
 
     @classmethod
     def tearDownClass(cls):
@@ -669,6 +768,8 @@ class PortalPanel(PortalCase):
         st, _, body = self.post("/admin/predict/show", {"key": self.ka, "hidden": "yes"}, token="0" * 40)
         self.assertEqual(st, 403)
         self.assertIn("expired", body)
+        self.assertIn('aria-current="page">Predict sessions</a>', body)    # the error stays on this tab
+        self.assertIn('href="/admin/predict">Back to Predict sessions</a>', body)
         self.assertFalse((self.env.state / "predict_sources.json").exists())
         self.assertEqual(self.audit_lines(), [])
 
@@ -688,6 +789,16 @@ class PortalPanel(PortalCase):
             self.assertEqual(f.read_text(encoding="utf-8"), "{broken")
         finally:
             f.unlink()
+
+    def test_orphans_on_the_panel(self):
+        PSRC.set_override(self.env.state, "0123456789", label="Gone " + XSS, hidden=True, actor="tester")
+        st, _, body = self.get("/admin/predict")
+        self.assertIn("Settings for sessions no longer found (1)", body)
+        self.assertIn("0123456789", body)
+        self.assertNotIn(XSS, body)
+        self.assertIn(html_esc("Gone " + XSS), body)
+        doc = json.loads(self.get("/admin/api/predict")[2])
+        self.assertEqual([o["key"] for o in doc["orphans"]], ["0123456789"])
 
     def test_escaping(self):
         st, h, _ = self.post("/admin/predict/label", {"key": self.ka, "label": XSS + ' & "q"'})
