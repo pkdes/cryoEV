@@ -1,27 +1,151 @@
 {
  "schema": "cj_modules/1",
  "modules": [
-  {"id": "home", "name": "Home", "route": "/", "icon": "home", "roles": ["admin", "advanced", "basic"], "health": null,
-   "status": "on", "nav": true, "desc": "Status and links"},
-  {"id": "data", "name": "Data", "route": null, "icon": "data", "roles": ["admin", "advanced"], "health": null,
-   "status": "coming", "nav": true, "desc": "Sessions, grids and images"},
-  {"id": "jobs", "name": "Jobs", "route": "/jobs/", "icon": "jobs", "roles": ["admin", "advanced"], "health": null,
-   "status": "on", "nav": true, "desc": "What's running, queued, blocked and done"},
-  {"id": "review", "name": "Review", "route": "/review/", "icon": "review", "roles": ["admin"], "health": "review",
-   "status": "on", "nav": true, "desc": "Accept, fix or delete outlines. Works on a phone.", "label": "eVHarmony"},
-  {"id": "predict", "name": "Predict", "route": null, "icon": "predict", "roles": ["admin", "advanced", "basic"],
-   "health": null, "status": "coming", "nav": true, "desc": "Run a model on new images"},
-  {"id": "results", "name": "Results", "route": null, "icon": "results", "roles": ["admin", "advanced", "basic"],
-   "health": null, "status": "coming", "nav": true, "desc": "Counts, sizes and morphology"},
-  {"id": "train", "name": "Train", "route": null, "icon": "train", "roles": ["admin", "advanced"], "health": null,
-   "status": "coming", "nav": true, "desc": "Queue a training job"},
-  {"id": "admin", "name": "Admin", "route": null, "icon": "admin", "roles": ["admin"], "health": null,
-   "status": "coming", "nav": true, "desc": "People and keys"},
-  {"id": "sandbox", "name": "Sandbox", "route": null,
-   "external": {"public_port": 8443, "local_port": 8765, "path": "/"},
-   "icon": "sandbox", "roles": ["admin"], "health": "sandbox", "status": "on", "nav": true,
-   "desc": "Practice copy of the review. Edits never ship."},
-  {"id": "history", "name": "History", "route": "/history/", "icon": "history", "roles": ["admin"], "health": null,
-   "status": "on", "nav": false, "classic": true, "desc": "Registry history, queue and live training (classic page)"}
+  {
+   "id": "home",
+   "name": "Home",
+   "route": "/",
+   "icon": "home",
+   "roles": [
+    "admin",
+    "advanced",
+    "basic"
+   ],
+   "health": null,
+   "status": "on",
+   "nav": true,
+   "desc": "Status and links"
+  },
+  {
+   "id": "data",
+   "name": "Data",
+   "route": null,
+   "icon": "data",
+   "roles": [
+    "admin",
+    "advanced"
+   ],
+   "health": null,
+   "status": "coming",
+   "nav": true,
+   "desc": "Sessions, grids and images"
+  },
+  {
+   "id": "jobs",
+   "name": "Jobs",
+   "route": "/jobs/",
+   "icon": "jobs",
+   "roles": [
+    "admin",
+    "advanced"
+   ],
+   "health": null,
+   "status": "on",
+   "nav": true,
+   "desc": "What's running, queued, blocked and done"
+  },
+  {
+   "id": "review",
+   "name": "Review",
+   "route": "/review/",
+   "icon": "review",
+   "roles": [
+    "admin"
+   ],
+   "health": "review",
+   "status": "on",
+   "nav": true,
+   "desc": "Accept, fix or delete outlines. Works on a phone.",
+   "label": "eVHarmony"
+  },
+  {
+   "id": "predict",
+   "name": "Predict",
+   "route": null,
+   "icon": "predict",
+   "roles": [
+    "admin",
+    "advanced",
+    "basic"
+   ],
+   "health": null,
+   "status": "coming",
+   "nav": true,
+   "desc": "Run a model on new images"
+  },
+  {
+   "id": "results",
+   "name": "Results",
+   "route": "/results/",
+   "icon": "results",
+   "roles": [
+    "admin",
+    "advanced",
+    "basic"
+   ],
+   "health": null,
+   "status": "on",
+   "nav": true,
+   "desc": "Counts, sizes and morphology"
+  },
+  {
+   "id": "train",
+   "name": "Train",
+   "route": null,
+   "icon": "train",
+   "roles": [
+    "admin",
+    "advanced"
+   ],
+   "health": null,
+   "status": "coming",
+   "nav": true,
+   "desc": "Queue a training job"
+  },
+  {
+   "id": "admin",
+   "name": "Admin",
+   "route": null,
+   "icon": "admin",
+   "roles": [
+    "admin"
+   ],
+   "health": null,
+   "status": "coming",
+   "nav": true,
+   "desc": "People and keys"
+  },
+  {
+   "id": "sandbox",
+   "name": "Sandbox",
+   "route": null,
+   "external": {
+    "public_port": 8443,
+    "local_port": 8765,
+    "path": "/"
+   },
+   "icon": "sandbox",
+   "roles": [
+    "admin"
+   ],
+   "health": "sandbox",
+   "status": "on",
+   "nav": true,
+   "desc": "Practice copy of the review. Edits never ship."
+  },
+  {
+   "id": "history",
+   "name": "History",
+   "route": "/history/",
+   "icon": "history",
+   "roles": [
+    "admin"
+   ],
+   "health": null,
+   "status": "on",
+   "nav": false,
+   "classic": true,
+   "desc": "Registry history, queue and live training (classic page)"
+  }
  ]
 }

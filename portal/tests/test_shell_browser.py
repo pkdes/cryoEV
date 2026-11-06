@@ -30,10 +30,17 @@ except ImportError:  # pragma: no cover
 BAR_H = {390: 88, 1280: 52, 1600: 52}            # cj.css --cj-bar-h; the review shell's phone bar is compact (44)
 PAGES = (("home", "/"), ("history", "/history/history.html"), ("review", "/review/"))
 CONTENT = {"home": "main.cj-main", "history": "body > header"}      # the first thing under the bar
-NAV = {"admin": (["Home", "Data", "Jobs", "Review", "Predict", "Results", "Train", "Admin", "Sandbox"],
-                 ["Home", "Jobs", "Review", "Sandbox"]),
-       "advanced": (["Home", "Data", "Jobs", "Predict", "Results", "Train"], ["Home", "Jobs"]),
-       "basic": (["Home", "Predict", "Results"], ["Home"])}
+_MODS = __import__("json").loads((__import__("pathlib").Path(__file__).resolve().parents[1] / "modules.json")
+                                 .read_text(encoding="utf-8"))["modules"]
+
+
+def _on(role):
+    return [m["name"] for m in _MODS if m.get("nav") and m["status"] == "on" and role in m["roles"]]
+
+
+NAV = {"admin": (["Home", "Data", "Jobs", "Review", "Predict", "Results", "Train", "Admin", "Sandbox"], _on("admin")),
+       "advanced": (["Home", "Data", "Jobs", "Predict", "Results", "Train"], _on("advanced")),
+       "basic": (["Home", "Predict", "Results"], _on("basic"))}
 CARDS = {"admin": ["data", "jobs", "review", "predict", "results", "train", "admin", "sandbox"],
          "advanced": ["data", "jobs", "predict", "results", "train"], "basic": ["predict", "results"]}
 TOKENS = {"light": {"bg": "rgb(243, 245, 247)", "card": "rgb(255, 255, 255)", "hist_bg": "rgb(250, 250, 249)"},

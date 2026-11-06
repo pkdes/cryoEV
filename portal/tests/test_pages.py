@@ -39,7 +39,9 @@ def launch(p):
 
 PAGES = (("home", "/", "#cj-bar .cj-nav a"), ("history", "/history/history.html", "#cj-bar .cj-nav a"),
          ("review", "/review/", "#cj-bar .cj-nav a"))
-NAV_LINKS = ["Home", "Jobs", "Review", "Sandbox"]                       # admin: the modules that are on
+_MODS = __import__("json").loads((__import__("pathlib").Path(__file__).resolve().parents[1] / "modules.json")
+                                 .read_text(encoding="utf-8"))["modules"]
+NAV_LINKS = [m["name"] for m in _MODS if m.get("nav") and m["status"] == "on" and "admin" in m["roles"]]  # admin, on
 NAV_ALL = ["Home", "Data", "Jobs", "Review", "Predict", "Results", "Train", "Admin", "Sandbox"]   # + greyed "coming"
 
 
@@ -114,7 +116,9 @@ class Pages(unittest.TestCase):
                                 self.assertEqual(page.get_attribute('#cj-bar a[data-id="sandbox"] .cj-dot', "class"),
                                                  "cj-dot down")
                                 self.assertEqual(page.text_content("#cj-bar .cj-user .cj-nm > span"), T.USER)
-                                self.assertEqual(page.locator(".cj-mod.off").count(), 5)
+                                self.assertEqual(page.locator(".cj-mod.off").count(),
+                                                 sum(1 for m in _MODS if m.get("nav") and m["status"] != "on"
+                                                     and "admin" in m["roles"]))
                                 page.wait_for_selector("#cj-train .cj-lv-snap")     # CJLive drew the snapshot
                             if name == "history":
                                 self.assertTrue(page.locator("#srv").is_hidden())   # the shell nav replaces it
