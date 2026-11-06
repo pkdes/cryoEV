@@ -194,6 +194,32 @@ class CreateTests(PredictRoots, unittest.TestCase):
                        **{k: v for k, v in kw.items() if k not in ("manifest", "sample_label_column")})
         self.assertEqual(C.read_json(ps / "status.json")["n_total"], 4)
 
+    def test_nm_per_px_tolerance(self):
+        """Contract section 8: within one sample, nm/px spread (max - min) / median <= 1 % is one scale and each
+        image keeps its own value; over 1 % is refused. Controls: one value (always fine), 2x apart (refused)."""
+        self.assertEqual(PS.NM_TOLERANCE, 0.01)
+        d = self.tmp / "tol"
+        d.mkdir()
+        for n in ("t1.png", "t2.png"):
+            png(d / n)
+        man = d / "MANIFEST.csv"
+        kw = dict(src=d, manifest=man)
+        for a, b, ok in (("1.4724", "1.4724", True),          # control: one value
+                         ("1.47125", "1.4724", True),          # 0.078 %: the 20261027 liposome pair
+                         ("1.000", "1.011", False),            # 1.094 %
+                         ("0.7362", "1.4724", False)):         # control: 2x apart
+            with self.subTest(a=a, b=b):
+                man.write_text(f"output_name,sample_label,nm_per_px\nt1.png,S,{a}\nt2.png,S,{b}\n", encoding="utf-8")
+                if ok:
+                    rows = PS.read_images(self.make(**kw))
+                    self.assertEqual([(r["orig_name"], float(r["nm_per_px"]), r["nm_confirmed_by"]) for r in rows],
+                                     [("t1.png", float(a), "pujan"), ("t2.png", float(b), "pujan")])
+                else:
+                    n_before = len(list(self.root.glob("ps_*"))) if self.root.exists() else 0
+                    with self.assertRaisesRegex(PS.PredictSetError, r"sample 'S': mixed nm/px \(spread over 1 %"):
+                        self.make(**kw)
+                    self.assertEqual(len(list(self.root.glob("ps_*"))) if self.root.exists() else 0, n_before)
+
     def test_only_names_and_size_cap(self):
         with self.assertRaisesRegex(PS.PredictSetError, "plain file names"):
             self.make(names=["golden_0001.png", "../src/golden_0002.png"])

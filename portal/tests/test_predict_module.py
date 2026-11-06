@@ -491,7 +491,10 @@ class PixelTolerance(unittest.TestCase):
     def test_constant_pinned_to_results(self):
         import importlib
         RC = importlib.import_module("results.compute")
-        self.assertEqual(P.NM_TOLERANCE, RC.NM_TOLERANCE)
+        from portal.modules import results as PR
+        self.assertEqual(P.NM_TOLERANCE, RC.NM_TOLERANCE)                # all four copies pinned equal
+        self.assertEqual(P.NM_TOLERANCE, PR.NM_TOLERANCE)
+        self.assertEqual(P.NM_TOLERANCE, P.PS.NM_TOLERANCE)              # jobs/predict_set.py create()
         self.assertEqual(P.NM_TOLERANCE, 0.01)
         for vals in ([1.4724], [1.47125, 1.4724], [1.0, 1.009], [1.0, 1.011], [1.0, 1.0, 1.02], [1.0, 1.005, 1.011],
                      [0.7362, 1.4724], [2.0, 1.0, 1.0, 1.01]):
@@ -599,11 +602,8 @@ class PixelTolerance(unittest.TestCase):
 
 class PixelToleranceCreate(Base):
     """Through the real jobs.predict_set.create: a sample within the 1 % tolerance must make a set whose images.csv
-    has each tile's own nm/px. EXPECTED TO FAIL until jobs/predict_set.py (B1's file, not F1's) adopts the
-    tolerance: create() still refuses any two distinct nm/px in a sample ("mixed nm/px"). When it passes, remove
-    the expectedFailure (an unexpected success fails the run, so this cannot be forgotten)."""
+    has each tile's own nm/px (the 20261027 liposome pair, 1.47125 / 1.4724)."""
 
-    @unittest.expectedFailure
     def test_range_sample_creates_a_set(self):
         d = self.env.tmp / "sessions" / "tol_tiles"
         d.mkdir(parents=True, exist_ok=True)

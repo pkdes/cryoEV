@@ -22,7 +22,7 @@ renamed into place, so a reader never sees half a set.
 Refused, with every problem listed and nothing written: no images, or more than 200; a file that is not an 8-bit
 PNG or JPEG by its content (the extension is not trusted; MANIFEST.csv, the --manifest file and OS files such as
 desktop.ini are skipped), or one with a side over 8192 px (checked before it is decoded); nm/px missing for any
-image; no --nm-confirmed-by; a sample label or file name starting with = + - @ (a spreadsheet would run it); mixed tile sizes (or mixed nm/px) within one sample label; an unknown model; --only
+image; no --nm-confirmed-by; a sample label or file name starting with = + - @ (a spreadsheet would run it); mixed tile sizes (or nm/px spread over 1 % of the median) within one sample label; an unknown model; --only
 names that are not plain file names. The manifest's name column is output_name (or image, file_name, filename,
 name), its nm/px column nm_per_px.
 
@@ -44,6 +44,7 @@ import os
 import re
 import secrets
 import shutil
+import statistics
 import sys
 import threading
 import time
@@ -72,6 +73,8 @@ CSV_COLUMNS = ["image", "file", "orig_name", "sample_label", "nm_per_px", "nm_co
 STATUS_KEYS = ("state", "n_done", "n_total", "where", "job", "error", "updated", "pid", "waiting")
 NAME_COLUMNS = ("output_name", "image", "file_name", "filename", "name")   # as inference/inference_check.py
 NM_COLUMN = "nm_per_px"
+NM_TOLERANCE = 0.01                              # one sample's nm/px spread / median above this = refused; pinned
+                                                 # equal to results.compute's and the portal's (portal tests)
 SKIP_NAMES = {"manifest.csv", "desktop.ini", "thumbs.db", ".ds_store"}
 PS_RE = re.compile(r"^ps_\d{8}_[0-9a-f]{6}$")
 PERSON_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")       # registry/schemas/prediction_set.json owner
@@ -472,9 +475,13 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
         if len(sizes) > 1:
             problems.append(f"sample {label!r}: mixed tile sizes " + "; ".join(
                 f"{s} x{len(n)} (e.g. {n[0]})" for s, n in sorted(sizes.items(), key=lambda kv: -len(kv[1]))))
-        if len(nms) > 1:
-            problems.append(f"sample {label!r}: mixed nm/px " + "; ".join(
-                f"{v:g} x{len(n)} (e.g. {n[0]})" for v, n in sorted(nms.items(), key=lambda kv: -len(kv[1]))))
+        # contract section 8: one scale when (max - min) / median of every image's nm/px <= NM_TOLERANCE; each
+        # image keeps its own value in images.csv
+        per_image = [it["nm"] for it in its]
+        if len(nms) > 1 and (max(per_image) - min(per_image)) / statistics.median(per_image) > NM_TOLERANCE:
+            problems.append(f"sample {label!r}: mixed nm/px (spread over {NM_TOLERANCE * 100:g} % of the median) "
+                            + "; ".join(f"{v:g} x{len(n)} (e.g. {n[0]})"
+                                        for v, n in sorted(nms.items(), key=lambda kv: -len(kv[1]))))
     if problems:
         raise PredictSetError(f"refused ({len(problems)} problem(s)); results would refuse mixed sets:"
                               + _list(problems))
