@@ -242,10 +242,48 @@ Known limit: older items without a decision key or `t` still follow the whole-li
 Repeat at any time; each new lv supersedes the last. Unreviewed images keep their base labels until someone
 reviews them. Rules: [LABEL_CHANGES.md](LABEL_CHANGES.md#apply-rule).
 
+## Prediction packages (CJ portal)
+A user's prediction set (`<CryoAI-laptop>/predict/<ps>/`) becomes a package `review/pred_<ps>/` for this same tool. The contract is in BUILD_CONTRACTS.md, section 3.
+```bash
+python -m annotation.prediction_package build --ps <CryoAI-laptop>/predict/<ps> [--review-root <dir>] [--owner <id>]
+python -m annotation.multi_review_server [--root <CryoAI-laptop>/review] [--port 8767]
+python -m annotation.prediction_package reviewed --pkg <review>/pred_<ps>     # -> <pkg>/reviewed.json
+python -m annotation.prediction_package spotcheck --pkg <review>/pred_<ps> [--n 10] [--seed 0]
+```
+- **Labels** are the predictions at conf ≥ 0.50. A label nobody touches counts as present, so the reviewer only deletes, reclasses or reshapes. A stub COCO of them is kept in `labels.coco.json` (EV = 0, non-EV = 1).
+- **Candidates** are the predictions at 0.25 ≤ conf < 0.50, shown as unmatched predictions (`u`, image flag `fp`) to accept or reject.
+  - Phone: cards in **flagged objects** mode. Set the menu to **conf ≥ 0.25**: its default, 0.35, hides candidates below 0.35.
+  - For MV / inner calls, use **class review**, scope **all labels**.
+- `categories` = EV, non-EV, MV, inner. `split` = the sample label, reduced to `[A-Za-z0-9 _.-]` because the page shows `split` unescaped. The real label stays in `prediction_package.json`.
+- The other files:
+  - `prediction_package.json`: per image, its size, sample label, and the label ids and candidate confidences.
+  - `review_package.json`: the registry line (`kind: "prediction"`, `owner`, `prediction_set`).
+  - `.review_key`: kept when the package is rebuilt.
+- A package that already has saved edits is never rebuilt, because the edits point at its label ids.
+- **reviewed.json** (`reviewed/1`) is built with `review_server.effective_labels`.
+  - **Only images marked Reviewed take their edits.** Every other image reports the model's predictions at ≥ 0.50, even if it has edits.
+  - `source`: `"model"` for an outline as the model drew it, `"human"` for one drawn or reshaped by a reviewer.
+  - `conf`: the model's value, kept on a reshaped outline; `null` on a drawn one.
+  - `cls`: 0 for EV-type classes, 1 for non-EV / VLDL (`class_groups.yaml`).
+  - `reviewer_class`: EV / MV / inner / nonEV on reviewed images.
+  - `reviewed_by`: the `who` of the image's decisions. The tool doesn't record who pressed Reviewed.
+- **Spot check:** a seeded subset that goes round-robin over the sample labels. Within each sample, images are drawn weighted by 1 + their number of candidates. It is written to `<pkg>/spotcheck.json`.
+- **Multi-package server** (port 8767) serves `/<pkg id>/…`, each package through `review_server.make_handler`. `review_server.py` is wrapped, not changed.
+  - It serves only `pred_*` folders, so it never writes the edits of a package that the :8766 server has open.
+  - Each package has its own key (`.review_key`), and its own cookie, `review_key_<port>_<pkg id>`.
+  - An unknown id returns 404. A malformed id, or a path with `..`, `\` or `:`, returns 400. `/<id>` redirects to `/<id>/`.
+  - A package built after start is found on its first request. A rebuilt `data.js` or a new key is picked up on the next one.
+
 ## Tests
 ```bash
 python -m unittest discover -s annotation/tests -v
 ```
+- `test_prediction_package.py` runs on the golden fixtures (`tests/fixtures/cj_golden`, read only, checked unchanged).
+  - Labels vs candidates.
+  - Control: with no edits, the objects are the prediction files at ≥ 0.50.
+  - The golden review of 0002, through the multi server's HTTP API, equals `reviewed.json`.
+  - The multi server: per-package keys and cookies, 404 / 400, a late package, and the CLI.
+  - The spot check.
 - `test_review_server.py`, standard library only: a live server on a free 127.0.0.1 port.
   - API: ping, PUT, a merge by timestamp, the new / redraw decisions, claims (and their cap), access-key rejection.
   - Sandbox and cookies: the flag in `data.js` for `--sandbox` and a `SANDBOX_` package (a real package's `data.js` byte-identical); two servers with different keys and one cookie jar both stay signed in; the legacy cookie accepted only with this server's key. The browser tests check the bar at 400 and 1280 px (`SandboxBarTests`).
