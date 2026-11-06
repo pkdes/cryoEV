@@ -997,5 +997,51 @@ class Browser(Base):
         self.assertEqual(st, 403)
 
 
+class PredictSessions(Base):
+    """The Predict sessions panel inside Admin (the rest is in test_predict_sources.py): admin only, in the sub-nav,
+    and with nothing to scan it says so instead of failing. Never the real processed-data root (scan off)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.saved_scan = {k: os.environ.get(k) for k in ("CJ_PREDICT_SCAN_ROOTS", "CJ_PREDICT_SOURCES")}
+        os.environ["CJ_PREDICT_SCAN_ROOTS"] = "off"
+        os.environ.pop("CJ_PREDICT_SOURCES", None)
+        super().setUpClass()
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        for k, v in cls.saved_scan.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_admin_only_and_in_the_subnav(self):
+        for role in ("basic", "advanced"):
+            for path in ("/admin/predict", "/admin/api/predict"):
+                st, _, _ = self.get(path, role=role)
+                self.assertEqual(st, 403, (role, path))
+        st, _, body = self.get("/admin/")
+        self.assertIn(b'<a href="/admin/predict">Predict sessions</a>', body)
+        st, _, body = self.get("/admin/predict")
+        self.assertEqual(st, 200)
+        self.assertIn(b'aria-current="page">Predict sessions</a>', body)
+        self.assertIn(b"No folder is scanned", body)
+        self.assertIn(b"No session with model-ready tiles was found.", body)
+        st, _, body = self.get("/admin/api/predict")
+        self.assertEqual(json.loads(body)["sources"], [])
+
+    def test_post_needs_token_and_origin(self):
+        st, _, _ = self.post("/admin/predict/show", {"key": "0123456789", "hidden": "yes"}, origin=False)
+        self.assertEqual(st, 403)
+        st, _, body = self.post("/admin/predict/show", {"key": "0123456789", "hidden": "yes"}, token="0" * 40)
+        self.assertEqual(st, 403)
+        st, _, body = self.post("/admin/predict/show", {"key": "0123456789", "hidden": "yes"})
+        self.assertEqual(st, 404)
+        self.assertIn(b"not in the list any more", body)
+        self.assertFalse((self.env.state / "predict_sources.json").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
