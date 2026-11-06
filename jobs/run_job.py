@@ -15,6 +15,11 @@ Picks the oldest <queue>/q/<job>/ that has READY and no <queue>/d/<job>/, then:
      --single-run --no-notify with the bundle's args (CRYOEV_CRYOAI_ROOT = the work folder);
   3. writes <queue>/d/.tmp_<job>/ (run.json, runs/<run>/, status.json, train.log), renames it to d/<job>/,
      then writes DONE.json last. The status comes from run.json, never from the exit code.
+A predict job (JOB.json job_type predict, from sync.py push-predict; picked only when $CRYOEV_PREDICT_JOBS is 1)
+keeps the md5 / pack / commit / Ultralytics / path / disk / GPU-busy checks, skips the training size and worker rules,
+runs inference/predict_models.py over the pack's images into work/<job>/p/, and is done only with exit 0, a
+prediction file per image and summary.csv (moved to p/<model>/summary.csv); d/<job>/ gets p/ and predict.log, and
+DONE.json adds job_type, ps, model, n_done, n_total.
 A failed check or run ends `blocked` with a reason. One ntfy push at the end ($CRYOEV_NTFY_TOPIC).
 Holds an OS lock on <queue>/runner.lock for the whole job (released if the process dies). Never writes the
 registry, and never deletes anything outside <queue>/work/<job>/. Keeps the machine awake while a job runs.
@@ -293,6 +298,12 @@ def check_job(qdir: Path, work: Path, st: dict, allow_big=False) -> tuple:
         raise Blocked(f"bad zip: {e}")
     st.update(bundle_id=job.get("bundle_id") or spec.get("bundle_id"), dataset=job.get("dataset_name"),
               cryoEV_commit=job.get("cryoEV_commit"), runner_commit=runner_commit())
+    predict = is_predict(job)
+    if predict or spec.get("type") == "predict":       # a train job (no job_type, type train) never enters here
+        if not (predict and spec.get("type") == "predict"):
+            raise Blocked(f"job type mismatch: job.json type {spec.get('type')}, JOB.json job_type "
+                          f"{job.get('job_type')}")
+        st.update(job_type="predict", ps=job.get("ps"), model=job.get("model"))
     if any(re.search(r"^\s*download\s*:", y, re.M) for y in yamls):
         raise Blocked("dataset.yaml has a download: key (Ultralytics would run it); remove it and rebundle")
     pack = None
@@ -320,8 +331,9 @@ def check_job(qdir: Path, work: Path, st: dict, allow_big=False) -> tuple:
         raise Blocked("only --single-run jobs are run here")
     gpu = gpu_state()
     st["gpu_used_mb_at_start"] = gpu.get("used_mb")
-    size, imgsz = size_and_imgsz(args)
-    if gpu["total_mb"] < LAPTOP_GPU_MB:
+    if not predict:                                    # training size / worker / memory rules; not for predict
+        size, imgsz = size_and_imgsz(args)
+    if not predict and gpu["total_mb"] < LAPTOP_GPU_MB:
         if size in BIG_SIZES or imgsz > MAX_LAPTOP_IMGSZ:
             if not allow_big:
                 raise Blocked(f"desktop only: y8{size} at imgsz {imgsz} on a {gpu['total_mb'] / 1024:.0f} GB GPU "
@@ -360,14 +372,80 @@ def train_argv(job: dict, work: Path) -> list:
     return [*cmd, *args]
 
 
+# ---------------------------------------------------------------- predict jobs (docs/JOBS.md, "Predict jobs")
+def is_predict(job: dict) -> bool:
+    """A predict job's JOB.json (sync.push_predict) says job_type predict; train bundles have no job_type."""
+    return job.get("job_type") == "predict"
+
+
+def predict_argv(req: dict, images, out, device="cuda") -> list:
+    """predict_models argv for one prediction set (req: request.json or a predict JOB.json): predictions only,
+    no overlays. Shared by the desktop runner and jobs/predict_local.py."""
+    cmd = hooks().get("predict_cmd") or [sys.executable, "-u", str(REPO / "inference" / "predict_models.py")]
+    args = ["--images", str(images), "--out", str(out), "--models", str(req["model"]),
+            "--conf", str(req.get("conf", 0.25)), "--max-det", str(req.get("max_det", 1000)),
+            "--device", device, "--no-overlays"]
+    if req.get("imgsz"):
+        args += ["--imgsz", str(int(req["imgsz"]))]
+    return [*cmd, *args]
+
+
+def log_tail(log: Path, n=300) -> str:
+    """The last non-empty lines of a log, at most n characters, for a reason / error field."""
+    try:
+        text = C.read_shared(log, limit=8192).decode("utf-8", errors="replace")
+    except OSError:
+        return "no log"
+    lines = [ln.strip() for ln in text.replace("\r", "\n").splitlines() if ln.strip()]
+    out = ""
+    for ln in reversed(lines):
+        if len(out) + len(ln) + 3 > n:
+            break
+        out = ln + (" | " + out if out else "")
+    return out or (lines[-1][-n:] if lines else "empty log")
+
+
+def finish_predict(work: Path, job: dict, st: dict, rc: int, max_hours, log: Path):
+    """After predict_models: complete = exit 0, a prediction file per image and summary.csv, which then moves to
+    p/<model>/summary.csv (the prediction_set layout). Records n_done / n_total. Raises Blocked / Cancelled."""
+    out, model = work / C.PS_PRED, str(job.get("model"))
+    images = work / "training outputs" / st["dataset"] / "images"
+    stems = sorted(p.stem for p in images.iterdir() if p.is_file()) if images.is_dir() else []
+    pred = out / model / "predictions"
+    st["n_total"], st["n_done"] = len(stems), C.count_predictions(pred)
+    if st.get("cancelled"):
+        raise Cancelled(st["cancelled"])
+    if st.get("time_capped"):
+        raise Blocked(f"time cap: stopped after --max-hours {max_hours:g} "
+                      f"({st['n_done']} of {st['n_total']} images predicted)")
+    if rc != 0:
+        raise Blocked(f"predict_models exit {rc}: {log_tail(log)}")
+    missing = [s for s in stems if not (pred / f"{s}.txt").is_file()]
+    if not stems or missing:
+        raise Blocked(f"{len(missing)} of {len(stems)} images have no prediction file, e.g. {missing[:3]}")
+    if not (out / "summary.csv").is_file():
+        raise Blocked(f"predict_models wrote no summary.csv; see {C.PREDICT_LOG}")
+    (out / "summary.csv").replace(out / model / "summary.csv")
+
+
 # ---------------------------------------------------------------- one job
+def queued_predict(qdir: Path) -> bool:
+    """q/<job>/job.json says type predict (an unreadable job.json counts as a train job, as before)."""
+    try:
+        return C.read_json(qdir / C.JOB_FILE).get("type") == "predict"
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def pick(root: Path, only=None):
-    """Oldest q/<job>/ with READY and no d/<job>/ (READY mtime, then name)."""
+    """Oldest q/<job>/ with READY and no d/<job>/ (READY mtime, then name). Predict jobs only when
+    $CRYOEV_PREDICT_JOBS is 1: otherwise they stay queued, untouched."""
     qroot = root / C.Q
     if not qroot.is_dir():
         return None
     ready = [d for d in qroot.iterdir() if d.is_dir() and not d.name.startswith(".")
-             and (d / C.READY).is_file() and not (root / C.D / d.name).exists() and (only in (None, d.name))]
+             and (d / C.READY).is_file() and not (root / C.D / d.name).exists() and (only in (None, d.name))
+             and (C.predict_enabled() or not queued_predict(d))]
     return min(ready, key=lambda d: ((d / C.READY).stat().st_mtime, d.name)) if ready else None
 
 
@@ -407,7 +485,7 @@ def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
           "started": C.now(), "queue_dir": str(root), "max_hours": max_hours}
     C.write_json(tmp / C.STATUS, st)
     log = work / "train.log"
-    runs = []
+    runs, predict = [], False
     try:
         why = cancel_request(qdir)
         if why:                                        # cancelled while queued: never started
@@ -416,6 +494,8 @@ def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
             raise Blocked(f"killed twice: {n_stale} interrupted attempts in d/.tmp_{job_id}.stale_*; "
                           f"check train.log there, then `sync.py retry`")
         spec, job, zp, names, pack = check_job(qdir, work, st, allow_big)   # GPU-busy first: an orphan may own work/
+        if st.get("job_type") == "predict":
+            predict, log = True, work / C.PREDICT_LOG
         if work.exists():                              # our own scratch from an earlier attempt
             for i in range(4):                         # a reader over SMB can hold a file for a moment
                 try:
@@ -440,9 +520,14 @@ def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
                 dataset_cache.verify_tree(work / "training outputs" / st["dataset"], pack[1])
             except dataset_cache.PackError as e:
                 raise Blocked(str(e))
-        argv = train_argv(job, work)
-        st["argv"] = argv
-        print(f"[jobs] {job_id}: training: {' '.join(argv[2:])}  (log {log})", flush=True)
+        if predict:                                    # predict_models over the set's images -> work/<job>/p/
+            argv = predict_argv(job, work / "training outputs" / st["dataset"] / "images", work / C.PS_PRED)
+            st["argv"] = argv
+            print(f"[jobs] {job_id}: predicting: {' '.join(argv[2:])}  (log {log})", flush=True)
+        else:
+            argv = train_argv(job, work)
+            st["argv"] = argv
+            print(f"[jobs] {job_id}: training: {' '.join(argv[2:])}  (log {log})", flush=True)
         env = {**os.environ, "CRYOEV_CRYOAI_ROOT": str(work), "PYTHONIOENCODING": "utf-8"}
         with open(log, "wb") as lf:
             p = subprocess.Popen(argv, cwd=REPO, env=env, stdout=lf, stderr=subprocess.STDOUT)
@@ -464,32 +549,35 @@ def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
                     rc = p.wait()
                     break
         st["exit_code"] = rc
-        run_root = work / "training outputs" / st["dataset"] / "runs"
-        if st.get("time_capped") or st.get("cancelled"):   # the trainer never wrote run.json: say why, keep last.pt
-            why = st.get("cancelled") or f"stopped by run_job.py after --max-hours {max_hours:g}"
-            for rd in (d for d in run_root.glob("*") if d.is_dir() and not (d / "run.json").exists()):
-                C.write_json(rd / "run.json", {
-                    "schema": "run/1", "id": rd.name, "dataset": st["dataset"],
-                    "status": "cancelled" if st.get("cancelled") else "time_cap",
-                    "error": f"{why} (partial run: weights/last.pt)",
-                    "bundle_id": st.get("bundle_id"), "job_bundle": st.get("bundle_id"),
-                    "cryoEV_commit": st.get("cryoEV_commit"), "machine": platform.node(), "ended": C.now()})
-        rjs = sorted(run_root.glob("*/run.json"), key=lambda p: p.stat().st_mtime)
-        if st.get("cancelled"):
+        if predict:
+            finish_predict(work, job, st, rc, max_hours, log)   # raises Blocked / Cancelled unless complete
+        else:
+            run_root = work / "training outputs" / st["dataset"] / "runs"
+            if st.get("time_capped") or st.get("cancelled"):   # the trainer never wrote run.json: say why, keep last.pt
+                why = st.get("cancelled") or f"stopped by run_job.py after --max-hours {max_hours:g}"
+                for rd in (d for d in run_root.glob("*") if d.is_dir() and not (d / "run.json").exists()):
+                    C.write_json(rd / "run.json", {
+                        "schema": "run/1", "id": rd.name, "dataset": st["dataset"],
+                        "status": "cancelled" if st.get("cancelled") else "time_cap",
+                        "error": f"{why} (partial run: weights/last.pt)",
+                        "bundle_id": st.get("bundle_id"), "job_bundle": st.get("bundle_id"),
+                        "cryoEV_commit": st.get("cryoEV_commit"), "machine": platform.node(), "ended": C.now()})
+            rjs = sorted(run_root.glob("*/run.json"), key=lambda p: p.stat().st_mtime)
+            if st.get("cancelled"):
+                runs = [p.parent for p in rjs]
+                if rjs:
+                    st["run"], st["run_status"] = rjs[-1].parent.name, "cancelled"
+                raise Cancelled(st["cancelled"])
+            if not rjs:
+                raise Blocked(f"time cap: stopped after --max-hours {max_hours:g}, before any run folder" if
+                              st.get("time_capped") else f"no run.json (run_experiments exit {rc}); see train.log")
             runs = [p.parent for p in rjs]
-            if rjs:
-                st["run"], st["run_status"] = rjs[-1].parent.name, "cancelled"
-            raise Cancelled(st["cancelled"])
-        if not rjs:
-            raise Blocked(f"time cap: stopped after --max-hours {max_hours:g}, before any run folder" if
-                          st.get("time_capped") else f"no run.json (run_experiments exit {rc}); see train.log")
-        runs = [p.parent for p in rjs]
-        rj = C.read_json(rjs[-1])
-        st["run"], st["run_status"] = rjs[-1].parent.name, rj.get("status")
-        if rj.get("status") != "finished":
-            raise Blocked(f"run {rj.get('status')}: {str(rj.get('error') or '')[:300]}")
-        if rc != 0:                                    # e.g. the summary step failed after run.json was written
-            raise Blocked(f"exit {rc} after a finished run.json; see train.log")
+            rj = C.read_json(rjs[-1])
+            st["run"], st["run_status"] = rjs[-1].parent.name, rj.get("status")
+            if rj.get("status") != "finished":
+                raise Blocked(f"run {rj.get('status')}: {str(rj.get('error') or '')[:300]}")
+            if rc != 0:                                # e.g. the summary step failed after run.json was written
+                raise Blocked(f"exit {rc} after a finished run.json; see train.log")
         st.update(status="done", reason=None)
     except Blocked as e:
         st.update(status="blocked", reason=str(e))
@@ -505,15 +593,29 @@ def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
         if runs:
             shutil.copy2(runs[-1] / "run.json", tmp / "run.json")
         if log.exists():
-            shutil.copy2(log, tmp / "train.log")
+            shutil.copy2(log, tmp / log.name)           # train.log (predict.log for a predict job)
+        if predict and (work / C.PS_PRED).is_dir():    # p/<model>/predictions/ + summary.csv (partial if blocked)
+            shutil.copytree(work / C.PS_PRED, tmp / C.PS_PRED)
     except OSError as e:
         st.update(status="blocked", reason=f"result copy failed: {e}")
     st.update(ended=C.now(), runs=[rd.name for rd in runs])
+    predict = predict or st.get("job_type") == "predict" or queued_predict(qdir)
+    if predict:                                        # also when blocked before JOB.json was read: from job.json
+        try:
+            spec = C.read_json(qdir / C.JOB_FILE)
+        except (OSError, ValueError):
+            spec = {}
+        for k, v in (("job_type", "predict"), ("ps", spec.get("ps")), ("model", spec.get("model")),
+                     ("n_total", spec.get("n_images")), ("n_done", 0)):
+            if st.get(k) is None:
+                st[k] = v
     C.write_json(tmp / C.STATUS, st)
     rename_retry(tmp, final)
     done = {k: st.get(k) for k in ("job", "status", "reason", "dataset", "bundle_id", "run", "run_status",
                                    "runs", "machine", "ended", "allow_big", "max_hours", "time_capped",
                                    "runner_commit", "cryoEV_commit")}
+    if predict:                                        # sync.pull lands p/ in <CryoAI-laptop>/predict/<ps>/
+        done.update({k: st.get(k) for k in ("job_type", "ps", "model", "n_done", "n_total")})
     C.write_json(final / C.DONE, done)                  # last: the laptop pulls only folders with DONE.json
     if st["status"] == "done":
         shutil.rmtree(work, ignore_errors=True)
@@ -524,7 +626,9 @@ def notify(done):
     try:
         from notify import _send_ntfy
         title = f"Job {done['status']}: {done['job']}"
-        _send_ntfy(title, done.get("reason") or f"{done.get('run')} {done.get('run_status')}",
+        what = (f"{done.get('ps')}: {done.get('n_done')}/{done.get('n_total')} images predicted"
+                if done.get("job_type") == "predict" else f"{done.get('run')} {done.get('run_status')}")
+        _send_ntfy(title, done.get("reason") or what,
                    priority=3 if done["status"] == "done" else 4)
     except Exception as e:
         print(f"[jobs] no push: {e}")

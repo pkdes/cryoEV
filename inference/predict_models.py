@@ -4,7 +4,7 @@ Run one or more registered EV models (models/models.yaml) over a folder of image
 Per model, writes to <out>/<model_id>/:
   predictions/<stem>.txt  -- standard prediction cache format ('class conf x1 y1 ...', normalized),
                              readable by rank_predictions.py, multilayer_role_analysis.py, etc.
-  overlays/<stem>.png     -- predicted polygon outlines on the image
+  overlays/<stem>.png     -- predicted polygon outlines on the image (not with --no-overlays)
 Plus <out>/summary.csv: one row per image x model (n_detections, mean_conf). These are RAW
 detections: for a multi-class model (models.yaml `classes:`, e.g. v5: EV + non-EV)
 n_detections and mean_conf cover every class. EV counts come from
@@ -51,6 +51,8 @@ def main():
                     help="override every model's registered imgsz; see the note above")
     ap.add_argument("--max-det", type=int, default=300,
                     help="ultralytics per-image detection cap (its default 300 truncates dense fields)")
+    ap.add_argument("--no-overlays", action="store_true",
+                    help="write predictions/ and summary.csv only (prediction sets, jobs/predict_local.py)")
     args = ap.parse_args()
 
     registry = yaml.safe_load(REGISTRY.read_text())["models"]
@@ -66,7 +68,8 @@ def main():
         spec = registry[mid]
         pred_dir = args.out / mid / "predictions"
         ov_dir = args.out / mid / "overlays"
-        ov_dir.mkdir(parents=True, exist_ok=True)
+        if not args.no_overlays:
+            ov_dir.mkdir(parents=True, exist_ok=True)
         # --imgsz and --max-det were parsed but never passed on, so both flags
         # did nothing: every run used the registered imgsz and kept
         # ultralytics' 300-detection cap, which truncates dense fields without
@@ -78,6 +81,11 @@ def main():
                                      imgsz=imgsz, conf=args.conf, iou=args.iou,
                                      device=args.device, max_det=args.max_det)
         for img_path in images:
+            if args.no_overlays:                       # counts and confidences don't depend on the image size
+                polys, confs = load_prediction_polygons(pred_dir / f"{img_path.stem}.txt", 1, 1)
+                rows.append({"image": img_path.name, "model_id": mid, "n_detections": len(polys),
+                             "mean_conf": round(float(np.mean(confs)), 4) if confs else ""})
+                continue
             img = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
             h, w = img.shape[:2]
             polys, confs = load_prediction_polygons(pred_dir / f"{img_path.stem}.txt", w, h)

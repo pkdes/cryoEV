@@ -31,10 +31,25 @@ MAX_JOB_ID = 48                  # keeps <queue>\work\<job>\... short
 ROBOCOPY_OK_MAX = 7              # robocopy exit codes >= 8 are failures
 ROBOCOPY_FLAGS = ["/E", "/Z", "/R:2", "/W:5", "/NP", "/NFL", "/NDL"]
 FORBIDDEN_FLAGS = ("/MIR", "/PURGE", "/MOV")     # /MOV and /MOVE delete the source
+PREDICT_ENV = "CRYOEV_PREDICT_JOBS"   # "1" turns on the desktop path for predict jobs (push-predict; run_job picks them)
+PS_PRED, PREDICT_LOG = "p", "predict.log"   # <prediction set>/p/<model>/predictions/<nnnn>.txt; the predictor's log
 
 
 def now():
     return datetime.now().isoformat(timespec="seconds")
+
+
+def predict_enabled() -> bool:
+    """Predict jobs on the queue (docs/JOBS.md, "Predict jobs") are off unless $CRYOEV_PREDICT_JOBS is "1"."""
+    return os.environ.get(PREDICT_ENV) == "1"
+
+
+def count_predictions(pred_dir) -> int:
+    """Prediction files (<stem>.txt) in pred_dir so far: predict_models writes one per image as it goes."""
+    try:
+        return sum(1 for n in os.listdir(pred_dir) if n.endswith(".txt"))
+    except OSError:
+        return 0
 
 
 def md5_file(path) -> str:
