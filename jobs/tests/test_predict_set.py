@@ -8,7 +8,6 @@ Never touches the real registry or CryoAI-laptop (CRYOEV_LAPTOP_ROOT points at a
 shared by test_predict_local.py and test_predict_desktop.py.
 """
 import csv
-import json
 import os
 import shutil
 import subprocess
