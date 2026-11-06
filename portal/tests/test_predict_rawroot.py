@@ -144,7 +144,7 @@ class RawRoot(RawBase):
         r = self.form(path, {"sig": sig, "samples": ["g0", "g1"], "nm_g0": "1.4724", "nm_g1": "1.4724",
                              "how": "all", "model": TC.MODEL, "confirm": "yes"}, "advanced")
         self.assertEqual(r.status_code, 303, r.text[:600])
-        ps = self.w.root / r.headers["location"].strip("/").split("/")[-1]
+        ps = self.w.root / self.follow(r.headers["location"]).strip("/").split("/")[-1]
         imgs = [p for p in (ps / "images").rglob("*") if p.is_file()]
         self.assertEqual(len(imgs), len(tiles))
         self.assertEqual(sorted(md5(p) for p in imgs), sorted(tiles.values()))
@@ -409,7 +409,7 @@ class RawRootOnSubstDrive(RawBase):
         r = self.form(path, {"sig": sig, "samples": ["g0", "g1"], "nm_g0": "1.4724", "nm_g1": "1.4724",
                              "how": "all", "model": TC.MODEL, "confirm": "yes"}, "advanced")
         self.assertEqual(r.status_code, 303, r.text[:600])
-        ps = self.w.root / r.headers["location"].strip("/").split("/")[-1]
+        ps = self.w.root / self.follow(r.headers["location"]).strip("/").split("/")[-1]
         imgs = [p for p in (ps / "images").rglob("*") if p.is_file()]
         self.assertEqual(sorted(md5(p) for p in imgs), sorted(tile_md5s(d / "tiles").values()))
         self.assertTrue(all(os.stat(p).st_nlink == 1 for p in imgs))

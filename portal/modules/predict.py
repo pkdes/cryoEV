@@ -105,6 +105,15 @@ Rules:
   - Everything shown is escaped here.
   - Uploads: caps checked on the declared list and again while streaming; free disk checked at the start (the whole
     declared size held), at each piece and every 64 MB, counting every upload in flight (FREE_MARGIN_BYTES kept free).
+  - Round 6 (P1): up to 1000 tiles (jobs/predict_set.MAX_IMAGES). Making a set takes longer than an HTTP request may
+    last, so a form only validates, starts a background task (keyed by upload id, or by owner + session + pick: the
+    same key joins the running task) and answers 303 to /predict/preparing/<id>/, which polls
+    /predict/api/preparing/<id> and opens the analysis. Uploads are hard-linked into the set (link=True; a copy on
+    another drive) and the staging is removed only after success: a failed create keeps the upload ("Try again").
+    TILES_MAX_TOTAL_BYTES and a free-disk check (copies: total + 10 %) refuse early. The forms show an estimate
+    (a + b * images fitted to finished laptop runs, cached 10 min) and an optional Name (request.json `name`,
+    not stored when it is still the prefill); POST /predict/<ps>/rename changes it (portal/names.py has
+    display_name).
   - A basic user has at most MAX_ACTIVE_BASIC sets queued or running. A review package built here is appended to
     the registry (review_package) once.
 """
@@ -138,6 +147,7 @@ from jobs import convert_raw as CR
 from jobs import predict_local as PL
 from jobs import predict_set as PS
 from portal import predict_sources as PSRC
+from portal import names as NM
 
 PREFIX = "/predict"
 ROLES = ("admin", "advanced", "basic")
@@ -149,7 +159,15 @@ MODELS_YAML = REPO / "models" / "models.yaml"
 PORTAL_TMP = ".portal"                    # <root>/.portal/: the portal's own scratch (consumers skip dot entries)
 IMAGE_EXT = (".png", ".jpg", ".jpeg")
 SAMPLE_COLUMNS = ("sample_label", "sample", "grid")
-MAX_FILES = PS.MAX_IMAGES                 # 200 tiles per analysis or upload (= a prediction set's maximum)
+MAX_FILES = PS.MAX_IMAGES                 # 1000 tiles per analysis or upload (= a prediction set's maximum)
+TILES_MAX_TOTAL_BYTES = 20 * 1024 ** 3    # one tile upload, all files together (raw uploads: RAW_MAX_TOTAL_BYTES)
+DISK_NEED_FACTOR = 1.1                    # a set's tiles are copied: their total + 10 % must be free (links need none)
+EST_FALLBACK = (12.0, 0.17)               # seconds: a + b * images, until 3 finished laptop sets fit a line
+RESUBMIT_S = 600                          # a finished pick pressed again within this opens its set
+EST_TTL_S = 600                           # the fitted line is cached this long
+EST_MAX_S_PER_IMAGE = 5                   # a finished run slower than this per image is a stall, not data
+EST_MAX_SETS = 300                        # finished sets read for the fit, newest first
+CREATE_ID_RE = re.compile(r"^(?:us|sc)_[0-9a-f]{12}$")   # a background create: us_ = an upload id, sc_ = a session pick
 MAX_FILE_BYTES = 100 * 1024 * 1024        # 100 MB per file
 MAX_FIELD_BYTES = 4096                    # a text field of the upload form
 MAX_FIELDS = 20
@@ -535,14 +553,7 @@ def _parse_local(s) -> float | None:
     return dt.timestamp()
 
 
-def when(s) -> str:
-    try:
-        dt = datetime.fromisoformat(str(s))
-    except (TypeError, ValueError):
-        return "?"
-    if dt.tzinfo is not None:
-        dt = dt.astimezone()
-    return f"{dt.day} {dt.strftime('%b %Y, %H:%M')}"
+when = NM.when                            # shared with names.py (Results and My reviews use it too)
 
 
 def ago(seconds) -> str:
@@ -775,15 +786,28 @@ def wrap(body: str) -> str:
     return _PH.sub(lambda m: body, tpl)
 
 
+def session_label(req: dict, srcs, admin=False):
+    """The configured label of a session source, found by its folder (never shown as a path)."""
+    src = req.get("source") or {}
+    return next((s["label"] for s in srcs if src.get("dir") and (admin or not s.get("problem")) and
+                 os.path.normcase(str(s["dir"].resolve())) == os.path.normcase(str(src.get("dir")))), None)
+
+
 def source_text(req: dict, srcs, admin=False) -> str:
     """A source with a problem (hidden, incompatible) lends its label only when admin=True (callers pass nothing
     yet, so for everyone it is "Session <id>" alone)."""
-    src = req.get("source") or {}
-    if src.get("kind") == "upload":
-        return "Uploaded images"
-    label = next((s["label"] for s in srcs if src.get("dir") and (admin or not s.get("problem")) and
-                  os.path.normcase(str(s["dir"].resolve())) == os.path.normcase(str(src.get("dir")))), None)
-    return f"Session {src.get('session') or '?'}" + (f" ({label})" if label else "")
+    return NM.source_label(req, session_label(req, srcs, admin))
+
+
+def tab_title(text: str) -> str:
+    """A browser-tab title safe for ctx.page's `{{...}}` substitution (it escapes & so entities would show): the
+    braces of a free-text name become full-width ones."""
+    return text.replace("{", "\uff5b").replace("}", "\uff5d")
+
+
+def set_title(req: dict, srcs, admin=False) -> str:
+    """What the analysis is called everywhere: its name, else "<source> · <date>" (names.display_name)."""
+    return NM.display_name(req, session_label(req, srcs, admin))
 
 
 def status_html(view: dict) -> str:
@@ -884,7 +908,9 @@ def item_of(cfg, user, d: Path, req: dict, st: dict, srcs) -> dict:
     ps = d.name
     view = status_view(st, user.get("role") == "admin")
     pkg = package_dir(cfg, ps)
-    return {"ps": ps, "href": f"/predict/{ps}/", "title": f"Analysis of {when(req.get('created'))}",
+    admin = user.get("role") == "admin"
+    return {"ps": ps, "href": f"/predict/{ps}/", "title": set_title(req, srcs, admin),
+            "named": bool(isinstance(req.get("name"), str) and req["name"].strip()),
             "created": req.get("created"), "owner": req.get("owner"), "model": req.get("model"),
             "source": source_text(req, srcs, admin=user.get("role") == "admin"), "state": view["state"], "label": view["label"],
             "n_done": view["n_done"], "n_total": view["n_total"],
@@ -904,9 +930,10 @@ def mine_html(items, admin) -> str:
         links = "".join(f'<a href="{esc(h)}">{t}</a>' for h, t in ((it["review_href"], "Review"),
                                                                     (it["results_href"], "Results")) if h)
         li.append(f'<li class="cj-card cj-predict-item"><div class="cj-predict-top">'
-                  f'<a class="cj-predict-ttl" href="{esc(it["href"])}">{esc(it["source"])}</a>'
+                  f'<a class="cj-predict-ttl" href="{esc(it["href"])}">{esc(it["title"])}</a>'
                   f'{chip(it["label"], tone)}</div>'
-                  f'<p class="cj-mut">{esc(when(it["created"]))} · {esc(prog)}{who}</p>'
+                  f'<p class="cj-mut">{esc(it["source"] + " · " + when(it["created"]) + " · ") if it.get("named") else ""}'
+                  f'{esc(prog)}{who}</p>'
                   + (f'<p class="cj-predict-links">{links}</p>' if links else "") + '</li>')
     return f'<ul class="cj-predict-items">{"".join(li)}</ul>'
 
@@ -1003,6 +1030,26 @@ def page_new(cfg, user, can_see) -> str:
         f'{raw}</div>')
 
 
+def name_field(value, prefill) -> str:
+    """The Name box, prefilled with the default name; the prefill travels in a hidden field so an unchanged box is
+    not stored as a name (chosen_name)."""
+    return (f'<fieldset class="cj-card cj-predict-fs"><legend>Name</legend>'
+            f'<label class="cj-predict-field"><span>Analysis name (optional; you can rename it later)</span>'
+            f'<input name="name" maxlength="{PS.NAME_MAX}" value="{esc(value)}"></label>'
+            f'<input type="hidden" name="name_default" value="{esc(prefill)}"></fieldset>')
+
+
+def chosen_name(f: dict):
+    """The name to store: the cleaned Name field, or None when empty or still the prefill that was offered."""
+    n = PS.clean_name(f.get("name"))
+    return None if n is None or n == PS.clean_name(f.get("name_default")) else n
+
+
+def default_name_for(source: dict, label=None) -> str:
+    """The prefill of the Name field: what the analysis would be called without a name (kept as typed if unchanged)."""
+    return NM.default_name({"source": source, "created": now_iso()}, label)[:PS.NAME_MAX]
+
+
 def page_session_form(cfg, user, src: dict, t: dict, form=None, error=None) -> str:
     admin = user.get("role") == "admin"
     form = form or {}
@@ -1053,6 +1100,10 @@ def page_session_form(cfg, user, src: dict, t: dict, form=None, error=None) -> s
     count = form.get("count", "")
     over = t["n"] > MAX_FILES
     err = msg_box("", extra=f'<div>{problem_list(error)}</div>') if error else ""
+    n0 = sum(len(g["names"]) for i, g in enumerate(t["groups"]) if f"g{i}" in picked and not g["mixed"])
+    prefill = form["name_default"] if "name_default" in form else default_name_for(
+        {"kind": "session", "session": src["session"]}, src["label"])
+    name_val = form["name"] if "name" in form else prefill
     return wrap(
         f'<div class="cj-predict"><p class="cj-mut"><a href="/predict/new/">← Back</a></p>'
         f'<h1>{esc(src["label"])}</h1><p class="cj-mut">Session {esc(src["session"])} · {t["n"]} tiles'
@@ -1074,14 +1125,16 @@ def page_session_form(cfg, user, src: dict, t: dict, form=None, error=None) -> s
         f'inputmode="numeric" aria-label="number of tiles" value="{esc(count)}"> tiles, spread across the '
         f'ticked samples</label>'
         f'<p class="cj-mut" id="cj-predict-sel" role="status"></p>'
+        + estimate_html(cfg, min(n0, MAX_FILES))
         + (f'<p class="cj-mut">At most {MAX_FILES} tiles per analysis: choose a number.</p>' if over else "")
-        + f'</fieldset>{model_block(cfg, user, form.get("model"))}'
+        + f'</fieldset>{name_field(name_val, prefill)}{model_block(cfg, user, form.get("model"))}'
         f'<p><button class="cj-predict-btn cj-predict-primary" type="submit" data-busy="Preparing your images… '
         f'this can take a minute">Start analysis</button></p></form></div>')
 
 
 def page_upload_form(cfg, user, form=None, error=None) -> str:
     form = form or {}
+    up_prefill = form["name_default"] if "name_default" in form else default_name_for({"kind": "upload"})
     err = msg_box("", extra=f'<div>{problem_list(error)}</div>') if error else ""
     again = '<p class="cj-mut">Choose the files again (a browser forgets them after a refusal).</p>' if error else ""
     return wrap(
@@ -1106,14 +1159,25 @@ def page_upload_form(cfg, user, form=None, error=None) -> str:
         f'<label class="cj-predict-confirm"><input type="checkbox" name="confirm" value="yes" required> '
         f'I confirm the pixel size</label>'
         f'<p class="cj-mut">Sizes in nm are computed from it. Your name is recorded as the person who confirmed it.'
-        f'</p></fieldset>{model_block(cfg, user, form.get("model"))}'
+        f'</p></fieldset>'
+        f'{name_field(form["name"] if "name" in form else up_prefill, up_prefill)}'
+        f'{model_block(cfg, user, form.get("model"))}'
         f'<fieldset class="cj-card cj-predict-fs"><legend>Images</legend>'
         f'<label class="cj-predict-field"><span>Processed 8-bit PNG or JPEG tiles of one sample (up to {MAX_FILES}, '
         f'{MAX_FILE_BYTES // 2 ** 20} MB each)</span><input type="file" name="files" multiple required '
         f'accept=".png,.jpg,.jpeg,image/png,image/jpeg"></label>'
-        f'<p class="cj-mut" id="cj-predict-files" data-cj-upload-info role="status"></p></fieldset>'
+        f'<p class="cj-mut" id="cj-predict-files" data-cj-upload-info role="status"></p>'
+        f'{estimate_html(cfg, 0)}</fieldset>'
         f'<p><button class="cj-predict-btn cj-predict-primary" type="submit" data-busy="Uploading… keep this '
         f'page open">Upload and start</button></p></form></div>')
+
+
+def rename_form(ps: str, req: dict) -> str:
+    """A small inline form on the analysis page (the owner and the admin are the only ones who see the page)."""
+    return (f'<form method="post" action="/predict/{esc(ps)}/rename" class="cj-predict-inline cj-predict-rename">'
+            f'<label>Name <input name="name" maxlength="{PS.NAME_MAX}" value="{esc(req.get("name") or "")}" '
+            f'placeholder="{esc(NM.default_name(req))}"></label> '
+            f'<button class="cj-predict-btn" type="submit">Rename</button></form>')
 
 
 def page_set(cfg, user, d: Path, req: dict, can_see=None) -> str:
@@ -1130,7 +1194,8 @@ def page_set(cfg, user, d: Path, req: dict, can_see=None) -> str:
     return wrap(
         f'<div class="cj-predict" id="cj-predict-set" data-ps="{esc(d.name)}" data-live="{int(v["live"])}" '
         f'data-every="{REFRESH_S}"><p class="cj-mut"><a href="/predict/">← My analyses</a></p>'
-        f'<h1>Analysis of {esc(when(req.get("created")))}</h1>'
+        f'<h1>{esc(set_title(req, srcs, admin))}</h1>'
+        + rename_form(d.name, req)
         + (f'<p class="cj-mut cj-wrap">{esc(d.name)}</p>' if user.get("role") != "basic" else "") +
         f'<p id="cj-predict-err" class="cj-mut" role="status" hidden></p>'
         f'<section id="cj-predict-status">{v["html"]["status"]}</section>'
@@ -1181,13 +1246,298 @@ def scratch(cfg, kind, raw=False) -> Path:
     return d
 
 
+# ---------------------------------------------------------------- how long an analysis takes (estimate)
+_EST_LOCK = threading.Lock()
+_EST_CACHE: dict = {}                    # predict root -> (time, (a, b, fitted))
+_RUN_START = re.compile(r"^=== (\S+) predict_local ")
+
+
+def run_seconds(d: Path):
+    """(images, seconds) of one finished laptop run: the LAST `=== <iso> predict_local` line of predict.log (the log
+    is appended across restarts; the last start is the run that finished) to status.json `updated`. None when this
+    set is not a finished laptop run, its log can't be read, or the figure is implausible (over EST_MAX_S_PER_IMAGE
+    seconds per image, or not positive)."""
+    st = _read_json(d / PS.STATUS)
+    if not isinstance(st, dict) or st.get("state") != "done" or st.get("where") not in (None, "laptop"):
+        return None
+    n = st.get("n_total")
+    if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+        return None
+    try:
+        last = None
+        with open(d / PS.C.PREDICT_LOG, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = _RUN_START.match(line)
+                if m:
+                    last = m.group(1)
+        if last is None:
+            return None
+        t0, t1 = _parse_local(last), _parse_local(st.get("updated"))
+        if t0 is None or t1 is None or not 0 < t1 - t0 <= EST_MAX_S_PER_IMAGE * n:
+            return None
+        return n, t1 - t0
+    except OSError:
+        pass
+    return None
+
+
+def fit_line(points):
+    """Least squares through (images, seconds) -> (a, b), or None: fewer than 3 distinct image counts, or a line
+    that does not rise (a bigger set is not faster)."""
+    pts = [(float(n), float(t)) for n, t in points]
+    if len({n for n, _ in pts}) < 3:
+        return None
+    mx, my = sum(n for n, _ in pts) / len(pts), sum(t for _, t in pts) / len(pts)
+    sxx = sum((n - mx) ** 2 for n, _ in pts)
+    b = sum((n - mx) * (t - my) for n, t in pts) / sxx
+    a = my - b * mx
+    return (a, b) if b > 0 else None
+
+
+def estimate_line(cfg, now=None):
+    """-> (a, b, fitted): seconds = a + b * images. Fitted across the finished laptop sets (3+ with distinct image
+    counts), else EST_FALLBACK. Cached EST_TTL_S."""
+    now = time.time() if now is None else now
+    root = predict_root(cfg)
+    key = str(root)
+    with _EST_LOCK:
+        hit = _EST_CACHE.get(key)
+        if hit and now - hit[0] < EST_TTL_S:
+            return hit[1]
+    pts = []
+    try:
+        dirs = sorted((p for p in root.iterdir() if p.is_dir() and PS.PS_RE.match(p.name)), reverse=True)
+    except OSError:
+        dirs = []
+    for d in dirs[:EST_MAX_SETS]:
+        r = run_seconds(d)
+        if r:
+            pts.append(r)
+    fit = fit_line(pts)
+    line = (fit[0], fit[1], True) if fit else (*EST_FALLBACK, False)
+    with _EST_LOCK:
+        _EST_CACHE[key] = (now, line)
+    return line
+
+
+def queue_ahead(cfg) -> int:
+    """Analyses queued or running on this server (anyone's)."""
+    try:
+        dirs = [p for p in predict_root(cfg).iterdir() if p.is_dir() and PS.PS_RE.match(p.name)]
+    except OSError:
+        return 0
+    return sum(1 for d in dirs if (_read_json(d / PS.STATUS) or {}).get("state") in ("queued", "running"))
+
+
+def estimate_text(a: float, b: float, n: int, ahead: int = 0) -> str:
+    """'about 3 min once it starts' (+ ' · 2 analyses ahead of you'); '' when there are no images."""
+    if n < 1:
+        return ""
+    mins = max(1, int((a + b * n) / 60 + 0.5))     # half up, as predict.js's Math.round
+    out = f"about {mins} min once it starts"
+    if ahead > 0:
+        out += f" · {ahead} {'analysis' if ahead == 1 else 'analyses'} ahead of you"
+    return out
+
+
+def estimate_html(cfg, n: int) -> str:
+    """The time line next to a tile count. predict.js rewrites it when the count changes (data-a, data-b, data-ahead)."""
+    a, b, _ = estimate_line(cfg)
+    ahead = queue_ahead(cfg)
+    return (f'<p class="cj-mut" id="cj-predict-est" data-a="{a:.4f}" data-b="{b:.5f}" data-ahead="{ahead}" '
+            f'role="status">{esc(estimate_text(a, b, n, ahead))}</p>')
+
+
+# ---------------------------------------------------------------- creating a set in the background
+# A set of 1000 tiles takes longer to create than one HTTP request may last (a tunnel gives up at about 100 s), and
+# a retried request would make a second set. So the request only validates and starts a task, answers 303 to a
+# progress page, and the page polls. A task is keyed: an upload by its upload id, a session pick by owner + session +
+# selection. The same key while it runs is the same task (a reload or a double submit starts nothing new).
+_CREATES: dict = {}
+_CREATE_LOCK = threading.Lock()
+
+
+def create_task(tid) -> dict | None:
+    with _CREATE_LOCK:
+        t = _CREATES.get(tid)
+        return dict(t) if t else None
+
+
+def create_running(tid) -> bool:
+    return (create_task(tid) or {}).get("state") == "running"
+
+
+def recently_done(tid) -> bool:
+    """The same pick finished within EST_TTL_S: pressing the button again opens that set, it makes no copy."""
+    t = create_task(tid) or {}
+    return t.get("state") == "done" and time.time() - t.get("finished", 0) < RESUBMIT_S
+
+
+def running_creates(user, exclude=None) -> int:
+    with _CREATE_LOCK:
+        return sum(1 for k, t in _CREATES.items()
+                   if t["state"] == "running" and t["owner"] == user.get("id") and k != exclude)
+
+
+def start_create(tid, owner, fn, *, back, upload=None) -> bool:
+    """Run fn(progress) -> the new set's folder in a daemon thread, unless this tid is already running (False).
+    progress(done, total, phase) is for the page. A failure is kept for the page; fn cleans up after a success."""
+    with _CREATE_LOCK:
+        cur = _CREATES.get(tid)
+        if cur and cur["state"] == "running":
+            return False
+        _CREATES.pop(tid, None)
+        _CREATES[tid] = {"state": "running", "owner": owner, "done": 0, "total": 0, "phase": "", "ps": None,
+                         "error": None, "tech": None, "status": None, "back": back, "upload": upload,
+                         "started": time.time()}
+        for k in [k for k, v in _CREATES.items() if v["state"] != "running"][:max(0, len(_CREATES) - CACHE_MAX)]:
+            _CREATES.pop(k, None)
+
+    def progress(done, total, phase=""):
+        with _CREATE_LOCK:
+            t = _CREATES.get(tid)
+            if t is not None:
+                t.update(done=int(done), total=int(total), phase=phase)
+
+    def run():
+        try:
+            ps_dir = fn(progress)
+            change = {"state": "done", "ps": Path(ps_dir).name, "finished": time.time()}
+        except Refusal as e:
+            change = {"state": "failed", "error": e.msg, "tech": e.tech, "status": e.status}
+        except OSError as e:
+            change = {"state": "failed", "error": os_error_text(e), "tech": f"{type(e).__name__}: {e}", "status": 500}
+        except BaseException as e:          # noqa: BLE001 - kept and shown, never lost in a thread
+            change = {"state": "failed", "error": "Your images could not be prepared. Nothing was started. Try again, "
+                                                  "or ask the admin.", "tech": f"{type(e).__name__}: {e}", "status": 500}
+        with _CREATE_LOCK:
+            t = _CREATES.get(tid)
+            if t is not None:
+                t.update(change)
+
+    threading.Thread(target=run, name=f"cj-predict-create-{tid}", daemon=True).start()
+    return True
+
+
+def prep_text(t: dict) -> str:
+    return f"Preparing your images: {int(t.get('done') or 0)} of {int(t.get('total') or 0)}"
+
+
+def prep_fragment(t: dict, tid: str, admin: bool) -> str:
+    """The progress page's status box (rendered and escaped here; predict.js swaps it in)."""
+    if t["state"] == "failed":
+        tech_ = f"\n(admin) {t['tech']}" if admin and t.get("tech") else ""
+        retry = ""
+        if t.get("upload"):
+            retry = (f'<form method="post" action="/predict/preparing/{esc(tid)}/retry" class="cj-predict-inline">'
+                     f'<button class="cj-predict-btn cj-predict-primary" type="submit">Try again</button></form> '
+                     f'<span class="cj-mut">Your uploaded images are kept for an hour.</span>')
+        return msg_box("", extra=f'<div>{problem_list(str(t["error"]) + tech_)}</div>') + \
+            f'<p>{retry} <a href="{esc(t["back"])}">Back to the form</a></p>'
+    if t["state"] == "done":
+        return (f'<div class="cj-card cj-predict-status"><b>Ready</b><p><a class="cj-predict-btn cj-predict-primary" '
+                f'href="/predict/{esc(t["ps"])}/">Open the analysis</a></p></div>')
+    total, done = int(t.get("total") or 0), int(t.get("done") or 0)
+    bar = (f'<progress class="cj-predict-bar" max="{total}" value="{max(0, min(done, total))}" '
+           f'aria-label="{done} of {total} images prepared"></progress>' if total else
+           '<progress class="cj-predict-bar" aria-label="starting"></progress>')
+    phase = {"checking": "Checking each image.", "placing": "Adding them to your analysis."}.get(t.get("phase"), "")
+    return (f'<div class="cj-card cj-predict-status"><div class="cj-predict-top"><b>{esc(prep_text(t))}</b></div>'
+            f'{bar}<p class="cj-mut">{esc(phase)} You can close this page: the analysis appears under '
+            f'“My analyses” when it is ready.</p></div>')
+
+
+def prep_view(t: dict, tid: str, admin: bool, with_html: bool) -> dict:
+    out = {"schema": "cj_predict_prep/1", "id": tid, "state": t["state"], "done": t["done"], "total": t["total"],
+           "text": prep_text(t), "live": t["state"] == "running",
+           "href": f"/predict/{t['ps']}/" if t["state"] == "done" else None}
+    if with_html:
+        out["html"] = {"status": prep_fragment(t, tid, admin)}
+    return out
+
+
+def page_prep(t: dict, tid: str, admin: bool) -> str:
+    return wrap(f'<div class="cj-predict" id="cj-predict-prep" data-tid="{esc(tid)}" data-every="2" '
+                f'data-live="{int(t["state"] == "running")}"><p class="cj-mut"><a href="/predict/">← My analyses</a></p>'
+                f'<h1>Starting your analysis</h1><p id="cj-predict-err" class="cj-mut" role="status" hidden></p>'
+                f'<section id="cj-predict-prepstatus">{prep_fragment(t, tid, admin)}</section>'
+                f'<noscript><p class="cj-mut">JavaScript is off: reload this page to update it.</p></noscript></div>')
+
+
+def selection_key(user, session, model, rows) -> str:
+    """sc_<12 hex>: the same person, session, model and tiles (with their sample and nm/px) = the same task."""
+    blob = json.dumps([user.get("id"), str(session), model, sorted(rows)], ensure_ascii=False)
+    return "sc_" + hashlib.sha1(blob.encode("utf-8")).hexdigest()[:12]
+
+
+def tile_bytes(d_from: Path, names=None) -> int:
+    """Bytes of the tiles a create will place (the listed names, else every image file of the folder)."""
+    total = 0
+    try:
+        paths = [d_from / n for n in names] if names is not None else \
+            [p for p in d_from.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXT]
+        for p in paths:
+            try:
+                total += p.stat().st_size
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return total
+
+
+def same_volume(a: Path, b: Path) -> bool:
+    try:
+        return os.stat(a).st_dev == os.stat(b).st_dev and PS.protected_problem(a) is None
+    except OSError:
+        return False
+
+
+_LINK_OK: dict = {}                      # predict root -> whether this volume can hard-link (probed once)
+
+
+def can_link(root: Path) -> bool:
+    """Whether hard links work on the volume of `root` (some, e.g. exFAT or a network share, can't): probed with
+    two scratch names under <root>/.portal."""
+    key = str(root)
+    if key not in _LINK_OK:
+        probe = root / PORTAL_TMP / f"probe_{secrets.token_hex(4)}"
+        try:
+            probe.parent.mkdir(parents=True, exist_ok=True)
+            probe.write_bytes(b"x")
+            os.link(probe, str(probe) + ".l")
+            _LINK_OK[key] = True
+        except OSError:
+            _LINK_OK[key] = False
+        finally:
+            for q in (probe, Path(str(probe) + ".l")):
+                try:
+                    q.unlink()
+                except OSError:
+                    pass
+    return _LINK_OK[key]
+
+
+def check_create_disk(root: Path, d_from: Path, names, link: bool):
+    """Refuse (507) when the tiles to be copied (their total x 1.1, plus the free margin and the uploads in flight:
+    check_disk_for) do not fit. Hard links need none: only when link is wanted, the tiles are on the set's drive
+    AND that drive can link; otherwise _place copies and the copy size is checked."""
+    if link and same_volume(d_from, root) and can_link(root):
+        return
+    check_disk_for(root, tile_bytes(d_from, names), DISK_NEED_FACTOR, "for these images",
+                   "Nothing was started. Ask the admin.")
+
+
 def create_and_start(cfg, d_from, user, model, *, names=None, manifest=None, sample_label=None, nm=None,
-                     session=None) -> Path:
-    """create() then start_detached(). Runs in a worker thread. Raises Refusal (plain) on a refusal."""
+                     session=None, name=None, link=False, progress=None) -> Path:
+    """create() then start_detached(). Runs in a worker thread. Raises Refusal (plain) on a refusal.
+    link=True (uploads): the tiles are hard-linked into the set when they are on the set's drive, else copied.
+    progress(done, total, phase): for the progress page."""
     root, reg = predict_root(cfg), registry_root(cfg)
     root.mkdir(parents=True, exist_ok=True)
+    check_create_disk(root, Path(d_from), names, link)
     kw = dict(model=model, owner=user["id"], nm_confirmed_by=user["id"], registry_root=reg, root=root,
-              session=session or None)
+              session=session or None, name=name, link=link, progress=progress)
     if manifest is not None:
         kw.update(manifest=manifest, sample_label_column="manifest:sample_label", nm_from_manifest=True, names=names)
     else:
@@ -1219,17 +1569,18 @@ def active_sets(cfg, user) -> int:
                if st.get("state") in ("queued", "running"))
 
 
-def check_active(cfg, user):
-    """Basic users may have at most MAX_ACTIVE_BASIC sets queued or running (failed and done sets don't count)."""
-    if user.get("role") == "basic" and active_sets(cfg, user) >= MAX_ACTIVE_BASIC:
+def check_active(cfg, user, exclude=None):
+    """Basic users may have at most MAX_ACTIVE_BASIC sets queued or running (failed and done sets don't count;
+    sets still being prepared do, except the task `exclude` itself)."""
+    if user.get("role") == "basic" and active_sets(cfg, user) + running_creates(user, exclude) >= MAX_ACTIVE_BASIC:
         raise Refusal(f"You already have {MAX_ACTIVE_BASIC} analyses waiting or running. Start a new one when one "
                       f"of them is done.", 429)
 
 
-def session_submit(cfg, user, src: dict, form: dict) -> Path:
+def session_plan(cfg, user, src: dict, form: dict) -> dict:
+    """Every check of a session form, no work: -> what session_run needs (+ `tid`, the task key). Raises Refusal."""
     if form.get("confirm") != "yes":
         raise Refusal("Tick “I confirm the pixel size”: nothing was started.")
-    check_active(cfg, user)
     t = read_tiles(src)
     if form.get("sig") != t["sig"]:
         raise Refusal("The session’s tiles changed since this page was opened. Check the samples again.")
@@ -1291,6 +1642,16 @@ def session_submit(cfg, user, src: dict, form: dict) -> Path:
                   + (f" ({g['nm_missing']} tile(s) without a value)" if g["nm_missing"] else ""),
                   "tiles": len(set(names) & set(g["names"]))}
                  for g in chosen if g["nm_in"] is not None and (g["nm_range"] or (g["nm_missing"] and g["nm_values"]))]
+    tid = selection_key(user, src["session"], form["model"], [(n, label_of[n], repr(float(nm_of[n]))) for n in names])
+    if not create_running(tid) and not recently_done(tid):
+        check_active(cfg, user, exclude=tid)
+    return {"tid": tid, "names": names, "label_of": label_of, "nm_of": nm_of, "overrides": overrides,
+            "model": form["model"], "name": chosen_name(form)}
+
+
+def session_run(cfg, user, src: dict, plan: dict, progress=None) -> Path:
+    """Make the set from a plan (slow: the background task, or session_submit). Tiles are copied."""
+    names, label_of, nm_of = plan["names"], plan["label_of"], plan["nm_of"]
     tmp = scratch(cfg, "sel")
     try:
         man = tmp / "MANIFEST.csv"
@@ -1299,13 +1660,20 @@ def session_submit(cfg, user, src: dict, form: dict) -> Path:
             w.writerow(["output_name", "sample_label", PS.NM_COLUMN])
             for n in names:
                 w.writerow([n, label_of[n], repr(float(nm_of[n]))])
-        ps_dir = create_and_start(cfg, src["dir"], user, form["model"], names=names, manifest=man,
-                                  session=src["session"])
+        ps_dir = create_and_start(cfg, src["dir"], user, plan["model"], names=names, manifest=man,
+                                  session=src["session"], name=plan["name"], progress=progress)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    for o in overrides:
+    for o in plan["overrides"]:
         record_nm_override(cfg, user, ps_dir.name, o)
     return ps_dir
+
+
+
+
+def session_submit(cfg, user, src: dict, form: dict, progress=None) -> Path:
+    """session_plan then session_run in this thread (tests, scripts; the portal runs session_run in a task)."""
+    return session_run(cfg, user, src, session_plan(cfg, user, src, form), progress)
 
 
 _AUDIT_FAILED: dict = {}                 # ps id -> why its nm/px override record was not written (admin sees it)
@@ -1338,6 +1706,49 @@ def record_nm_override(cfg, user, ps_id: str, detail: dict) -> bool:
 def audit_problem(ps_id: str) -> str | None:
     with _AUDIT_LOCK:
         return _AUDIT_FAILED.get(ps_id)
+
+
+def audit_event(cfg, user, action: str, ps_id: str, detail: dict) -> bool:
+    """One line in the portal audit log; a failure is logged to the console and never undoes the action."""
+    try:
+        state = getattr(cfg, "state_dir", None)
+        if not state:
+            raise OSError("the portal has no state folder configured")
+        from portal import audit as PA
+        PA.audit(state, user.get("id"), action, ps_id, detail)
+        return True
+    except OSError as e:
+        print(f"[predict] {ps_id}: {action} not written to the audit log: {type(e).__name__}: {e}",
+              file=sys.stderr, flush=True)
+        return False
+
+
+_RENAME_LOCKS: dict = {}
+_RENAME_LOCKS_LOCK = threading.Lock()
+
+
+def rename_lock(ps: str) -> threading.Lock:
+    with _RENAME_LOCKS_LOCK:
+        return _RENAME_LOCKS.setdefault(ps, threading.Lock())
+
+
+def rename_set(cfg, user, d: Path, raw_name) -> str | None:
+    """Set (or, when empty, clear) the analysis name: read-modify-write of request.json under the set's lock,
+    written atomically, then audited as predict.rename. -> the new name (None = back to the default).
+    The caller has already checked that this person may see the set (owner or admin)."""
+    new = PS.clean_name(raw_name)
+    with rename_lock(d.name):
+        req = _read_json(d / PS.REQUEST)
+        if not isinstance(req, dict):
+            raise Refusal("This analysis can’t be renamed right now. Try again later.", 503)
+        old = req.get("name")
+        if new:
+            req["name"] = new
+        else:
+            req.pop("name", None)
+        PS.write_json_atomic(d / PS.REQUEST, req)
+    audit_event(cfg, user, "predict.rename", d.name, {"from": old if isinstance(old, str) else None, "to": new})
+    return new
 
 
 # ---------------------------------------------------------------- upload (multipart, streamed to disk)
@@ -1584,7 +1995,8 @@ def upload_fields(cfg, user, f: dict, files=True) -> tuple:
 def upload_submit(cfg, user, dest: Path, sink: UploadSink) -> Path:
     label, nm = upload_fields(cfg, user, sink.fields, bool(sink.files))
     check_active(cfg, user)
-    return create_and_start(cfg, dest, user, sink.fields["model"], sample_label=label, nm=nm)
+    return create_and_start(cfg, dest, user, sink.fields["model"], sample_label=label, nm=nm,
+                            name=chosen_name(sink.fields), link=True)
 
 
 def nojs_too_big() -> str:
@@ -1853,17 +2265,19 @@ def input_bytes(meta: dict) -> int:
     return total
 
 
-def check_disk_for(where: Path, nbytes: int):
+def check_disk_for(where: Path, nbytes: int, factor=DISK_FACTOR, what="to convert these",
+                   tail="Ask the admin."):
     """A conversion writes its work copies and tiles next to the predict root: refuse (507) unless about
-    DISK_FACTOR x its raw input is free on top of FREE_MARGIN_BYTES and the uploads in flight."""
+    `factor` x its input is free on top of FREE_MARGIN_BYTES and the uploads in flight (a set made from copies:
+    DISK_NEED_FACTOR)."""
     free = disk_free(_existing(where))
     dev = _dev(where)
     with _RES_LOCK:
         held = _held(dev)
-    need = DISK_FACTOR * int(nbytes or 0) + FREE_MARGIN_BYTES
+    need = int(factor * int(nbytes or 0)) + FREE_MARGIN_BYTES
     if free - held < need:
-        raise Refusal(f"Not enough disk space on the server to convert these (about "
-                      f"{DISK_FACTOR * int(nbytes or 0) / 2 ** 30:.1f} GB needed). Ask the admin.", 507,
+        raise Refusal(f"Not enough disk space on the server {what} (about "
+                      f"{factor * int(nbytes or 0) / 2 ** 30:.1f} GB needed). {tail}", 507,
                       tech=f"{free} bytes free, {held} held by uploads, need {need}")
 
 
@@ -2519,6 +2933,9 @@ def declared_files(kind: str, files) -> dict:
         if size > cap:
             raise Refusal(f"{safe} is over {cap // 2 ** 20} MB. Nothing was kept.", 413)
         out[safe] = size
+    if kind == "tiles" and sum(out.values()) > TILES_MAX_TOTAL_BYTES:
+        raise Refusal(f"Over {TILES_MAX_TOTAL_BYTES // 2 ** 30} GB of images in one upload. Upload fewer images "
+                      f"at once. Nothing was kept.", 413)
     if kind == "raw":
         if sum(out.values()) > RAW_MAX_TOTAL_BYTES:
             raise Refusal(f"Over {RAW_MAX_TOTAL_BYTES // 2 ** 30} GB in one conversion. Convert fewer montages at "
@@ -2588,7 +3005,8 @@ def upload_start(cfg, user, body) -> dict:
             continue
     for p in mine:
         m = _read_json(p / UPLOAD_META)
-        if isinstance(m, dict) and m.get("owner") == user.get("id") and m.get("kind") == kind:
+        if isinstance(m, dict) and m.get("owner") == user.get("id") and m.get("kind") == kind \
+                and not create_running(p.name):
             drop_upload(p, p.name)
     d = scratch(cfg, "us", raw=(kind == "raw"))
     uid = d.name
@@ -2776,10 +3194,27 @@ def upload_create(cfg, user, d: Path, meta: dict) -> str:
                       f"{', …' if len(missing) > 3 else ''}). Press the button again to send them.", 409)
     fields = meta.get("fields") or {}
     if meta["kind"] == "tiles":
-        label, nm = upload_fields(cfg, user, fields, True)
-        check_active(cfg, user)
-        ps_dir = create_and_start(cfg, d / UPLOAD_FILES, user, fields["model"], sample_label=label, nm=nm)
-        return f"/predict/{ps_dir.name}/"
+        uid = meta["id"]
+        if not create_running(uid):                      # the same upload pressed again: the same task, no new check
+            label, nm = upload_fields(cfg, user, fields, True)
+            check_active(cfg, user, exclude=uid)
+            name = chosen_name(fields)
+
+            def run(progress):
+                # hard links: the staged names are removed after, the set keeps its own; a failure leaves the upload
+                try:
+                    ps_dir = create_and_start(cfg, d / UPLOAD_FILES, user, fields["model"], sample_label=label,
+                                              nm=nm, name=name, link=True, progress=progress)
+                except BaseException:
+                    try:                             # kept for the stated hour from now, not from the first request
+                        os.utime(d / UPLOAD_META)
+                    except OSError:
+                        pass
+                    raise
+                drop_upload(d, uid)
+                return ps_dir
+            start_create(uid, user["id"], run, back="/predict/new/upload/", upload=uid)
+        return f"/predict/preparing/{uid}/"
     raw = raw_fields(cfg, user, fields)
     check_conv_cap(cfg, user)
     # every sidecar's [Image = ...]: a bare name, and one of the uploaded files (else cryoem_core would open whatever
@@ -3052,10 +3487,22 @@ def sweep_scratch(cfg, max_age_s=SCRATCH_MAX_AGE_S) -> int:
                     and age(p) > max_age_s]
         except Exception:                            # no root configured or not there yet: nothing to sweep
             continue
+    try:                                             # a set half built when the portal stopped (no create is running)
+        with _CREATE_LOCK:
+            busy = any(t["state"] == "running" for t in _CREATES.values())
+        inc = predict_root(cfg) / PS.INCOMING
+        if not busy and inc.is_dir():
+            for p in inc.iterdir():
+                if time.time() - p.stat().st_mtime > max_age_s:
+                    shutil.rmtree(p, ignore_errors=True)
+                    old.append(p)
+    except Exception:                                # no root configured or not there yet
+        pass
     for p in old:
         if UPLOAD_RE.match(p.name):
-            drop_upload(p, p.name)
-        else:
+            if not create_running(p.name):
+                drop_upload(p, p.name)
+        elif p.exists():
             shutil.rmtree(p, ignore_errors=True)
     return len(old)
 
@@ -3144,7 +3591,7 @@ def routes(ctx) -> list:
         form = {k: v for k, v in fd.items() if isinstance(v, str)}
         form["samples"] = [v for v in fd.getlist("samples") if isinstance(v, str)]
         try:
-            ps_dir = await run_in_threadpool(session_submit, cfg, user, src, form)
+            plan = await run_in_threadpool(session_plan, cfg, user, src, form)
         except Refusal as e:
             msg, status = admin_text(e, user), e.status
 
@@ -3155,7 +3602,11 @@ def routes(ctx) -> list:
                     return refused_page(request, src["label"], unreadable_page(src, e2, user), e2.status)
                 return refused_page(request, src["label"], page_session_form(cfg, user, src, t, form, msg), status)
             return await run_in_threadpool(again)
-        return RedirectResponse(f"/predict/{ps_dir.name}/", status_code=303)
+        # the work runs in a task, keyed by the pick: pressing the button twice (or a retried request) joins it
+        if not recently_done(plan["tid"]):
+            start_create(plan["tid"], user["id"], lambda progress: session_run(cfg, user, src, plan, progress),
+                         back=f"/predict/new/session/{src['key']}/")
+        return RedirectResponse(f"/predict/preparing/{plan['tid']}/", status_code=303)
 
     def upload_form(request: Request):
         return ctx.page(request, "Upload images", page_upload_form(cfg, ctx.user(request)), active="predict")
@@ -3273,7 +3724,68 @@ def routes(ctx) -> list:
         d, req = load_set(cfg, user, ctx.can_see, request.path_params["ps"])
         if d is None:
             return not_found(request)
-        return ctx.page(request, "Analysis", page_set(cfg, user, d, req, ctx.can_see), active="predict")
+        srcs, _ = sources_safe(cfg, user, ctx.can_see)
+        return ctx.page(request, tab_title(set_title(req, srcs, user.get("role") == "admin")),
+                        page_set(cfg, user, d, req, ctx.can_see), active="predict")
+
+    def prep_load(request: Request):
+        tid = request.path_params["tid"]
+        t = create_task(tid) if CREATE_ID_RE.match(tid) else None
+        user = ctx.user(request)
+        return (tid, t) if t is not None and t["owner"] == user.get("id") else (tid, None)
+
+    def prep_page(request: Request):
+        tid, t = prep_load(request)
+        if t is None:
+            return not_found(request)
+        if t["state"] == "done":
+            return RedirectResponse(f"/predict/{t['ps']}/", status_code=303)
+        return ctx.page(request, "Starting your analysis", page_prep(t, tid, ctx.user(request).get("role") == "admin"),
+                        active="predict")
+
+    def api_prep(request: Request):
+        tid, t = prep_load(request)
+        if t is None:
+            return ctx.json({"error": "not found"}, 404)
+        return ctx.json(prep_view(t, tid, ctx.user(request).get("role") == "admin",
+                                  request.query_params.get("html") == "1"))
+
+    def prep_retry(request: Request):
+        """After a failed create from an upload: run it again from the kept upload."""
+        user = ctx.user(request)
+        tid, t = prep_load(request)
+        if t is None or not t.get("upload"):
+            return not_found(request)
+        if t["state"] == "failed":
+            d, meta = load_upload(cfg, user, tid)
+            if d is None:
+                return refused_page(request, "Starting your analysis", wrap(
+                    '<div class="cj-predict"><h1>Upload gone</h1><p>These images are no longer kept (an hour passed). '
+                    'Please upload them again.</p><p><a href="/predict/new/upload/">Upload images</a></p></div>'), 410)
+            try:
+                upload_create(cfg, user, d, meta)
+            except Refusal as e:
+                return refused_page(request, "Starting your analysis", wrap(
+                    f'<div class="cj-predict">{msg_box(admin_text(e, user))}'
+                    f'<p><a href="/predict/new/upload/">Upload images</a></p></div>'), e.status)
+        return RedirectResponse(f"/predict/preparing/{tid}/", status_code=303)
+
+    async def rename(request: Request):
+        user = ctx.user(request)
+        d, req = await run_in_threadpool(load_set, cfg, user, ctx.can_see, request.path_params["ps"])
+        if d is None:
+            return await run_in_threadpool(not_found, request)
+        fd = await request.form(max_files=0, max_fields=20)
+        raw = fd.get("name")
+        try:
+            await run_in_threadpool(rename_set, cfg, user, d, raw if isinstance(raw, str) else "")
+        except (Refusal, OSError) as e:
+            msg, status = (e.msg, e.status) if isinstance(e, Refusal) else (
+                "This analysis can’t be renamed right now. Try again later.", 503)
+            return await run_in_threadpool(lambda: refused_page(
+                request, "Rename", wrap(f'<div class="cj-predict">{msg_box(msg)}'
+                                        f'<p><a href="/predict/{esc(d.name)}/">Back</a></p></div>'), status))
+        return RedirectResponse(f"/predict/{d.name}/", status_code=303)
 
     def action(kind):
         def act(request: Request):            # sync: file checks and a thread start, no long work here
@@ -3412,7 +3924,8 @@ def routes(ctx) -> list:
                 return refusal_json(e, user, not keep)
             except OSError as e:                         # the files stay staged: pressing the button again retries
                 return refusal_json(Refusal(os_error_text(e), 500, tech=f"{type(e).__name__}: {e}"), user, False)
-            await run_in_threadpool(drop_upload, d, uid)
+            if meta["kind"] != "tiles":                  # a tiles upload is dropped by its task, after it succeeds
+                await run_in_threadpool(drop_upload, d, uid)
         return ctx.json({"href": href})
 
     async def api_upload_cancel(request: Request):
@@ -3420,6 +3933,9 @@ def routes(ctx) -> list:
         d, _ = await run_in_threadpool(load_upload, cfg, user, uid)
         if d is None:
             return ctx.json(GONE, 404)
+        if create_running(uid):                          # its images are being added to an analysis
+            return ctx.json({"error": "These images are being prepared; they can’t be cancelled now.",
+                             "dropped": False}, 409)
         async with upload_lock(uid):
             await run_in_threadpool(drop_upload, d, uid)
         return ctx.json({"ok": True})
@@ -3445,6 +3961,9 @@ def routes(ctx) -> list:
             Route(PREFIX + "/convert/{cid}/stop", convert_action("stop"), methods=["POST"]),
             Route(PREFIX + "/convert/{cid}/retry", convert_action("retry"), methods=["POST"]),
             Route(PREFIX + "/convert/{cid}/inputs", convert_action("inputs"), methods=["POST"]),
+            Route(PREFIX + "/preparing/{tid}/", prep_page, methods=["GET"]),
+            Route(PREFIX + "/preparing/{tid}/retry", prep_retry, methods=["POST"]),
+            Route(PREFIX + "/api/preparing/{tid}", api_prep, methods=["GET"]),
             Route(PREFIX + "/api/mine", api_mine, methods=["GET"]),
             Route(PREFIX + "/api/set/{ps}", api_set, methods=["GET"]),
             Route(PREFIX + "/api/convert/{cid}", api_convert, methods=["GET"]),
@@ -3456,4 +3975,5 @@ def routes(ctx) -> list:
             Route(PREFIX + "/{ps}/", set_page, methods=["GET"]),
             Route(PREFIX + "/{ps}/review", action("review"), methods=["POST"]),
             Route(PREFIX + "/{ps}/results", action("results"), methods=["POST"]),
+            Route(PREFIX + "/{ps}/rename", rename, methods=["POST"]),
             Route(PREFIX + "/{ps}/start", action("start"), methods=["POST"])]

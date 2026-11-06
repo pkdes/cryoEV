@@ -2,7 +2,7 @@
 
 Known answers: the golden set (tests/fixtures/cj_golden/predict/ps_20261105_abc123) built again from its own tiles
 gives the same images.csv rows (all but `source`, whose session is "golden") and the same request.json / status.json
-keys. Each refusal comes with a control that passes: a 200-image set next to the 201 refused, the same mixed tile
+keys. Each refusal comes with a control that passes: a set of exactly the cap (patched small) next to one more refused; the real cap is 1000, the same mixed tile
 sizes accepted once they sit in two sample labels, a JPEG named .png accepted (content, not extension).
 Never touches the real registry or CryoAI-laptop (CRYOEV_LAPTOP_ROOT points at a temp folder). Helpers here are
 shared by test_predict_local.py and test_predict_desktop.py.
@@ -288,18 +288,69 @@ class CreateTests(PredictRoots, unittest.TestCase):
         self.assertEqual((set(st), st["n_done"], st["state"]), (STATUS_KEYS, 24, "queued"))
         self.assertEqual([p.name for p in ps.iterdir() if p.name.endswith(".tmp")], [])
 
-    def test_more_than_200_refused(self):
+    def test_cap_is_1000_and_refuses_one_more(self):
+        self.assertEqual(PS.MAX_IMAGES, 1000)
         d = self.tmp / "many"
         d.mkdir()
-        for i in range(201):
+        for i in range(4):
             png(d / f"t{i:03d}.png", (8, 8))
         kw = dict(sample_label="S", sample_label_column=None, nm_per_px=1.0, nm_from_manifest=False, manifest=None)
-        with self.assertRaisesRegex(PS.PredictSetError, "201 files .* at most 200"):
-            self.make(src=d, **kw)
-        self.assert_nothing_written()
-        (d / "t200.png").unlink()                          # control: 200 is allowed
+        with mock.patch.object(PS, "MAX_IMAGES", 3):
+            with self.assertRaisesRegex(PS.PredictSetError, "4 files .* at most 3"):
+                self.make(src=d, **kw)
+            self.assert_nothing_written()
+            (d / "t003.png").unlink()                      # control: exactly the cap is allowed
+            ps = self.make(src=d, **kw)
+        self.assertEqual(sorted(p.name for p in (ps / "images").iterdir())[-1], "0003.png")
+
+    def test_name_cleaned_and_written_only_when_set(self):
+        d = self.tmp / "named"
+        d.mkdir()
+        png(d / "a.png", (8, 8))
+        kw = dict(sample_label="S", sample_label_column=None, nm_per_px=1.0, nm_from_manifest=False, manifest=None)
         ps = self.make(src=d, **kw)
-        self.assertEqual(sorted(p.name for p in (ps / "images").iterdir())[-1], "0200.png")
+        self.assertNotIn("name", C.read_json(ps / "request.json"))
+        ps2 = self.make(src=d, name="  My‮ run​ ", **kw)
+        self.assertEqual(C.read_json(ps2 / "request.json")["name"], "My run")
+        ps3 = self.make(src=d, name=" ​ ", **kw)
+        self.assertNotIn("name", C.read_json(ps3 / "request.json"))
+        recs = (self.reg / "prediction_set.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("My run", recs)                   # the registry record is unchanged
+
+    def test_clean_name(self):
+        self.assertEqual(PS.clean_name("x" * 81), "x" * 80)
+        self.assertIsNone(PS.clean_name(""))
+        self.assertIsNone(PS.clean_name("   "))
+        self.assertIsNone(PS.clean_name(None))
+        self.assertEqual(PS.clean_name("<b>x</b>"), "<b>x</b>")   # not an escape: the pages escape it
+        # Cf (bidi, zero-width, word joiners, soft hyphen, Arabic letter mark, Mongolian vowel sep., tags) and Cc go
+        self.assertEqual(PS.clean_name("a⁦b⁩c‎d‏e﻿f‌g‍h"), "abcdefgh")
+        self.assertEqual(PS.clean_name("a؜b⁠c⁤d­e᠎f\U000e0041g\x07h"), "abcdefgh")
+        # NFC: e + combining acute equals the precomposed letter
+        self.assertEqual(PS.clean_name("Café"), "Café")
+        # tab, newline, CR, line and paragraph separators become one space; runs collapse
+        self.assertEqual(PS.clean_name("a\tb\n\r\nc d   e   f"), "a b c d e f")
+        # a combining mark left at the end by the cut goes (q + two marks, cut between them)
+        self.assertEqual(PS.clean_name("x" * 78 + "q́̂y"), "x" * 78 + "q")
+        self.assertEqual(PS.clean_name("ok ́́"), "ok")
+
+
+    def test_progress_and_link(self):
+        d = self.tmp / "prog"
+        d.mkdir()
+        for i in range(3):
+            png(d / f"t{i}.png", (8, 8))
+        kw = dict(sample_label="S", sample_label_column=None, nm_per_px=1.0, nm_from_manifest=False, manifest=None)
+        seen = []
+        ps = self.make(src=d, progress=lambda a, b, ph: seen.append((a, b, ph)), link=True, **kw)
+        self.assertIn((0, 3, "checking"), seen)
+        self.assertIn((2, 3, "placing"), seen)
+        self.assertEqual(seen[-1], (3, 3, "placing"))
+        src, dst = d / "t0.png", ps / "images" / "0001.png"
+        self.assertEqual(PS.md5_file(src), PS.md5_file(dst))
+        self.assertEqual(os.stat(src).st_ino, os.stat(dst).st_ino)    # one drive: hard-linked
+        src.unlink()                                       # removing the staged name leaves the set's file
+        self.assertTrue(dst.is_file())
 
     def test_cli(self):
         env = {**os.environ}
