@@ -56,6 +56,101 @@ class RealPackageDefaultsTests(trb.Base):
         self.assertEqual((c["slider"], c["sliderMin"], c["filter"]), ("0.2", "0.2", "0.2"))
 
 
+WORDS = """() => ({gt: document.getElementById('lblGtWrap').innerText.trim(), gtTip: document.getElementById('lblGtWrap').title,
+    pr: document.getElementById('lblPrWrap').innerText.trim(), prTip: document.getElementById('lblPrWrap').title,
+    help: document.querySelector('.help').innerText, flags: document.getElementById('flagLegend').innerText,
+    btn: document.getElementById('toTri').innerText, btnTip: document.getElementById('toTri').title,
+    title: document.title, keys: document.getElementById('triKeys').innerText,
+    keysShown: !document.getElementById('triKeys').hidden && getComputedStyle(document.getElementById('triKeys')).display !== 'none'})"""
+BRANDS = ("eVHarmony", "Gridr", "cryonder")
+
+
+def with_fields(**kw):
+    def setup(context, page):
+        page.add_init_script("Object.defineProperty(window, 'REVIEW_DATA', {configurable: true, "
+                             "get() { return this.__rd; }, set(d) { Object.assign(d, %s); this.__rd = d; }});" % json.dumps(kw))
+    return setup
+
+
+class LabelingPackageWordsTests(trb.Base):
+    """Control: the lab's labeling package (no kind, no cand_conf) keeps the old words and the brand button."""
+
+    def test_old_words_and_brand_button(self):
+        page = self.open()
+        w = page.evaluate(WORDS)
+        self.assertEqual(w["gt"], "Labels")
+        self.assertTrue(w["pr"].startswith("Predictions ≥"), w["pr"])
+        self.assertEqual((w["gtTip"], w["prTip"]), ("", ""))
+        self.assertIn("toggle predictions", w["help"])
+        self.assertIn("Selected prediction:", w["help"])
+        self.assertIn("delete label", w["help"])
+        self.assertIn("label with no prediction", w["flags"])
+        self.assertIn("Low conf EV label", w["flags"])
+        self.assertIn("Sept", w["flags"])
+        self.assertIn("Older packages have only the first three", w["flags"])
+        self.assertIn("prediction", w["flags"])
+        self.assertIn("Predictions:", page.inner_text("#progress"))
+        page.evaluate("__review.render()")
+        self.assertRegex(page.inner_text("#selBox"), r"\d+ labels, \d+ predictions shown")
+        self.assertTrue(page.is_visible("#showSept"))
+        self.assertIn(w["btn"], BRANDS)
+        self.assertFalse(page.evaluate("document.getElementById('toTri').classList.contains('quick')"))
+        page.click("#toTri")
+        self.assertTrue(page.evaluate("document.getElementById('triKeys').hidden"))
+        self.assertEqual(self.errors, [])
+
+
+class PredictionWordsTests(trb.Base):
+    """Prediction package: Counted / Unsure wording, Quick check button, key legend in the cards."""
+
+    def test_wording_button_and_legend(self):
+        page = self.open(setup=with_fields(kind="prediction", cand_conf=0.3, label_conf=0.5))
+        w = page.evaluate(WORDS)
+        self.assertEqual(w["gt"], "Counted")
+        self.assertTrue(w["pr"].startswith("Unsure, not counted ≥"), w["pr"])
+        self.assertIn("≥50% plus what you accepted or drew", w["gtTip"])
+        self.assertIn("EVs counted, non-EVs counted separately, inner layers excluded.", w["gtTip"])
+        self.assertEqual(w["prTip"], "Model outlines between 30% and 50%. Not counted unless you accept them.")
+        self.assertIn("toggle unsure", w["help"])
+        self.assertIn("unsure outline, undecided: not counted until you accept it", w["flags"])
+        for gone in ("label with no prediction", "class disagrees", "Low conf EV label", "Sept", "Older packages"):
+            self.assertNotIn(gone, w["flags"])
+        self.assertIn("Selected unsure outline:", w["help"])
+        self.assertIn("delete counted outline", w["help"])
+        self.assertFalse(page.is_visible("#showSept"))
+        self.assertTrue(w["btn"].startswith("Quick check"), w["btn"])
+        self.assertEqual(w["btnTip"], "Go through unsure outlines one at a time: accept or reject")
+        self.assertEqual(w["title"], "EV Label Review")
+        page.click("#toTri")
+        w = page.evaluate(WORDS)
+        self.assertIn(w["title"], BRANDS)  # document.title is still the brand
+        self.assertEqual(w["keys"], "→ / A accept · ← / X reject · ↑ / S skip · Z undo · Esc close")
+        self.assertTrue(w["keysShown"])
+        page.select_option("#triMode", "cls")
+        self.assertEqual(page.inner_text("#triKeys"), "1–8 pick class · → / A keep · ← / ↑ / S next · Z undo · Esc close")
+        self.assertTrue(page.evaluate("document.getElementById('toTri').innerText").startswith("Quick check"))
+        self.assertEqual(self.errors, [])
+
+    def test_logo_cycle_keeps_quick_check(self):
+        page = self.open(setup=with_fields(kind="prediction", cand_conf=0.3, label_conf=0.5))
+        page.click("#toTri")
+        before = page.evaluate("document.title")
+        page.click("#logo")
+        w = page.evaluate(WORDS)
+        self.assertTrue(w["btn"].startswith("Quick check"), w["btn"])
+        self.assertIn(w["title"], BRANDS)
+        self.assertNotEqual(w["title"], before)
+        self.assertEqual(self.errors, [])
+
+    def test_fallback_ranges_and_hidden_on_touch(self):
+        page = self.open(setup=with_fields(kind="prediction"))
+        self.assertIn("between 25% and 50%", page.evaluate(WORDS)["prTip"])
+        phone = self.open("&who=tester", setup=with_fields(kind="prediction"), **trb.PhoneTests.PHONE)
+        self.assertTrue(phone.evaluate("!document.getElementById('tri').hidden"))
+        self.assertFalse(phone.evaluate(WORDS)["keysShown"])  # coarse pointer: legend not displayed
+        self.assertEqual(self.errors, [])
+
+
 class PredictionPackageTests(trb.Base):
     """A package built by prediction_package.build from the golden set: the 0.30 candidate (D on 0001) shows."""
     card, file_of, wait_card = trb.PhoneReviewTests.card, trb.PhoneReviewTests.file_of, trb.PhoneReviewTests.wait_card
@@ -70,7 +165,7 @@ class PredictionPackageTests(trb.Base):
         self.assertEqual(page.evaluate(CONTROLS), {"slider": "0.25", "sliderMin": "0.25", "out": "0.25",
                                                    "filter": "0.25", "options": OLD_OPTIONS})
         self.go(page, "0001.png")
-        self.assertIn("4 labels, 1 predictions shown", page.inner_text("#selBox"))  # D, 0.30: hidden at 0.45
+        self.assertIn("4 counted, 1 unsure shown", page.inner_text("#selBox"))  # D, 0.30: hidden at 0.45
         phone = self.open("&who=tester", **trb.PhoneTests.PHONE)
         self.wait_card(phone)
         queue = [(self.file_of(c), c["key"]) for c in self.state(phone)["tri"]["queue"]]
