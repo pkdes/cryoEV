@@ -1,36 +1,78 @@
 """
 Predict module (CJ portal, journey J1): a person runs the production model on their tiles and gets a prediction set
-(BUILD_CONTRACTS.md section 2) to review and count.
+(BUILD_CONTRACTS.md section 2) to review and count. Raw cryo-EM montages can be converted to tiles first.
 
-    GET  /predict/                        My analyses (admin: everyone's) + "New analysis"
-    GET  /predict/predict.js              the module's script (a file: no inline script anywhere)
-    GET  /predict/new/                    step 1: what images work; pick a processed session or upload
+    GET  /predict/                        My analyses (admin: everyone's), raw conversions, "New analysis"
+    GET  /predict/predict.js              the module's script (portal/static/predict.js; no inline script anywhere)
+    GET  /predict/new/                    step 1: what images work; pick a processed session, upload, or convert raw
     GET  /predict/new/session/<key>/      step 2: tiles (all, a count, by sample), nm/px per sample + the
     POST /predict/new/session/<key>/        confirmation tick, model -> create() + start_detached() -> 303 set page
     GET  /predict/new/upload/             upload processed 8-bit PNG/JPEG tiles (caps MAX_FILES x MAX_FILE_BYTES),
-    POST /predict/new/upload/               sample label + nm/px + tick; streamed to <root>/.portal/up_<hex>/
+    POST /predict/new/upload/               sample label + nm/px + tick. The page's script sends one file per request
+                                            (the upload API below); this POST is the no-JavaScript form, for small
+                                            sets only (at most NOJS_MAX_BYTES in all; else refused, saying why)
+    GET  /predict/new/raw/                admin, advanced: upload raw montages (.mrc + .mrc.mdoc, or .idoc + .tif
+                                            tiles; an optional sample key .csv), a session id and a recipe -> convert
+    GET  /predict/new/raw/sessions/       admin: raw session folders under the scan roots with no 3d tiles yet
+    GET  /predict/new/raw/sessions/<key>/ admin: pick montages of one; POST: convert (the folder is only read)
+    GET  /predict/convert/<id>/           one conversion: status (auto-refresh), warnings, then "Analyse these tiles"
     GET  /predict/<ps>/                   the set: status (auto-refresh), Review / Results, spot-check list
     POST /predict/<ps>/review             build the prediction review package in a thread (if missing)
     POST /predict/<ps>/results            compute results/results.json in a thread (if missing or older than edits)
     POST /predict/<ps>/start              start the laptop run again (failed, or no heartbeat for STALE_S)
     GET  /predict/api/mine                {"schema": "cj_predict_mine/1", "items": [...]}: Home's "My results"
     GET  /predict/api/set/<ps>            one set's status; ?html=1 adds the page fragments (the refresh swaps them)
+    GET  /predict/api/convert/<id>        one conversion's status; ?html=1 adds the page fragments
+  Upload API: one file, or one piece of at most CHUNK_BYTES of a bigger file, per request (a Cloudflare free tunnel
+  caps a request at about 100 MB; a raw .mrc is often more):
+    POST /predict/api/upload              {"kind": "tiles"|"raw", "fields": {...}, "files": [{"name", "size"}],
+                                           "resume": id|null} -> the session {"upload", "chunk", "received", "done"}.
+                                           Fields, names, caps and free disk (the declared total is held) are checked
+                                           here, before a byte is sent. "resume": the same person's session with the
+                                           same files carries on where it stopped.
+    GET  /predict/api/upload/<id>         the session (what has arrived)
+    POST /predict/api/upload/<id>/file?name=<file>&offset=<n>   body = the bytes. offset must be what has arrived
+                                           (else 409 + the session, and the page resumes from there). A file is
+                                           content-checked once complete (tiles: 8-bit PNG/JPEG; raw: MRC, SerialEM
+                                           sidecar, TIFF, sample key)
+    POST /predict/api/upload/<id>/create  every file there -> the prediction set (tiles) or the conversion (raw)
+    POST /predict/api/upload/<id>/cancel
+  A session lives in <root>/.portal/us_<12 hex>/ (upload.json + files/); only its owner reaches it. A refusal (cap,
+  disk, content, fields) removes it ("nothing was kept"); a dropped connection or a missing piece does not. A session
+  never finished (no "create") is removed SCRATCH_MAX_AGE_S after its last request, and its disk hold released.
+
+Sessions people may pick (portal/predict_sources.py): the session folders found under the scan roots
+(CJ_PREDICT_SCAN_ROOTS, default the processing root) that have `3. Processed images/3d. Tiles no scalebar*`, plus the
+admin's hand list (CJ_PREDICT_SOURCES), with the Admin panel's overrides (Admin > Predict sessions: hide, rename). A
+session is named by its full registry id, e.g. 20261027 or 20260827-2. Plus the finished raw conversions, each seen
+only by its owner and the admin (ctx.can_see).
+
+Raw conversion (BUILD_CONTRACTS.md section 10): `python -m jobs.convert_raw` as a detached one-shot subprocess with
+the processing repo from CJ_PROCESSING_REPO, one at a time (MAX_CONVERT_RUNNING; the others wait queued; a watcher
+thread starts the next and records the end). Output in <root>/raw_tiles/<session id>_<6 hex>/ (the name starts with
+the session id: Predict reads the id from it):
+    convert.json   {"schema": "cj_convert/1", id, owner, session, recipe, gpu, source, inputs, sample_key, created}
+    status.json    {state: queued|running|done|failed, updated, pid, started, finished, error, kind, warnings,
+                    result (convert_raw's JSON), n_tiles}
+    convert.out    the converter's stdout (one JSON object); convert.log its stderr (the pipeline's progress)
+    input/         the uploaded raw files (removed once the conversion is done)
+    tiles/         the converter's --out: PNG tiles + MANIFEST.csv, the Predict source once done
+  The recipe is "default" (convert_raw's DEFAULT_RECIPE; the page warns) or one of the processing repo's session
+  recipes that convert_raw's static check accepts (the portal never runs one). The GPU is used only when ticked and the
+  GPU check passes (else refused, saying why); the CPU otherwise. A session folder the admin picks is never written:
+  the converter reads it and writes only under raw_tiles/.
 
 Configuration (environment, read per request; Config attributes of the same lower-case name win when present):
-  CJ_PREDICT_SOURCES   JSON list, or the path of a JSON file holding it: [{"label": "Session 27 Oct (EV prep A)",
-                       "dir": "<processed tile folder>", "manifest": "<MANIFEST.csv>" (optional; default
-                       <dir>/MANIFEST.csv when present), "session": "YYYYMMDD" (optional; else the first 8-digit
-                       date in the folder name), "sample_column": "grid" (optional; default the first of
-                       sample_label, sample, grid in the manifest)}]. Only the admin sets this: people pick from
-                       these folders, never type a path.
+  CJ_PREDICT_SCAN_ROOTS, CJ_PREDICT_SOURCES   the session list (portal/predict_sources.py)
   CJ_PREDICT_ROOT      prediction sets (default <CryoAI-laptop>/predict, jobs.predict_set.default_root())
   CJ_REVIEW_ROOT       prediction review packages, when cfg.review_root (the shell's /review/<pkg_id>/ root) is unset
                        (default <CryoAI-laptop>/review)
+  CJ_PROCESSING_REPO   the lab's processing repo (read only) for raw conversion; unset = no raw conversion
   The registry is the portal's (cfg.registry).
 
 Rules:
   - Every set view, API and action checks ctx.can_see(user, request.json owner); not found and not allowed give the
-    same 404.
+    same 404. The same for conversions (convert.json owner).
   - nm/px is never defaulted: each sample's value is shown (from the manifest when it has one) and the person must
     tick "I confirm the pixel size"; their id goes into images.csv nm_confirmed_by. No tick: refused, nothing written.
   - Pixel-size tolerance (BUILD_CONTRACTS.md section 8): a sample whose manifest nm/px values spread (max - min) by
@@ -38,17 +80,19 @@ Rules:
     its own value in images.csv; a number typed there applies to all of that sample's tiles and is recorded in the
     portal audit log (predict.nm_override). Over the tolerance: refused, as before.
   - Model: the registry's production model (also in models/models.yaml) by default; basic users get only that one.
+  - Raw upload: admin and advanced. Raw session pick: admin. Basic users get 403 on both.
   - Long work (create(), uploads to disk, the review package, results) runs in worker threads, never on the event
-    loop. The predictor itself is a detached process (jobs.predict_local.start_detached); status.json says the rest.
+    loop. The predictor and the converter are detached processes; status.json says the rest.
   - Plain words for scientists: paths, ids of folders and raw errors only on admin-only lines.
   - Everything shown is escaped here.
-  - Uploads: caps while streaming; free disk re-checked at each file and every 64 MB, counting every upload in
-    flight (FREE_MARGIN_BYTES kept free); the text fields are checked when the first file part arrives.
+  - Uploads: caps checked on the declared list and again while streaming; free disk checked at the start (the whole
+    declared size held), at each piece and every 64 MB, counting every upload in flight (FREE_MARGIN_BYTES kept free).
   - A basic user has at most MAX_ACTIVE_BASIC sets queued or running. A review package built here is appended to
     the registry (review_package) once.
 """
 from __future__ import annotations
 
+import asyncio
 import csv
 import errno
 import hashlib
@@ -59,6 +103,8 @@ import os
 import re
 import secrets
 import shutil
+import struct
+import subprocess
 import sys
 import threading
 import time
@@ -66,10 +112,11 @@ from datetime import datetime
 from pathlib import Path
 
 from starlette.concurrency import run_in_threadpool
-from starlette.requests import Request
+from starlette.requests import ClientDisconnect, Request
 from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
 
+from jobs import convert_raw as CR
 from jobs import predict_local as PL
 from jobs import predict_set as PS
 from portal import predict_sources as PSRC
@@ -105,6 +152,35 @@ SCHEMA_MINE = "cj_predict_mine/1"
 SCHEMA_SET = "cj_predict_set/1"
 NAME_BAD = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]')
 WIN_RESERVED = re.compile(r"^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$", re.I)
+# uploads: one file (or one piece of a big file) per request
+CHUNK_BYTES = 32 * 1024 ** 2              # a piece; a Cloudflare free tunnel caps a request at about 100 MB
+NOJS_MAX_BYTES = 90 * 1024 ** 2           # the no-JavaScript multi-file form: the whole request
+START_MAX_BYTES = 512 * 1024              # the JSON that opens an upload session (the file list)
+UPLOAD_RE = re.compile(r"^us_[0-9a-f]{12}$")
+UPLOAD_META, UPLOAD_FILES, PART = "upload.json", "files", ".part"
+SCHEMA_UPLOAD = "cj_upload/1"
+WRITE_BATCH = 4 * 1024 ** 2               # bytes gathered before one write in a worker thread
+# raw conversion (jobs/convert_raw.py)
+RAW_ROLES = ("admin", "advanced")
+RAW_TILES = "raw_tiles"                   # <root>/raw_tiles/<session id>_<6 hex>/
+RAW_ID_RE = re.compile(r"^(\d{8}(?:-\d+)?)_([0-9a-f]{6})$")
+CONVERT_JSON, CONVERT_OUT, CONVERT_LOG = "convert.json", "convert.out", "convert.log"
+CONVERT_INPUT, CONVERT_TILES, CONVERT_LOCK = "input", "tiles", ".convert.lock"
+SCHEMA_CONVERT, SCHEMA_CONVERT_VIEW = "cj_convert/1", "cj_predict_convert/1"
+MAX_CONVERT_RUNNING = 1                   # one montage render holds GBs of RAM: the others wait, queued
+CONVERT_POLL_S = 2.0                      # the watcher thread's beat while a conversion is queued or running
+RECIPE_TTL_S = 60.0
+RAW_EXT = (".mrc.mdoc", ".mrc", ".idoc", ".tif", ".tiff", ".csv")
+RAW_MAX_FILES = 1000                      # one upload: an .idoc montage brings one .tif per tile
+RAW_MAX_FILE_BYTES = 8 * 1024 ** 3        # an MRC stack
+RAW_SIDE_MAX_BYTES = 32 * 1024 ** 2       # an .mdoc / .idoc / sample key
+RAW_MAX_TOTAL_BYTES = 64 * 1024 ** 3
+RAW_SCAN_DEPTH = 2                        # a session folder is searched this deep for montages
+RAW_SCAN_MAX = 20000                      # entries looked at, at most
+RAW_SKIP_DIR = re.compile(r"^(\.|[345]\.\s|processed|montages|archive|figures|__)", re.I)
+NOTES_SUB, SAMPLE_KEY = "1. Notes + reports", "sample_key.csv"
+GPU_CHECK_S = 60
+TEST_HOOKS = ("CRYOEV_JOBS_TESTING", "CRYOEV_JOBS_TEST_HOOKS", "CRYOEV_JOBS_TEST_HOOKS_FILE")   # = jobs/run_job.py
 
 NO_MODEL = "No production model is set up yet, so analyses can't start. Ask the admin."
 NM_FROM_MANIFEST = "from the session’s MANIFEST.csv (tile pixel size after processing)"
@@ -154,11 +230,13 @@ def sources(cfg) -> list:
     return PSRC.for_predict(cfg)
 
 
-def sources_safe(cfg):
+def sources_safe(cfg, user=None, can_see=None):
+    """(sources, problem). With a user: also the finished raw conversions that person may see (owner or admin)."""
+    extra = converted_sources(cfg, user, can_see) if user is not None and can_see is not None else []
     try:
-        return sources(cfg), None
+        return sources(cfg) + extra, None
     except (OSError, ValueError) as e:
-        return [], f"Session list unreadable: {type(e).__name__}: {e}"
+        return extra, f"Session list unreadable: {type(e).__name__}: {e}"
 
 
 # ---------------------------------------------------------------- models
@@ -810,13 +888,18 @@ def mine_html(items, admin) -> str:
 
 def page_mine(cfg, user, can_see) -> str:
     admin = user.get("role") == "admin"
-    srcs, _ = sources_safe(cfg)
+    srcs, _ = sources_safe(cfg, user, can_see)
     items = [item_of(cfg, user, d, req, st, srcs) for d, req, st in list_sets(cfg, user, can_see)]
+    convs = list_conversions(cfg, user, can_see)
+    conv = ""
+    if convs or user.get("role") in RAW_ROLES:
+        conv = (f'<h2 class="cj-sec">{"Raw conversions" if admin else "My raw conversions"}</h2>'
+                + conversions_html(convs, admin))
     return wrap(f'<div class="cj-predict"><div class="cj-predict-head"><div><h1>Predict</h1>'
                 f'<p class="cj-mut">Count and size the EVs in your images with the lab’s model.</p></div>'
                 f'<a class="cj-predict-btn cj-predict-primary" href="/predict/new/">New analysis</a></div>'
                 f'<h2 class="cj-sec">{"All analyses" if admin else "My analyses"}</h2>{mine_html(items, admin)}'
-                f'</div>')
+                f'{conv}</div>')
 
 
 def model_block(cfg, user, chosen=None) -> str:
@@ -841,9 +924,9 @@ def model_block(cfg, user, chosen=None) -> str:
             + (f'<ul class="cj-mut cj-predict-qual">{qual}</ul>' if qual else "") + '</fieldset>')
 
 
-def page_new(cfg, user) -> str:
+def page_new(cfg, user, can_see) -> str:
     admin = user.get("role") == "admin"
-    srcs, err = sources_safe(cfg)
+    srcs, err = sources_safe(cfg, user, can_see)
     cards = []
     for s in srcs:
         if s["problem"]:
@@ -851,20 +934,39 @@ def page_new(cfg, user) -> str:
                 cards.append(f'<div class="cj-card cj-predict-src cj-predict-off"><b>{esc(s["label"])}</b>'
                              f'<p class="cj-mut">Not available: {esc(s["problem"])}</p>{tech(str(s["dir"]))}</div>')
             continue
+        who = (f' · converted by {esc(s["owner"])}' if admin and s.get("owner") else
+               ' · converted from raw' if s.get("owner") else "")
         cards.append(f'<a class="cj-card cj-predict-src" href="/predict/new/session/{esc(s["key"])}/">'
-                     f'<b>{esc(s["label"])}</b><span class="cj-mut">Session {esc(s["session"])}</span>'
+                     f'<b>{esc(s["label"])}</b><span class="cj-mut">Session {esc(s["session"])}{who}</span>'
                      + (tech(str(s["dir"])) if admin else "") + '</a>')
     if err and admin:
         cards.append(msg_box("The session list setting can't be read.", extra=tech(err)))
     no_model = "" if allowed_models(cfg, user)[1] else msg_box(NO_MODEL)
     sess = ("".join(cards) or '<p class="cj-mut">No processed sessions are set up for analysis yet'
-            + (' (set CJ_PREDICT_SOURCES).' if admin else '; ask the admin, or upload your own images.') + '</p>')
+            + (' (set CJ_PREDICT_SCAN_ROOTS or CJ_PREDICT_SOURCES).' if admin else
+               '; ask the admin, or upload your own images.') + '</p>')
+    raw = ""
+    if user.get("role") in RAW_ROLES:
+        repo, why = processing_repo(cfg)
+        if repo is None:
+            raw = ('<h2 class="cj-sec">Or convert raw images</h2>'
+                   + msg_box("Raw conversion is not set up on this server.",
+                             extra=tech(why) if admin else '<p>Ask the admin.</p>'))
+        else:
+            raw = ('<h2 class="cj-sec">Or convert raw images</h2><div class="cj-predict-srcs">'
+                   '<a class="cj-card cj-predict-src" href="/predict/new/raw/"><b>Upload raw images</b>'
+                   '<span class="cj-mut">.mrc with its .mrc.mdoc, or .idoc with its .tif tiles: made into tiles '
+                   'the way the lab’s processing does it, then analysed here</span></a>'
+                   + ('<a class="cj-card cj-predict-src" href="/predict/new/raw/sessions/"><b>Pick a raw session</b>'
+                      '<span class="cj-mut">Imaging sessions on the server with no processed tiles yet</span></a>'
+                      if admin else "") + '</div>')
     return wrap(
         '<div class="cj-predict"><p class="cj-mut"><a href="/predict/">← My analyses</a></p>'
         f'<h1>New analysis</h1>{no_model}'
         '<div class="cj-card cj-predict-what"><h2>What images work</h2><ul>'
         '<li>Processed cryo-EM tiles: 8-bit PNG or JPEG, contrast-adjusted the way the lab’s processing does '
-        'it (not raw MRC or TIFF).</li>'
+        'it' + (' (raw MRC or TIFF montages: convert them first, below).</li>' if raw else
+                ' (not raw MRC or TIFF).</li>') +
         '<li>The same kind of images and magnification as the model was trained on. If unsure, ask the admin.</li>'
         f'<li>Up to {MAX_FILES} images per analysis. You must confirm the pixel size (nm per pixel) of each '
         'sample: sizes in nm depend on it.</li></ul></div>'
@@ -873,7 +975,7 @@ def page_new(cfg, user) -> str:
         '<h2 class="cj-sec">Or upload your own tiles</h2>'
         '<a class="cj-card cj-predict-src" href="/predict/new/upload/"><b>Upload images</b>'
         f'<span class="cj-mut">Up to {MAX_FILES} PNG or JPEG files, {MAX_FILE_BYTES // 2 ** 20} MB each</span></a>'
-        '</div>')
+        f'{raw}</div>')
 
 
 def page_session_form(cfg, user, src: dict, t: dict, form=None, error=None) -> str:
@@ -960,8 +1062,13 @@ def page_upload_form(cfg, user, form=None, error=None) -> str:
     return wrap(
         f'<div class="cj-predict"><p class="cj-mut"><a href="/predict/new/">← Back</a></p>'
         f'<h1>Upload images</h1>{err}{again}'
-        f'<form method="post" enctype="multipart/form-data" class="cj-predict-form" id="cj-predict-upload" '
-        f'data-max-files="{MAX_FILES}" data-max-bytes="{MAX_FILE_BYTES}">'
+        f'<form method="post" action="/predict/new/upload/" enctype="multipart/form-data" class="cj-predict-form" '
+        f'id="cj-predict-upload" data-cj-upload="tiles" data-max-files="{MAX_FILES}" '
+        f'data-max-bytes="{MAX_FILE_BYTES}">'
+        f'<div class="cj-predict-msg cj-predict-t-warn" data-cj-upload-msg role="alert" hidden></div>'
+        f'<noscript><p class="cj-predict-msg">JavaScript is off: this form then sends everything in one request, '
+        f'at most {NOJS_MAX_BYTES // 2 ** 20} MB in total. Turn JavaScript on for bigger sets (files are then '
+        f'sent one at a time).</p></noscript>'
         # the text fields come BEFORE the files: the browser sends parts in this order, so the server checks the
         # tick, nm/px and model as soon as the first file part arrives (fail fast, before any big file lands)
         f'<fieldset class="cj-card cj-predict-fs"><legend>Sample and pixel size</legend>'
@@ -979,16 +1086,16 @@ def page_upload_form(cfg, user, form=None, error=None) -> str:
         f'<label class="cj-predict-field"><span>Processed 8-bit PNG or JPEG tiles of one sample (up to {MAX_FILES}, '
         f'{MAX_FILE_BYTES // 2 ** 20} MB each)</span><input type="file" name="files" multiple required '
         f'accept=".png,.jpg,.jpeg,image/png,image/jpeg"></label>'
-        f'<p class="cj-mut" id="cj-predict-files" role="status"></p></fieldset>'
+        f'<p class="cj-mut" id="cj-predict-files" data-cj-upload-info role="status"></p></fieldset>'
         f'<p><button class="cj-predict-btn cj-predict-primary" type="submit" data-busy="Uploading… keep this '
         f'page open">Upload and start</button></p></form></div>')
 
 
-def page_set(cfg, user, d: Path, req: dict) -> str:
+def page_set(cfg, user, d: Path, req: dict, can_see=None) -> str:
     admin = user.get("role") == "admin"
     v = set_view(cfg, user, d, req, True)
     rows = images_rows(d)
-    srcs, _ = sources_safe(cfg)
+    srcs, _ = sources_safe(cfg, user, can_see)
     samples = "".join(f'<tr><td data-l="Sample">{esc(s["label"])}</td><td data-l="Images" class="cj-num">{s["n"]}'
                       f'</td><td data-l="nm/px">{esc(s["nm_per_px"])}</td>'
                       f'<td data-l="Confirmed by">{esc(s["confirmed_by"] or "?")}</td></tr>'
@@ -1340,9 +1447,9 @@ async def receive_upload(request: Request, dest: Path, first_file=None) -> Uploa
         length = int(request.headers.get("content-length") or 0)
     except ValueError:
         length = 0
-    limit = MAX_FILES * (MAX_FILE_BYTES + 4096) + MAX_FIELDS * (MAX_FIELD_BYTES + 1024)
+    limit = min(MAX_FILES * (MAX_FILE_BYTES + 4096) + MAX_FIELDS * (MAX_FIELD_BYTES + 1024), NOJS_MAX_BYTES)
     if length > limit:
-        raise Refusal(f"The upload is too big: at most {MAX_FILES} files of {MAX_FILE_BYTES // 2 ** 20} MB.", 413)
+        raise Refusal(nojs_too_big(), 413)
     res = Reservation(dest, length)
     try:
         await run_in_threadpool(res.check)
@@ -1391,7 +1498,7 @@ async def _stream(request: Request, boundary: bytes, dest: Path, res: Reservatio
         async for chunk in request.stream():
             total += len(chunk)
             if total > limit:
-                raise Refusal("The upload is too big.", 413)
+                raise Refusal(nojs_too_big(), 413)
             try:
                 parser.write(chunk)
             except Exception as e:
@@ -1435,113 +1542,1081 @@ def upload_submit(cfg, user, dest: Path, sink: UploadSink) -> Path:
     return create_and_start(cfg, dest, user, sink.fields["model"], sample_label=label, nm=nm)
 
 
+def nojs_too_big() -> str:
+    return (f"Without JavaScript, one upload is at most {NOJS_MAX_BYTES // 2 ** 20} MB in total (the link to the "
+            f"server caps one request at about 100 MB). Nothing was kept. Turn JavaScript on (the page then sends "
+            f"the files one at a time), or upload fewer files.")
+
+
+def now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+# ---------------------------------------------------------------- raw conversion: settings, recipes, checks
+def test_hooks() -> dict:
+    """jobs/run_job.py's test hooks (only when CRYOEV_JOBS_TESTING=1), read here without importing run_job (it puts
+    jobs/ and training/ on sys.path, which the portal process must not get)."""
+    if os.environ.get(TEST_HOOKS[0]) != "1":
+        return {}
+    try:
+        h = json.loads(os.environ.get(TEST_HOOKS[1]) or "{}")
+        f = os.environ.get(TEST_HOOKS[2])
+        if f and Path(f).is_file():
+            h.update(json.loads(Path(f).read_text(encoding="utf-8")))
+        return h if isinstance(h, dict) else {}
+    except (ValueError, OSError):
+        return {}
+
+
+def processing_repo(cfg) -> tuple:
+    """-> (repo Path, None) or (None, why): CJ_PROCESSING_REPO, checked the way jobs/convert_raw.py checks it."""
+    v = _setting(cfg, CR.REPO_ENV)
+    if not v:
+        return None, f"{CR.REPO_ENV} is not set: raw conversion is off"
+    try:
+        return CR.processing_repo(str(v)), None
+    except CR.ConvertError as e:
+        return None, str(e)
+
+
+_RECIPES: dict = {}
+_RECIPE_LOCK = threading.Lock()
+
+
+def recipes(repo) -> list:
+    """The processing repo's session recipes (datasets/process_<name>.py) that convert_raw's static check accepts,
+    newest name first. Read only and never executed; cached RECIPE_TTL_S."""
+    d = Path(repo) / "datasets"
+    key = os.path.normcase(str(d))
+    with _RECIPE_LOCK:
+        hit = _RECIPES.get(key)
+        if hit and 0 <= time.monotonic() - hit[0] < RECIPE_TTL_S:
+            return list(hit[1])
+    names = []
+    try:
+        files = sorted(d.glob("process_*.py"))
+    except OSError:
+        files = []
+    for p in files:
+        name = p.stem[len("process_"):]
+        if not CR.RECIPE_RE.match(name):
+            continue
+        try:
+            CR.check_recipe_source(p, name)
+        except (CR.ConvertError, OSError):
+            continue
+        names.append(name)
+    names.sort(reverse=True)
+    with _RECIPE_LOCK:
+        _RECIPES.clear()
+        _RECIPES[key] = (time.monotonic(), names)
+    return list(names)
+
+
+def session_recipe(session, names) -> str | None:
+    """The recipe named after this session (20260827-2 -> 20260827_2), when the repo has one."""
+    want = str(session or "").replace("-", "_")
+    return want if want in names else None
+
+
+def valid_session_id(s) -> bool:
+    return isinstance(s, str) and PSRC.session_of(s) == s and bool(PS.SESSION_RE.match(s))
+
+
+def raw_fields(cfg, user, f: dict, session=None) -> dict:
+    """The raw form's fields -> {session, recipe, gpu, repo}. Raises Refusal (403 for a basic user, 503 when the
+    processing repo is not set up, else 400 listing every problem). session: fixed by a picked session folder."""
+    if user.get("role") not in RAW_ROLES:
+        raise Refusal("Converting raw images is for advanced users and the admin.", 403)
+    repo, why = processing_repo(cfg)
+    if repo is None:
+        raise Refusal("Raw conversion is not set up on this server. Ask the admin.", 503, tech=why)
+    problems = []
+    sid = session if session is not None else str(f.get("session") or "").strip()
+    if not valid_session_id(sid):
+        problems.append("Session: the imaging date as YYYYMMDD, or YYYYMMDD-n for a later session that day "
+                        "(e.g. 20261027 or 20260827-2).")
+    recipe = str(f.get("recipe") or "default").strip()
+    if recipe != "default" and recipe not in recipes(repo):
+        problems.append("Recipe: pick one from the list.")
+    if problems:
+        raise Refusal(f"Please fix ({len(problems)}):\n" + "\n".join(problems))
+    return {"session": sid, "recipe": recipe, "gpu": f.get("gpu") == "yes", "repo": repo}
+
+
+def gpu_check() -> tuple:
+    """jobs/convert_raw.gpu_check() (= jobs/predict_local.py's) in a short child process, so the portal never imports
+    jobs/run_job.py. -> (ok, note)."""
+    code = "import json; from jobs import convert_raw as CR; print(json.dumps(list(CR.gpu_check())))"
+    try:
+        r = subprocess.run([sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True,
+                           timeout=GPU_CHECK_S, env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        ok, note = json.loads(r.stdout.strip().splitlines()[-1])
+        return bool(ok), str(note)
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError) as e:
+        return False, f"GPU check failed: {type(e).__name__}: {e}"
+
+
+def check_gpu(fields: dict):
+    if fields.get("gpu"):
+        ok, note = gpu_check()
+        if not ok:
+            raise Refusal("The GPU can’t be used now. Untick “Use the GPU” to convert on the CPU, or try later.",
+                          409, tech=note)
+
+
+def recipe_select(repo, chosen=None, session=None) -> str:
+    """The recipe <select> (default first) and the warning about the default."""
+    names = recipes(repo) if repo else []
+    chosen = chosen if chosen in names else "default"
+    opts = (f'<option value="default"{" selected" if chosen == "default" else ""}>default ({esc(CR.DEFAULT_RECIPE)}, '
+            f'the lab’s template)</option>' +
+            "".join(f'<option value="{esc(n)}"{" selected" if n == chosen else ""}>{esc(n)}</option>' for n in names))
+    own = session_recipe(session, names) if session else None
+    hint = (f' This session has its own recipe: <b>{esc(own)}</b>.' if own else
+            ' A session’s own recipe is named after it (20260827-2 → 20260827_2).')
+    return (f'<label class="cj-predict-field"><span>Recipe (the lab’s processing settings for a session: denoise, '
+            f'contrast)</span><select name="recipe" data-cj-recipe>{opts}</select></label>'
+            f'<p class="cj-predict-warn" data-cj-recipe-warn>“default” is the lab’s template ({esc(CR.DEFAULT_RECIPE)}): '
+            f'its contrast and denoise were tuned on that session, and a sampling far from it is refused. Pick the '
+            f'recipe of the session these images come from when there is one.{hint}</p>')
+
+
+def gpu_box(checked=False) -> str:
+    return (f'<label class="cj-predict-radio"><input type="checkbox" name="gpu" value="yes"'
+            f'{" checked" if checked else ""}> Use the GPU (faster; only if it is free. Results differ from the CPU '
+            f'by ±1 grey level on under 0.01 % of pixels)</label>')
+
+
+# ---------------------------------------------------------------- raw conversion: records and the runner
+def raw_root(cfg) -> Path:
+    return predict_root(cfg) / RAW_TILES
+
+
+def conv_dir(cfg, cid) -> Path | None:
+    if not isinstance(cid, str) or not RAW_ID_RE.match(cid):
+        return None
+    d = raw_root(cfg) / cid
+    return d if (d / CONVERT_JSON).is_file() else None
+
+
+def load_conversion(cfg, user, can_see, cid) -> tuple:
+    """-> (folder, convert.json, status) when it exists AND this person may see it; else (None, None, None)."""
+    d = conv_dir(cfg, cid)
+    meta = _read_json(d / CONVERT_JSON) if d else None
+    if not isinstance(meta, dict) or not can_see(user, meta.get("owner")):
+        return None, None, None
+    return d, meta, _read_json(d / PS.STATUS) or {}
+
+
+def all_conversions(cfg) -> list:
+    """[(folder, convert.json, status)] of every conversion, oldest first."""
+    root = raw_root(cfg)
+    try:
+        dirs = [p for p in root.iterdir() if p.is_dir() and RAW_ID_RE.match(p.name)]
+    except OSError:
+        return []
+    out = []
+    for d in dirs:
+        meta = _read_json(d / CONVERT_JSON)
+        if isinstance(meta, dict):
+            out.append((d, meta, _read_json(d / PS.STATUS) or {}))
+    out.sort(key=lambda t: (str(t[1].get("created") or ""), t[0].name))
+    return out
+
+
+def list_conversions(cfg, user, can_see) -> list:
+    """This person's conversions (admin: all), newest first."""
+    return [t for t in reversed(all_conversions(cfg)) if can_see(user, t[1].get("owner"))]
+
+
+def write_conv_status(d: Path, **fields) -> dict:
+    """Merge fields into the conversion's status.json (atomic). Callers hold the runner lock, or own the folder
+    (just made)."""
+    st = _read_json(d / PS.STATUS) or {}
+    st.update(fields, updated=now_iso())
+    PS.write_json_atomic(d / PS.STATUS, st)
+    return st
+
+
+def new_conversion(cfg, user, fields: dict, *, source: dict, inputs=None, upload_files: Path | None = None,
+                   sample_key=None) -> Path:
+    """Make <root>/raw_tiles/<session>_<6 hex>/ with convert.json + status queued (uploaded files moved into
+    input/), then start it when nothing else runs. -> the folder."""
+    root = raw_root(cfg)
+    root.mkdir(parents=True, exist_ok=True)
+    for _ in range(50):
+        d = root / f"{fields['session']}_{secrets.token_hex(3)}"
+        try:
+            d.mkdir()
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise Refusal("Could not make a folder for the conversion. Try again.", 500)
+    try:
+        if upload_files is not None:
+            inp = d / CONVERT_INPUT
+            os.replace(upload_files, inp)                 # same drive: both under the predict root
+            names = sorted(p.name for p in inp.iterdir() if p.is_file())
+            inputs = [str(inp / n) for n in names if n.lower().endswith((".mrc.mdoc", ".idoc"))]
+            keys = [n for n in names if n.lower().endswith(".csv")]
+            sample_key = str(inp / keys[0]) if keys else None
+        meta = {"schema": SCHEMA_CONVERT, "id": d.name, "owner": user["id"], "session": fields["session"],
+                "recipe": fields["recipe"], "gpu": bool(fields["gpu"]), "source": source,
+                "inputs": [str(x) for x in inputs or []], "sample_key": str(sample_key) if sample_key else None,
+                "created": now_iso()}
+        PS.write_json_atomic(d / CONVERT_JSON, meta)
+        write_conv_status(d, state="queued", pid=None, started=None, finished=None, error=None, kind=None,
+                          warnings=[], result=None, n_tiles=None)
+    except BaseException:
+        shutil.rmtree(d, ignore_errors=True)
+        raise
+    kick(cfg)
+    ensure_watcher(cfg)
+    return d
+
+
+def convert_argv(d: Path, meta: dict, repo: Path) -> list:
+    """`python -m jobs.convert_raw --in ... --out <d>/tiles --recipe <r> [--sample-key k] [--gpu]
+    --processing-repo <repo>` (tests: the hooks' convert_cmd in place of `python -m jobs.convert_raw`)."""
+    hook = test_hooks().get("convert_cmd")
+    cmd = [str(x) for x in hook] if isinstance(hook, list) and hook else [sys.executable, "-m", "jobs.convert_raw"]
+    argv = cmd + ["--in", *meta["inputs"], "--out", str(d / CONVERT_TILES), "--recipe", str(meta["recipe"])]
+    if meta.get("sample_key"):
+        argv += ["--sample-key", str(meta["sample_key"])]
+    if meta.get("gpu"):
+        argv.append("--gpu")
+    return argv + ["--processing-repo", str(repo)]
+
+
+def start_conversion(cfg, d: Path, meta: dict) -> dict:
+    """Spawn the converter detached (no console window; it outlives the portal): stdout -> convert.out, stderr ->
+    convert.log. -> the new status."""
+    repo, why = processing_repo(cfg)
+    if repo is None:
+        return write_conv_status(d, state="failed", kind="refused", finished=now_iso(),
+                                 error=f"Raw conversion is not set up: {why}")
+    if not meta.get("inputs"):
+        return write_conv_status(d, state="failed", kind="refused", finished=now_iso(), error="No montage to convert.")
+    kw = {}
+    if os.name == "nt":
+        kw["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kw["start_new_session"] = True
+    env = {**os.environ, CR.REPO_ENV: str(repo), "PYTHONIOENCODING": "utf-8"}
+    try:
+        with open(d / CONVERT_OUT, "wb") as out, open(d / CONVERT_LOG, "ab") as log:
+            p = subprocess.Popen(convert_argv(d, meta, repo), cwd=REPO, stdin=subprocess.DEVNULL, stdout=out,
+                                 stderr=log, env=env, close_fds=True, **kw)
+    except OSError as e:
+        return write_conv_status(d, state="failed", kind="failed", finished=now_iso(),
+                                 error=f"could not start the converter: {type(e).__name__}: {e}")
+    return write_conv_status(d, state="running", pid=p.pid, started=now_iso())
+
+
+def converter_result(d: Path):
+    """The converter's one JSON object from convert.out, or None (not finished, or nothing printed)."""
+    try:
+        text = (d / CONVERT_OUT).read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                doc = json.loads(line)
+            except ValueError:
+                return None
+            return doc if isinstance(doc, dict) and "ok" in doc else None
+    return None
+
+
+def log_tail(d: Path, n=4000) -> str:
+    try:
+        with open(d / CONVERT_LOG, "rb") as f:
+            f.seek(max(0, os.fstat(f.fileno()).st_size - n))
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def finalize(d: Path, meta: dict, st: dict) -> dict:
+    """A running conversion: its result once printed (done / failed), failed when its process is gone without one;
+    else unchanged. Uploaded inputs are removed once done (the tiles are what Predict uses)."""
+    res = converter_result(d)
+    if res is None:
+        if PL.pid_alive(st.get("pid")):
+            return st
+        res = converter_result(d)                       # it may have printed just before it ended
+        if res is None:
+            return write_conv_status(d, state="failed", kind="failed", pid=None, finished=now_iso(),
+                                     error="The converter stopped without a result.")
+    warnings = [str(w) for w in (res.get("warnings") or [])]
+    if res.get("ok"):
+        st = write_conv_status(d, state="done", pid=None, finished=now_iso(), error=None, kind=None,
+                               warnings=warnings, result=res, n_tiles=res.get("n_tiles"))
+        if (meta.get("source") or {}).get("kind") == "upload":
+            shutil.rmtree(d / CONVERT_INPUT, ignore_errors=True)
+        return st
+    return write_conv_status(d, state="failed", pid=None, finished=now_iso(), kind=res.get("kind") or "failed",
+                             error=str(res.get("error") or "unknown error"), warnings=warnings, result=res)
+
+
+def kick(cfg) -> int:
+    """Record finished conversions and start queued ones (at most MAX_CONVERT_RUNNING at once), under the runner
+    lock. -> how many are still queued or running."""
+    root = raw_root(cfg)
+    if not root.is_dir():
+        return 0
+    with PS.locked(root / CONVERT_LOCK):
+        items = all_conversions(cfg)
+        running = 0
+        for i, (d, meta, st) in enumerate(items):
+            if st.get("state") == "running":
+                st = finalize(d, meta, st)
+                items[i] = (d, meta, st)
+                running += st.get("state") == "running"
+        pending = running
+        for d, meta, st in items:
+            if st.get("state") != "queued":
+                continue
+            if running < MAX_CONVERT_RUNNING:
+                st = start_conversion(cfg, d, meta)
+                running += st.get("state") == "running"
+                pending += st.get("state") == "running"
+            else:
+                pending += 1
+    return pending
+
+
+_WATCH: dict = {}                     # raw root -> {"dirty": bool}: one watcher thread per root
+_WATCH_LOCK = threading.Lock()
+
+
+def ensure_watcher(cfg):
+    """A daemon thread that calls kick() every CONVERT_POLL_S while anything is queued or running, then ends."""
+    key = os.path.normcase(str(raw_root(cfg)))
+    with _WATCH_LOCK:
+        if key in _WATCH:
+            _WATCH[key]["dirty"] = True
+            return
+        _WATCH[key] = {"dirty": True}
+
+    def loop():
+        while True:
+            with _WATCH_LOCK:
+                _WATCH[key]["dirty"] = False
+            try:
+                pending = kick(cfg)
+            except Exception as e:                     # noqa: BLE001 - logged; the watcher keeps going
+                print(f"[predict] conversion watcher: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+                pending = 1
+            if not pending:
+                with _WATCH_LOCK:
+                    if not _WATCH[key]["dirty"]:
+                        _WATCH.pop(key, None)
+                        return
+                continue
+            time.sleep(CONVERT_POLL_S)
+
+    threading.Thread(target=loop, name="cj-predict-convert-watch", daemon=True).start()
+
+
+def converted_sources(cfg, user, can_see) -> list:
+    """The finished conversions this person may see (owner, admin) as Predict sources: [{key, label, dir, manifest,
+    session (from the folder name), sample_column, problem, owner, conversion}]."""
+    out = []
+    for d, meta, st in list_conversions(cfg, user, can_see):
+        if st.get("state") != "done":
+            continue
+        m = RAW_ID_RE.match(d.name)
+        tiles = d / CONVERT_TILES
+        man = tiles / PSRC.MANIFEST
+        chk = PSRC.check_folder(tiles)
+        out.append({"key": PSRC.source_key(tiles),
+                    "label": f"{PSRC.default_label(m.group(1))} · converted ({meta.get('recipe')} recipe, "
+                             f"{when(meta.get('created'))})",
+                    "dir": tiles, "manifest": man if man.is_file() else None, "session": m.group(1),
+                    "sample_column": None, "problem": None if chk["compatible"] else chk["reason"],
+                    "owner": meta.get("owner"), "conversion": d.name})
+    return out
+
+
+# ---------------------------------------------------------------- raw session folders (admin; read only)
+def raw_sessions(cfg) -> list:
+    """Session folders under the scan roots with no model-ready tiles yet (predict_sources' "no model-ready tiles"):
+    [{key, folder, root, dir, session, label}]."""
+    out = []
+    for s in PSRC.discover(cfg)["skipped"]:
+        if not str(s.get("reason") or "").startswith("no model-ready tiles"):
+            continue
+        sid = PSRC.session_of(s["folder"])
+        if not sid:
+            continue
+        d = Path(s["root"]) / s["folder"]
+        out.append({"key": hashlib.sha1(os.path.normcase(str(d)).encode("utf-8")).hexdigest()[:10],
+                    "folder": s["folder"], "root": Path(s["root"]), "dir": d, "session": sid,
+                    "label": PSRC.default_label(sid)})
+    out.sort(key=lambda s: (s["session"][:8], s["session"][8:]), reverse=True)
+    return out
+
+
+def raw_montages(s: dict) -> dict:
+    """{"montages": [{rel, name, kind, bytes, files, atlas}], "sample_key": Path | None, "truncated": bool} for one
+    session folder: .mrc.mdoc (with its .mrc beside it) and .idoc files, RAW_SCAN_DEPTH folders deep (processed,
+    gallery and model folders skipped). Reads only; follows no link out of the scan root."""
+    rr = PSRC.real(s["root"])
+    found, seen = [], {"n": 0, "cut": False}
+
+    def walk(p: Path, depth: int):
+        try:
+            entries = sorted(os.scandir(p), key=lambda e: e.name.lower())
+        except OSError:
+            return
+        for e in entries:
+            seen["n"] += 1
+            if seen["n"] > RAW_SCAN_MAX:
+                seen["cut"] = True
+                return
+            try:
+                if e.is_dir(follow_symlinks=False):
+                    if depth < RAW_SCAN_DEPTH and not RAW_SKIP_DIR.match(e.name) and PSRC.inside(e.path, rr):
+                        walk(Path(e.path), depth + 1)
+                    continue
+                if not e.is_file(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            low, path = e.name.lower(), Path(e.path)
+            if low.endswith(".mrc.mdoc"):
+                mrc = path.with_name(e.name[:-len(".mdoc")])
+                if not (mrc.is_file() and PSRC.inside(mrc, rr)):
+                    continue
+                kind, size = "MRC", mrc.stat().st_size
+            elif low.endswith(".idoc"):
+                kind, size = "TIFF", None
+            else:
+                continue
+            if not PSRC.inside(path, rr):
+                continue
+            found.append({"rel": path.relative_to(s["dir"]).as_posix(), "name": e.name, "kind": kind, "bytes": size,
+                          "atlas": "atlas" in low})
+    walk(s["dir"], 0)
+    key = None
+    for cand in (s["dir"] / NOTES_SUB / SAMPLE_KEY, s["dir"] / SAMPLE_KEY):
+        if cand.is_file() and PSRC.inside(cand, rr):
+            key = cand
+            break
+    return {"montages": found, "sample_key": key, "truncated": seen["cut"]}
+
+
+def session_convert(cfg, user, s: dict, form: dict) -> Path:
+    """The admin's pick of montages in a raw session folder -> a conversion (inputs = the sidecars, read in place)."""
+    if user.get("role") != "admin":
+        raise Refusal("Picking a raw session is for the admin.", 403)
+    fields = raw_fields(cfg, user, form, session=s["session"])
+    listing = raw_montages(s)
+    by_rel = {m["rel"]: m for m in listing["montages"]}
+    picked = [r for r in form.get("montages") or [] if r in by_rel]
+    if not picked:
+        raise Refusal("Tick at least one montage.")
+    if len(picked) != len(set(form.get("montages") or [])):
+        raise Refusal("The session’s files changed since this page was opened. Check the montages again.")
+    check_gpu(fields)
+    return new_conversion(cfg, user, fields, source={"kind": "session", "folder": s["folder"], "montages": picked},
+                          inputs=[str(s["dir"] / r) for r in picked], sample_key=listing["sample_key"])
+
+
+# ---------------------------------------------------------------- upload sessions (one file or piece per request)
+_UP_RES: dict = {}                      # upload id -> Reservation (the bytes it may still write)
+_UP_RES_LOCK = threading.Lock()
+_UP_ALOCKS: dict = {}                   # upload id -> asyncio.Lock (one request at a time per session)
+
+
+def upload_dir(cfg, uid) -> Path | None:
+    if not isinstance(uid, str) or not UPLOAD_RE.match(uid):
+        return None
+    d = predict_root(cfg) / PORTAL_TMP / uid
+    return d if (d / UPLOAD_META).is_file() else None
+
+
+def load_upload(cfg, user, uid) -> tuple:
+    """-> (folder, upload.json) when it exists and is this person's own (an admin too: uploads are personal)."""
+    d = upload_dir(cfg, uid)
+    meta = _read_json(d / UPLOAD_META) if d else None
+    if not isinstance(meta, dict) or meta.get("owner") != user.get("id"):
+        return None, None
+    return d, meta
+
+
+def upload_reservation(uid, d: Path, meta: dict) -> Reservation:
+    """The session's disk hold (made again after a portal restart from what is still to come)."""
+    with _UP_RES_LOCK:
+        res = _UP_RES.get(uid)
+        if res is None:
+            res = Reservation(d, max(0, sum(meta["declared"].values()) - sum(upload_received(d, meta).values())))
+            _UP_RES[uid] = res
+        return res
+
+
+def drop_upload(d: Path, uid: str):
+    with _UP_RES_LOCK:
+        res = _UP_RES.pop(uid, None)
+    if res is not None:
+        res.release()
+    _UP_ALOCKS.pop(uid, None)
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def upload_received(d: Path, meta: dict) -> dict:
+    out = {}
+    done = set(meta.get("done") or [])
+    for n, size in meta["declared"].items():
+        if n in done:
+            out[n] = size
+        else:
+            p = d / UPLOAD_FILES / (n + PART)
+            try:
+                out[n] = p.stat().st_size
+            except OSError:
+                out[n] = 0
+    return out
+
+
+def upload_state(d: Path, meta: dict) -> dict:
+    return {"schema": SCHEMA_UPLOAD, "upload": meta["id"], "kind": meta["kind"], "chunk": CHUNK_BYTES,
+            "received": upload_received(d, meta), "done": list(meta.get("done") or []),
+            "total": sum(meta["declared"].values())}
+
+
+def is_sidecar(name: str) -> bool:
+    return name.lower().endswith((".mdoc", ".idoc", ".csv"))
+
+
+def raw_pairing(names) -> list:
+    """Problems with a raw file list: each .mrc with its .mrc.mdoc, .tif tiles with an .idoc, one sample key."""
+    low = {n.lower(): n for n in names}
+    problems = []
+    for lo, n in low.items():
+        if lo.endswith(".mrc") and lo + ".mdoc" not in low:
+            problems.append(f"{n}: its {n}.mdoc is missing (the pixel size and tile positions come from it)")
+        if lo.endswith(".mrc.mdoc") and lo[:-len(".mdoc")] not in low:
+            problems.append(f"{n}: its {n[:-len('.mdoc')]} is missing")
+    idocs = [n for lo, n in low.items() if lo.endswith(".idoc")]
+    tifs = [n for lo, n in low.items() if lo.endswith((".tif", ".tiff"))]
+    if tifs and not idocs:
+        problems.append("TIFF tiles need the montage’s .idoc file")
+    if idocs and not tifs:
+        problems.append("an .idoc needs its .tif tiles")
+    if sum(1 for lo in low if lo.endswith(".csv")) > 1:
+        problems.append("at most one sample key (.csv)")
+    if not any(lo.endswith((".mrc.mdoc", ".idoc")) for lo in low) and not problems:
+        problems.append("no montage: add an .mrc with its .mrc.mdoc, or an .idoc with its .tif tiles")
+    return problems
+
+
+def declared_files(kind: str, files) -> dict:
+    """The file list a page declares at the start -> {name: size}. Raises Refusal on a cap (413) or a bad list."""
+    if not isinstance(files, list) or not files:
+        raise Refusal("Choose at least one image." if kind == "tiles" else "Choose the raw files.")
+    cap_n = MAX_FILES if kind == "tiles" else RAW_MAX_FILES
+    if len(files) > cap_n:
+        raise Refusal(f"More than {cap_n} files: " + (f"an analysis takes at most {cap_n}." if kind == "tiles" else
+                                                       f"convert at most {cap_n} files at once.") +
+                      " Nothing was kept.", 413)
+    out, seen = {}, set()
+    for it in files:
+        name = str((it or {}).get("name") or "") if isinstance(it, dict) else ""
+        size = (it or {}).get("size") if isinstance(it, dict) else None
+        safe = safe_name(name)
+        if safe is None or safe != name:
+            raise Refusal(f"File name not accepted: {name[:80]!r}. Rename it (letters, digits, - _ . and spaces) and "
+                          f"upload again.")
+        if safe.lower() in seen:
+            raise Refusal(f"Two files are named {safe!r}; each name must be unique.")
+        seen.add(safe.lower())
+        if kind == "raw" and not safe.lower().endswith(RAW_EXT):
+            raise Refusal(f"{safe}: not a raw montage file. Upload .mrc files with their .mrc.mdoc, or an .idoc with "
+                          f"its .tif tiles (and, if you have it, the session’s sample key .csv).")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 1:
+            raise Refusal(f"{safe} is empty.")
+        cap = MAX_FILE_BYTES if kind == "tiles" else RAW_SIDE_MAX_BYTES if is_sidecar(safe) else RAW_MAX_FILE_BYTES
+        if size > cap:
+            raise Refusal(f"{safe} is over {cap // 2 ** 20} MB. Nothing was kept.", 413)
+        out[safe] = size
+    if kind == "raw":
+        if sum(out.values()) > RAW_MAX_TOTAL_BYTES:
+            raise Refusal(f"Over {RAW_MAX_TOTAL_BYTES // 2 ** 30} GB in one conversion. Convert fewer montages at "
+                          f"once.", 413)
+        problems = raw_pairing(out)
+        if problems:
+            raise Refusal(f"Please fix ({len(problems)}):\n" + "\n".join(problems))
+    return out
+
+
+def clean_fields(raw) -> dict:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or len(raw) > MAX_FIELDS:
+        raise Refusal("Too many form fields.", 413)
+    out = {}
+    for k, v in raw.items():
+        if not isinstance(k, str) or not isinstance(v, (str, int, float)) or isinstance(v, bool):
+            continue
+        v = str(v)
+        if len(k) > 64 or len(v.encode("utf-8")) > MAX_FIELD_BYTES:
+            raise Refusal("A form field is too long.", 413)
+        out[k] = v
+    return out
+
+
+def check_upload_fields(cfg, user, kind, fields, has_files=True) -> dict:
+    """Tiles: the label / nm / tick / model checks of the plain form (+ the basic user's limit). Raw: raw_fields."""
+    if kind == "tiles":
+        upload_fields(cfg, user, fields, has_files)
+        check_active(cfg, user)
+        return {}
+    return raw_fields(cfg, user, fields)
+
+
+def upload_start(cfg, user, body) -> dict:
+    """Open (or resume) an upload session. Every check that can be made before a byte is sent is made here."""
+    if not isinstance(body, dict):
+        raise Refusal("Bad request.", 400)
+    kind = body.get("kind")
+    if kind not in ("tiles", "raw"):
+        raise Refusal("Unknown upload.", 400)
+    if kind == "raw" and user.get("role") not in RAW_ROLES:
+        raise Refusal("Converting raw images is for advanced users and the admin.", 403)
+    sweep_scratch(cfg)
+    fields = clean_fields(body.get("fields"))
+    if kind == "tiles" and fields.get("confirm") != "yes":       # the plain form's first refusal, before the list
+        raise Refusal("Tick “I confirm the pixel size”: nothing was started.")
+    decl = declared_files(kind, body.get("files"))
+    raw = check_upload_fields(cfg, user, kind, fields)
+    if raw:
+        check_gpu(raw)
+    tmp = predict_root(cfg) / PORTAL_TMP
+    resume = body.get("resume")
+    if isinstance(resume, str):
+        d, meta = load_upload(cfg, user, resume)
+        if meta and meta.get("kind") == kind and meta.get("declared") == decl:
+            meta["fields"] = fields
+            PS.write_json_atomic(d / UPLOAD_META, meta)
+            return upload_state(d, meta)
+    # one open session per person and kind: an earlier one (other files) is given up
+    try:
+        mine = [p for p in tmp.iterdir() if UPLOAD_RE.match(p.name)]
+    except OSError:
+        mine = []
+    for p in mine:
+        m = _read_json(p / UPLOAD_META)
+        if isinstance(m, dict) and m.get("owner") == user.get("id") and m.get("kind") == kind:
+            drop_upload(p, p.name)
+    d = scratch(cfg, "us")
+    uid = d.name
+    res = Reservation(d, sum(decl.values()))
+    try:
+        res.check()
+        (d / UPLOAD_FILES).mkdir()
+        meta = {"schema": SCHEMA_UPLOAD, "id": uid, "owner": user["id"], "kind": kind, "fields": fields,
+                "declared": decl, "done": [], "created": now_iso()}
+        PS.write_json_atomic(d / UPLOAD_META, meta)
+    except BaseException:
+        res.release()
+        shutil.rmtree(d, ignore_errors=True)
+        raise
+    with _UP_RES_LOCK:
+        _UP_RES[uid] = res
+    return upload_state(d, meta)
+
+
+MRC_MAGIC = b"MAP"
+TIFF_MAGIC = (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+")
+
+
+def raw_problem(path: Path) -> str | None:
+    """A raw upload file checked by its content: an MRC stack, a SerialEM sidecar, a TIFF tile, a sample key."""
+    n = path.name.lower()
+    with open(path, "rb") as f:
+        head = f.read(65536)
+    if n.endswith(".mrc"):
+        if len(head) < 1024 or head[208:211] != MRC_MAGIC:
+            return f"{path.name}: not an MRC file (by content)"
+        nx, ny, nz = struct.unpack("<3i", head[:12])
+        if min(nx, ny, nz) < 1:
+            return f"{path.name}: an MRC file with no image in it"
+    elif n.endswith((".mdoc", ".idoc")):
+        if b"\x00" in head or b"PixelSpacing" not in head or not (b"[ZValue" in head or b"[Image" in head):
+            return f"{path.name}: not a SerialEM {n.rsplit('.', 1)[-1]} file (by content: no PixelSpacing and tiles)"
+    elif n.endswith((".tif", ".tiff")):
+        if head[:4] not in TIFF_MAGIC:
+            return f"{path.name}: not a TIFF (by content)"
+    elif n.endswith(".csv"):
+        try:
+            first = head.decode("utf-8-sig").splitlines()[0]
+        except (UnicodeDecodeError, IndexError):
+            return f"{path.name}: not a sample key (a text .csv with a #,Label header)"
+        if b"\x00" in head or "label" not in first.lower():
+            return f"{path.name}: not a sample key (a text .csv with a #,Label header)"
+    return None
+
+
+def file_problem(kind: str, path: Path) -> str | None:
+    if kind == "tiles":
+        try:
+            PS.inspect_image(path)
+        except (ValueError, OSError) as e:
+            return f"{path.name}: {e}"
+        return None
+    return raw_problem(path)
+
+
+class Resync(Exception):
+    """The piece does not start where the file stands: answer 409 with the session (the page resumes there)."""
+
+
+async def receive_piece(request: Request, d: Path, uid: str) -> dict:
+    """One piece of one file: ?name=&offset=, body = the bytes. Appends to <name>.part; the complete file is renamed
+    and content-checked. Raises Refusal (the caller drops the session unless keep), Resync, ClientDisconnect."""
+    meta = await run_in_threadpool(_read_json, d / UPLOAD_META)
+    if not isinstance(meta, dict):
+        raise Refusal("This upload is gone. Start again.", 404)
+    name = request.query_params.get("name") or ""
+    try:
+        offset = int(request.query_params.get("offset") or "")
+    except ValueError:
+        raise Refusal("Bad request (offset).", 400)
+    decl = meta["declared"]
+    if name not in decl:
+        raise Refusal(f"{name[:80]!r} is not one of the files of this upload.", 400)
+    if name in (meta.get("done") or []):
+        return upload_state(d, meta)                     # already complete: answering again is harmless
+    size = decl[name]
+    part = d / UPLOAD_FILES / (name + PART)
+    have = part.stat().st_size if part.is_file() else 0
+    if offset != have:
+        raise Resync()
+    try:
+        length = int(request.headers.get("content-length") or "")
+    except ValueError:
+        raise Refusal("Each piece must say its length (Content-Length).", 411)
+    if length < 1 or length > CHUNK_BYTES:
+        raise Refusal(f"One request carries at most {CHUNK_BYTES // 2 ** 20} MB. Nothing was kept.", 413)
+    if offset + length > size:
+        raise Refusal(f"{name}: more bytes than its size. Nothing was kept.", 400)
+    res = upload_reservation(uid, d, meta)
+    await run_in_threadpool(res.check)
+    fh = await run_in_threadpool(open, part, "ab")
+    got, buf, since = 0, bytearray(), 0
+    try:
+        async for piece in request.stream():
+            if not piece:
+                continue
+            got += len(piece)
+            if got > length:
+                raise Refusal("A piece was longer than it said. Nothing was kept.", 400)
+            buf += piece
+            if len(buf) >= WRITE_BATCH:
+                await run_in_threadpool(fh.write, bytes(buf))
+                res.written(len(buf))
+                since += len(buf)
+                buf.clear()
+                if since >= DISK_CHECK_BYTES:
+                    await run_in_threadpool(res.check)
+                    since = 0
+        if buf:
+            await run_in_threadpool(fh.write, bytes(buf))
+            res.written(len(buf))
+    finally:
+        await run_in_threadpool(fh.close)
+    if got != length:
+        raise Resync()                                   # cut short: the page asks again from what arrived
+    try:
+        os.utime(d / UPLOAD_META)                        # last activity (the sweep's clock)
+    except OSError:
+        pass
+    if offset + length == size:
+        final = d / UPLOAD_FILES / name
+        await run_in_threadpool(os.replace, part, final)
+        problem = await run_in_threadpool(file_problem, meta["kind"], final)
+        if problem:
+            raise Refusal(f"{problem}. Nothing was kept.", 400)
+        meta["done"] = list(meta.get("done") or []) + [name]
+        await run_in_threadpool(PS.write_json_atomic, d / UPLOAD_META, meta)
+    return upload_state(d, meta)
+
+
+def upload_create(cfg, user, d: Path, meta: dict) -> str:
+    """Every declared file is there -> the prediction set (tiles) or the conversion (raw). -> where to go next.
+    Refusal 409 (keep the session) when files are missing."""
+    missing = [n for n in meta["declared"] if n not in set(meta.get("done") or [])]
+    if missing:
+        raise Refusal(f"{len(missing)} file(s) not sent yet ({', '.join(missing[:3])}"
+                      f"{', …' if len(missing) > 3 else ''}). Press the button again to send them.", 409)
+    fields = meta.get("fields") or {}
+    if meta["kind"] == "tiles":
+        label, nm = upload_fields(cfg, user, fields, True)
+        check_active(cfg, user)
+        ps_dir = create_and_start(cfg, d / UPLOAD_FILES, user, fields["model"], sample_label=label, nm=nm)
+        return f"/predict/{ps_dir.name}/"
+    raw = raw_fields(cfg, user, fields)
+    check_gpu(raw)
+    names = [n for n in meta["declared"] if n.lower().endswith(".idoc")]
+    for n in names:                                       # an .idoc whose tiles were not uploaded: say so now
+        try:
+            listed_tiles = re.findall(r"^\s*\[Image\s*=\s*(.+?)\s*\]", (d / UPLOAD_FILES / n).read_text(
+                encoding="utf-8", errors="replace"), re.M)
+        except OSError:
+            listed_tiles = []
+        if listed_tiles and not any(t in meta["declared"] for t in listed_tiles):
+            raise Refusal(f"{n}: none of the .tif tiles it lists were uploaded (it lists e.g. {listed_tiles[0]}).")
+    conv = new_conversion(cfg, user, raw, upload_files=d / UPLOAD_FILES,
+                          source={"kind": "upload", "files": list(meta["declared"])})
+    return f"/predict/convert/{conv.name}/"
+
+
+# ---------------------------------------------------------------- raw pages (every text through esc)
+CONV_TONE = {"queued": "wait", "running": "run", "done": "ok", "failed": "warn"}
+
+
+def conv_status_view(meta: dict, st: dict, admin: bool, paths=()) -> dict:
+    state = st.get("state")
+    out = {"state": state, "tone": CONV_TONE.get(state, "wait"), "label": "Unknown", "detail": None, "tech": None,
+           "final": state in ("done", "failed")}
+    if state == "queued":
+        out.update(label="Waiting to start", detail="Another conversion is running; this one starts after it.")
+    elif state == "running":
+        out.update(label="Converting", detail="About half a minute per montage on the CPU. This page updates by "
+                                              "itself; you can close it.")
+    elif state == "done":
+        out.update(label="Done", detail=f"{int(st.get('n_tiles') or 0)} tiles made.")
+    elif state == "failed":
+        msg = _plain(str(st.get("error") or ""), paths)
+        out.update(label="Stopped", detail=(f"Not converted: {msg}" if st.get("kind") == "refused" else
+                                            "The conversion failed. Ask the admin (they can see the details)."))
+    if admin:
+        bits = [f"{k} {st.get(k)}" for k in ("pid", "kind", "error", "started", "finished") if st.get(k)]
+        out["tech"] = "; ".join(bits + [f"updated {st.get('updated')}"])
+    return out
+
+
+def conv_paths(d: Path, meta: dict) -> list:
+    """Folders whose spelling is left out of what people read (they never typed them)."""
+    out = [d / CONVERT_INPUT, d / CONVERT_TILES, d]
+    for p in meta.get("inputs") or []:
+        out.append(Path(p).parent)
+    if meta.get("sample_key"):
+        out.append(Path(meta["sample_key"]).parent)
+    return list(dict.fromkeys(out))
+
+
+def conv_fragments(cfg, user, can_see, d: Path, meta: dict, st: dict) -> dict:
+    admin = user.get("role") == "admin"
+    paths = conv_paths(d, meta)
+    v = conv_status_view(meta, st, admin, paths)
+    status = (f'<div class="cj-card cj-predict-status"><div class="cj-predict-top"><b>Status</b>'
+              f'{chip(v["label"], v["tone"])}</div>'
+              + (f'<p class="cj-predict-detail">{esc(v["detail"])}</p>' if v["detail"] else "") + tech(v["tech"])
+              + '</div>')
+    parts = []
+    warns = [_plain(w, paths) for w in st.get("warnings") or []]
+    if st.get("state") == "done":
+        src = next((s for s in converted_sources(cfg, user, can_see) if s.get("conversion") == d.name), None)
+        if src is not None and not src["problem"]:
+            parts.append(f'<div class="cj-card"><a class="cj-predict-btn cj-predict-primary" '
+                         f'href="/predict/new/session/{esc(src["key"])}/">Analyse these tiles</a>'
+                         f'<p class="cj-mut">Pick samples and confirm the pixel size, as for a processed session. '
+                         f'Also listed under “New analysis”.</p></div>')
+        elif src is not None:
+            parts.append(msg_box(f"These tiles can’t be analysed: {src['problem']}"))
+        res = st.get("result") or {}
+        nm = ", ".join(f"{float(x):g}" for x in res.get("nm_per_px") or [])
+        parts.append(f'<div class="cj-card"><dl class="cj-predict-kv">'
+                     f'<div><dt>Tiles</dt><dd>{int(st.get("n_tiles") or 0)}</dd></div>'
+                     f'<div><dt>nm per pixel</dt><dd>{esc(nm or "?")}</dd></div>'
+                     f'<div><dt>Montages</dt><dd>{esc(", ".join(res.get("montages") or []))}</dd></div>'
+                     f'<div><dt>Computed on</dt><dd>{esc(res.get("compute") or "?")}</dd></div></dl></div>')
+    if warns:
+        parts.append('<h2 class="cj-sec">Warnings</h2><div class="cj-card"><ul class="cj-predict-warns">'
+                     + "".join(f"<li>{esc(w)}</li>" for w in warns) + '</ul></div>')
+    if admin and st.get("state") in ("failed", "running", "done"):
+        tail = log_tail(d)
+        if tail:
+            parts.append(f'<details class="cj-card"><summary>Converter log (admin)</summary>'
+                         f'<pre class="cj-predict-log">{esc(tail)}</pre></details>')
+    return {"status": status, "result": "".join(parts), "live": not v["final"], "state": st.get("state")}
+
+
+def page_convert(cfg, user, can_see, d: Path, meta: dict, st: dict) -> str:
+    admin = user.get("role") == "admin"
+    fr = conv_fragments(cfg, user, can_see, d, meta, st)
+    src = meta.get("source") or {}
+    what = ("Uploaded files" if src.get("kind") == "upload" else
+            f"Raw session folder {src.get('folder') or '?'}")
+    default = (msg_box(f"Converted with the default recipe ({CR.DEFAULT_RECIPE}, the lab’s template), not this "
+                       f"session’s own: contrast and denoise may differ from the lab’s delivered tiles.")
+               if meta.get("recipe") == "default" else "")
+    owner = f'<div><dt>Owner</dt><dd>{esc(meta.get("owner"))}</dd></div>' if admin else ""
+    return wrap(
+        f'<div class="cj-predict" id="cj-predict-conv" data-cid="{esc(d.name)}" data-live="{int(fr["live"])}" '
+        f'data-every="{REFRESH_S}"><p class="cj-mut"><a href="/predict/">← My analyses</a></p>'
+        f'<h1>Raw conversion: {esc(PSRC.default_label(meta.get("session") or "19700101"))}</h1>'
+        + (f'<p class="cj-mut cj-wrap">{esc(d.name)}</p>' if user.get("role") != "basic" else "") +
+        f'<p id="cj-predict-err" class="cj-mut" role="status" hidden></p>{default}'
+        f'<section id="cj-predict-cstatus">{fr["status"]}</section>'
+        f'<section id="cj-predict-cresult">{fr["result"]}</section>'
+        f'<h2 class="cj-sec">Details</h2><div class="cj-card"><dl class="cj-predict-kv">'
+        f'<div><dt>Session</dt><dd>{esc(meta.get("session"))}</dd></div>'
+        f'<div><dt>Recipe</dt><dd>{esc(meta.get("recipe"))}</dd></div>'
+        f'<div><dt>Compute</dt><dd>{"GPU (asked)" if meta.get("gpu") else "CPU"}</dd></div>'
+        f'<div><dt>Images from</dt><dd>{esc(what)}</dd></div>'
+        f'<div><dt>Started</dt><dd>{esc(when(meta.get("created")))}</dd></div>{owner}</dl>'
+        + (tech(f"{d} · inputs {json.dumps(meta.get('inputs'))} · sample key {meta.get('sample_key')}")
+           if admin else "") + '</div></div>')
+
+
+def conversions_html(convs, admin) -> str:
+    if not convs:
+        return '<p class="cj-mut">No raw conversions yet. Start one from “New analysis”.</p>'
+    li = []
+    for d, meta, st in convs:
+        v = conv_status_view(meta, st, False)
+        n = f' · {int(st.get("n_tiles") or 0)} tiles' if st.get("state") == "done" else ""
+        who = f' · {esc(meta.get("owner"))}' if admin else ""
+        li.append(f'<li class="cj-card cj-predict-item"><div class="cj-predict-top">'
+                  f'<a class="cj-predict-ttl" href="/predict/convert/{esc(d.name)}/">'
+                  f'{esc(PSRC.default_label(RAW_ID_RE.match(d.name).group(1)))} · {esc(meta.get("recipe"))} recipe'
+                  f'</a>{chip(v["label"], v["tone"])}</div>'
+                  f'<p class="cj-mut">{esc(when(meta.get("created")))}{n}{who}</p></li>')
+    return f'<ul class="cj-predict-items">{"".join(li)}</ul>'
+
+
+def not_set_up(cfg, user) -> str:
+    _, why = processing_repo(cfg)
+    return msg_box("Raw conversion is not set up on this server.",
+                   extra=tech(why) if user.get("role") == "admin" else "<p>Ask the admin.</p>")
+
+
+def page_raw_upload(cfg, user, error=None) -> str:
+    repo, _ = processing_repo(cfg)
+    head = '<div class="cj-predict"><p class="cj-mut"><a href="/predict/new/">← Back</a></p><h1>Convert raw images</h1>'
+    if repo is None:
+        return wrap(head + not_set_up(cfg, user) + '</div>')
+    err = msg_box("", extra=f'<div>{problem_list(error)}</div>') if error else ""
+    return wrap(
+        head + err +
+        '<div class="cj-card cj-predict-what"><h2>What this does</h2><ul>'
+        '<li>Your raw montages are made into model-ready tiles by the lab’s own processing (the same code that made '
+        'the delivered “3d” tile folders), then you analyse them as a session.</li>'
+        '<li>Upload whole montages: each <b>.mrc</b> with its <b>.mrc.mdoc</b>, or an <b>.idoc</b> with all its '
+        '<b>.tif</b> tiles. Add the session’s <b>sample_key.csv</b> if you have it (else samples are “Grid n”).</li>'
+        '<li>The pixel size comes from the .mdoc / .idoc; it is never guessed.</li></ul></div>'
+        f'<form method="post" action="/predict/new/raw/" enctype="multipart/form-data" class="cj-predict-form" '
+        f'id="cj-predict-raw" data-cj-upload="raw" data-max-files="{RAW_MAX_FILES}" '
+        f'data-max-bytes="{RAW_MAX_FILE_BYTES}">'
+        f'<div class="cj-predict-msg cj-predict-t-warn" data-cj-upload-msg role="alert" hidden></div>'
+        f'<noscript><p class="cj-predict-msg">Raw files are sent one at a time, which needs JavaScript. Turn it on to '
+        f'upload here.</p></noscript>'
+        f'<fieldset class="cj-card cj-predict-fs"><legend>Session and recipe</legend>'
+        f'<label class="cj-predict-field"><span>Session id (the imaging date, YYYYMMDD; YYYYMMDD-n for a later '
+        f'session that day)</span><input name="session" required maxlength="12" '
+        f'pattern="[0-9]{{8}}(-[0-9]+)?" inputmode="numeric" placeholder="20261027"></label>'
+        f'{recipe_select(repo)}{gpu_box()}</fieldset>'
+        f'<fieldset class="cj-card cj-predict-fs"><legend>Raw files</legend>'
+        f'<label class="cj-predict-field"><span>.mrc + .mrc.mdoc, or .idoc + .tif tiles (+ sample_key.csv)</span>'
+        f'<input type="file" name="files" multiple required accept=".mrc,.mdoc,.idoc,.tif,.tiff,.csv"></label>'
+        f'<p class="cj-mut" data-cj-upload-info role="status"></p></fieldset>'
+        f'<p><button class="cj-predict-btn cj-predict-primary" type="submit" data-busy="Uploading… keep this page '
+        f'open">Upload and convert</button></p></form></div>')
+
+
+def page_raw_sessions(cfg, user) -> str:
+    repo, _ = processing_repo(cfg)
+    head = ('<div class="cj-predict"><p class="cj-mut"><a href="/predict/new/">← Back</a></p>'
+            '<h1>Pick a raw session</h1>')
+    if repo is None:
+        return wrap(head + not_set_up(cfg, user) + '</div>')
+    cards = [f'<a class="cj-card cj-predict-src" href="/predict/new/raw/sessions/{esc(s["key"])}/">'
+             f'<b>{esc(s["label"])}</b><span class="cj-mut">Session {esc(s["session"])} · folder '
+             f'{esc(s["folder"])}</span>{tech(str(s["dir"]))}</a>' for s in raw_sessions(cfg)]
+    body = "".join(cards) or ('<p class="cj-mut">Every session folder under the scan roots already has processed '
+                              'tiles (or none was found).</p>')
+    return wrap(head + '<p class="cj-mut">Session folders under the scan roots that have no processed tiles yet. The '
+                       'folder is only read; the tiles are written under the Predict folder.</p>'
+                f'<div class="cj-predict-srcs">{body}</div></div>')
+
+
+def human_bytes(n) -> str:
+    if not n:
+        return ""
+    return f"{n / 2 ** 30:.1f} GB" if n >= 2 ** 30 else f"{n / 2 ** 20:.0f} MB"
+
+
+def page_raw_session(cfg, user, s: dict, listing: dict, form=None, error=None) -> str:
+    repo, _ = processing_repo(cfg)
+    head = (f'<div class="cj-predict"><p class="cj-mut"><a href="/predict/new/raw/sessions/">← Back</a></p>'
+            f'<h1>{esc(s["label"])}</h1><p class="cj-mut">Session {esc(s["session"])} · folder {esc(s["folder"])}'
+            f'</p>{tech(str(s["dir"]))}')
+    if repo is None:
+        return wrap(head + not_set_up(cfg, user) + '</div>')
+    form = form or {}
+    picked = set(form.get("montages") or [m["rel"] for m in listing["montages"] if not m["atlas"]])
+    def row(m):
+        size = f' · {esc(human_bytes(m["bytes"]))}' if m["bytes"] else ""
+        atlas = ' <span class="cj-predict-warn">atlas: usually not wanted</span>' if m["atlas"] else ""
+        return (f'<li><label><input type="checkbox" name="montages" value="{esc(m["rel"])}"'
+                f'{" checked" if m["rel"] in picked else ""}> <span class="cj-wrap">{esc(m["rel"])}</span></label> '
+                f'<span class="cj-predict-tag">{esc(m["kind"])}{size}</span>{atlas}</li>')
+    rows = "".join(row(m) for m in listing["montages"])
+    err = msg_box("", extra=f'<div>{problem_list(error)}</div>') if error else ""
+    if not rows:
+        return wrap(head + err + '<p class="cj-mut">No montages (.mrc with its .mrc.mdoc, or .idoc) found in this '
+                                 'folder.</p></div>')
+    key = (f'Sample key: {esc(listing["sample_key"].relative_to(s["dir"]).as_posix())} (sample names come from it).'
+           if listing["sample_key"] else 'No sample_key.csv found: samples will be named “Grid n”.')
+    cut = '<p class="cj-predict-warn">The folder is very big: only part of it was looked at.</p>' \
+        if listing["truncated"] else ""
+    return wrap(
+        head + err +
+        f'<form method="post" class="cj-predict-form" id="cj-predict-rawsession">'
+        f'<fieldset class="cj-card cj-predict-fs"><legend>Montages ({len(listing["montages"])})</legend>{cut}'
+        f'<ul class="cj-predict-mlist">{rows}</ul><p class="cj-mut">{key}</p></fieldset>'
+        f'<fieldset class="cj-card cj-predict-fs"><legend>Recipe</legend>'
+        f'{recipe_select(repo, form.get("recipe"), s["session"])}{gpu_box(form.get("gpu") == "yes")}</fieldset>'
+        f'<p><button class="cj-predict-btn cj-predict-primary" type="submit" data-busy="Starting…">Convert</button>'
+        f'</p></form></div>')
+
+
 # ---------------------------------------------------------------- the page's script (served as /predict/predict.js)
-JS = r"""// Predict module (portal/modules/predict.py). No inline script: this file is the module's only script.
-// - Set page (#cj-predict-set[data-live="1"]): every few seconds GET /predict/api/set/<ps>?html=1 (same origin) and
-//   swap in the status and actions fragments, rendered and escaped by the server; stops when nothing is left to do.
-// - Forms: show what is selected, check the upload caps before sending, disable the button while it works.
-(function () {
-  'use strict';
-  if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
-
-  function swap(id, frag) {
-    var box = document.getElementById(id);
-    if (!box || typeof frag !== 'string') return;
-    var t = document.createElement('template');
-    t.innerHTML = frag;
-    box.replaceChildren(t.content);
-  }
-
-  var set = document.getElementById('cj-predict-set');
-  if (set && set.dataset.ps) {
-    var every = Math.max(2, parseInt(set.dataset.every, 10) || 5) * 1000, busy = false, timer = null;
-    var note = document.getElementById('cj-predict-err');
-    var tick = function () {
-      if (busy || document.hidden) return;
-      busy = true;
-      fetch('/predict/api/set/' + encodeURIComponent(set.dataset.ps) + '?html=1',
-            {cache: 'no-store', credentials: 'same-origin'})
-        .then(function (r) { if (!r.ok) throw new Error('status ' + r.status); return r.json(); })
-        .then(function (j) {
-          var h = (j && j.html) || {};
-          swap('cj-predict-status', h.status);
-          swap('cj-predict-actions', h.actions);
-          if (note) { note.textContent = ''; note.hidden = true; }
-          if (!j.live && timer) { clearInterval(timer); timer = null; }
-        })
-        .catch(function (e) {
-          if (note) { note.textContent = 'Could not refresh (' + e.message + '); showing the last state.'; note.hidden = false; }
-        })
-        .then(function () { busy = false; });
-    };
-    if (set.dataset.live === '1') timer = setInterval(tick, every);
-    document.addEventListener('visibilitychange', function () { if (!document.hidden && timer) tick(); });
-  }
-
-  document.addEventListener('submit', function (e) {
-    var f = e.target;
-    if (!f || f.tagName !== 'FORM') return;
-    if (f.dataset.sent === '1') { e.preventDefault(); return; }
-    f.dataset.sent = '1';
-    var b = f.querySelector('button[type="submit"]');
-    if (b) { b.disabled = true; if (b.dataset.busy) b.textContent = b.dataset.busy; }
-  });
-
-  var sess = document.getElementById('cj-predict-session');
-  if (sess) {
-    var out = document.getElementById('cj-predict-sel'), max = parseInt(sess.dataset.max, 10) || 200;
-    var count = sess.querySelector('input[name="count"]');
-    var update = function () {
-      var n = 0;
-      sess.querySelectorAll('input[name="samples"]:checked').forEach(function (c) { n += parseInt(c.dataset.n, 10) || 0; });
-      var mode = sess.querySelector('input[name="how"]:checked');
-      if (mode && mode.value === 'count') {
-        var k = parseInt(count.value, 10);
-        if (k > 0) n = Math.min(n, k);
-      }
-      out.textContent = n + ' tile' + (n === 1 ? '' : 's') + ' will be analysed' + (n > max ? ' (too many: at most ' + max + ')' : '') + '.';
-    };
-    sess.addEventListener('input', update);
-    sess.addEventListener('change', update);
-    if (count) count.addEventListener('focus', function () {
-      var r = sess.querySelector('input[name="how"][value="count"]');
-      if (r) r.checked = true;
-      update();
-    });
-    update();
-  }
-
-  var up = document.getElementById('cj-predict-upload');
-  if (up) {
-    var input = up.querySelector('input[type="file"]'), info = document.getElementById('cj-predict-files');
-    var maxFiles = parseInt(up.dataset.maxFiles, 10), maxBytes = parseInt(up.dataset.maxBytes, 10);
-    var check = function () {
-      var fs = Array.prototype.slice.call(input.files || []), big = fs.filter(function (f) { return f.size > maxBytes; });
-      var mb = fs.reduce(function (a, f) { return a + f.size; }, 0) / 1048576;
-      var msg = fs.length + ' file' + (fs.length === 1 ? '' : 's') + ', ' + mb.toFixed(1) + ' MB';
-      var bad = '';
-      if (fs.length > maxFiles) bad = 'At most ' + maxFiles + ' files.';
-      else if (big.length) bad = big[0].name + ' is over ' + Math.round(maxBytes / 1048576) + ' MB.';
-      info.textContent = bad ? msg + '. ' + bad : msg;
-      input.setCustomValidity(bad);
-    };
-    input.addEventListener('change', check);
-  }
-})();
-"""
+SCRIPT = HERE.parent / "static" / "predict.js"      # served as /predict/predict.js (app.py serves only /cj/*)
+JS = SCRIPT.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------- routes
 def sweep_scratch(cfg, max_age_s=SCRATCH_MAX_AGE_S) -> int:
-    """Remove <root>/.portal/* left by a portal that stopped mid-upload (older than max_age_s). -> how many."""
+    """Remove <root>/.portal/* left by a portal that stopped mid-upload, and upload sessions never finished (no
+    "create"), older than max_age_s (a session: since its last request; its disk hold goes too). -> how many."""
+    def age(p: Path) -> float:
+        t = p.stat().st_mtime
+        try:
+            t = max(t, (p / UPLOAD_META).stat().st_mtime)
+        except OSError:
+            pass
+        return time.time() - t
     try:
         tmp = predict_root(cfg) / PORTAL_TMP
-        old = [p for p in tmp.iterdir() if p.is_dir() and p.name.startswith(("up_", "sel_"))
-               and time.time() - p.stat().st_mtime > max_age_s]
+        old = [p for p in tmp.iterdir() if p.is_dir() and p.name.startswith(("up_", "sel_", "us_"))
+               and age(p) > max_age_s]
     except Exception:                                # no root configured or not there yet: nothing to sweep
         return 0
     for p in old:
-        shutil.rmtree(p, ignore_errors=True)
+        if UPLOAD_RE.match(p.name):
+            drop_upload(p, p.name)
+        else:
+            shutil.rmtree(p, ignore_errors=True)
     return len(old)
 
 
@@ -1562,6 +2637,11 @@ def unreadable_page(src: dict, e: Refusal, user) -> str:
 def routes(ctx) -> list:
     cfg = ctx.cfg
     sweep_scratch(cfg)                               # at start (routes() runs once, before the portal serves)
+    try:                                             # a conversion left queued / running by a portal that stopped
+        if any(st.get("state") in ("queued", "running") for _, _, st in all_conversions(cfg)):
+            ensure_watcher(cfg)
+    except Exception:                                # no root configured or not there yet
+        pass
 
     def not_found(request):
         r = ctx.page(request, "Not found", wrap('<div class="cj-predict"><h1>Not found</h1><p>There is no analysis '
@@ -1575,22 +2655,35 @@ def routes(ctx) -> list:
         r.status_code = status
         return r
 
-    def find_source(key):
-        srcs, _ = sources_safe(cfg)
+    def forbidden(request, text):
+        return refused_page(request, "Not allowed", wrap(f'<div class="cj-predict"><h1>Not allowed</h1>'
+                                                         f'<p>{esc(text)}</p><p><a href="/predict/new/">Back</a></p>'
+                                                         f'</div>'), 403)
+
+    def find_source(key, user):
+        srcs, _ = sources_safe(cfg, user, ctx.can_see)
         return next((s for s in srcs if s["key"] == key and not s["problem"]), None)
+
+    def admin_text(e: Refusal, user) -> str:
+        return e.msg + (f"\n(admin) {e.tech}" if e.tech and user.get("role") == "admin" else "")
+
+    def refusal_json(e: Refusal, user, dropped: bool, extra=None):
+        doc = {"error": admin_text(e, user), "dropped": dropped}
+        doc.update(extra or {})
+        return ctx.json(doc, e.status)
 
     # ---- pages (sync: Starlette runs them in a worker thread)
     def index(request: Request):
         return ctx.page(request, "Predict", page_mine(cfg, ctx.user(request), ctx.can_see), active="predict")
 
     def new(request: Request):
-        return ctx.page(request, "New analysis", page_new(cfg, ctx.user(request)), active="predict")
+        return ctx.page(request, "New analysis", page_new(cfg, ctx.user(request), ctx.can_see), active="predict")
 
     def session_form(request: Request):
-        src = find_source(request.path_params["key"])
+        user = ctx.user(request)
+        src = find_source(request.path_params["key"], user)
         if src is None:
             return not_found(request)
-        user = ctx.user(request)
         try:
             t = read_tiles(src)
         except Refusal as e:
@@ -1598,17 +2691,17 @@ def routes(ctx) -> list:
         return ctx.page(request, src["label"], page_session_form(cfg, user, src, t), active="predict")
 
     async def session_post(request: Request):
-        src = await run_in_threadpool(find_source, request.path_params["key"])
+        user = ctx.user(request)
+        src = await run_in_threadpool(find_source, request.path_params["key"], user)
         if src is None:
             return await run_in_threadpool(not_found, request)
-        user = ctx.user(request)
         fd = await request.form(max_files=0, max_fields=1000)
         form = {k: v for k, v in fd.items() if isinstance(v, str)}
         form["samples"] = [v for v in fd.getlist("samples") if isinstance(v, str)]
         try:
             ps_dir = await run_in_threadpool(session_submit, cfg, user, src, form)
         except Refusal as e:
-            msg, status = e.msg + (f"\n(admin) {e.tech}" if e.tech and user.get("role") == "admin" else ""), e.status
+            msg, status = admin_text(e, user), e.status
 
             def again():
                 try:
@@ -1623,6 +2716,7 @@ def routes(ctx) -> list:
         return ctx.page(request, "Upload images", page_upload_form(cfg, ctx.user(request)), active="predict")
 
     async def upload_post(request: Request):
+        """The no-JavaScript form: one multipart request, at most NOJS_MAX_BYTES."""
         user = ctx.user(request)
         dest = await run_in_threadpool(scratch, cfg, "up")
         sink = None
@@ -1634,7 +2728,7 @@ def routes(ctx) -> list:
             except OSError as e:                     # disk full, a locked file, a path too long: nothing is kept
                 raise Refusal(os_error_text(e), 500, tech=f"{type(e).__name__}: {e}")
         except Refusal as e:
-            msg, status = e.msg + (f"\n(admin) {e.tech}" if e.tech and user.get("role") == "admin" else ""), e.status
+            msg, status = admin_text(e, user), e.status
             form = dict(sink.fields) if sink else {}
 
             def again():
@@ -1644,12 +2738,75 @@ def routes(ctx) -> list:
             await run_in_threadpool(shutil.rmtree, dest, True)
         return RedirectResponse(f"/predict/{ps_dir.name}/", status_code=303)
 
+    def raw_form(request: Request):
+        user = ctx.user(request)
+        if user.get("role") not in RAW_ROLES:
+            return forbidden(request, "Converting raw images is for advanced users and the admin.")
+        return ctx.page(request, "Convert raw images", page_raw_upload(cfg, user), active="predict")
+
+    def raw_post(request: Request):
+        """The raw form without JavaScript: refused (raw files go one per request, which needs the page's script)."""
+        user = ctx.user(request)
+        if user.get("role") not in RAW_ROLES:
+            return forbidden(request, "Converting raw images is for advanced users and the admin.")
+        return refused_page(request, "Convert raw images", page_raw_upload(
+            cfg, user, "Raw files are sent one at a time, which needs JavaScript. Turn JavaScript on and try again "
+                       "(nothing was kept)."), 400)
+
+    def raw_sessions_page(request: Request):
+        user = ctx.user(request)
+        if user.get("role") != "admin":
+            return forbidden(request, "Picking a raw session is for the admin.")
+        return ctx.page(request, "Pick a raw session", page_raw_sessions(cfg, user), active="predict")
+
+    def find_raw(key):
+        return next((s for s in raw_sessions(cfg) if s["key"] == key), None)
+
+    def raw_session_page(request: Request):
+        user = ctx.user(request)
+        if user.get("role") != "admin":
+            return forbidden(request, "Picking a raw session is for the admin.")
+        s = find_raw(request.path_params["key"])
+        if s is None:
+            return not_found(request)
+        return ctx.page(request, s["label"], page_raw_session(cfg, user, s, raw_montages(s)), active="predict")
+
+    async def raw_session_post(request: Request):
+        user = ctx.user(request)
+        if user.get("role") != "admin":
+            return await run_in_threadpool(forbidden, request, "Picking a raw session is for the admin.")
+        s = await run_in_threadpool(find_raw, request.path_params["key"])
+        if s is None:
+            return await run_in_threadpool(not_found, request)
+        fd = await request.form(max_files=0, max_fields=RAW_MAX_FILES + 20)
+        form = {k: v for k, v in fd.items() if isinstance(v, str)}
+        form["montages"] = [v for v in fd.getlist("montages") if isinstance(v, str)]
+        try:
+            d = await run_in_threadpool(session_convert, cfg, user, s, form)
+        except Refusal as e:
+            msg, status = admin_text(e, user), e.status
+            return await run_in_threadpool(lambda: refused_page(
+                request, s["label"], page_raw_session(cfg, user, s, raw_montages(s), form, msg), status))
+        return RedirectResponse(f"/predict/convert/{d.name}/", status_code=303)
+
+    def convert_page(request: Request):
+        user = ctx.user(request)
+        d, meta, st = load_conversion(cfg, user, ctx.can_see, request.path_params["cid"])
+        if d is None:
+            return not_found(request)
+        if st.get("state") in ("queued", "running"):
+            kick(cfg)
+            ensure_watcher(cfg)
+            st = _read_json(d / PS.STATUS) or st
+        return ctx.page(request, "Raw conversion", page_convert(cfg, user, ctx.can_see, d, meta, st),
+                        active="predict")
+
     def set_page(request: Request):
         user = ctx.user(request)
         d, req = load_set(cfg, user, ctx.can_see, request.path_params["ps"])
         if d is None:
             return not_found(request)
-        return ctx.page(request, "Analysis", page_set(cfg, user, d, req), active="predict")
+        return ctx.page(request, "Analysis", page_set(cfg, user, d, req, ctx.can_see), active="predict")
 
     def action(kind):
         def act(request: Request):            # sync: file checks and a thread start, no long work here
@@ -1680,7 +2837,7 @@ def routes(ctx) -> list:
     # ---- JSON
     def api_mine(request: Request):
         user = ctx.user(request)
-        srcs, _ = sources_safe(cfg)
+        srcs, _ = sources_safe(cfg, user, ctx.can_see)
         items = [item_of(cfg, user, d, req, st, srcs) for d, req, st in list_sets(cfg, user, ctx.can_see)]
         return ctx.json({"schema": SCHEMA_MINE, "items": items})
 
@@ -1690,6 +2847,113 @@ def routes(ctx) -> list:
         if d is None:
             return ctx.json({"error": "not found"}, 404)
         return ctx.json(set_view(cfg, user, d, req, request.query_params.get("html") == "1"))
+
+    def api_convert(request: Request):
+        user = ctx.user(request)
+        d, meta, st = load_conversion(cfg, user, ctx.can_see, request.path_params["cid"])
+        if d is None:
+            return ctx.json({"error": "not found"}, 404)
+        if st.get("state") in ("queued", "running"):
+            kick(cfg)
+            ensure_watcher(cfg)
+            st = _read_json(d / PS.STATUS) or st
+        fr = conv_fragments(cfg, user, ctx.can_see, d, meta, st)
+        out = {"schema": SCHEMA_CONVERT_VIEW, "id": d.name, "session": meta.get("session"), "state": st.get("state"),
+               "n_tiles": st.get("n_tiles"), "warnings": st.get("warnings") or [], "live": fr["live"]}
+        if request.query_params.get("html") == "1":
+            out["html"] = {"status": fr["status"], "result": fr["result"]}
+        return ctx.json(out)
+
+    # ---- the upload API (one file, or one piece of a file, per request)
+    async def read_body(request: Request, cap: int):
+        try:
+            if int(request.headers.get("content-length") or 0) > cap:
+                raise Refusal("Request too big.", 413)
+        except ValueError:
+            raise Refusal("Bad request.", 400)
+        buf = bytearray()
+        async for chunk in request.stream():
+            buf += chunk
+            if len(buf) > cap:
+                raise Refusal("Request too big.", 413)
+        try:
+            return json.loads(bytes(buf) or b"{}")
+        except ValueError:
+            raise Refusal("Bad request (not JSON).", 400)
+
+    async def api_upload_start(request: Request):
+        user = ctx.user(request)
+        try:
+            body = await read_body(request, START_MAX_BYTES)
+            return ctx.json(await run_in_threadpool(upload_start, cfg, user, body))
+        except Refusal as e:
+            return refusal_json(e, user, True)
+        except OSError as e:
+            return refusal_json(Refusal(os_error_text(e), 500, tech=f"{type(e).__name__}: {e}"), user, True)
+
+    def upload_lock(uid):
+        lock = _UP_ALOCKS.get(uid)
+        if lock is None:
+            lock = _UP_ALOCKS[uid] = asyncio.Lock()
+        return lock
+
+    GONE = {"error": "This upload is gone (finished, refused, or unused for an hour). Start again.", "dropped": True}
+
+    def api_upload_state(request: Request):
+        d, meta = load_upload(cfg, ctx.user(request), request.path_params["uid"])
+        if d is None:
+            return ctx.json(GONE, 404)
+        return ctx.json(upload_state(d, meta))
+
+    async def api_upload_file(request: Request):
+        user, uid = ctx.user(request), request.path_params["uid"]
+        d, _ = await run_in_threadpool(load_upload, cfg, user, uid)
+        if d is None:
+            return ctx.json(GONE, 404)
+        async with upload_lock(uid):
+            try:
+                return ctx.json(await receive_piece(request, d, uid))
+            except Resync:
+                meta = await run_in_threadpool(_read_json, d / UPLOAD_META)
+                if not isinstance(meta, dict):
+                    return ctx.json(GONE, 404)
+                return ctx.json(upload_state(d, meta), 409)
+            except ClientDisconnect:                     # the page resumes from what arrived
+                return Response(status_code=400)
+            except Refusal as e:
+                await run_in_threadpool(drop_upload, d, uid)
+                return refusal_json(e, user, True)
+            except OSError as e:
+                await run_in_threadpool(drop_upload, d, uid)
+                return refusal_json(Refusal(os_error_text(e), 500, tech=f"{type(e).__name__}: {e}"), user, True)
+
+    async def api_upload_create(request: Request):
+        user, uid = ctx.user(request), request.path_params["uid"]
+        d, meta = await run_in_threadpool(load_upload, cfg, user, uid)
+        if d is None:
+            return ctx.json(GONE, 404)
+        async with upload_lock(uid):
+            try:
+                href = await run_in_threadpool(upload_create, cfg, user, d, meta)
+            except Refusal as e:
+                keep = e.status in (409, 429, 503)       # files still to send, a limit, a busy GPU: try again later
+                if not keep:
+                    await run_in_threadpool(drop_upload, d, uid)
+                return refusal_json(e, user, not keep)
+            except OSError as e:
+                await run_in_threadpool(drop_upload, d, uid)
+                return refusal_json(Refusal(os_error_text(e), 500, tech=f"{type(e).__name__}: {e}"), user, True)
+            await run_in_threadpool(drop_upload, d, uid)
+        return ctx.json({"href": href})
+
+    async def api_upload_cancel(request: Request):
+        user, uid = ctx.user(request), request.path_params["uid"]
+        d, _ = await run_in_threadpool(load_upload, cfg, user, uid)
+        if d is None:
+            return ctx.json(GONE, 404)
+        async with upload_lock(uid):
+            await run_in_threadpool(drop_upload, d, uid)
+        return ctx.json({"ok": True})
 
     def script(request: Request):
         r = Response(JS, media_type="text/javascript; charset=utf-8")
@@ -1703,8 +2967,20 @@ def routes(ctx) -> list:
             Route(PREFIX + "/new/session/{key}/", session_post, methods=["POST"]),
             Route(PREFIX + "/new/upload/", upload_form, methods=["GET"]),
             Route(PREFIX + "/new/upload/", upload_post, methods=["POST"]),
+            Route(PREFIX + "/new/raw/", raw_form, methods=["GET"]),
+            Route(PREFIX + "/new/raw/", raw_post, methods=["POST"]),
+            Route(PREFIX + "/new/raw/sessions/", raw_sessions_page, methods=["GET"]),
+            Route(PREFIX + "/new/raw/sessions/{key}/", raw_session_page, methods=["GET"]),
+            Route(PREFIX + "/new/raw/sessions/{key}/", raw_session_post, methods=["POST"]),
+            Route(PREFIX + "/convert/{cid}/", convert_page, methods=["GET"]),
             Route(PREFIX + "/api/mine", api_mine, methods=["GET"]),
             Route(PREFIX + "/api/set/{ps}", api_set, methods=["GET"]),
+            Route(PREFIX + "/api/convert/{cid}", api_convert, methods=["GET"]),
+            Route(PREFIX + "/api/upload", api_upload_start, methods=["POST"]),
+            Route(PREFIX + "/api/upload/{uid}", api_upload_state, methods=["GET"]),
+            Route(PREFIX + "/api/upload/{uid}/file", api_upload_file, methods=["POST"]),
+            Route(PREFIX + "/api/upload/{uid}/create", api_upload_create, methods=["POST"]),
+            Route(PREFIX + "/api/upload/{uid}/cancel", api_upload_cancel, methods=["POST"]),
             Route(PREFIX + "/{ps}/", set_page, methods=["GET"]),
             Route(PREFIX + "/{ps}/review", action("review"), methods=["POST"]),
             Route(PREFIX + "/{ps}/results", action("results"), methods=["POST"]),
