@@ -17,13 +17,20 @@ review_server.py is wrapped, not changed; the real review (review_server.py on :
   (data.js, images/, api/...) stay inside the package.
 - Portal identity (BUILD_CONTRACTS.md section 8): the CJ portal proxies /review/<id>/app/... here with the package's key
   as X-Review-Key and the signed-in user's id as X-CJ-User (portal/proxy.py drops any client-sent X-CJ-* first). That
-  id is trusted ONLY when the same request brought this package's key in X-Review-Key (no ?k=, no cookie). Then:
-    GET /<id>/            index.html with window.REVIEW_IDENTITY = {"who": <id>, "locked": true} put before its first
-                          <script> (the page skips the "Who is reviewing?" picker; the file on disk is unchanged)
+  id is trusted ONLY when the same request came from loopback (the portal runs on this PC) AND brought this package's
+  key in X-Review-Key (no ?k=, no cookie). Then:
+    GET /<id>/            the repo's CURRENT annotation/review_tool/index.html (the package's own copy only when that
+                          is missing) with window.REVIEW_IDENTITY = {"who": <id>, "locked": true} put before its first
+                          <script>: the page skips the "Who is reviewing?" picker. Not the package copy: a package
+                          built before LOCKED_WHO would ask for a name, and with its claims rewritten (below) to an
+                          id the page doesn't know, card mode would skip the user's own cards. Files on disk unchanged.
     PUT /<id>/api/edits   every decision in the body gets who = <id> (a client-sent who never counts) before
                           review_server merges it, so reviewed_by (prediction_package) names the portal user
     POST /<id>/api/claim  ?who= = <id>
-  Without that header, every request is handled exactly as before (the page asks for a name as it always did).
+  Without a trusted identity, every request is handled exactly as before: direct :8767/<id>/?k= links get the
+  package's own index.html and the page asks for a name as it always did.
+  So a package's data.js is frozen at build while the tool page is the repo's: later changes to review_tool/index.html
+  must keep reading old data.js files (add fields only; never rename, remove or re-mean one).
 """
 import argparse
 import io
@@ -48,6 +55,8 @@ ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 BAD_PATH = ("..", "\\", ":")
 COMPLETE = "review_package.json"  # prediction_package.build writes it last (and builds in a temp folder anyway)
 IDENTITY_HEADER = "X-CJ-User"     # set by portal/proxy.py (client copies stripped); trusted only with the key header
+LOCAL_CLIENTS = frozenset({"127.0.0.1", "::1", "::ffff:127.0.0.1"})  # the portal's address: the only identity source
+TOOL_PAGE = REPO / "annotation" / "review_tool" / "index.html"     # served (with the identity) to portal requests
 
 
 def cookie_name(port: int, pkg_id: str) -> str:
@@ -218,9 +227,10 @@ class Dispatch(BaseHTTPRequestHandler):
         """The portal user this request is for: the X-CJ-User header, trusted only because this request brought the
         package's key in X-Review-Key (checked by Packages.handler just before; no ?k=, which would outrank it, and not
         a cookie, which any browser that once opened a ?k= link sends). None when there is no such header, or the key
-        came another way (the header is then ignored). ValueError for a trusted header that isn't one valid id."""
+        came another way, or the request is not from loopback (LOCAL_CLIENTS: the portal runs on this PC; a header
+        from any other address is ignored). ValueError for a trusted header that isn't one valid id."""
         vals = self.headers.get_all(IDENTITY_HEADER) or []
-        if not vals:
+        if not vals or self.client_address[0] not in LOCAL_CLIENTS:
             return None
         if parse_qs(query).get("k", [None])[0] or self.headers.get("X-Review-Key") is None:
             return None
@@ -233,7 +243,7 @@ class Dispatch(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urlsplit(self.path)
         if self.reviewer and url.path in ("/", "/index.html"):
-            path = self.pkg_dir / "index.html"
+            path = TOOL_PAGE if TOOL_PAGE.is_file() else self.pkg_dir / "index.html"  # the current tool (docstring)
             if path.is_file():
                 return self._send(200, inject_identity(path.read_bytes(), self.reviewer), "text/html; charset=utf-8")
         return super().do_GET()
@@ -285,7 +295,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", type=Path, default=None, help="Review root (default: <CryoAI-laptop>/review)")
     ap.add_argument("--host", default="127.0.0.1",
-                    help="Bind address (default 127.0.0.1; for phones use `tailscale serve` or the Tailscale IP)")
+                    help="Bind address (default 127.0.0.1). Keep it local: phones reach packages through the CJ portal, "
+                         "and a portal identity is trusted only from loopback, so don't expose this port (no "
+                         "Tailscale IP, no `tailscale serve`, whose requests also arrive from loopback)")
     ap.add_argument("--port", type=int, default=PORT)
     ap.add_argument("--prefix", default=PREFIX, help=f"Serve only package folders starting with this (default {PREFIX})")
     a = ap.parse_args(argv)
@@ -300,7 +312,10 @@ def main(argv=None):
     for i in ids:
         print(f"[OK]   http://{a.host}:{srv.server_address[1]}/{i}/?k=<key in {root / i / '.review_key'}>", flush=True)
     if a.host in ("0.0.0.0", "::"):
-        print("[WARN] Listening on every interface, LAN included. Prefer --host <Tailscale IP>.", flush=True)
+        print("[WARN] Listening on every interface, LAN included. Keep --host 127.0.0.1: reach packages through "
+              "the CJ portal.", flush=True)
+    elif a.host not in LOCAL_CLIENTS and a.host != "localhost":
+        print("[WARN] Not bound to loopback. Keep --host 127.0.0.1: reach packages through the CJ portal.", flush=True)
     srv.serve_forever()
 
 

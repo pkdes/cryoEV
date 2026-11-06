@@ -19,6 +19,7 @@ import threading
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 from urllib.parse import quote
 
 HERE = Path(__file__).resolve().parent
@@ -60,6 +61,26 @@ def request(port, method, path, body=None, headers=None):
 
 def pending(v, t, who):
     return {"v": v, "t": t, "who": who, "pending": True}
+
+
+def old_tool_page() -> bytes:
+    """review_tool/index.html as packages built before F2 hold it: the current page without the LOCKED_WHO lines
+    (each F2 line names LOCKED_WHO; its comment lines start "// Portal sign-in" and the next ones follow them)."""
+    lines, out, skip = mrs.TOOL_PAGE.read_bytes().splitlines(keepends=True), [], False
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith(b"// Portal sign-in"):
+            skip = True
+            continue
+        if skip and s.startswith(b"//"):
+            continue
+        skip = False
+        if b"LOCKED_WHO" in ln:
+            if b"const KEY" in ln:  # the KEY line existed before: keep it without the ":u:" part
+                out.append(ln.replace(b' + (LOCKED_WHO ? ":u:" + LOCKED_WHO : "")', b""))
+            continue
+        out.append(ln)
+    return b"".join(out)
 
 
 class MultiIdentity(unittest.TestCase):
@@ -106,12 +127,53 @@ class MultiIdentity(unittest.TestCase):
         self.assertIn(b'window.REVIEW_IDENTITY = {"who": "u-alice", "locked": true};', script)
         self.assertEqual(body.count(IDENT), 1)
         self.assertLess(body.index(IDENT), body.index(b"data.js"))           # set before data.js and the tool run
-        self.assertEqual(body.replace(script, b"", 1), self.index)             # nothing else changed
+        self.assertEqual(body.replace(script, b"", 1), mrs.TOOL_PAGE.read_bytes())  # the current tool, nothing else
         self.assertEqual((self.pkg / "index.html").read_bytes(), self.index)  # the file on disk is unchanged
         st, body2 = request(self.port, "GET", f"/{PKG}/index.html", headers=self.portal("u-alice"))
         self.assertEqual((st, body2), (200, body))
         st, head = request(self.port, "HEAD", f"/{PKG}/", headers=self.portal("u-alice"))
         self.assertEqual((st, head), (200, b""))
+
+    def test_old_package_copy_gets_the_current_tool(self):
+        """A package built before LOCKED_WHO keeps its old index.html: the portal gets the repo's tool (the old page
+        would ask for a name and skip its own cards); a direct ?k= link still gets the package's copy."""
+        old = old_tool_page()
+        self.assertNotIn(b"LOCKED_WHO", old)
+        try:
+            (self.pkg / "index.html").write_bytes(old)
+            st, body = request(self.port, "GET", f"/{PKG}/", headers=self.portal("u-alice"))
+            self.assertEqual(st, 200)
+            self.assertEqual(body.replace(mrs.identity_script("u-alice"), b"", 1), mrs.TOOL_PAGE.read_bytes())
+            self.assertIn(b"LOCKED_WHO", body)
+            st, body = request(self.port, "GET", f"/{PKG}/?k={self.key}")
+            self.assertEqual((st, body), (200, old))
+            with mock.patch.object(mrs, "TOOL_PAGE", self.tmp / "no-such-tool.html"):   # no repo tool: the copy
+                st, body = request(self.port, "GET", f"/{PKG}/", headers=self.portal("u-alice"))
+            self.assertEqual((st, body), (200, mrs.inject_identity(old, "u-alice")))
+        finally:
+            (self.pkg / "index.html").write_bytes(self.index)
+
+    def test_identity_only_from_loopback(self):
+        """A request from any other address (here: the server told the client is 10.1.2.3) is served as before, with
+        the header ignored: the page is the package's copy and the body's who is saved."""
+        srv = mrs.make_server(self.root, "127.0.0.1", 0, people=[])
+        srv.finish_request = lambda sock, addr: srv.RequestHandlerClass(sock, ("10.1.2.3", addr[1]), srv)
+        serve(srv)
+        try:
+            port = srv.server_address[1]
+            st, body = request(port, "GET", f"/{PKG}/", headers=self.portal("u-alice"))
+            self.assertEqual((st, body), (200, self.index))
+            file, (g1, *_) = self.image()
+            st, body = request(port, "PUT", f"/{PKG}/api/edits?f={quote(file)}",
+                               {"t": T0 + 1, "dec": {g1: pending("keep:MV", T0 + 1, "pujan")}}, self.portal("u-alice"))
+            self.assertEqual(st, 200, body)
+            self.assertEqual(self.saved(file)["dec"][g1]["who"], "pujan")
+            st, body = request(port, "GET", f"/{PKG}/", headers={"X-CJ-User": "u-alice"})   # and still a key
+            self.assertEqual(st, 403)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertEqual(mrs.LOCAL_CLIENTS, {"127.0.0.1", "::1", "::ffff:127.0.0.1"})
 
     def test_control_without_identity_is_byte_identical(self):
         """Known answer: no X-CJ-User (or a key from ?k= / the cookie, which the header can't ride on) -> the file."""

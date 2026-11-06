@@ -235,10 +235,11 @@ def _request_identity(handler, claimed):
     """THE ONE PLACE a request's reviewer comes from: the who saved on this request's new decisions (pending ones)
     and on its claim.
 
-    Today: `claimed`, the name the page's picker sent (a decision's who, a claim's ?who=), unverified, as before.
-    Portal (not implemented): behind the portal gateway this returns the gateway's verified user (an X-CJ-User
-    header), and only after checking the gateway's shared secret on the same request; without that check a header
-    is just another claim. Until then no header is read here."""
+    Here: always `claimed`, the name the page's picker sent (a decision's who, a claim's ?who=), unverified; this
+    server (the real review on :8766, the sandbox) reads no identity header and keeps the name picker.
+    Portal identity lives in annotation/multi_review_server.py (prediction packages, BUILD_CONTRACTS.md section 8):
+    it trusts the portal's X-CJ-User only from loopback with the package key in X-Review-Key, and stamps the request's
+    decisions and claim with that id before this handler sees them, so `claimed` already is that id there."""
     return claimed
 
 
