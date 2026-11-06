@@ -1,7 +1,10 @@
 """
-The /review/ proxy (P1): the CJ portal's only proxied module. httpx streaming both ways.
+The review proxy: the CJ portal's only proxied module. httpx streaming both ways.
 
-    /review/<path>?<query>  ->  <upstream>/<path>?<query without k>
+    <prefix>/<path>?<query>  ->  <upstream>/<path>?<query without k>
+
+`prefix` is per proxy (the app mounts the real review at /review/app; PREFIX below is only the default). The shell
+page at /review/ frames <prefix>/.
 
 - Paths: the raw path is percent-decoded (repeatedly, so %252e is caught too) and every segment checked;
   `..`, `.`, empty segments (`//`), backslashes, NUL and other control characters are rejected (400). A clean path
@@ -11,7 +14,7 @@ The /review/ proxy (P1): the CJ portal's only proxied module. httpx streaming bo
   real package's key, read once at start) and X-CJ-User (for P1b). Any `k` in the query is dropped, since on the
   review server a `k` in the query outranks the header.
 - Response headers: hop-by-hop headers (and any named in Connection), Set-Cookie, Server and Date are dropped; a
-  Location pointing at the upstream is made relative to /review/.
+  Location pointing at the upstream is made relative to <prefix>/.
 - Limits: request body <= MAX_BODY (413 above), upstream timeout TIMEOUT_S; 502 page when the upstream is down or
   times out.
 """
@@ -89,15 +92,15 @@ def request_headers(raw_headers, key: str | None, user: str) -> list:
     return out
 
 
-def rewrite_location(value: str, upstream: str) -> str:
+def rewrite_location(value: str, upstream: str, prefix: str = PREFIX) -> str:
     if value.startswith(upstream):
         value = value[len(upstream):] or "/"
     if value.startswith("/") and not value.startswith("//"):
-        return PREFIX + value
+        return prefix + value
     return value
 
 
-def response_headers(headers: httpx.Headers, upstream: str) -> list:
+def response_headers(headers: httpx.Headers, upstream: str, prefix: str = PREFIX) -> list:
     named = {t.strip().lower() for v in headers.get_list("connection") for t in v.split(",") if t.strip()}
     out = []
     for k, v in headers.multi_items():
@@ -105,7 +108,7 @@ def response_headers(headers: httpx.Headers, upstream: str) -> list:
         if lk in DROP_RESPONSE or lk in named:
             continue
         if lk == "location":
-            v = rewrite_location(v, upstream)
+            v = rewrite_location(v, upstream, prefix)
         out.append((lk.encode("latin-1"), v.encode("latin-1")))
     return out
 
@@ -119,8 +122,10 @@ def error_page(status: int, title: str, text: str) -> HTMLResponse:
 
 
 class ReviewProxy:
-    def __init__(self, upstream: str, key: str | None, timeout: float = TIMEOUT_S, max_body: int = MAX_BODY):
+    def __init__(self, upstream: str, key: str | None, timeout: float = TIMEOUT_S, max_body: int = MAX_BODY,
+                 prefix: str = PREFIX):
         self.upstream = upstream.rstrip("/")
+        self.prefix = prefix.rstrip("/")             # the URL space this proxy answers under, e.g. /review/app
         self.key = key
         self.timeout = timeout
         self.max_body = max_body
@@ -165,10 +170,10 @@ class ReviewProxy:
     async def handle(self, request: Request, user: str) -> Response:
         scope = request.scope
         raw = (scope.get("raw_path") or scope["path"].encode("utf-8")).decode("latin-1")
-        if not raw.startswith(PREFIX + "/"):
+        if not raw.startswith(self.prefix + "/"):
             return error_page(400, "Bad request", "Bad path.")
         try:
-            sub = clean_subpath(raw[len(PREFIX):])
+            sub = clean_subpath(raw[len(self.prefix):])
         except (BadPath, UnicodeDecodeError):
             return error_page(400, "Bad request", "That path is not allowed.")
         query = strip_k(scope.get("query_string", b"").decode("latin-1"))
@@ -190,7 +195,7 @@ class ReviewProxy:
         except httpx.HTTPError:
             return error_page(502, "Review is down",
                               "The review server is not running. Start it on the laptop, then reload this page.")
-        out_headers = response_headers(resp.headers, self.upstream)
+        out_headers = response_headers(resp.headers, self.upstream, self.prefix)
         if request.method == "HEAD":
             await resp.aclose()
             r = Response(b"", status_code=resp.status_code)

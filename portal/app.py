@@ -8,11 +8,17 @@ Routes (everything except OPEN needs a session; see Gate):
   /                      home: platform status from <registry>/live/live.json + module cards from modules.json
   /login?k=<key>         key link -> session cookie -> relative redirect to /
   /healthz               {"ok": true}
-  /cj/cj.css, brand.json, header.js, modules.json, me.json     the shell's own files
+  /cj/cj.css, brand.json, header.js, live.js, review.js, modules.json, me.json     the shell's own files
   /history/history.html, /history/live/live.json               served from the registry folder (allowlist only);
-                         history.html gets the cj.css / header.js include lines before </head> (file untouched)
-  /review/*              proxy to the real review server (portal/proxy.py); /review -> /review/
+                         history.html gets the cj.css / header.js include lines before </head> (file untouched).
+                         A hidden "classic" page: not in the nav, linked from home's footer.
+  /review/               the review shell: the bar + a full-height same-origin iframe of /review/app/ (its query,
+                         minus any k, goes into the iframe's src; review.js mirrors the frame's URL back)
+  /review/app/*          proxy to the real review server (portal/proxy.py), upstream path = the part after /review/app
+  /review/<other>        404: kept free for the multi-package route /review/<pkg_id>/ (wave 2; see review_mount)
 The sandbox is NOT proxied (it shares the real package's localStorage key); modules.json links out to :8443.
+Roles: plug-in modules declare ROLES (portal/modules); the core pages take theirs from modules.json (manifest_rules):
+review and history are admin only. The Gate answers 403 to any other role.
 
 Defaults: --registry = data_utils.config.registry_root(); --review-package = the newest open revise job on port
 8766 in that registry (its review_package path); roster and state dir under %USERPROFILE%\\.cryoev (portal/auth.py).
@@ -54,7 +60,28 @@ SECURITY_HEADERS = ((b"x-content-type-options", b"nosniff"), (b"x-frame-options"
                     (b"referrer-policy", b"same-origin"))
 INCLUDES = b'<link rel="stylesheet" href="/cj/cj.css">\n<script src="/cj/header.js" defer></script>\n'
 STATIC = {"cj.css": "text/css; charset=utf-8", "header.js": "text/javascript; charset=utf-8",
+          "live.js": "text/javascript; charset=utf-8", "review.js": "text/javascript; charset=utf-8",
           "brand.json": "application/json"}
+REVIEW_BASE = "/review"           # the real review: shell at /review/, tool proxied at /review/app/
+TPL_RE = re.compile(r"\{\{(\w+)\}\}")
+# module icons (24 x 24, stroked; design direction A)
+ICONS = {
+    "home": '<path d="M4 11l8-7 8 7"/><path d="M6 10v10h12V10"/>',
+    "data": '<ellipse cx="12" cy="6" rx="7" ry="2.6"/><path d="M5 6v12c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6V6"/>'
+            '<path d="M5 12c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6"/>',
+    "jobs": '<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="5" cy="6" r="1.3"/><circle cx="5" cy="12" r="1.3"/>'
+            '<circle cx="5" cy="18" r="1.3"/>',
+    "history": '<circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="13" r="2"/>'
+               '<path d="M6 8v8M8 6h3a5 5 0 015 5v0"/>',
+    "review": '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="5.5" stroke-dasharray="2 2"/>'
+              '<path d="M9.5 12.2l1.8 1.8 3.4-3.6"/>',
+    "sandbox": '<rect x="4" y="4" width="16" height="16" rx="2" stroke-dasharray="3 2.2"/><path d="M9 15l6-6M10 9h5v5"/>',
+    "predict": '<path d="M12 15V4M8 8l4-4 4 4M4 14v6h16v-6"/>',
+    "results": '<path d="M5 20v-8M10 20V5M15 20v-6M20 20v-10"/>',
+    "train": '<path d="M19.5 13a7.5 7.5 0 01-13.3 4.2M4.5 11a7.5 7.5 0 0113.3-4.2"/><path d="M18 3.5v3.5h-3.5M6 20.5V17h3.5"/>',
+    "admin": '<path d="M12 3l7 3v5.5c0 4.3-2.9 7.6-7 9.5-4.1-1.9-7-5.2-7-9.5V6z"/><path d="M9.5 12l1.8 1.8 3.4-3.5"/>',
+}
+EXT_ICON = '<svg class="cj-ext" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 16L16 8M10 8h6v6"/></svg>'
 REVIEW_PORT = 8766
 PUBLIC_PORTS = {"", "443", "8443", "8445", "8446"}   # tailscale serve's https ports (links use https there)
 HOST_RE = re.compile(r"[A-Za-z0-9.-]{1,253}|\[[0-9A-Fa-f:.]{2,45}\]")
@@ -263,100 +290,206 @@ class Gate:
 
 
 # ---------------------------------------------------------------- app
+def manifest() -> list:
+    return (read_json(HERE / "modules.json") or {}).get("modules", [])
+
+
+def manifest_roles(mods, mod_id) -> tuple:
+    for m in mods:
+        if m.get("id") == mod_id:
+            return tuple(m.get("roles") or ())
+    return ()
+
+
+def manifest_rules(mods, taken=()) -> list:
+    """Gate rules for the core pages from modules.json: [(prefix, roles)] for every module with a local route below
+    "/" (review -> /review, history -> /history). A plug-in module's own ROLES win: its prefix is in `taken`."""
+    out = []
+    for m in mods:
+        r = m.get("route")
+        if m.get("external") or not isinstance(r, str) or not r.startswith("/") or r == "/":
+            continue
+        prefix = "/" + r.strip("/").split("/")[0]
+        if prefix in taken or any(p == prefix for p, _ in out):
+            continue
+        out.append((prefix, tuple(m.get("roles") or ())))
+    return out
+
+
+def fill(tpl: str, values: dict) -> str:
+    """{{name}} placeholders in one pass (a value containing "{{x}}" is never expanded again)."""
+    return TPL_RE.sub(lambda mt: values.get(mt.group(1), mt.group(0)), tpl)
+
+
+def script_json(obj) -> str:
+    """JSON for a <script type="application/json"> block: no "<", ">" or "&" can end the element."""
+    return (json.dumps(obj, ensure_ascii=True).replace("&", "\\u0026").replace("<", "\\u003c")
+            .replace(">", "\\u003e"))
+
+
+def icon(name) -> str:
+    return f'<svg viewBox="0 0 24 24" aria-hidden="true">{ICONS.get(name, ICONS["home"])}</svg>'
+
+
 def render_home(request: Request, cfg: Config, user: dict) -> str:
+    """Home's body (goes into base.html): status cards for roles that may read the live snapshot (History's roles),
+    module cards from modules.json for the user's role, and the Classic history link."""
     brand = read_json(HERE / "static" / "brand.json") or {"name": "CJ"}
-    mods = (read_json(HERE / "modules.json") or {}).get("modules", [])
-    live = read_json(cfg.registry / "live" / "live.json") if cfg.registry else None
+    mods = manifest()
+    role = user.get("role")
     esc = html.escape
+    sees_live = role in manifest_roles(mods, "history")
+    live = read_json(cfg.registry / "live" / "live.json") if (cfg.registry and sees_live) else None
     stale = live is None or is_stale(live)
     age = snapshot_age(live) if live else None
-
-    if live is None:
-        snap = "No live snapshot (is jobs/monitor.py running?)"
-    elif stale:
-        snap = f"Live snapshot is stale ({dur(age)} old): the dots show unknown."
-    else:
-        snap = f"Live snapshot {dur(age)} old."
-
-    def card(title, rows, cls=""):
-        items = "".join(f"<li>{r}</li>" for r in rows)
-        return f'<section class="cj-card cj-stat{cls}"><h2>{esc(title)}</h2><ul class="cj-list">{items}</ul></section>'
 
     def dot(state):
         return f'<span class="cj-dot {state}" aria-hidden="true"></span>'
 
-    servers = []
-    for s in (live or {}).get("servers") or []:
-        st = "unk" if stale else ("up" if s.get("up") else "down")
-        word = {"unk": "unknown", "up": "up", "down": "down"}[st]
-        ms = f" · {s['ms']} ms" if st == "up" and s.get("ms") is not None else ""
-        servers.append(f'{dot(st)}<b>{esc(str(s.get("name", "?")).capitalize())}</b> '
-                       f'<span class="cj-mut">{word}{esc(ms)}</span>')
-    if not servers:
-        servers = [f'{dot("unk")}<span class="cj-mut">unknown (no snapshot)</span>']
+    def card(title, inner, extra=""):
+        return f'<section class="cj-card"{extra}><h2>{title}</h2>{inner}</section>'
 
-    watchers, running = [], []
-    for q in (live or {}).get("queues") or []:
-        where = esc(str((q.get("watcher") or {}).get("machine") or "desktop"))
-        if q.get("reach") != "ok":
-            watchers.append(f'{dot("down")}<b>{where}</b> <span class="cj-mut">{esc(str(q.get("reach") or "?"))}'
-                            f'</span>')
-            continue
-        w = q.get("watcher") or {}
-        disp = str(w.get("display") or "unknown")
-        st = "up" if disp == "alive" and not stale else "unk" if stale else "down"
-        hb = f" · heartbeat {dur(w.get('age_s'))} ago" if w.get("age_s") is not None else ""
-        watchers.append(f'{dot(st)}<b>{where}</b> <span class="cj-mut">{esc(disp + hb)}</span>')
-        r = q.get("running")
-        if r:
-            ep = f"epoch {r.get('epoch') if r.get('epoch') is not None else '?'}/{r.get('epochs') or '?'}"
-            eta = f"ETA {dur(r.get('eta_s'))}" if r.get("eta_s") is not None else "ETA ?"
-            running.append(f'<b class="cj-wrap">{esc(str(r.get("job") or "?"))}</b>'
-                           f'<span class="cj-mut">{esc(str(r.get("phase") or ""))} · {esc(ep)} · {esc(eta)}</span>')
-    if not watchers:
-        watchers = ['<span class="cj-mut">unknown (no queue in the snapshot)</span>']
-    if not running:
-        running = ['<span class="cj-mut">' + ("unknown" if live is None else "no job running") + '</span>']
-    status = (card("Servers", servers) + card("Desktop watcher", watchers) + card("Running job", running)
-              + card("Last backup", ['<b>unknown</b> <span class="cj-mut">(live.json has no backup field yet)</span>']))
+    status = ""
+    if sees_live:
+        if live is None:
+            snap = "No live snapshot (is jobs/monitor.py running?)"
+        elif stale:
+            snap = f"Live snapshot is stale ({dur(age)} old): the dots show unknown."
+        else:
+            snap = f"From live.json, {dur(age)} old."
+        servers, n_up = [], 0
+        srv_list = (live or {}).get("servers") or []
+        for s in srv_list:
+            st = "unk" if stale else ("up" if s.get("up") else "down")
+            n_up += st == "up"
+            word = {"unk": "unknown", "up": "up", "down": "down"}[st]
+            ms = f" · {s['ms']} ms" if st == "up" and s.get("ms") is not None else ""
+            servers.append(f'{dot(st)}<b>{esc(str(s.get("name", "?")).capitalize())}</b> '
+                           f'<span class="cj-mut">{word}{esc(ms)}</span>')
+        if not servers:
+            servers = [f'{dot("unk")}<span class="cj-mut">unknown (no snapshot)</span>']
+        big = (f'<div class="cj-big">{n_up} <small>of {len(srv_list)} up</small></div>' if srv_list and not stale
+               else '<div class="cj-big">? <small>unknown</small></div>')
+        srv_card = card("Servers", big + '<ul class="cj-list">' + "".join(f"<li>{r}</li>" for r in servers) + "</ul>")
+
+        watchers, running = [], []
+        for q in (live or {}).get("queues") or []:
+            where = esc(str((q.get("watcher") or {}).get("machine") or "desktop"))
+            if q.get("reach") != "ok":
+                watchers.append(f'<div class="cj-big warn">{dot("down")}{esc(str(q.get("reach") or "?"))}</div>'
+                                f'<div class="cj-mut">{where}</div>')
+                continue
+            w = q.get("watcher") or {}
+            disp = str(w.get("display") or "unknown")
+            st = "up" if disp == "alive" and not stale else "unk" if stale else "down"
+            hb = f"heartbeat {dur(w.get('age_s'))} ago" if w.get("age_s") is not None else "no heartbeat"
+            watchers.append(f'<div class="cj-big">{dot(st)}{esc(disp.capitalize())}</div>'
+                            f'<div class="cj-mut">{esc(disp)} · {esc(hb)} · {where}</div>')
+            r = q.get("running")
+            if r and not stale:
+                ep = f"epoch {r.get('epoch') if r.get('epoch') is not None else '?'}/{r.get('epochs') or '?'}"
+                eta = f"ETA {dur(r.get('eta_s'))}" if r.get("eta_s") is not None else "ETA ?"
+                running.append(f'<div class="cj-wrap"><b>{esc(str(r.get("job") or "?"))}</b></div>'
+                               f'<div class="cj-mut">{esc(str(r.get("phase") or ""))} · {esc(ep)} · {esc(eta)}</div>')
+        if not watchers:
+            watchers = ['<div class="cj-big">? <small>unknown</small></div>'
+                        '<div class="cj-mut">no queue in the snapshot</div>']
+        if not running:
+            running = ['<div class="cj-mut">' + ("unknown" if live is None else
+                                                 "unknown (stale snapshot)" if stale else "no job running") + "</div>"]
+        # the training snapshot: server-rendered text first, then CJLive (live.js) draws the epoch bar, ETA and last
+        # mAP from the embedded snapshot and refreshes it every 30 s
+        slim = None if live is None else {
+            "generated_utc": live.get("generated_utc"), "interval_s": live.get("interval_s"),
+            "queues": [{"reach": q.get("reach"), "running": q.get("running")} for q in live.get("queues") or []]}
+        train = (f'<script type="application/json" id="cj-live-data">{script_json(slim)}</script>'
+                 f'<div id="cj-train" data-cj-live="compact" data-cj-live-json="cj-live-data" '
+                 f'data-cj-live-src="/history/live/live.json" data-cj-live-every="30">{"".join(running)}</div>')
+        status = (f'<h2 class="cj-sec">Status</h2><div class="cj-mut" id="cj-snap">{esc(snap)}</div>'
+                  f'<div class="cj-cards" id="cj-status">'
+                  + srv_card + card("Desktop watcher", "".join(watchers)) + card("Training", train, ' id="cj-training"')
+                  + card("Last backup", '<div class="cj-big warn">Unknown</div>'
+                                        '<div class="cj-mut">live.json has no backup field yet</div>')
+                  + "</div>")
 
     srv = {s.get("name"): s for s in (live or {}).get("servers") or []}
-    role = user.get("role")
     cards = []
     for m in mods:
-        if m.get("id") == "home" or role not in (m.get("roles") or []):
+        if m.get("id") == "home" or not m.get("nav") or role not in (m.get("roles") or []):
             continue
+        mid = str(m.get("id", ""))
         name, desc = esc(m.get("name", "?")), esc(m.get("desc", ""))
-        ico = f'<span class="cj-ico" aria-hidden="true">{esc(m.get("name", "?")[:1])}</span>'
+        ico = f'<span class="cj-ico">{icon(m.get("icon"))}</span>'
+        label = f'<span class="cj-evh">{esc(m["label"])}</span>' if m.get("label") and mid == "review" else ""
         if m.get("status") != "on":
-            cards.append(f'<div class="cj-mod off" aria-disabled="true">{ico}<span class="cj-modt"><b>{name}</b>'
-                         f'<span class="cj-mut">{desc}</span></span><span class="cj-tag">coming</span></div>')
+            cards.append(f'<div class="cj-mod off" data-id="{esc(mid)}" aria-disabled="true"><div class="cj-mt">{ico}'
+                         f'<b>{name}</b><span class="cj-tag">coming</span></div><p>{desc}</p></div>')
             continue
         href = m.get("route") if not m.get("external") else external_href(m, request.headers.get("host"))
         h = m.get("health")
-        st = "" if not h else dot("unk" if stale or h not in srv else ("up" if srv[h].get("up") else "down"))
-        ext = ' <span class="cj-mut">(own address)</span>' if m.get("external") else ""
-        cards.append(f'<a class="cj-mod" href="{esc(href or "#")}">{ico}<span class="cj-modt"><b>{name}</b>{ext}'
-                     f'<span class="cj-mut">{desc}</span></span>{st}</a>')
+        st = "" if not h or not sees_live else dot("unk" if stale or h not in srv else
+                                                   ("up" if srv[h].get("up") else "down"))
+        ext = f' <span class="cj-mut">(own address)</span>{EXT_ICON}' if m.get("external") else ""
+        cls = "cj-mod cj-mod-review" if mid == "review" else "cj-mod"
+        cards.append(f'<a class="{cls}" data-id="{esc(mid)}" href="{esc(href or "#")}"><div class="cj-mt">{ico}'
+                     f'<b>{name}</b>{label}{ext}{st}</div><p>{desc}</p></a>')
+    if not cards:
+        cards = ['<div class="cj-mut">No modules for your role yet.</div>']
+    footer = ""
+    hist = next((m for m in mods if m.get("id") == "history"), None)
+    if hist and role in (hist.get("roles") or []) and hist.get("status") == "on":
+        footer = (f'<footer class="cj-foot"><a href="{esc(hist.get("route") or "/history/")}" id="cj-classic">'
+                  f'Classic history</a><span>registry history, queue and the Live tab</span></footer>')
 
     tpl = (HERE / "templates" / "home.html").read_text(encoding="utf-8")
-    for k, v in {"title": esc(brand.get("name", "CJ")), "tagline": esc(brand.get("tagline", "")),
-                 "user": esc(user.get("id", "")), "snapshot": esc(snap), "status_cards": status,
-                 "module_cards": "".join(cards)}.items():
-        tpl = tpl.replace("{{" + k + "}}", v)
-    return tpl
+    return fill(tpl, {"heading": esc(brand.get("name", "CJ")), "tagline": esc(brand.get("tagline", "")),
+                      "user": esc(user.get("id", "")), "status": status, "module_cards": "".join(cards),
+                      "footer": footer})
+
+
+def review_mount(base: str, proxy: P.ReviewProxy, title: str = "Review") -> list:
+    """The routes for one review under `base` (no trailing slash):
+         base/          the shell page: the bar + an iframe of base/app/ (the shell's query, minus k, goes along)
+         base/app       -> base/app/
+         base/app/...   the tool, through `proxy` (whose prefix must be base + "/app")
+    The real review is review_mount("/review", ...). Wave 2's multi-package route can mount each package the same
+    way (/review/<pkg_id>/, ids never "app"), in front of the /review/{rest} catch-all."""
+    app_prefix = base + "/app"
+    if proxy.prefix != app_prefix:
+        raise ValueError(f"review proxy prefix {proxy.prefix!r} != {app_prefix!r}")
+
+    async def shell(request: Request):
+        q = P.strip_k(request.scope.get("query_string", b"").decode("latin-1"))
+        src = app_prefix + "/" + (f"?{q}" if q else "")
+        body = (f'<iframe id="cj-review-frame" class="cj-review-frame" title="{html.escape(title)} tool" '
+                f'src="{html.escape(src)}" data-base="{html.escape(base)}/" data-app="{html.escape(app_prefix)}/" '
+                f'allow="clipboard-write; fullscreen"></iframe>\n<script src="/cj/review.js" defer></script>')
+        return M.Ctx.page(request, title, body, active="review")
+
+    async def tool(request: Request):
+        return await proxy.handle(request, request.scope["cj_user"]["id"])
+
+    async def to_app(request: Request):
+        return RedirectResponse(app_prefix + "/", status_code=307)
+
+    return [Route(base + "/", shell, methods=["GET"]),
+            Route(app_prefix, to_app, methods=["GET"]),
+            Route(app_prefix + "/{path:path}", tool, methods=["GET", "HEAD", "PUT", "POST", "DELETE"])]
 
 
 def create_app(cfg: Config) -> Gate:
     auth = A.Auth(cfg.roster, cfg.state_dir)
-    proxy = P.ReviewProxy(cfg.review_upstream, cfg.review_key, cfg.review_timeout, cfg.max_body)
+    proxy = P.ReviewProxy(cfg.review_upstream, cfg.review_key, cfg.review_timeout, cfg.max_body,
+                          prefix=REVIEW_BASE + "/app")
 
     def no_store(r: Response) -> Response:
         r.headers["Cache-Control"] = "no-store"
         return r
 
     async def home(request: Request):
-        return no_store(HTMLResponse(render_home(request, cfg, request.scope["cj_user"])))
+        brand = read_json(HERE / "static" / "brand.json") or {}
+        return M.Ctx.page(request, str(brand.get("name") or "CJ"), render_home(request, cfg, request.scope["cj_user"]),
+                          active="home")
 
     async def login(request: Request):
         key = request.query_params.get("k")
@@ -424,8 +557,8 @@ def create_app(cfg: Config) -> Gate:
             return RedirectResponse(to, status_code=307)
         return go
 
-    async def review(request: Request):
-        return await proxy.handle(request, request.scope["cj_user"]["id"])
+    async def review_free(request: Request):
+        return page(404, "Not found", "Nothing here yet. The review is at /review/.")
 
     routes = [
         Route("/", home, methods=["GET"]),
@@ -439,11 +572,15 @@ def create_app(cfg: Config) -> Gate:
         Route("/history/history.html", history_html, methods=["GET"]),
         Route("/history/live/live.json", live_json, methods=["GET"]),
         Route("/history/{rest:path}", history_other, methods=["GET"]),
-        Route("/review", redirect("/review/"), methods=["GET"]),
-        Route("/review/{path:path}", review, methods=["GET", "HEAD", "PUT", "POST", "DELETE"]),
+        Route(REVIEW_BASE, redirect(REVIEW_BASE + "/"), methods=["GET"]),
+        *review_mount(REVIEW_BASE, proxy),
+        # kept free for /review/<pkg_id>/ (wave 2: mount those before this catch-all)
+        Route(REVIEW_BASE + "/{rest:path}", review_free, methods=["GET", "HEAD", "PUT", "POST", "DELETE"]),
     ]
     mod_routes, rules = M.load(M.Ctx(cfg))          # portal/modules/<id>.py plug-ins (BUILD_CONTRACTS.md section 1)
     routes.extend(mod_routes)
+    # core pages (review, history) get their roles from modules.json; a plug-in's own ROLES win for its PREFIX
+    rules = sorted(rules + manifest_rules(manifest(), {pr for pr, _ in rules}), key=lambda pr: -len(pr[0]))
 
     @contextlib.asynccontextmanager
     async def lifespan(app):
@@ -480,9 +617,11 @@ def startup_lines(cfg: Config, host: str, port: int) -> list:
         f"[cj] roster: {cfg.roster} ({n} people){'' if cfg.roster.is_file() else ' MISSING: nobody can sign in'}",
         f"[cj] sessions: {cfg.state_dir / 'sessions.json'} (sha256 of session ids only)",
         f"[cj] history: {cfg.registry or 'registry NOT FOUND'} (history.html + live/live.json only)",
-        f"[cj] review: /review/ -> {cfg.review_upstream}; key from "
+        f"[cj] review: /review/ = shell, /review/app/ -> {cfg.review_upstream}; key from "
         + (f"{cfg.review_package}" if cfg.review_key else
            f"NOWHERE ({cfg.review_package or 'no package'}: no .review_key), so review answers 403"),
+        "[cj] roles (modules.json): " + ("; ".join(f"{p} {'/'.join(r) or 'nobody'}" for p, r in manifest_rules(manifest()))
+                                         or "none") + "; plug-in modules: their own ROLES",
         "[cj] sandbox: not proxied (link out to :8443)",
         "[cj] logs: uvicorn access log off, proxy headers off; own access log with k= redacted",
     ]
