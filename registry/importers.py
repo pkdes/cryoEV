@@ -20,6 +20,11 @@ v2 (jobs and inputs, TRACKING_CONTRACT.md addendum):
   A package's `applied` status never makes its job done (only an explicit set-status line does).
 - a run folder with its own `run.json` (run_experiments.py, 2026-11-02) gives status (finished; error/oom ->
   failed, with a note), job_bundle and config as written; older run folders are derived as before.
+- export membership (2026-11-05, additive): each roboflow_export gets `image_list` {file, sha256, method, n}
+  (`<root>/lists/export_<slug>.tsv`, `stem\tsplit`), counts_listed and not_listed, from its own COCO files (exact;
+  excluded-session images counted, not listed), else from tracking/v2 `in: <export>` (tracked images only; method
+  says so), else image_list null + image_list_gap. Image ids: the export file name's key, else the image whose
+  rf_name is the COCO `extra.name`. The portal's Lineage follows it from an export to its images' grids / sessions.
 
 Raw imaging (2026-11-05, additive; nothing in Cryo-image-processing is written):
 - grid: imaged_grids_master.csv fields (sample_label, project, prep_date, grid_type, replicate, glow_discharge,
@@ -101,6 +106,15 @@ def list_text(pairs):
     """{(stem, split)} -> sorted `stem\tsplit` lines (split order, then stem)."""
     rows = sorted(set(pairs), key=lambda x: (SPLIT_ORDER.get(x[1], 9), x[1], x[0]))
     return "".join(f"{stem}\t{split}\n" for stem, split in rows)
+
+
+def export_list_names(export_ids):
+    """Export id -> its image list file, `lists/export_<slug>.tsv` (slug: runs of other characters -> `_`; a slug
+    two exports share gets the id's sha256[:8] appended, so names never collide)."""
+    slug = {e: "export_" + (re.sub(r"[^A-Za-z0-9]+", "_", e).strip("_") or "x") for e in export_ids}
+    n = Counter(slug.values())
+    return {e: f"{LISTS}/{s}" + (f"_{hashlib.sha256(e.encode('utf-8')).hexdigest()[:8]}" if n[s] > 1 else "") + ".tsv"
+            for e, s in slug.items()}
 
 
 def split_counts(pairs):
@@ -470,6 +484,70 @@ class Importer:
                 "counts_listed": split_counts({p for p in pairs if p[0] in known}),
                 "not_listed": dict(sorted(why.items())) or None}      # reason -> n (no excluded ids written)
 
+    def image_by_rf_name(self):
+        """Roboflow name -> image id, from image.rf_name (names claimed by two images are left out)."""
+        if not hasattr(self, "_by_rf_name"):
+            seen = defaultdict(set)
+            recs = {**registry.current("image", self.root), **{r["id"]: r for e, r in self.out if e == "image"}}
+            for iid, r in recs.items():
+                if r.get("rf_name"):
+                    seen[r["rf_name"]].add(iid)
+            self._by_rf_name = {n: next(iter(v)) for n, v in seen.items() if len(v) == 1}
+        return self._by_rf_name
+
+    def export_key(self, im):
+        """Export COCO image -> registry image id: the file name's key (`<stem>.rf.<hash>.jpg` -> image_key), else
+        the image whose rf_name is the Roboflow name (`extra.name`), else the file name's key (not in the registry)."""
+        key = ids.image_key(im["file_name"])
+        if key in self.registry_image_ids():
+            return key
+        return self.image_by_rf_name().get((im.get("extra") or {}).get("name"), key)
+
+    def export_membership(self, eid, rel, members):
+        """Which images went into an export -> image_list {file, sha256, method, n} (`stem\tsplit`, like datasets),
+        counts_listed, not_listed; or image_list null + image_list_gap (unknown, never empty). Sources, in order:
+        - the export's own COCO files (members = [(coco image, split, kept)]): exact. Excluded-session images are
+          counted in not_listed.excluded_session and left out of the list, as they are out of `counts`.
+        - tracking/v2 prelipo_tracking.csv `in: <export>` column, used only when the export has no local COCO and no
+          row says `unread`: membership of the TRACKED images only (backfill_tracking.py's pinned set), so the method
+          says so; an export image the tracker does not list is not known here.
+        """
+        known = self.registry_image_ids()
+        excluded = 0
+        if members is not None:
+            pairs = set()
+            for im, split, kept in members:
+                if kept:
+                    pairs.add((self.export_key(im), split))
+                else:
+                    excluded += 1
+            method = "export COCO split folders"
+        else:
+            col = f"in: {eid}"
+            vals = {stem: (r.get(col) or "").strip() for stem, r in self.tracking.items() if col in r}
+            if not vals or any(v.lower() == "unread" for v in vals.values()) or not any(vals.values()):
+                gap = ("no local COCO for this export, and tracking/v2 does not record its images (unread or absent)")
+                return {"image_list": None, "image_list_gap": gap}
+            pairs = set()
+            for stem, v in vals.items():
+                split = v.split(" ")[0]
+                if not v or split not in SPLIT_ORDER:
+                    continue
+                if self.s.is_excluded_stem(stem):
+                    excluded += 1
+                    continue
+                pairs.add((ids.image_key(stem), split))
+            method = (f"tracking/v2 prelipo_tracking.csv `{col}` column: tracked images only (no local COCO); "
+                      "an export image the tracker does not list is not known")
+        text = list_text(pairs)
+        self.lists[rel] = text
+        missing = sum(1 for stem, _ in pairs if stem not in known)
+        why = {k: v for k, v in (("excluded_session", excluded), ("not_in_registry", missing)) if v}
+        return {"image_list": {"file": rel, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                               "method": method, "n": len(pairs)},
+                "counts_listed": split_counts({p for p in pairs if p[0] in known}),
+                "not_listed": why or None, "image_list_gap": None}
+
     def pulls_and_rf_images(self):
         for pid, p in sorted(self.s.pulls.items()):
             if not p["coco"]:
@@ -604,19 +682,22 @@ class Importer:
     def exports_datasets_runs(self):
         s = self.s
         self.export_stems = {}
+        slugs = export_list_names(s.exports)
         for eid, e in sorted(s.exports.items()):
             d = self.cache / "training images" / eid
-            counts, classes, lines = {}, [], []
+            counts, classes, lines, members = {}, [], [], []
             for split, n in e["counts"].items():
                 c = read_json(d / split / "_annotations.coco.json")
                 keep = {im["id"] for im in c["images"] if not s.is_excluded_stem(ids.stem_of_export(im["file_name"]))}
                 counts[split] = {"images": n, "instances": sum(1 for a in c["annotations"] if a["image_id"] in keep)}
                 classes = classes or [k["name"] for k in c["categories"] if k.get("supercategory") != "none"]
                 lines += [f"{split}\t{ids.image_key(im['file_name'])}\n" for im in c["images"] if im["id"] in keep]
+                members += [(im, split, im["id"] in keep) for im in c["images"]]
             self.export_stems[eid] = (hashlib.sha256("".join(sorted(lines)).encode()).hexdigest() if lines else None)
             self.add("roboflow_export", id=eid, path=str(d), counts=counts, classes=classes,
                      derived_from=e["derived_from"], split_file=e["split_file"].name if e["split_file"] else None,
-                     note=None if counts else "local placeholder: no COCO in the cache")
+                     note=None if counts else "local placeholder: no COCO in the cache",
+                     **self.export_membership(eid, slugs[eid], members if counts else None))
         self.exp_counts = {r["id"]: r for ent, r in self.out if ent == "roboflow_export"}
         for did, d in sorted(s.datasets.items()):
             if not did:
@@ -924,6 +1005,7 @@ class Importer:
 
 REQUIRED_NULL = {"image": ("session", "grid"), "model": ("run",),
                  "dataset": ("images_sha256", "image_list", "counts_trained", "counts_listed"),
+                 "roboflow_export": ("image_list",),
                  "review_package": (), "label_version": ()}
 
 
