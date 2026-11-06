@@ -219,6 +219,14 @@ class CreateTests(PredictRoots, unittest.TestCase):
                     with self.assertRaisesRegex(PS.PredictSetError, r"sample 'S': mixed nm/px \(spread over 1 %"):
                         self.make(**kw)
                     self.assertEqual(len(list(self.root.glob("ps_*"))) if self.root.exists() else 0, n_before)
+        # exactly 1 %: 1.0 / 1.0 / 1.01 (median 1.0; (1.01 - 1.0) / 1.0 > 0.01 in floats): accepted thanks to NM_EPS
+        self.assertEqual(PS.NM_EPS, 1e-12)
+        png(d / "t3.png")
+        man.write_text("output_name,sample_label,nm_per_px\nt1.png,S,1.0\nt2.png,S,1.0\nt3.png,S,1.01\n",
+                       encoding="utf-8")
+        rows = PS.read_images(self.make(**kw))
+        self.assertEqual([float(r["nm_per_px"]) for r in rows], [1.0, 1.0, 1.01])
+        self.assertFalse(PS.nm_one_scale([1.0, 1.0, 1.0101]))          # control: just over
 
     def test_only_names_and_size_cap(self):
         with self.assertRaisesRegex(PS.PredictSetError, "plain file names"):

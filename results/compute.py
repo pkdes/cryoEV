@@ -74,7 +74,8 @@ from inference.model_classes import ev_class_ids, model_classes
 SCHEMA = "results/1"
 CONF = 0.5
 MULTILAYER_RULE = "geometry: outline containing another outline"
-NM_TOLERANCE = 0.01   # nm/px spread (max - min) <= this x median = one scale; a test pins portal predict's equal
+NM_TOLERANCE = 0.01   # nm/px spread (max - min) <= this x median = one scale; tests pin the other copies equal
+NM_EPS = 1e-12        # float slack on that comparison: exactly 1 % is accepted (pinned equal too)
 REVIEWER_CLASSES = {"EV", "MV", "inner", "nonEV"}
 REVIEWER_ROLE = {"EV": "standalone", "MV": "multilayer", "inner": "inner-layer"}   # agreeing geometry role
 SAMPLE_FIELDS = ["n_images", "n_reviewed", "ev_total", "ev_per_image_mean", "diam_nm_median", "diam_nm_q1",
@@ -276,8 +277,9 @@ def nm_spread(values) -> float:
 
 
 def one_scale(values) -> bool:
-    """True when these nm/px values (one per image of one sample) count as one scale: spread <= NM_TOLERANCE."""
-    return nm_spread(values) <= NM_TOLERANCE
+    """True when these nm/px values (one per image of one sample) count as one scale: spread <= NM_TOLERANCE
+    (+ NM_EPS, so exactly 1 % is not lost to float rounding)."""
+    return nm_spread(values) <= NM_TOLERANCE + NM_EPS
 
 
 def _refusal(label: str, imgs: list[dict]) -> str | None:

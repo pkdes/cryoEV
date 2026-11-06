@@ -496,11 +496,19 @@ class PixelTolerance(unittest.TestCase):
         self.assertEqual(P.NM_TOLERANCE, PR.NM_TOLERANCE)
         self.assertEqual(P.NM_TOLERANCE, P.PS.NM_TOLERANCE)              # jobs/predict_set.py create()
         self.assertEqual(P.NM_TOLERANCE, 0.01)
+        self.assertEqual((P.NM_EPS, RC.NM_EPS, P.PS.NM_EPS), (1e-12, 1e-12, 1e-12))
         for vals in ([1.4724], [1.47125, 1.4724], [1.0, 1.009], [1.0, 1.011], [1.0, 1.0, 1.02], [1.0, 1.005, 1.011],
-                     [0.7362, 1.4724], [2.0, 1.0, 1.0, 1.01]):
+                     [0.7362, 1.4724], [2.0, 1.0, 1.0, 1.01], [1.0, 1.0, 1.01]):
             with self.subTest(vals=vals):
                 self.assertAlmostEqual(P.nm_spread(vals), RC.nm_spread(vals), places=15)
                 self.assertEqual(P.one_scale(vals), RC.one_scale(vals))
+                self.assertEqual(P.one_scale(vals), P.PS.nm_one_scale(vals))
+        # exactly 1 %: (1.01 - 1.0) / 1.0 is 0.010000000000000009 in floats; the epsilon keeps it accepted everywhere
+        self.assertGreater((1.01 - 1.0) / 1.0, 0.01)
+        self.assertTrue(P.one_scale([1.0, 1.0, 1.01]))
+        self.assertTrue(RC.one_scale([1.0, 1.0, 1.01]))
+        self.assertTrue(P.PS.nm_one_scale([1.0, 1.0, 1.01]))
+        self.assertFalse(P.one_scale([1.0, 1.0, 1.0101]))                # control: just over
 
     def test_grouping_boundary(self):
         g = self.groups()
@@ -599,6 +607,82 @@ class PixelTolerance(unittest.TestCase):
         got = {s["label"]: s["nm_per_px"] for s in P.samples_of(rows)}
         self.assertEqual(got, {"A": "1–1.009 (each image its own)", "C": "1.4724"})
 
+    def test_split_by_tile_size_real_shape(self):
+        """The 20261027 shape: the liposome sample has 297 tiles at 1440x1023 (1.4724) and 96 at 352x250 (1.47125,
+        the 45k re-run); sizes from the manifest's output_size (the files are not read). Control: the carbon
+        sample, one size, is not split."""
+        d = self.tmp / "real_shape"
+        d.mkdir()
+        lines = ["output_name,sample_label,output_size,nm_per_px"]
+        for i in range(297):
+            lines.append(f"L{i:03d}.png,Liposomes,1440x1023,1.47240")
+        for i in range(96):
+            lines.append(f"S{i:03d}.png,Liposomes,352x250,1.47125")
+        for i in range(159):
+            lines.append(f"C{i:03d}.png,Carbon,1440x1023,1.47240")
+        for ln in lines[1:]:
+            (d / ln.split(",")[0]).write_bytes(b"")      # never opened: output_size gives the size
+        (d / "MANIFEST.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        t = P.tiles_of({**self.src, "dir": d, "manifest": d / "MANIFEST.csv"})
+        got = [(g["label"], len(g["names"]), g["nm"], g["nm_range"], g["mixed"]) for g in t["groups"]]
+        self.assertEqual(got, [("Carbon", 159, 1.4724, False, False),
+                               ("Liposomes · 352×250 tiles", 96, 1.47125, False, False),
+                               ("Liposomes · 1440×1023 tiles", 297, 1.4724, False, False)])
+        self.assertEqual(t["n"], 552)
+        with mock.patch.object(P, "model_block", return_value=""):
+            page = P.page_session_form(self.cfg, self.user, {**self.src, "dir": d}, t)
+        self.assertEqual(page.count('name="samples"'), 3)                # one tick per group
+        self.assertIn("Liposomes · 352×250 tiles", page)
+
+    def test_split_sizes_from_headers(self):
+        from PIL import Image
+        d = self.tmp / "hdr"
+        d.mkdir()
+        for n, size in (("a.png", (64, 48)), ("b.png", (64, 48)), ("c.png", (48, 64))):
+            Image.new("L", size, 128).save(d / n)
+        (d / "MANIFEST.csv").write_text("output_name,sample_label,nm_per_px\na.png,A,1.0\nb.png,A,1.0\nc.png,A,1.0\n",
+                                        encoding="utf-8")
+        t = P.tiles_of({**self.src, "dir": d, "manifest": d / "MANIFEST.csv"})
+        self.assertEqual([(g["label"], g["names"]) for g in t["groups"]],
+                         [("A · 48×64 tiles", ["c.png"]), ("A · 64×48 tiles", ["a.png", "b.png"])])
+        self.assertEqual(len(self.groups()), 3)                         # control: the setUp tiles, one size each
+
+    def test_range_outside_bounds_refused(self):
+        """A range left empty is still checked against NM_MIN-NM_MAX: 1000 / 1005 (0.5 %) is one scale but no
+        plausible pixel size."""
+        (self.src_dir / "MANIFEST.csv").write_text("output_name,sample_label,nm_per_px\na1.png,A,1000\n"
+                                                   "a2.png,A,1005\n", encoding="utf-8")
+        for n in list(self.nm)[2:]:
+            (self.src_dir / n).unlink()
+        self.assertTrue(self.groups()["A"]["nm_range"])
+        with self.assertRaises(P.Refusal) as e:
+            self.submit(samples=["g0"])
+        self.assertIn("A: 1000 nm per pixel (from the manifest) is outside 0.01-100", e.exception.msg)
+        seen = self.submit(samples=["g0"], nm_g0="1.4724")              # control: a typed plausible value
+        self.assertEqual({float(r["nm_per_px"]) for r in seen["rows"].values()}, {1.4724})
+
+    def test_typed_value_over_partly_missing_values_is_recorded(self):
+        (self.src_dir / "MANIFEST.csv").write_text("output_name,sample_label,nm_per_px\na1.png,A,1.000\n"
+                                                   "a2.png,A,\n", encoding="utf-8")
+        for n in list(self.nm)[2:]:
+            (self.src_dir / n).unlink()
+        seen = self.submit(samples=["g0"], nm_g0="1.2")
+        self.assertEqual([float(seen["rows"][n]["nm_per_px"]) for n in ("a1.png", "a2.png")], [1.2, 1.2])
+        (rec,) = self.audit_lines()
+        self.assertEqual(rec["detail"], {"sample": "A", "typed_nm_per_px": 1.2,
+                                         "manifest_nm_per_px": "1 (1 tile(s) without a value)", "tiles": 2})
+
+    def test_audit_failure_is_logged_and_kept_for_the_admin(self):
+        self.cfg.state_dir.parent.mkdir(parents=True, exist_ok=True)
+        self.cfg.state_dir.write_text("a file, not a folder", encoding="utf-8")   # the audit folder can't be made
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err):
+            seen = self.submit(nm_g0="1.005")
+        self.assertEqual([float(seen["rows"][n]["nm_per_px"]) for n in ("a1.png", "a2.png")], [1.005, 1.005])
+        self.assertIn("ps_20261105_aaaaaa: nm/px override not written to the audit log", err.getvalue())
+        self.assertIn("nm/px override not written", P.audit_problem("ps_20261105_aaaaaa"))
+        self.assertIsNone(P.audit_problem("ps_20261105_bbbbbb"))
+
 
 class PixelToleranceCreate(Base):
     """Through the real jobs.predict_set.create: a sample within the 1 % tolerance must make a set whose images.csv
@@ -622,6 +706,44 @@ class PixelToleranceCreate(Base):
         rows = read_rows(ps_dir / "images.csv")
         self.assertEqual([(r["orig_name"], float(r["nm_per_px"]), r["nm_confirmed_by"]) for r in rows],
                          [("t1.png", 1.47125, "bas"), ("t2.png", 1.4724, "bas")])
+
+    def test_split_groups_pass_create(self):
+        """Known answer: one sample with two tile sizes (the 20261027 shape, small) is split by tile size; both
+        groups ticked make ONE set that create() accepts, the size in each sample_label, each tile's own nm/px.
+        Control: the same tiles as one sample label go straight to create() and are refused (mixed tile sizes)."""
+        from PIL import Image
+        d = self.env.tmp / "sessions" / "split_tiles"
+        d.mkdir(parents=True, exist_ok=True)
+        Image.new("L", (144, 102), 120).save(d / "big1.png")
+        Image.new("L", (144, 102), 130).save(d / "big2.png")
+        Image.new("L", (35, 25), 140).save(d / "small1.png")
+        (d / "MANIFEST.csv").write_text("output_name,sample_label,output_size,nm_per_px\n"
+                                        "big1.png,Lipo,144x102,1.4724\nbig2.png,Lipo,144x102,1.4724\n"
+                                        "small1.png,Lipo,35x25,1.47125\n", encoding="utf-8")
+        src = {"key": "split", "label": "Split", "dir": d, "manifest": d / "MANIFEST.csv", "session": "20261027",
+               "sample_column": None}
+        t = P.tiles_of(src)
+        self.assertEqual([g["label"] for g in t["groups"]], ["Lipo · 35×25 tiles", "Lipo · 144×102 tiles"])
+        cfg = types.SimpleNamespace(registry=self.env.registry, review_root=self.review, state_dir=self.env.state)
+        with mock.patch.object(P.PL, "start_detached"):
+            ps_dir = P.session_submit(cfg, {"id": "bas", "role": "basic"}, src,
+                                      {"confirm": "yes", "sig": t["sig"], "samples": ["g0", "g1"], "nm_g0": "1.47125",
+                                       "nm_g1": "1.4724", "how": "all", "model": MODEL})
+        rows = read_rows(ps_dir / "images.csv")
+        self.assertEqual([(r["orig_name"], r["sample_label"], float(r["nm_per_px"])) for r in rows],
+                         [("big1.png", "Lipo · 144×102 tiles", 1.4724), ("big2.png", "Lipo · 144×102 tiles", 1.4724),
+                          ("small1.png", "Lipo · 35×25 tiles", 1.47125)])
+        with self.assertRaisesRegex(P.PS.PredictSetError, "mixed tile sizes"):
+            P.PS.create(d, model=MODEL, owner="bas", nm_confirmed_by="bas", sample_label_column="manifest:sample_label",
+                        nm_from_manifest=True, manifest=d / "MANIFEST.csv", registry_root=self.env.registry,
+                        root=self.root)
+
+    def test_audit_failure_shown_to_the_admin_only(self):
+        ps = self.fake_set("bas", "done", n_done=3)
+        with mock.patch("sys.stderr", io.StringIO()):
+            P.record_nm_override(types.SimpleNamespace(state_dir=None), {"id": "bas"}, ps, {"sample": "S1"})
+        self.assertIn("nm/px override not written to the audit log", html.unescape(self.page(f"/predict/{ps}/", "admin")))
+        self.assertNotIn("override not written", self.page(f"/predict/{ps}/", "basic"))
 
 
 class Limits(Base):

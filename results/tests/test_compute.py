@@ -373,6 +373,10 @@ class PixelTolerance(unittest.TestCase):
         self.assertTrue(C.one_scale([1.000, 1.009]))                      # 0.009 / 1.0045 = 0.896 %
         self.assertFalse(C.one_scale([1.000, 1.011]))                     # 0.011 / 1.0055 = 1.094 %
         self.assertTrue(C.one_scale([1.47125, 1.4724]))                   # the real 20261027 liposome sample
+        self.assertEqual(C.NM_EPS, 1e-12)
+        self.assertGreater(C.nm_spread([1.0, 1.0, 1.01]), 0.01)           # exactly 1 %, 0.010000000000000009 in floats
+        self.assertTrue(C.one_scale([1.0, 1.0, 1.01]))                    # ... accepted (NM_EPS)
+        self.assertFalse(C.one_scale([1.0, 1.0, 1.0101]))                 # control: just over
 
     def test_0_9_percent_accepted_with_range(self):
         with TempPS() as t:
