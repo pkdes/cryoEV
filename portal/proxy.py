@@ -93,10 +93,20 @@ def request_headers(raw_headers, key: str | None, user: str) -> list:
 
 
 def rewrite_location(value: str, upstream: str, prefix: str = PREFIX) -> str:
+    """An upstream Location, kept under `prefix`. A path that starts with // (another host) or whose path has dot
+    segments, empty segments or odd characters (it could climb out of `prefix`) becomes `prefix`/ instead."""
     if value.startswith(upstream):
         value = value[len(upstream):] or "/"
-    if value.startswith("/") and not value.startswith("//"):
-        return prefix + value
+    if value.startswith("//") or value.startswith("\\") or value.startswith("/\\"):
+        return prefix + "/"
+    if value.startswith("/") or "://" not in value.split("?", 1)[0]:
+        path = value.split("?", 1)[0].split("#", 1)[0]
+        try:
+            clean_subpath(path if path.startswith("/") else "/" + path)
+        except (BadPath, UnicodeDecodeError):
+            return prefix + "/"
+        if value.startswith("/"):
+            return prefix + value
     return value
 
 

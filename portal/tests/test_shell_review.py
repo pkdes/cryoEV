@@ -15,6 +15,7 @@ import re
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cjtest as T  # noqa: E402
@@ -207,15 +208,166 @@ class ShellRoles(unittest.TestCase):
 
     def test_manifest_rules(self):
         mods = [{"id": "home", "route": "/", "roles": ["admin", "basic"]},
-                {"id": "review", "route": "/review/", "roles": ["admin"]},
+                {"id": "review", "route": "/review/", "roles": ["admin", "advanced"]},
                 {"id": "jobs", "route": "/jobs/", "roles": ["admin", "advanced"]},
                 {"id": "sandbox", "route": None, "external": {"public_port": 8443}, "roles": ["admin"]},
                 {"id": "x", "route": None, "roles": ["admin"]}]
-        self.assertEqual(APP.manifest_rules(mods), [("/review", ("admin",)), ("/jobs", ("admin", "advanced"))])
-        self.assertEqual(APP.manifest_rules(mods, {"/jobs"}), [("/review", ("admin",))])   # a plug-in's ROLES win
-        rules = APP.manifest_rules(APP.manifest())
+        self.assertEqual(APP.manifest_rules(mods), [("/review", ("admin", "advanced")), ("/history", ("admin",)),
+                                                    ("/jobs", ("admin", "advanced"))])
+        self.assertEqual(APP.manifest_rules(mods, {"/jobs"}),                         # a plug-in's ROLES win
+                         [("/review", ("admin", "advanced")), ("/history", ("admin",))])
+        # fail closed: nothing, no route, bad roles or junk -> the built-in defaults stay
+        defaults = [("/review", ("admin",)), ("/history", ("admin",))]
+        for bad in ([], [{"id": "review", "route": None, "roles": ["basic"]}],
+                    [{"id": "review", "route": "/review/", "roles": []}],
+                    [{"id": "review", "route": "/review/", "roles": ["basic", "root"]}],
+                    [{"id": "review", "route": "/review/", "roles": "basic"}],
+                    [{"id": "review", "route": "//review/", "roles": ["basic"]}], ["junk", 3]):
+            self.assertEqual(APP.manifest_rules(bad), defaults, bad)
+        rules = APP.manifest_rules(APP.load_manifest())                               # the shipped file
         self.assertIn(("/review", ("admin",)), rules)
         self.assertIn(("/history", ("admin",)), rules)
+
+    def test_modules_json_filtered_by_role(self):
+        want = {"admin": None, "advanced": {"home", "data", "jobs", "predict", "results", "train"},
+                "basic": {"home", "predict", "results"}}
+        every = {m["id"] for m in APP.load_manifest()}
+        for role, ids in want.items():
+            st, h, body = self.get(role, "/cj/modules.json")
+            self.assertEqual(st, 200)
+            got = {m["id"] for m in json.loads(body)["modules"]}
+            self.assertEqual(got, ids or every, role)
+            self.assertEqual(T.hget(h, "cache-control"), "no-store")
+
+
+class FailClosed(unittest.TestCase):
+    """The Gate's core rules never come from guesses: built-in defaults (review, history: admin), replaced only by a
+    valid modules.json entry; a modules.json that can't be read or parsed stops the portal."""
+
+    def portal_with(self, text):
+        env = T.Env()
+        self.addCleanup(env.cleanup)
+        up = T.Upstream()
+        self.addCleanup(up.stop)
+        (env.registry / "history.html").write_text("<html><head></head><body>h</body></html>", encoding="utf-8")
+        man = env.tmp / "modules.json"
+        man.write_text(text, encoding="utf-8")
+        p = T.Portal(env.config(review_upstream=up.url, manifest=man))
+        self.addCleanup(p.stop)
+        basic = T.login(p.port, A.add_key(env.roster, "u-basic", "basic"))
+        return p, up, basic
+
+    def statuses(self, p, token, paths=("/review/", "/review/app/x", "/history/history.html")):
+        return [T.request(p.port, "GET", path, T.cookie(token))[0] for path in paths]
+
+    def test_weak_manifests_keep_defaults(self):
+        shipped = APP.load_manifest()
+        no_review = [m for m in shipped if m["id"] != "review"]
+        null_route = [dict(m, route=None) if m["id"] in ("review", "history") else m for m in shipped]
+        bad_roles = [dict(m, roles=["basic", "root"]) if m["id"] == "review" else m for m in shipped]
+        empty_roles = [dict(m, roles=[]) if m["id"] == "review" else m for m in shipped]
+        for name, mods in (("empty", []), ("no review", no_review), ("route null", null_route),
+                           ("bad roles", bad_roles), ("empty roles", empty_roles)):
+            with self.subTest(manifest=name):
+                p, up, basic = self.portal_with(json.dumps({"modules": mods}))
+                self.assertEqual(self.statuses(p, basic), [403, 403, 403])
+                self.assertEqual(up.seen, [])                                 # nothing reached the review server
+
+    def test_valid_entry_replaces_default(self):
+        """Control: the same harness does open /review to basic when modules.json validly says so."""
+        mods = [dict(m, roles=["admin", "basic"]) if m["id"] == "review" else m for m in APP.load_manifest()]
+        p, up, basic = self.portal_with(json.dumps({"modules": mods}))
+        self.assertEqual(self.statuses(p, basic), [200, 200, 403])
+        self.assertEqual(up.last()["path"], "/x")
+
+    def test_unreadable_manifest_refuses_to_start(self):
+        env = T.Env()
+        self.addCleanup(env.cleanup)
+        man = env.tmp / "modules.json"
+        for text in (None, "{not json", "[]", '{"modules": {"a": 1}}', '{"modules": ["x"]}'):
+            with self.subTest(text=text):
+                if text is None:
+                    man.unlink(missing_ok=True)
+                else:
+                    man.write_text(text, encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    APP.create_app(env.config(manifest=man))
+        with mock.patch("uvicorn.run") as run, mock.patch("logging.basicConfig"), \
+                mock.patch("builtins.print") as out:
+            rc = APP.main(["--registry", str(env.registry), "--roster", str(env.roster), "--state-dir",
+                           str(env.state), "--review-package", str(env.tmp / "none"), "--modules", str(man)])
+        self.assertEqual(rc, 2)
+        run.assert_not_called()
+        self.assertTrue(any("refusing to start" in str(c) for c in out.call_args_list))
+
+    def test_startup_note_on_roles(self):
+        env = T.Env()
+        self.addCleanup(env.cleanup)
+        lines = "\n".join(APP.startup_lines(env.config(), "127.0.0.1", 8770))
+        self.assertIn("/review admin", lines)
+        self.assertIn("Restart the portal after changing roles in modules.json", lines)
+
+
+class ToShell(unittest.TestCase):
+    """A copied /review/app/ link opened as a whole page goes to the shell (302 /review/?<query minus k>); the frame's
+    own loads and every other request still reach the tool."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = T.Env()
+        cls.up = T.Upstream()
+        cls.p = T.Portal(cls.env.config(review_upstream=cls.up.url))
+        cls.token = T.login(cls.p.port, cls.env.key)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.p.stop()
+        cls.up.stop()
+        cls.env.cleanup()
+
+    def get(self, path, headers=None):
+        return T.request(self.p.port, "GET", path, {**T.cookie(self.token), **(headers or {})})
+
+    def test_top_level_document_redirects(self):
+        n = len(self.up.seen)
+        shell_ref = f"{self.p.origin}/review/?mode=cards"
+        cases = [{"Sec-Fetch-Dest": "document"}, {"Sec-Fetch-Dest": "document", "Referer": shell_ref},
+                 {"Accept": "text/html,application/xhtml+xml"},
+                 {"Accept": "text/html", "Referer": f"{self.p.origin}/"},
+                 {"Accept": "text/html", "Referer": "http://elsewhere.example/review/"}]
+        for hdrs in cases:
+            for path in ("/review/app/?img=a.png&k=secret-9&mode=editor",
+                         "/review/app/index.html?img=a.png&k=s&mode=editor"):
+                st, h, _ = self.get(path, hdrs)
+                self.assertEqual((st, T.hget(h, "location")), (302, "/review/?img=a.png&mode=editor"), (hdrs, path))
+        st, h, _ = self.get("/review/app/", {"Sec-Fetch-Dest": "document"})
+        self.assertEqual((st, T.hget(h, "location")), (302, "/review/"))
+        self.assertEqual(len(self.up.seen), n)                               # none reached the tool
+
+    def test_frame_and_other_requests_pass(self):
+        shell_ref = f"{self.p.origin}/review/?mode=cards"
+        for hdrs, path in (({"Sec-Fetch-Dest": "iframe"}, "/review/app/?mode=cards"),
+                           ({"Accept": "text/html", "Referer": shell_ref}, "/review/app/?mode=cards"),
+                           ({}, "/review/app/?mode=cards"),                      # no browser headers at all
+                           ({"Sec-Fetch-Dest": "document"}, "/review/app/data.js"),   # only the tool's page moves
+                           ({"Sec-Fetch-Dest": "empty"}, "/review/app/api/edits")):
+            st, _, _ = self.get(path, hdrs)
+            self.assertEqual(st, 200, (hdrs, path))
+            self.assertEqual(self.up.last()["path"], path[len("/review/app"):], (hdrs, path))
+
+
+class LocationRewrite(unittest.TestCase):
+    def test_rewrite_location(self):
+        up, pre = "http://127.0.0.1:8766", "/review/app"
+        for value, want in (("/y", "/review/app/y"), ("http://127.0.0.1:8766/x?a=1", "/review/app/x?a=1"),
+                            ("http://127.0.0.1:8766", "/review/app/"), ("y?a=1", "y?a=1"),
+                            ("https://elsewhere.example/x", "https://elsewhere.example/x"),
+                            ("//evil.example/x", "/review/app/"), ("/\\evil.example", "/review/app/"),
+                            ("http://127.0.0.1:8766//evil.example/x", "/review/app/"),
+                            ("/a/../../history/history.html", "/review/app/"), ("/%2e%2e/x", "/review/app/"),
+                            ("/./x", "/review/app/"), ("../x", "/review/app/"), ("/a//b", "/review/app/"),
+                            ("/ok?next=../x", "/review/app/ok?next=../x")):
+            self.assertEqual(P.rewrite_location(value, up, pre), want, value)
 
 
 class ShellRealReviewServer(unittest.TestCase):

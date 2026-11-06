@@ -10,12 +10,20 @@
   if (!f) return;
   var base = f.getAttribute('data-base') || '/review/', app = f.getAttribute('data-app') || base + 'app/';
   var title = document.title;
+  // navigate this window, only ever to an absolute URL of this origin (never a path: "//host/x" would be another
+  // host, and a same-origin pathname can start with "//", e.g. from "/.//evil.example/x")
+  function go(href, replace) {
+    var u;
+    try { u = new URL(href); } catch (e) { return; }
+    if (u.origin !== location.origin) return;
+    if (replace) location.replace(u.href); else location.assign(u.href);
+  }
   function sync() {
     var w = f.contentWindow, l;
     try { l = w.location; if (!l || l.href === 'about:blank') return; } catch (e) { return; }   // not same-origin: leave
     if (l.origin !== location.origin) return;
     var p = l.pathname;
-    if (p.indexOf(app) !== 0) { location.replace(l.pathname + l.search + l.hash); return; }
+    if (p.indexOf(app) !== 0) { go(l.href, true); return; }
     var sub = p.slice(app.length);
     if (sub === '' || sub === 'index.html') {
       var want = base + l.search + l.hash;
@@ -47,7 +55,7 @@
       try { u = new URL(a.getAttribute('href'), w.location.href); } catch (e) { return; }
       if (u.origin !== location.origin || u.pathname.indexOf(app) === 0) return;
       ev.preventDefault();
-      location.assign(u.pathname + u.search + u.hash);
+      go(u.href, false);
     }, true);
     sync();
     try { w.focus(); } catch (e) { /* ignore */ }      // keyboard shortcuts go to the tool

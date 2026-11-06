@@ -67,6 +67,10 @@
    bar's height is held free until header.js inserts the bar, so the page does not jump. */
 #srv{display:none!important}
 html:not(.cj-barred) body:not(.cj-page)::before{content:"";display:block;height:var(--cj-bar-h)}
+/* the band between History's filters and "Queue" (header padding + filter margin + main padding, ~52 px; #srv takes
+   none): tightened in the served copy only */
+body:not(.cj-page)>header>.filters{margin-bottom:0}
+body:not(.cj-page)>header+main{padding-top:0}
 
 /* ---------------------------------------------------------------- pages the shell renders (base.html, errors) */
 .cj-page{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 var(--cj-font);-webkit-text-size-adjust:100%}

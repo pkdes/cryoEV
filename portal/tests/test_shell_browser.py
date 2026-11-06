@@ -203,6 +203,50 @@ class Shell(unittest.TestCase):
             finally:
                 ctx.close()
 
+    def test_review_frame_never_leaves_the_origin(self):
+        """"/.//evil.example/x" is a same-origin URL whose path starts with "//": navigating to that PATH would go to
+        evil.example. review.js only ever navigates to the absolute same-origin URL."""
+        ctx, page, rec = self.session(1280)
+        try:
+            for how in ("click", "frame"):
+                with self.subTest(how=how):
+                    page.goto(self.p.origin + "/review/?mode=cards")
+                    page.wait_for_load_state("networkidle")
+                    frame = page.frame(url=lambda u: "/review/app/" in u)
+                    if how == "click":                       # a link out of the tool -> this window
+                        frame.evaluate("""() => { const a = document.createElement('a'); a.href = '/.//evil.example/x';
+                                                 a.id = 'cj-test-evil'; a.textContent = 'x'; document.body.appendChild(a); }""")
+                        frame.locator("#cj-test-evil").dispatch_event("click")
+                        want = self.p.origin + "//evil.example/x"
+                    else:                                    # the frame lands outside the tool -> this window follows
+                        frame.evaluate("location.href = '/review/.//evil.example/x'")
+                        want = self.p.origin + "/review//evil.example/x"
+                    page.wait_for_url(want)
+                    page.wait_for_load_state("networkidle")
+                    self.assertTrue(page.url.startswith(self.p.origin + "/"), page.url)
+                    self.assertEqual(rec["foreign"], [])                        # nothing left for evil.example
+            self.assertFalse(any("evil.example" in u and not u.startswith(self.p.origin + "/") for u in rec["requests"]))
+        finally:
+            ctx.close()
+
+    def test_copied_tool_link_opens_in_the_shell(self):
+        """A /review/app/ link opened as the whole page (e.g. copied from the tool) lands in the shell, k dropped."""
+        ctx, page, rec = self.session(1280)
+        try:
+            resp = page.goto(self.p.origin + "/review/app/?mode=classes&k=stale-77")
+            page.wait_for_load_state("networkidle")
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.request.redirected_from.url, self.p.origin + "/review/app/?mode=classes&k=stale-77")
+            self.assertEqual(page.url, self.p.origin + "/review/?mode=classes")
+            self.assertEqual(page.get_attribute("#cj-review-frame", "src"), "/review/app/?mode=classes")
+            frame = page.frame(url=lambda u: "/review/app/" in u)
+            frame.wait_for_selector("body")
+            self.assertEqual(frame.locator("#cj-bar").count(), 0)          # the frame's own load was not redirected
+            self.assertTrue(any(u.endswith("/review/app/api/edits") for u in rec["requests"]))
+            self.clean(rec)
+        finally:
+            ctx.close()
+
     def test_nav_and_cards_by_role(self):
         for role in ("admin", "advanced", "basic"):
             ctx, page, rec = self.session(1280, role=role)

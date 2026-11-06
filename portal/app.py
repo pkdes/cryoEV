@@ -17,8 +17,10 @@ Routes (everything except OPEN needs a session; see Gate):
   /review/app/*          proxy to the real review server (portal/proxy.py), upstream path = the part after /review/app
   /review/<other>        404: kept free for the multi-package route /review/<pkg_id>/ (wave 2; see review_mount)
 The sandbox is NOT proxied (it shares the real package's localStorage key); modules.json links out to :8443.
-Roles: plug-in modules declare ROLES (portal/modules); the core pages take theirs from modules.json (manifest_rules):
-review and history are admin only. The Gate answers 403 to any other role.
+Roles: plug-in modules declare ROLES (portal/modules); the core pages start from CORE_ROLES (review, history: admin)
+and a valid modules.json entry may replace one (manifest_rules; fail closed). The rules are read once at start (an
+unreadable modules.json stops the portal; a role change needs a restart). The Gate answers 403 to any other role.
+A top-level document GET of /review/app/ (a copied tool link) answers 302 /review/?<query minus k>.
 
 Defaults: --registry = data_utils.config.registry_root(); --review-package = the newest open revise job on port
 8766 in that registry (its review_package path); roster and state dir under %USERPROFILE%\\.cryoev (portal/auth.py).
@@ -63,6 +65,9 @@ STATIC = {"cj.css": "text/css; charset=utf-8", "header.js": "text/javascript; ch
           "live.js": "text/javascript; charset=utf-8", "review.js": "text/javascript; charset=utf-8",
           "brand.json": "application/json"}
 REVIEW_BASE = "/review"           # the real review: shell at /review/, tool proxied at /review/app/
+MANIFEST = HERE / "modules.json"
+CORE_ROLES = {"/review": ("admin",), "/history": ("admin",)}   # built-in defaults; modules.json may only replace
+                                                                # one with a valid entry (manifest_rules)
 TPL_RE = re.compile(r"\{\{(\w+)\}\}")
 # module icons (24 x 24, stroked; design direction A)
 ICONS = {
@@ -100,6 +105,7 @@ class Config:
     origins: tuple = ()
     review_timeout: float = P.TIMEOUT_S
     max_body: int = P.MAX_BODY
+    manifest: Path = MANIFEST
 
 
 # ---------------------------------------------------------------- helpers
@@ -290,8 +296,26 @@ class Gate:
 
 
 # ---------------------------------------------------------------- app
-def manifest() -> list:
-    return (read_json(HERE / "modules.json") or {}).get("modules", [])
+def load_manifest(path: Path = MANIFEST) -> list:
+    """modules.json, strictly: the Gate's rules come from it at start, so a file that can't be read or parsed stops
+    the portal (ValueError) instead of starting with guessed roles."""
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise ValueError(f"modules.json not readable ({path}): {e}") from None
+    mods = doc.get("modules") if isinstance(doc, dict) else None
+    if not isinstance(mods, list) or not all(isinstance(m, dict) for m in mods):
+        raise ValueError(f"modules.json has no list of module objects ({path})")
+    return mods
+
+
+def manifest(path: Path = MANIFEST) -> list:
+    """modules.json for display (home cards, /cj/modules.json), read per request; [] when unreadable. Never used for
+    access decisions: those are the Gate's rules, fixed at start."""
+    try:
+        return load_manifest(path)
+    except ValueError:
+        return []
 
 
 def manifest_roles(mods, mod_id) -> tuple:
@@ -301,19 +325,32 @@ def manifest_roles(mods, mod_id) -> tuple:
     return ()
 
 
+def valid_roles(roles):
+    """A non-empty list of known roles (portal/auth.py ROLES) as a tuple, else None."""
+    if not isinstance(roles, (list, tuple)) or not roles or not all(isinstance(r, str) and r in A.ROLES for r in roles):
+        return None
+    return tuple(dict.fromkeys(roles))
+
+
 def manifest_rules(mods, taken=()) -> list:
-    """Gate rules for the core pages from modules.json: [(prefix, roles)] for every module with a local route below
-    "/" (review -> /review, history -> /history). A plug-in module's own ROLES win: its prefix is in `taken`."""
-    out = []
+    """Gate rules for the core pages: [(prefix, roles)]. Starts from the built-in CORE_ROLES (fail closed); a
+    modules.json entry with a local route below "/" and valid roles sets its prefix (replacing a default only then).
+    A missing, route-less or invalid entry leaves the default. A plug-in module's own ROLES win: its prefix is in
+    `taken`."""
+    rules, seen = dict(CORE_ROLES), set()
     for m in mods:
+        if not isinstance(m, dict):
+            continue
         r = m.get("route")
-        if m.get("external") or not isinstance(r, str) or not r.startswith("/") or r == "/":
+        if m.get("external") or not isinstance(r, str) or not r.startswith("/") or r.startswith("//") or r == "/":
             continue
         prefix = "/" + r.strip("/").split("/")[0]
-        if prefix in taken or any(p == prefix for p, _ in out):
+        roles = valid_roles(m.get("roles"))
+        if roles is None or prefix in seen:
             continue
-        out.append((prefix, tuple(m.get("roles") or ())))
-    return out
+        seen.add(prefix)
+        rules[prefix] = roles
+    return [(p, r) for p, r in rules.items() if p not in taken]
 
 
 def fill(tpl: str, values: dict) -> str:
@@ -331,14 +368,15 @@ def icon(name) -> str:
     return f'<svg viewBox="0 0 24 24" aria-hidden="true">{ICONS.get(name, ICONS["home"])}</svg>'
 
 
-def render_home(request: Request, cfg: Config, user: dict) -> str:
-    """Home's body (goes into base.html): status cards for roles that may read the live snapshot (History's roles),
-    module cards from modules.json for the user's role, and the Classic history link."""
+def render_home(request: Request, cfg: Config, user: dict, rules=None) -> str:
+    """Home's body (goes into base.html): status cards for roles the Gate lets read the live snapshot (History's
+    rules), module cards from modules.json for the user's role, and the Classic history link."""
     brand = read_json(HERE / "static" / "brand.json") or {"name": "CJ"}
-    mods = manifest()
+    mods = manifest(cfg.manifest)
     role = user.get("role")
     esc = html.escape
-    sees_live = role in manifest_roles(mods, "history")
+    rules = list(rules) if rules is not None else manifest_rules([])
+    sees_live = M.allowed(rules, "/history/live/live.json", role)       # the Gate's answer, not the file's
     live = read_json(cfg.registry / "live" / "live.json") if (cfg.registry and sees_live) else None
     stale = live is None or is_stale(live)
     age = snapshot_age(live) if live else None
@@ -437,7 +475,7 @@ def render_home(request: Request, cfg: Config, user: dict) -> str:
         cards = ['<div class="cj-mut">No modules for your role yet.</div>']
     footer = ""
     hist = next((m for m in mods if m.get("id") == "history"), None)
-    if hist and role in (hist.get("roles") or []) and hist.get("status") == "on":
+    if hist and sees_live and role in (hist.get("roles") or []) and hist.get("status") == "on":
         footer = (f'<footer class="cj-foot"><a href="{esc(hist.get("route") or "/history/")}" id="cj-classic">'
                   f'Classic history</a><span>registry history, queue and the Live tab</span></footer>')
 
@@ -451,7 +489,8 @@ def review_mount(base: str, proxy: P.ReviewProxy, title: str = "Review") -> list
     """The routes for one review under `base` (no trailing slash):
          base/          the shell page: the bar + an iframe of base/app/ (the shell's query, minus k, goes along)
          base/app       -> base/app/
-         base/app/...   the tool, through `proxy` (whose prefix must be base + "/app")
+         base/app/...   the tool, through `proxy` (whose prefix must be base + "/app"). A top-level document GET of
+                        the tool's page (a copied link) is sent to the shell instead: 302 base/?<query minus k>
     The real review is review_mount("/review", ...). Wave 2's multi-package route can mount each package the same
     way (/review/<pkg_id>/, ids never "app"), in front of the /review/{rest} catch-all."""
     app_prefix = base + "/app"
@@ -466,7 +505,27 @@ def review_mount(base: str, proxy: P.ReviewProxy, title: str = "Review") -> list
                 f'allow="clipboard-write; fullscreen"></iframe>\n<script src="/cj/review.js" defer></script>')
         return M.Ctx.page(request, title, body, active="review")
 
+    def to_shell(request: Request) -> bool:
+        """A browser opening the tool's page as the whole window (not in the shell's frame)."""
+        if request.method != "GET" or request.url.path not in (app_prefix + "/", app_prefix + "/index.html"):
+            return False
+        dest = request.headers.get("sec-fetch-dest")
+        if dest is not None:
+            return dest == "document"                       # the frame's loads say "iframe"
+        if "text/html" not in request.headers.get("accept", ""):
+            return False
+        ref = request.headers.get("referer")                # older browsers: framed loads come from the shell page
+        if not ref:
+            return True
+        u = urlsplit(ref)
+        return not (u.netloc.lower() == (request.headers.get("host") or "").lower() and u.path.startswith(base + "/"))
+
     async def tool(request: Request):
+        if to_shell(request):
+            q = P.strip_k(request.scope.get("query_string", b"").decode("latin-1"))
+            r = RedirectResponse(base + "/" + (f"?{q}" if q else ""), status_code=302)
+            r.headers["Cache-Control"] = "no-store"
+            return r
         return await proxy.handle(request, request.scope["cj_user"]["id"])
 
     async def to_app(request: Request):
@@ -478,7 +537,9 @@ def review_mount(base: str, proxy: P.ReviewProxy, title: str = "Review") -> list
 
 
 def create_app(cfg: Config) -> Gate:
+    """Raises ValueError when modules.json can't be read (the Gate's rules come from it): refuse to start."""
     auth = A.Auth(cfg.roster, cfg.state_dir)
+    rules_box: list = []                            # the Gate's rules, filled below; home asks them, not the file
     proxy = P.ReviewProxy(cfg.review_upstream, cfg.review_key, cfg.review_timeout, cfg.max_body,
                           prefix=REVIEW_BASE + "/app")
 
@@ -488,8 +549,8 @@ def create_app(cfg: Config) -> Gate:
 
     async def home(request: Request):
         brand = read_json(HERE / "static" / "brand.json") or {}
-        return M.Ctx.page(request, str(brand.get("name") or "CJ"), render_home(request, cfg, request.scope["cj_user"]),
-                          active="home")
+        body = render_home(request, cfg, request.scope["cj_user"], rules_box)
+        return M.Ctx.page(request, str(brand.get("name") or "CJ"), body, active="home")
 
     async def login(request: Request):
         key = request.query_params.get("k")
@@ -518,9 +579,9 @@ def create_app(cfg: Config) -> Gate:
         return serve
 
     async def modules(request: Request):
-        r = Response((HERE / "modules.json").read_bytes(), media_type="application/json")
-        r.headers["Cache-Control"] = "no-cache"
-        return r
+        role = request.scope["cj_user"].get("role")                 # only the modules this role can see
+        mods = [m for m in manifest(cfg.manifest) if role in (m.get("roles") or [])]
+        return no_store(JSONResponse({"schema": "cj_modules/1", "modules": mods}))
 
     async def me(request: Request):
         u = request.scope["cj_user"]
@@ -579,8 +640,11 @@ def create_app(cfg: Config) -> Gate:
     ]
     mod_routes, rules = M.load(M.Ctx(cfg))          # portal/modules/<id>.py plug-ins (BUILD_CONTRACTS.md section 1)
     routes.extend(mod_routes)
-    # core pages (review, history) get their roles from modules.json; a plug-in's own ROLES win for its PREFIX
-    rules = sorted(rules + manifest_rules(manifest(), {pr for pr, _ in rules}), key=lambda pr: -len(pr[0]))
+    # core pages (review, history): built-in defaults, replaced only by valid modules.json entries; a plug-in's own
+    # ROLES win for its PREFIX. Read ONCE here: a role change in modules.json needs a restart.
+    core = manifest_rules(load_manifest(cfg.manifest), {pr for pr, _ in rules})      # ValueError: refuse to start
+    rules = sorted(rules + core, key=lambda pr: -len(pr[0]))
+    rules_box[:] = rules
 
     @contextlib.asynccontextmanager
     async def lifespan(app):
@@ -604,7 +668,8 @@ def build_config(args) -> Config:
     key = read_review_key(pkg)
     return Config(registry=Path(registry) if registry else None, roster=args.roster or A.default_roster(),
                   state_dir=args.state_dir or A.default_state_dir(), review_upstream=args.review_upstream,
-                  review_key=key, review_package=pkg, origins=tuple(args.origin or ()))
+                  review_key=key, review_package=pkg, origins=tuple(args.origin or ()),
+                  manifest=getattr(args, "modules", None) or MANIFEST)
 
 
 def startup_lines(cfg: Config, host: str, port: int) -> list:
@@ -620,8 +685,9 @@ def startup_lines(cfg: Config, host: str, port: int) -> list:
         f"[cj] review: /review/ = shell, /review/app/ -> {cfg.review_upstream}; key from "
         + (f"{cfg.review_package}" if cfg.review_key else
            f"NOWHERE ({cfg.review_package or 'no package'}: no .review_key), so review answers 403"),
-        "[cj] roles (modules.json): " + ("; ".join(f"{p} {'/'.join(r) or 'nobody'}" for p, r in manifest_rules(manifest()))
-                                         or "none") + "; plug-in modules: their own ROLES",
+        "[cj] roles (read once, from built-in defaults + modules.json): "
+        + "; ".join(f"{p} {'/'.join(r)}" for p, r in manifest_rules(manifest(cfg.manifest)))
+        + "; plug-in modules: their own ROLES. Restart the portal after changing roles in modules.json",
         "[cj] sandbox: not proxied (link out to :8443)",
         "[cj] logs: uvicorn access log off, proxy headers off; own access log with k= redacted",
     ]
@@ -637,6 +703,8 @@ def main(argv=None):
                     help="the real review package (its .review_key is sent upstream); default: from the registry")
     ap.add_argument("--roster", type=Path, default=None, help=f"default {A.default_roster()}")
     ap.add_argument("--state-dir", type=Path, default=None, help=f"default {A.default_state_dir()}")
+    ap.add_argument("--modules", type=Path, default=None,
+                    help="the module manifest (default portal/modules.json); read once for the roles; unreadable = no start")
     ap.add_argument("--origin", action="append", default=None,
                     help="extra allowed Origin for PUT/POST/DELETE, e.g. https://<name>:8446 (repeatable)")
     args = ap.parse_args(argv)
@@ -645,9 +713,14 @@ def main(argv=None):
     cfg = build_config(args)
     if args.host in ("0.0.0.0", "::"):
         print("[WARN] listening on every interface; P1 expects 127.0.0.1 behind tailscale serve", flush=True)
+    try:
+        app = create_app(cfg)
+    except ValueError as e:                          # e.g. modules.json unreadable: no guessed roles, no start
+        print(f"[ERROR] refusing to start: {e}", flush=True)
+        return 2
     for line in startup_lines(cfg, args.host, args.port):
         print(line, flush=True)
-    uvicorn.run(create_app(cfg), host=args.host, port=args.port, access_log=False, proxy_headers=False,
+    uvicorn.run(app, host=args.host, port=args.port, access_log=False, proxy_headers=False,
                 server_header=False, log_level="info")
     return 0
 
