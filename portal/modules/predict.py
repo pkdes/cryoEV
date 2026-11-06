@@ -783,7 +783,7 @@ def item_of(cfg, user, d: Path, req: dict, st: dict, srcs) -> dict:
     pkg = package_dir(cfg, ps)
     return {"ps": ps, "href": f"/predict/{ps}/", "title": f"Analysis of {when(req.get('created'))}",
             "created": req.get("created"), "owner": req.get("owner"), "model": req.get("model"),
-            "source": source_text(req, srcs), "state": view["state"], "label": view["label"],
+            "source": source_text(req, srcs, admin=user.get("role") == "admin"), "state": view["state"], "label": view["label"],
             "n_done": view["n_done"], "n_total": view["n_total"],
             "review_href": f"/review/{pkg.name}/" if pkg else None,
             "results_href": f"/results/{ps}/" if results_file(d) else None}
@@ -1004,7 +1004,7 @@ def page_set(cfg, user, d: Path, req: dict) -> str:
         f'<section id="cj-predict-status">{v["html"]["status"]}</section>'
         f'<section id="cj-predict-actions">{v["html"]["actions"]}</section>'
         f'<h2 class="cj-sec">Details</h2><div class="cj-card"><dl class="cj-predict-kv">'
-        f'<div><dt>Images from</dt><dd>{esc(source_text(req, srcs))}</dd></div>'
+        f'<div><dt>Images from</dt><dd>{esc(source_text(req, srcs, admin=admin))}</dd></div>'
         f'<div><dt>Model</dt><dd>{esc(req.get("model"))}</dd></div>'
         f'<div><dt>Started</dt><dd>{esc(when(req.get("created")))}</dd></div>{owner}</dl>'
         f'<div class="cj-predict-tablewrap"><table class="cj-predict-table"><thead><tr><th>Sample</th><th>Images</th>'
