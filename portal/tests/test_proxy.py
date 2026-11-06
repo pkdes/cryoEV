@@ -1,5 +1,5 @@
 """
-The /review/ proxy (portal/proxy.py) through the whole app under uvicorn: a dummy upstream that records what reaches
+The /review/app/ proxy (portal/proxy.py) through the whole app under uvicorn: a dummy upstream that records what reaches
 it, plus the real review_server.py handler on a temp fixture package as the known-good control.
 
   python -m unittest discover -s portal/tests -v
@@ -46,7 +46,7 @@ class ProxyDummy(unittest.TestCase):
         return T.request(self.p.port, method, path, h, body)
 
     def test_upstream_sees_key_and_user_but_no_cookie_or_k(self):
-        st, _, body = self.req("GET", "/review/echo?k=stale-browser-key&f=a%7Cb&K=upper&k=again&c=x%20y",
+        st, _, body = self.req("GET", "/review/app/echo?k=stale-browser-key&f=a%7Cb&K=upper&k=again&c=x%20y",
                                {"Cookie": f"__Host-cj_session={self.token}; review_key_8766=old; other=1",
                                 "Accept": "application/json", "User-Agent": "cj-test", "Accept-Language": "en"})
         self.assertEqual(st, 200)
@@ -61,11 +61,11 @@ class ProxyDummy(unittest.TestCase):
         self.assertEqual(json.loads(body)["path"], rec["path"])
 
     def test_encoded_k_name_also_stripped(self):
-        self.req("GET", "/review/echo?%6B=enc&k+=space&f=1")
+        self.req("GET", "/review/app/echo?%6B=enc&k+=space&f=1")
         self.assertEqual(self.up.last()["path"], "/echo?k+=space&f=1")    # "k " is not k upstream either
 
     def test_spoofed_inbound_headers_stripped(self):
-        st, _, _ = self.req("GET", "/review/echo", SPOOF)
+        st, _, _ = self.req("GET", "/review/app/echo", SPOOF)
         self.assertEqual(st, 200)
         h = hdrs(self.up.last())
         self.assertEqual(h.get("x-cj-user"), T.USER)
@@ -76,7 +76,7 @@ class ProxyDummy(unittest.TestCase):
                              or (k.startswith("x-cj-") and k != "x-cj-user"), k)
 
     def test_set_cookie_and_hop_by_hop_dropped(self):
-        st, h, body = self.req("GET", "/review/setcookie")
+        st, h, body = self.req("GET", "/review/app/setcookie")
         self.assertEqual((st, body), (200, b"ok"))
         names = {k.lower() for k, _ in h}
         self.assertNotIn("set-cookie", names)
@@ -84,30 +84,30 @@ class ProxyDummy(unittest.TestCase):
         self.assertNotIn("keep-alive", names)
         self.assertEqual(T.hget(h, "x-keep"), "1")                         # control: an ordinary header passes
         # and the proxy's own client never keeps it: the next request upstream carries no cookie
-        self.req("GET", "/review/echo")
+        self.req("GET", "/review/app/echo")
         self.assertNotIn("cookie", hdrs(self.up.last()))
 
     def test_range_and_head(self):
-        st, h, body = self.req("GET", "/review/range", {"Range": "bytes=10-19"})
+        st, h, body = self.req("GET", "/review/app/range", {"Range": "bytes=10-19"})
         self.assertEqual(st, 206)
         self.assertEqual(T.hget(h, "content-range"), "bytes 10-19/1024")
         self.assertEqual(body, T.Upstream.DATA[10:20])
         self.assertEqual(hdrs(self.up.last()).get("range"), "bytes=10-19")
-        st, h, body = self.req("HEAD", "/review/range")
+        st, h, body = self.req("HEAD", "/review/app/range")
         self.assertEqual((st, body), (200, b""))
         self.assertEqual(T.hget(h, "content-length"), "1024")
         self.assertEqual(self.up.last()["method"], "HEAD")
-        st, h, body = self.req("GET", "/review/range")                    # control: the full body
+        st, h, body = self.req("GET", "/review/app/range")                    # control: the full body
         self.assertEqual((st, len(body)), (200, 1024))
 
     def test_large_response_streams_intact(self):
-        st, h, body = self.req("GET", "/review/big")
+        st, h, body = self.req("GET", "/review/app/big")
         self.assertEqual(st, 200)
         self.assertEqual(hashlib.md5(body).hexdigest(), hashlib.md5(T.Upstream.BIG).hexdigest())
 
     def test_put_body_forwarded(self):
         body = json.dumps({"t": 1, "dec": {}, "pad": "x" * 2_000_000}).encode()
-        st, _, out = self.req("PUT", "/review/api/edits?f=a.png&k=stale", {"Content-Type": "application/json"}, body)
+        st, _, out = self.req("PUT", "/review/app/api/edits?f=a.png&k=stale", {"Content-Type": "application/json"}, body)
         self.assertEqual(st, 200)
         rec = self.up.last()
         self.assertEqual((rec["method"], rec["path"], rec["body_len"], rec["body_md5"]),
@@ -119,27 +119,27 @@ class ProxyDummy(unittest.TestCase):
         for method in ("PUT", "POST", "DELETE", "PATCH"):
             for origin in ("http://evil.example", "https://127.0.0.1.evil.example", "null",
                            f"https://127.0.0.1:{self.p.port + 1}", f"{self.p.origin}/path"):
-                st, _, _ = self.req(method, "/review/api/edits?f=a", {"Origin": origin}, b"{}")
+                st, _, _ = self.req(method, "/review/app/api/edits?f=a", {"Origin": origin}, b"{}")
                 self.assertEqual(st, 403, (method, origin))
-            st, _, _ = self.req(method, "/review/api/edits?f=a", None, b"{}", origin=False)   # no Origin at all
+            st, _, _ = self.req(method, "/review/app/api/edits?f=a", None, b"{}", origin=False)   # no Origin at all
             self.assertEqual(st, 403, method)
         self.assertEqual(len(self.up.seen), n)                             # none reached the review server
-        st, _, _ = self.req("POST", "/review/api/claim?c=x&who=t", {"Origin": self.p.origin}, b"")  # control
+        st, _, _ = self.req("POST", "/review/app/api/claim?c=x&who=t", {"Origin": self.p.origin}, b"")  # control
         self.assertEqual(st, 200)
 
     def test_traversal_rejected(self):
         n = len(self.up.seen)
-        targets = [b"/review/../history/history.html", b"/review/%2e%2e/x", b"/review/%2E%2E/x", b"/review/..%2fx",
-                   b"/review/..%2Fhistory", b"/review/%2e%2e%2fx", b"/review/%252e%252e/x", b"/review/a/../../x",
-                   b"/review//x", b"/review/a//b", b"/review/%2f/x", b"/review/%2F%2Fx", b"/review/./x",
-                   b"/review/..\\x", b"/review/%5c..%5cx", b"/review/a%00b", b"/review/a\x00b", b"/review/a%0d%0ab",
-                   b"/review/%25%32%65%25%32%65/x"]
+        targets = [b"/review/app/../history/history.html", b"/review/app/%2e%2e/x", b"/review/app/%2E%2E/x", b"/review/app/..%2fx",
+                   b"/review/app/..%2Fhistory", b"/review/app/%2e%2e%2fx", b"/review/app/%252e%252e/x", b"/review/app/a/../../x",
+                   b"/review/app//x", b"/review/app/a//b", b"/review/app/%2f/x", b"/review/app/%2F%2Fx", b"/review/app/./x",
+                   b"/review/app/..\\x", b"/review/app/%5c..%5cx", b"/review/app/a%00b", b"/review/app/a\x00b", b"/review/app/a%0d%0ab",
+                   b"/review/app/%25%32%65%25%32%65/x"]
         for t in targets:
             resp = T.raw(self.p.port, b"GET " + t + b" HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: __Host-cj_session="
                          + self.token.encode() + b"\r\nConnection: close\r\n\r\n")
             self.assertIn(T.raw_status(resp), (400, 404), t)
         self.assertEqual(len(self.up.seen), n, [r["path"] for r in self.up.seen[n:]])
-        st, _, _ = self.req("GET", "/review/images/ok_name.png")           # control: a normal path passes
+        st, _, _ = self.req("GET", "/review/app/images/ok_name.png")           # control: a normal path passes
         self.assertEqual((st, self.up.last()["path"]), (200, "/images/ok_name.png"))
 
     def test_clean_subpath_unit(self):
@@ -153,15 +153,15 @@ class ProxyDummy(unittest.TestCase):
     def test_redirects_relative(self):
         st, h, _ = self.req("GET", "/review")
         self.assertEqual((st, T.hget(h, "location")), (307, "/review/"))
-        st, h, _ = self.req("GET", "/review/redir-abs")
-        self.assertEqual((st, T.hget(h, "location")), (302, "/review/x"))
-        st, h, _ = self.req("GET", "/review/redir-rel")
-        self.assertEqual((st, T.hget(h, "location")), (302, "/review/y"))
+        st, h, _ = self.req("GET", "/review/app/redir-abs")
+        self.assertEqual((st, T.hget(h, "location")), (302, "/review/app/x"))
+        st, h, _ = self.req("GET", "/review/app/redir-rel")
+        self.assertEqual((st, T.hget(h, "location")), (302, "/review/app/y"))
 
     def test_body_cap_413(self):
         self.assertEqual(P.MAX_BODY, 25 * 2**20)
         n = len(self.up.seen)
-        head = (b"PUT /review/api/edits?f=a HTTP/1.1\r\nHost: 127.0.0.1:" + str(self.p.port).encode()
+        head = (b"PUT /review/app/api/edits?f=a HTTP/1.1\r\nHost: 127.0.0.1:" + str(self.p.port).encode()
                 + b"\r\nOrigin: " + self.p.origin.encode() + b"\r\nCookie: __Host-cj_session=" + self.token.encode()
                 + b"\r\nContent-Type: application/json\r\nConnection: close\r\n")
         # declared too large: refused before any body byte is read (none sent, so no reset races the reply)
@@ -186,10 +186,10 @@ class ProxyDown(unittest.TestCase):
         p = T.Portal(env.config(review_upstream=f"http://127.0.0.1:{T.free_port()}"))
         try:
             token = T.login(p.port, env.key)
-            st, h, body = T.request(p.port, "GET", "/review/", T.cookie(token))
+            st, h, body = T.request(p.port, "GET", "/review/app/", T.cookie(token))
             self.assertEqual(st, 502)
             self.assertIn(b"not running", body)
-            self.assertEqual(T.hget(h, "x-frame-options"), "SAMEORIGIN")   # /review/* may be framed by the shell
+            self.assertEqual(T.hget(h, "x-frame-options"), "SAMEORIGIN")   # /review/app/* may be framed by the shell
         finally:
             p.stop()
             env.cleanup()
@@ -200,7 +200,7 @@ class ProxyDown(unittest.TestCase):
         p = T.Portal(env.config(review_upstream=up.url, review_timeout=0.5))
         try:
             token = T.login(p.port, env.key)
-            st, _, body = T.request(p.port, "GET", "/review/slow", T.cookie(token))
+            st, _, body = T.request(p.port, "GET", "/review/app/slow", T.cookie(token))
             self.assertEqual(st, 502)
             self.assertIn(b"did not answer", body)
             self.assertEqual(APP.Config(None, env.roster, env.state).review_timeout, 30.0)
@@ -236,22 +236,22 @@ class ProxyRealReviewServer(unittest.TestCase):
 
     def test_through_portal(self):
         c = T.cookie(self.token)
-        st, h, body = T.request(self.p.port, "GET", "/review/api/ping", c)
+        st, h, body = T.request(self.p.port, "GET", "/review/app/api/ping", c)
         self.assertEqual((st, json.loads(body)), (200, {"ok": True}))
-        st, h, body = T.request(self.p.port, "GET", "/review/?k=stale-wrong-key", c)
+        st, h, body = T.request(self.p.port, "GET", "/review/app/?k=stale-wrong-key", c)
         self.assertEqual(st, 200)
         self.assertIn(b"<html", body.lower())
         self.assertIsNone(T.hget(h, "set-cookie"))
-        st, _, body = T.request(self.p.port, "GET", "/review/data.js", c)
+        st, _, body = T.request(self.p.port, "GET", "/review/app/data.js", c)
         self.assertEqual(st, 200)
         img = self.rv.files[0]
-        st, h, body = T.request(self.p.port, "GET", f"/review/images/{img}", c)
+        st, h, body = T.request(self.p.port, "GET", f"/review/app/images/{img}", c)
         self.assertEqual((st, body), (200, (self.rv.pkg / "images" / img).read_bytes()))
 
     def test_put_edit_through_portal(self):
         f = self.rv.files[0]
         edit = {"t": 5, "dec": {"g1": {"v": "del", "t": 5, "who": "tester"}}, "reviewed": True, "reviewedT": 5}
-        st, _, body = T.request(self.p.port, "PUT", f"/review/api/edits?f={f}",
+        st, _, body = T.request(self.p.port, "PUT", f"/review/app/api/edits?f={f}",
                                 {**T.cookie(self.token), "Origin": self.p.origin, "Content-Type": "application/json"},
                                 json.dumps(edit).encode())
         self.assertEqual(st, 200, body)

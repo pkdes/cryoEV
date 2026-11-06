@@ -163,7 +163,7 @@ class AuthLive(unittest.TestCase):
         token = T.login(self.p.port, self.env.key)
         cases = [("/healthz", None, 200), ("/", None, 401), ("/", "bad", 403), ("/nope", token, 404),
                  (f"/login?k={self.env.key}", None, 303), ("/cj/cj.css", None, 200), ("/review", token, 307),
-                 ("/review/x", token, 200)]
+                 ("/review/app/x", token, 200)]
         for path, tok, want in cases:
             st, h, _ = self.get(path, tok)
             self.assertEqual(st, want, path)
