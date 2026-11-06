@@ -215,3 +215,44 @@ a.cj-mod:hover,a.cj-mod:focus-visible{border-color:var(--acc);box-shadow:0 1px 2
 .cj-reviews-tab th{color:var(--mut);font-weight:500;border-top:0}
 .cj-reviews-open{display:inline-block;padding:4px 12px;border:1px solid var(--acc);border-radius:6px;text-decoration:none}
 .cj-reviews-empty{padding:16px}
+
+/* ---------------------------------------------------------------- Data: Lab graph (portal/static/data.js)
+   History's lineage graph CSS (registry/history_page.py .gnode/.ge ...), on cj tokens so light and dark follow the
+   shell. The graph scrolls sideways inside its box, never the page. */
+.cj-data-graph-bar{display:flex;flex-wrap:wrap;gap:4px 16px;align-items:center;margin:0 0 6px}
+.cj-data-graph-bar label{display:inline-flex;gap:6px;align-items:center;min-height:40px;cursor:pointer}
+.cj-data-graph-bar input{width:18px;height:18px;margin:0;accent-color:var(--acc)}
+.cj-data-graph-note{font-size:.8rem;flex:1 1 260px;min-width:0}
+.cj-data-graph-status{margin:0 0 6px;font-size:.85rem}
+.cj-data-graph-wrap{overflow-x:auto;overflow-y:hidden;max-width:100%;min-width:0;border:1px solid var(--line);
+  border-radius:var(--cj-r);background:var(--card);-webkit-overflow-scrolling:touch}
+.cj-data-graph-canvas{position:relative;min-height:60px}
+.cj-data-graph-canvas svg{position:absolute;left:0;top:0;overflow:visible}
+.cj-data-graph-head{position:absolute;top:6px;font-size:.75rem;font-weight:700;color:var(--mut);text-transform:uppercase;
+  letter-spacing:.03em;white-space:nowrap}
+.cj-data-graph-node{position:absolute;box-sizing:border-box;font:inherit;font-size:14px;color:var(--fg);background:var(--bg);
+  border:1px solid var(--line);border-radius:8px;padding:4px 7px;text-align:left;text-decoration:none;overflow:hidden;
+  display:flex;flex-direction:column;gap:2px}
+a.cj-data-graph-node{cursor:pointer}
+a.cj-data-graph-node:hover,a.cj-data-graph-node:focus-visible{border-color:var(--acc);text-decoration:none}
+a.cj-data-graph-node:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.cj-data-graph-node.cj-data-graph-part{background:var(--card)}
+.cj-data-graph-node.cj-data-graph-prod{border:2px solid var(--prod)}
+.cj-data-graph-node.cj-data-graph-dim{border-style:dashed;opacity:var(--dim)}
+.cj-data-graph-node.cj-data-graph-focus{outline:3px solid var(--acc);outline-offset:2px;background:var(--accbg);opacity:1}
+.cj-data-graph-l1{display:flex;gap:4px;align-items:baseline;white-space:nowrap;overflow:hidden}
+.cj-data-graph-tag{font-size:.72rem;padding:1px 6px;border-radius:999px;background:var(--accbg);color:var(--acc);
+  white-space:nowrap}
+.cj-data-graph-st{font-size:.72rem;padding:1px 6px;border-radius:999px;border:1px solid var(--line);color:var(--mut);
+  white-space:nowrap}
+.cj-data-graph-st.cj-data-graph-stprod{background:var(--prodbg);color:var(--prod);border-color:transparent;font-weight:700}
+.cj-data-graph-id{font-family:var(--cj-mono);font-size:.72rem;line-height:1.25;word-break:break-all;display:-webkit-box;
+  -webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.cj-data-graph-sub{font-size:.7rem;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cj-data-graph-sub.cj-data-graph-ver{color:var(--prod)}
+.cj-data-graph-sub.cj-data-graph-unrev{color:var(--warn)}
+.cj-data-graph-e{fill:none;stroke:var(--mut);stroke-width:1.4}
+.cj-data-graph-e.cj-data-graph-back{stroke:var(--acc);stroke-dasharray:6 4}
+.cj-data-graph-a{fill:var(--mut)}
+.cj-data-graph-a.cj-data-graph-back{fill:var(--acc)}
+.cj-data-graph-edim{opacity:.35}
