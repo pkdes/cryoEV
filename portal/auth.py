@@ -1,20 +1,23 @@
 """
 CryoEV portal sign-in, tailnet mode (P1): key links -> session cookie. Deny by default; see portal/README.md.
 
-    python -m portal.auth add-key --id <id> --role admin [--roster <path>] [--base <portal address>]
+    python -m portal.auth add-key --id <id> --role admin [--email <address>] [--roster <path>] [--base <address>]
+    python -m portal.auth set-email --id <id> --email <address or ''> [--roster <path>]
     python -m portal.auth revoke --id <id> [--roster <path>]
     python -m portal.auth list [--roster <path>]
 
 - Roster: a private file OUTSIDE the repo, default %USERPROFILE%\\.cryoev\\portal_roster.json:
-  {"people": [{"id": "...", "role": "admin", "key_sha256": "...", "added": "..."}]}. Keys are stored only as
-  sha256; `add-key` prints the new key link once and never again. Re-keying an id ends its old sessions.
+  {"people": [{"id": "...", "role": "admin", "key_sha256": "...", "added": "...", "email": "..."}]}. Keys are stored
+  only as sha256; `add-key` prints the new key link once and never again. Re-keying an id ends its old sessions and
+  keeps its email. `email` (lower-case, unique among active people) is the sign-in for Cloudflare access mode
+  (portal/access.py, Roster.usable_access / match_email); key mode ignores it.
 - Login: /login?k=<key> -> sha256 compared with hmac.compare_digest against every roster entry -> a random
   32-byte session id in the cookie __Host-cj_session (HttpOnly, Secure, SameSite=Lax, Path=/, 30 days).
 - Sessions persist in <state dir>/sessions.json (default %USERPROFILE%\\.cryoev\\portal\\), keyed by the sha256 of
   the session id only, each tied to the person's id and key hash. The roster is checked on every request (re-read
   when the file changes), so removing or revoking a person, or re-keying them, ends their sessions at once.
 - Neither keys nor session ids are ever logged.
-A later `access` mode (Cloudflare, C3) gets its own port and middleware; it is never mixed with key links.
+The Cloudflare `access` mode (portal/access.py) runs on its own port; it is never mixed with key links.
 """
 from __future__ import annotations
 
@@ -41,6 +44,7 @@ COOKIE = "__Host-cj_session"
 SESSION_S = 30 * 86400            # 30 days
 ROLES = ("admin", "advanced", "basic")   # admin > advanced > basic; modules list every role they allow
 ID_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,39}")
+EMAIL_RE = re.compile(r"(?=.{3,254}\Z)[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+")
 KEY_BYTES = 32
 REPLACE_TRIES = 10                # os.replace retries on PermissionError; backoff totals ~0.23 s
 REPLACE_PAUSE_S = 0.005
@@ -118,6 +122,21 @@ class Roster:
     @staticmethod
     def usable(p) -> bool:
         return bool(p) and not p.get("revoked") and p.get("role") in ROLES and isinstance(p.get("key_sha256"), str)
+
+    @staticmethod
+    def usable_access(p) -> bool:
+        """Access mode's `usable`: not revoked, a known role and an email (no key needed)."""
+        return (bool(p) and not p.get("revoked") and p.get("role") in ROLES
+                and isinstance(p.get("email"), str) and bool(p["email"].strip()))
+
+    def match_email(self, email: str):
+        """The ONE access-usable person with this email (case-insensitive), else None (none, or a hand-edited
+        roster with two: refuse rather than guess)."""
+        e = access_email(email)
+        if not e:
+            return None
+        hits = [p for p in self.people().values() if self.usable_access(p) and access_email(p["email"]) == e]
+        return hits[0] if len(hits) == 1 else None
 
     def match_key(self, key: str):
         """The person whose key this is, or None. Every entry is compared (no early exit)."""
@@ -231,20 +250,85 @@ def _load(path: Path) -> dict:
     return doc
 
 
-def add_key(path: Path, pid: str, role: str) -> str:
-    """Give `pid` a new key (replacing any old one, which ends its sessions). -> the key, shown once."""
+def norm_email(email) -> str:
+    """'' for none, else the address lower-cased. Raises ValueError for something that isn't an address."""
+    if email is None:
+        return ""
+    e = str(email).strip()
+    if e and access_email(e) is None:
+        raise ValueError(f"{email!r} is not a plain (ASCII) email address")
+    return e.lower()
+
+
+def access_email(email) -> str | None:
+    """A plain ASCII address (EMAIL_RE), lower-cased; else None. ASCII is checked BEFORE lower-casing: str.lower()
+    maps some non-ASCII letters onto ASCII ones (U+212A KELVIN SIGN -> 'k'), which would let one address pose as
+    another."""
+    if not isinstance(email, str):
+        return None
+    e = email.strip()
+    if not e or not e.isascii():
+        return None
+    e = e.lower()
+    return e if EMAIL_RE.fullmatch(e) else None
+
+
+def email_taken(people, email: str, pid: str) -> str | None:
+    """The id of another ACTIVE (not revoked) person who has `email` already, else None."""
+    if not email:
+        return None
+    for p in people:
+        if (isinstance(p, dict) and p.get("id") != pid and not p.get("revoked")
+                and str(p.get("email") or "").strip().lower() == email):
+            return str(p.get("id"))
+    return None
+
+
+def add_key(path: Path, pid: str, role: str, email: str | None = None) -> str:
+    """Give `pid` a new key (replacing any old one, which ends its sessions). -> the key, shown once.
+    The entry's email is kept (or set to `email`; emails are unique among active people)."""
     if not ID_RE.fullmatch(pid):
         raise ValueError(f"bad id {pid!r}: lower-case letters, digits, '_', '.', '-'")
     if role not in ROLES:
         raise ValueError(f"role must be one of {ROLES}")
+    new_email = norm_email(email) if email is not None else None
     with roster_lock(path):
         doc = _load(path)
+        old = [p for p in doc["people"] if isinstance(p, dict) and p.get("id") == pid]
+        keep = new_email if new_email is not None else str((old[-1] if old else {}).get("email") or "")
+        other = email_taken(doc["people"], keep, pid)
+        if other:
+            raise ValueError(f"{keep} is already the email of {other}")
         key = secrets.token_urlsafe(KEY_BYTES)
         entry = {"id": pid, "role": role, "key_sha256": sha256_hex(key),
                  "added": datetime.now().isoformat(timespec="seconds")}
+        if keep:
+            entry["email"] = keep
         doc["people"] = [p for p in doc["people"] if p.get("id") != pid] + [entry]
         write_json_atomic(path, doc)
     return key
+
+
+def set_email(path: Path, pid: str, email: str) -> str:
+    """Set (or with '' remove) an active person's email; unique among active people. -> the old email ('' if none).
+    Raises ValueError (bad address, taken, no such active person)."""
+    e = norm_email(email)
+    with roster_lock(path):
+        doc = _load(path)
+        hits = [p for p in doc["people"] if isinstance(p, dict) and p.get("id") == pid and not p.get("revoked")]
+        if not hits:
+            raise ValueError(f"{pid} is not on the list, or revoked")
+        other = email_taken(doc["people"], e, pid)
+        if other:
+            raise ValueError(f"{e} is already the email of {other}")
+        old = str(hits[-1].get("email") or "")
+        for p in hits:
+            if e:
+                p["email"] = e
+            else:
+                p.pop("email", None)
+        write_json_atomic(path, doc)
+    return old
 
 
 def revoke(path: Path, pid: str) -> bool:
@@ -278,16 +362,28 @@ def main(argv=None):
     a.add_argument("--id", required=True)
     a.add_argument("--role", required=True, choices=ROLES)
     a.add_argument("--base", default=None, help="portal address for the printed link (default: the tailnet :8446)")
+    a.add_argument("--email", default=None, help="sign-in email for Cloudflare access mode (kept if not given)")
     r = sub.add_parser("revoke", help="revoke an id (its sessions end on their next request)")
     r.add_argument("--id", required=True)
-    sub.add_parser("list", help="ids, roles and state (never keys)")
-    for p in (a, r, sub.choices["list"]):
+    e = sub.add_parser("set-email", help="set an active id's sign-in email for access mode ('' removes it)")
+    e.add_argument("--id", required=True)
+    e.add_argument("--email", required=True)
+    sub.add_parser("list", help="ids, roles, emails and state (never keys)")
+    for p in (a, r, e, sub.choices["list"]):
         p.add_argument("--roster", type=Path, default=None, help=f"default {default_roster()}")
     args = ap.parse_args(argv)
     path = args.roster or default_roster()
+    if args.cmd == "set-email":
+        try:
+            set_email(path, args.id, args.email)
+        except ValueError as err:
+            print(f"[--] {err}")
+            return 1
+        print(f"[OK] {args.id}: email {'set' if args.email.strip() else 'removed'}")
+        return 0
     if args.cmd == "add-key":
         try:
-            key = add_key(path, args.id, args.role)
+            key = add_key(path, args.id, args.role, args.email)
         except ValueError as e:
             ap.error(str(e))
         base = (args.base or default_base()).rstrip("/")
@@ -300,7 +396,7 @@ def main(argv=None):
         return 0 if ok else 1
     for p in _load(path)["people"]:
         print(f"{p.get('id')}\t{p.get('role')}\t{'revoked ' + p['revoked'] if p.get('revoked') else 'active'}"
-              f"\tadded {p.get('added', '?')}")
+              f"\tadded {p.get('added', '?')}\t{p.get('email') or '-'}")
     return 0
 
 

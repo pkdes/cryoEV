@@ -54,6 +54,8 @@
 .cj-nm{display:flex;flex-direction:column;line-height:1.15;font-size:13px;font-weight:600;min-width:0}
 .cj-nm>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cj-nm small{color:var(--mut);font-weight:400;font-size:11.5px}
+.cj-bar .cj-signout{flex:none;align-self:center;font-size:13px;color:var(--mut);white-space:nowrap}
+.cj-bar .cj-signout:hover{color:var(--fg)}
 @media (max-width:640px){
   .cj-bar{flex-wrap:wrap;align-content:flex-start;padding:0 12px;gap:0 12px}
   .cj-bar .cj-mark,.cj-bar .cj-user{height:48px}

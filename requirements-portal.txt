@@ -5,3 +5,5 @@ starlette==1.9.0
 uvicorn==0.54.0
 httpx==0.28.1
 python-multipart==0.0.32        # Predict uploads (portal/modules/predict.py), streamed multipart
+PyJWT==2.15.1                   # Cloudflare access mode only (portal/access.py): RS256 JWT checks
+cryptography==50.0.2            # PyJWT's RSA backend

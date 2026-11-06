@@ -8,6 +8,8 @@ Admin module (CryoEV portal, admin only): people and their key links, health at 
                                  again, never logged and never stored (the roster keeps its sha256 only, auth.py)
     POST /admin/people/role      id + role -> the roster entry's role (same key; the Gate re-reads the roster on
                                  every request, so it takes effect on that person's next request)
+    POST /admin/people/email     id + email -> set, change or ('') remove an active person's sign-in email (Cloudflare
+                                 access mode; lower-cased, unique among active people). The add form takes one too
     GET  /admin/people/revoke    ?id= -> the confirmation page (a form; no script, no confirm())
     POST /admin/people/revoke    id + confirm=yes -> revoked: that person's sessions end at once
     GET  /admin/predict          Predict sessions: the sessions Predict offers (found by the scan of processed
@@ -23,8 +25,9 @@ Admin module (CryoEV portal, admin only): people and their key links, health at 
     GET  /admin/admin.js         the key page's Copy button (a file: no inline script)
 
 Rules:
-  - Every POST: the Gate checks Origin (portal/app.py); here a form token bound to the session cookie
-    (HMAC with a per-process secret) is checked as well. A portal restart makes open forms stale (reload).
+  - Every POST: the Gate checks Origin (portal/app.py); here a form token bound to the sign-in (`binding`: the
+    session cookie in key mode, the VERIFIED user id in Cloudflare access mode; HMAC with a per-process secret) is
+    checked as well. A portal restart makes open forms stale (reload).
   - Never leave the portal without an admin: demoting or revoking the last active admin is refused (yourself or
     anyone). Demoting or revoking yourself while other admins remain is allowed (you are signed out / sent home).
   - The roster is the private file auth.py reads (cfg.roster), in auth.py's format. Add, role change and revoke
@@ -32,9 +35,9 @@ Rules:
     `python -m portal.auth` tool takes too), written atomically with os.replace retried briefly; the file's
     (mtime, size) must change (the Gate's Roster cache keys on it) or it raises. Any OSError (lock or write):
     "Nothing was changed", no temp file left.
-  - After a change the page shows a one-time message bound to the session (?f=<token>); a bare URL shows none.
+  - After a change the page shows a one-time message bound to the same `binding` (?f=<token>); a bare URL shows none.
   - The key link points at the first --origin, else the tailnet address (auth.default_base), else the request's
-    Origin reduced to scheme://host[:port].
+    Origin reduced to scheme://host[:port] (never in access mode: key links don't work through Cloudflare).
   - Audit: portal/audit.py (shared with Jobs), <state dir>/audit/portal.jsonl. `audit(ctx, actor, action, target,
     detail)` here is a thin wrapper. The Recent actions page shows the last AUDIT_SHOW lines of every module.
   - Predict sessions: overrides in <state dir>/predict_sources.json (predict_sources.set_override: its own thread +
@@ -99,6 +102,7 @@ ROLE_DESC = {"admin": "everything, including people and health",
              "advanced": "jobs, history, training (when it opens)",
              "basic": "their own uploads, predictions and results"}
 ACTION_WORD = {"person_added": "added", "role_changed": "changed the role of", "person_revoked": "revoked",
+               "email_changed": "changed the sign-in email of",
                "cancel": "cancel", "release": "release", "predict_source_renamed": "renamed the Predict session",
                "predict_source_hidden": "hid the Predict session", "predict_source_shown": "showed the Predict session"}
 
@@ -257,20 +261,30 @@ def write_roster(path, doc: dict) -> None:
             pass
 
 
+def usable_any(p) -> bool:
+    """Can sign in in either mode: a key (tailnet) or an email (Cloudflare access; no key needed)."""
+    return A.Roster.usable(p) or A.Roster.usable_access(p)
+
+
 def is_admin(p) -> bool:
-    return A.Roster.usable(p) and p.get("role") == "admin"
+    """An admin who can sign in in EITHER mode: the last-admin guard must see email-only admins too."""
+    return usable_any(p) and p.get("role") == "admin"
 
 
-def public_person(p: dict) -> dict:
-    """The only fields that ever leave this module: never key_sha256 (or anything else in the entry)."""
-    return {"id": str(p.get("id")), "role": p.get("role") if p.get("role") in A.ROLES else None,
-            "state": "revoked" if p.get("revoked") else ("active" if A.Roster.usable(p) else "not usable"),
-            "added": _s(p.get("added")), "revoked": _s(p.get("revoked")), "role_changed": _s(p.get("role_changed"))}
+def public_person(p: dict, email: bool = False) -> dict:
+    """The only fields that ever leave this module: never key_sha256 (or anything else in the entry). `email` adds
+    the sign-in email (the People page; /admin/api/people keeps its shape)."""
+    out = {"id": str(p.get("id")), "role": p.get("role") if p.get("role") in A.ROLES else None,
+           "state": "revoked" if p.get("revoked") else ("active" if usable_any(p) else "not usable"),
+           "added": _s(p.get("added")), "revoked": _s(p.get("revoked")), "role_changed": _s(p.get("role_changed"))}
+    if email:
+        out["email"] = _s(p.get("email"))
+    return out
 
 
-def people(path) -> list:
+def people(path, email: bool = False) -> list:
     doc = load_roster(path)
-    rows = [public_person(p) for p in doc["people"] if isinstance(p, dict) and _s(p.get("id"))]
+    rows = [public_person(p, email) for p in doc["people"] if isinstance(p, dict) and _s(p.get("id"))]
     rows.sort(key=lambda r: (r["state"] != "active", r["id"]))
     return rows
 
@@ -299,23 +313,65 @@ def _active(doc, pid) -> list:
     return [p for p in doc["people"] if isinstance(p, dict) and p.get("id") == pid and not p.get("revoked")]
 
 
-def add_person(path, pid: str, role: str) -> str:
-    """-> the new key (the caller shows it once and forgets it). Same entry as auth.add_key; refuses an id that is
-    already active. Raises Refused, ValueError (unreadable roster) or OSError (lock or write: nothing changed)."""
+def _email(email) -> str:
+    """'' or the address lower-cased (auth.norm_email); Refused (400) for something that isn't an address."""
+    try:
+        return A.norm_email(email)
+    except ValueError:
+        raise Refused("That email address doesn't look right (name@example.org).", 400) from None
+
+
+def _email_free(doc, email, pid) -> None:
+    other = A.email_taken(doc["people"], email, pid)
+    if other:
+        raise Refused(f"{email} is already the email of {other}. Emails are unique among active people.")
+
+
+def add_person(path, pid: str, role: str, email: str | None = None) -> str:
+    """-> the new key (the caller shows it once and forgets it). Same entry as auth.add_key (+ `email` when given:
+    lower-cased, unique among active people); refuses an id that is already active. Raises Refused, ValueError
+    (unreadable roster) or OSError (lock or write: nothing changed)."""
     _check_id(pid)
     if role not in A.ROLES:
         raise Refused("Pick a role: Admin, Advanced or Basic.", 400)
+    em = _email(email)
     with roster_lock(path):
         doc = load_roster(path)
         if _active(doc, pid):
             raise Refused(f"{pid} is already on the list. To give them a new key link, revoke them first, then add "
                           "them again.")
+        _email_free(doc, em, pid)
         key = secrets.token_urlsafe(A.KEY_BYTES)
         entry = {"id": pid, "role": role, "key_sha256": A.sha256_hex(key),
                  "added": datetime.now().isoformat(timespec="seconds")}
+        if em:
+            entry["email"] = em
         doc["people"] = [p for p in doc["people"] if not (isinstance(p, dict) and p.get("id") == pid)] + [entry]
         write_roster(path, doc)
         return key
+
+
+def set_email(path, pid: str, email: str) -> tuple:
+    """Set, change or ('') remove an active person's sign-in email. -> (old, new) ('' for none). Refuses a revoked or
+    unknown id, a bad address and one another active person has."""
+    _check_id(pid)
+    em = _email(email)
+    with roster_lock(path):
+        doc = load_roster(path)
+        hits = _active(doc, pid)
+        if not hits:
+            raise Refused(f"{pid} is not on the list, or revoked.", 404)
+        old = str(hits[-1].get("email") or "")
+        if old == em:
+            raise Refused(f"{pid} already has that email." if em else f"{pid} has no email.")
+        _email_free(doc, em, pid)
+        for p in hits:
+            if em:
+                p["email"] = em
+            else:
+                p.pop("email", None)
+        write_roster(path, doc)
+        return old, em
 
 
 def set_role(path, pid: str, role: str) -> str:
@@ -405,6 +461,8 @@ def link_base(cfg, request_origin) -> str:
     t = tailnet_base()
     if t:
         return t.rstrip("/")
+    if getattr(cfg, "auth", "key") == "access":         # this origin answers /login with 404
+        return ""
     try:
         u = urlsplit(request_origin or "")
         host, port = u.hostname, u.port
@@ -414,6 +472,16 @@ def link_base(cfg, request_origin) -> str:
         return ""
     host = f"[{host}]" if ":" in host else host
     return f"{u.scheme}://{host}" + (f":{port}" if port else "")
+
+
+# ---------------------------------------------------------------- what forms and messages are bound to
+def binding(request) -> str:
+    """The sign-in the form token and flash messages are bound to. Key mode: the session cookie (as before).
+    Cloudflare access mode (the Gate sets scope["cj_auth"]): the VERIFIED user id; there is no session cookie."""
+    if request.scope.get("cj_auth") == "access":
+        uid = (request.scope.get("cj_user") or {}).get("id")
+        return f"access-user:{uid}" if uid else ""
+    return request.cookies.get(A.COOKIE) or ""
 
 
 # ---------------------------------------------------------------- flash messages (only after a real POST)
@@ -675,17 +743,28 @@ def render_people(rows, me, tok, msg_html="") -> str:
         tone = {"admin": "acc", "advanced": "ok", "basic": "off"}.get(role, "warn")
         added = parse_time(r["added"])
         meta = f'Added {esc(when(added))}' if added is not None else "Added: unknown"
+        em = r.get("email")
+        mail = (f'<p class="cj-mut cj-admin-meta cj-wrap cj-admin-email">Email: {esc(em)}</p>' if em else
+                '<p class="cj-mut cj-admin-meta cj-admin-email">Email: none (no Cloudflare sign-in)</p>')
         if r["state"] == "revoked":
             rt = parse_time(r["revoked"])
             return (f'<li class="cj-admin-person"><div class="cj-admin-top"><b class="cj-wrap">{name}</b>'
                     f'{chip(ROLE_WORD.get(role, role), "off")}</div>'
-                    f'<p class="cj-mut cj-admin-meta">Revoked {esc(when(rt))}. {meta}.</p></li>')
+                    f'<p class="cj-mut cj-admin-meta">Revoked {esc(when(rt))}. {meta}.</p>{mail if em else ""}</li>')
         last = role == "admin" and n_admin <= 1
         fid = f"cj-admin-r{i}"
         role_form = (f'<form class="cj-admin-row" method="post" action="{PREFIX}/people/role">'
                      f'{hidden_token(tok)}<input type="hidden" name="id" value="{esc(r["id"])}">'
                      f'<label class="cj-admin-lbl" for="{fid}">Role</label>{role_select("role", role, fid)}'
                      f'<button class="cj-admin-btn" type="submit">Change role</button></form>')
+        eid = f"cj-admin-e{i}"
+        mail_form = (f'<form class="cj-admin-row" method="post" action="{PREFIX}/people/email">'
+                     f'{hidden_token(tok)}<input type="hidden" name="id" value="{esc(r["id"])}">'
+                     f'<label class="cj-admin-lbl" for="{eid}">Email</label>'
+                     f'<input class="cj-admin-in" id="{eid}" name="email" type="email" maxlength="254" '
+                     f'value="{esc(em or "")}" autocomplete="off" autocapitalize="none" spellcheck="false">'
+                     f'<button class="cj-admin-btn" type="submit">{"Change email" if em else "Set email"}</button>'
+                     f'</form>')
         rev = (f'<a class="cj-admin-link cj-admin-danger" href="{PREFIX}/people/revoke?id={quote(r["id"])}">'
                f'Revoke{" (you)" if you else ""}…</a>')
         lastnote = ('<p class="cj-mut cj-admin-meta">The last admin: can\'t be demoted or revoked until someone '
@@ -694,8 +773,9 @@ def render_people(rows, me, tok, msg_html="") -> str:
                'sign in.</p>' if r["state"] != "active" else "")
         return (f'<li class="cj-admin-person"><div class="cj-admin-top"><b class="cj-wrap">{name}</b>'
                 f'{chip(ROLE_WORD.get(role, role), tone)}</div>'
-                f'<p class="cj-mut cj-admin-meta">{meta}.</p>{bad}{lastnote}'
-                + ("" if last else f'<div class="cj-admin-acts">{role_form}{rev}</div>') + '</li>')
+                f'<p class="cj-mut cj-admin-meta">{meta}.</p>{mail}{bad}{lastnote}'
+                + ("" if last else f'<div class="cj-admin-acts">{role_form}{rev}</div>')
+                + f'<div class="cj-admin-acts">{mail_form}</div></li>')
 
     roles = "".join(f"<li><b>{ROLE_WORD[r]}</b>: {esc(ROLE_DESC[r])}</li>" for r in A.ROLES)
     add = (f'<section class="cj-card cj-admin-add" aria-labelledby="cj-admin-h-add">'
@@ -705,6 +785,10 @@ def render_people(rows, me, tok, msg_html="") -> str:
            f'jsmith)</span></label>'
            f'<input class="cj-admin-in" id="cj-admin-id" name="id" required maxlength="40" '
            f'pattern="[a-z0-9][a-z0-9_.\\-]{{0,39}}" autocomplete="off" autocapitalize="none" spellcheck="false">'
+           f'<label class="cj-admin-lbl" for="cj-admin-email">Email <span class="cj-mut">(optional: their '
+           f'Cloudflare sign-in)</span></label>'
+           f'<input class="cj-admin-in" id="cj-admin-email" name="email" type="email" maxlength="254" '
+           f'autocomplete="off" autocapitalize="none" spellcheck="false">'
            f'<label class="cj-admin-lbl" for="cj-admin-role">Role</label>{role_select("role", "basic", "cj-admin-role")}'
            f'<button class="cj-admin-btn cj-admin-primary" type="submit">Add and make a key link</button></form>'
            f'<ul class="cj-mut cj-admin-roles">{roles}</ul>'
@@ -1023,7 +1107,7 @@ def routes(ctx) -> list:
     secret = secrets.token_bytes(32)                     # per process: a restart makes open forms stale
 
     def token(request: Request) -> str:
-        sess = request.cookies.get(A.COOKIE) or ""
+        sess = binding(request)                      # key: session cookie; access: the verified user
         return hmac.new(secret, hashlib.sha256(sess.encode()).digest(), hashlib.sha256).hexdigest()[:40]
 
     def me(request: Request) -> str:
@@ -1064,7 +1148,7 @@ def routes(ctx) -> list:
 
     def people_page(request, msg_html="", status=200):
         try:
-            rows = people(ctx.cfg.roster)
+            rows = people(ctx.cfg.roster, email=True)
         except ValueError as e:
             return show(request, "People", "people", "<h1>People</h1>" + note(
                 f"The roster can't be read ({e}). Nothing was changed.", "warn"), 500)
@@ -1079,12 +1163,12 @@ def routes(ctx) -> list:
             return note(f"The change was made, but the audit log could not be written ({type(e).__name__}).", "warn")
 
     def index(request: Request):                         # sync: Starlette runs it in a worker thread
-        text = flash_take(request.cookies.get(A.COOKIE) or "", request.query_params.get("f"))
+        text = flash_take(binding(request), request.query_params.get("f"))
         return people_page(request, note(text) if text else "")
 
     def done(request: Request, text: str, to: str = PREFIX + "/"):
         """303 to People (or `to`) with a one-time message for this session (a bare URL shows nothing)."""
-        tok = flash_put(request.cookies.get(A.COOKIE) or "", text)
+        tok = flash_put(binding(request), text)
         return ctx.no_store(RedirectResponse(f"{to}?f={quote(tok)}", status_code=303))
 
     async def change(request: Request, fn, *args):
@@ -1105,10 +1189,12 @@ def routes(ctx) -> list:
         if err:
             return err
         pid, role, actor = f.get("id", "").lower(), f.get("role", ""), me(request)
-        key, err = await change(request, add_person, pid, role)
+        email = f.get("email", "")
+        key, err = await change(request, add_person, pid, role, email)
         if err:
             return err
-        warn = await run_in_threadpool(try_audit, actor, "person_added", pid, {"role": role})
+        detail = {"role": role, "email": email.lower()} if email else {"role": role}
+        warn = await run_in_threadpool(try_audit, actor, "person_added", pid, detail)
         base = await run_in_threadpool(link_base, ctx.cfg, request.headers.get("origin"))
         link = f"{base}/login?k={key}"
         del key
@@ -1131,6 +1217,21 @@ def routes(ctx) -> list:
         if pid == actor and new != "admin":              # no longer an admin: /admin/ would answer 403
             return ctx.no_store(RedirectResponse("/", status_code=303))
         return done(request, f"{pid} is now {ROLE_WORD[new]}. It applies from their next click.")
+
+    async def email(request: Request):
+        f, err = await form(request)
+        if err:
+            return err
+        pid, actor = f.get("id", ""), me(request)
+        res, err = await change(request, set_email, pid, f.get("email", ""))
+        if err:
+            return err
+        old, new = res
+        warn = await run_in_threadpool(try_audit, actor, "email_changed", pid, {"from": old or None, "to": new or None})
+        if warn:
+            return await run_in_threadpool(people_page, request, warn)
+        return done(request, f"{pid} now signs in through Cloudflare as {new}." if new else
+                    f"{pid} has no sign-in email now (no Cloudflare sign-in).")
 
     def revoke_page(request: Request):
         pid = request.query_params.get("id") or ""
@@ -1182,7 +1283,7 @@ def routes(ctx) -> list:
     # ---- Predict sessions
     def predict_page(request: Request, msg_html="", status=200):
         if not msg_html:
-            text = flash_take(request.cookies.get(A.COOKIE) or "", request.query_params.get("f"))
+            text = flash_take(binding(request), request.query_params.get("f"))
             msg_html = note(text) if text else ""
         m = PSRC.merged(ctx.cfg, fresh=True)
         return show(request, "Predict sessions", "predict", render_predict(m, token(request), msg_html), status)
@@ -1274,6 +1375,7 @@ def routes(ctx) -> list:
     return [Route(PREFIX + "/", index, methods=["GET"]),
             Route(PREFIX + "/people/add", add, methods=["POST"]),
             Route(PREFIX + "/people/role", role, methods=["POST"]),
+            Route(PREFIX + "/people/email", email, methods=["POST"]),
             Route(PREFIX + "/people/revoke", revoke_page, methods=["GET"]),
             Route(PREFIX + "/people/revoke", revoke, methods=["POST"]),
             Route(PREFIX + "/predict", predict_page, methods=["GET"]),

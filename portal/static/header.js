@@ -121,6 +121,11 @@
       u.appendChild(nm);
       bar.appendChild(u);
     }
+    if (me && me.signout === '/cdn-cgi/access/logout') {   // Cloudflare access mode only (me.json says so)
+      var so = el('a', 'cj-signout', 'Sign out');
+      so.href = me.signout;
+      bar.appendChild(so);
+    }
     return bar;
   }
   function dots(bar, live) {
