@@ -125,6 +125,36 @@ Rules on a GPU under 8 GB (the laptop: RTX 3050 Ti, 4 GB, 15 GB RAM):
 - Not tried yet: batch 1–2 at 960; 640 tiles cut from the native images (keeps the 1440 pixel scale; needs a tiler that cuts labels too); `mask_ratio` 8; a frozen backbone when fine-tuning.
 - Set `--max-hours` ~1.5× the table (early stopping often ends sooner). The desktop's 1440 runs can't be done here.
 
+## One call: `queue_train` and the portal's Train page
+Steps 2 and 3 above as one function, for code (the portal) rather than people:
+```python
+from training.make_job_bundle import make_bundle   # step 2: the CLI's work without printing -> dict
+import sync                                         # jobs/ on sys.path, as the scripts do
+sync.queue_train(job_id, dataset_dir, exp_args, share, max_hours, hold=False, check_origin=True,
+                 *, out=None, registry_root=None, expect_sha256=None, copier="auto")   # -> <share>/q/<job>
+```
+- **`make_bundle(dataset_dir, exp_args, out, dataset_name=None, single_zip=False, allow_dirty=False)`** writes the same files as `make_job_bundle.py` and returns `{zip, md5, md5_path, readme, pack, pack_reused, pack_bytes, dataset_sha256, job_json, name, exp, changes, n_files}`. `main()` only parses the arguments and prints. Refusals stay `SystemExit`, as on the CLI. `out=None` means `<CryoAI-laptop>\job_bundles`.
+  - Control (`tests/test_make_bundle.py`): with the clock frozen, the CLI from the commit before the refactor, the CLI now and `make_bundle()` write byte-identical files (job zip, pack, sidecars, README) and the same stdout.
+- **`queue_train`** = `make_bundle` + `push`, the same functions as the two commands. A relative `--weights` is taken from the repo (the portal writes `models/<id>/best.pt`). `expect_sha256` is the registry's `labels.dataset_sha256` when the dataset has one (`dataset_from_lv.py` records it).
+- **Refused** (`SyncError`; nothing on the share):
+
+  | Refusal | When |
+  |---|---|
+  | share not found | before anything; never created (as `push`) |
+  | bad id, or not a `train` job in the registry (`registry_root`) | before bundling |
+  | job already on the share (`q\<job>` or `d\<job>`) | before bundling |
+  | bundle refused (uncommitted code, no `dataset.yaml`, an unknown flag, ...) | bundling (`bundle refused: ...`) |
+  | dataset sha mismatch: the bundle's `dataset_sha256` ≠ `expect_sha256` (the folder changed since it was recorded) | after bundling; the bundle stays in `out` |
+  | commit not on origin/main (`check_origin`) | `push` |
+  | `ds\<sha>\` on the share holds another pack ("same dataset hash, different pack") | `push_pack` |
+- Control (`jobs/tests/test_queue_train.py`): `make_job_bundle.py` + `sync.py push` (the CLI path) and `queue_train` on two temp shares, clock frozen, give byte-identical share trees with exactly one `q\<job>\`.
+- **Portal (Train).** Only with `CJ_TRAIN_QUEUE=on` (default off: Queue writes nothing). For a **desktop** job, when a queue share is known, Queue does all three steps:
+  - The share comes from the Config attribute `train_share`, else `$CJ_TRAIN_SHARE`, else the one share `live.json` names. That share must be a UNC path or be listed in `$CJ_JOBS_LOCAL_SHARES`, the Jobs page's rule.
+  - Before anything is written, it checks that the share can be reached, that the dataset folder is on the laptop (the registry's `dataset_dir`, else `<CryoAI>\training outputs\<dataset>`) and that the job id isn't on the share yet. A failed check: 409, nothing written.
+  - Then three audit lines: `requested` (write-ahead, `send: gpu_queue`), then `registry.new_job` and `result`, then `queue_train` in a worker thread (one send at a time) and `send` (`ok` / `failed: <error>`).
+  - A failed send marks the job **blocked** with `not sent to the GPU queue (portal Train): <why>` through `registry.set_status`; the job schema has no `failed`. The page then tells the requester in plain words; admins see the error.
+  - A laptop job, or no share known, works as before: the registry job, then the commands (admin).
+
 ## Predict jobs
 A **prediction set** is one batch of a user's tiles run through one registry model (`BUILD_CONTRACTS.md` section 2). It lives in `<CryoAI-laptop>\predict\<ps id>\`; review packages and results read it there.
 ```powershell
@@ -171,6 +201,41 @@ python jobs/sync.py pull --share \\<desktop>\cj
   - `n_done` counts the prediction files in `work\<job>\p\`, which are listed, never opened.
   - `hung` means no new file for max(10 × the time per image, 10 min).
   - Every `jobs[]` entry has `ready_at` (READY's time; `retry` refreshes it).
+
+## Raw montages to tiles: `jobs/convert_raw.py`
+Turns raw montages into the model-ready tiles (the lab's `3d. Tiles no scalebar - 14.7 A-px PNG`). The output folder is a Predict source as it is.
+```powershell
+python -m jobs.convert_raw --in <files or dirs> --out <new dir> [--recipe default|<YYYYMMDD>] [--sample-key <sample_key.csv>] [--gpu] [--processing-repo <dir>]
+```
+- **Inputs.** An MRC stack with its `.mrc.mdoc`, or SerialEM TIFF tiles with their `.idoc`. Pass the file, its sidecar or a folder (searched one level deep). A whole montage is always converted.
+- **Output.** `<out>\*.png` + `MANIFEST.csv` (`output_name`, ..., `nm_per_px`, ...). `<out>` must be new or empty.
+- **No pixel work here.** Every pixel comes from the lab's processing repo, imported, never copied. Its location is `CJ_PROCESSING_REPO` (or `--processing-repo`). The repo's tile export renders the tiles; the recipe is a session config `datasets/process_<recipe>.py`, used as is. `default` is 20261012.
+- **Result.** stdout is always one JSON object; the pipeline's progress goes to stderr.
+
+  | Exit | stdout |
+  |---|---|
+  | 0 | `{"ok": true, out_dir, recipe, recipe_defaulted, entry_point, compute, device, montages, a_px, n_tiles, tiles: [{file, nm_per_px, source_file, montage, sample_label, size}], nm_per_px, warnings}` |
+  | 2 | `{"ok": false, "kind": "refused", "error", "warnings"}`: nothing left in `<out>` |
+  | 1 | `{"ok": false, "kind": "failed", "error", "warnings"}` |
+- **Refused:**
+  - no processing repo;
+  - an unknown or non-session recipe (checked statically, never executed);
+  - an input that isn't a montage, or a sidecar without a finite, positive PixelSpacing (nm/px is never defaulted);
+  - a missing stack or idoc, or two montages that would get the same name;
+  - `<out>` not empty;
+  - a montage whose estimated peak memory (~14 bytes per montage pixel) is more than the RAM free;
+  - `--gpu` with the GPU busy or missing;
+  - with the default recipe, a sampling outside 0.5–2× the recipe session's own (name `--recipe` to override);
+  - no tile written.
+  
+  Montages coarser than 14.724 Å/px are dropped (no upsampling) and listed in `warnings`.
+- **One-shot subprocess.** Run it as its own process, one per conversion. It is slow (~25–30 s per montage on the CPU) and imports the processing repo into its interpreter, so one process converts with one repo. The portal's Predict page is to start it detached (wave 4, W1), with `CJ_PROCESSING_REPO` set, into a folder under the predict root whose name starts with the session id.
+  - A killed run leaves `<out>\.convert_work`: delete it (or `<out>`) before trying again.
+- **CPU vs GPU.** Compute is CPU unless `--gpu`. To reproduce a delivered set, use its compute: GPU and CPU differ by ±1 grey level on < 0.01 % of pixels. `device` says what really ran.
+- **Tests** (`jobs/tests/test_convert_raw.py`):
+  - A stub processing repo checks the plumbing.
+  - With `CJ_PROCESSING_REPO` set, synthetic MRC and TIFF montages go through the real pipeline. Known answer: tile size = source / (14.724 / PixelSpacing), nm/px 1.4724, an 8-bit greyscale PNG.
+  - **Known-answer control:** with `CJ_CONVERT_CONTROL_DIR` set to a session that already has its 3d tiles, one montage (`CJ_CONVERT_CONTROL_MONTAGE`, default `grid1-pos1`) is converted again. It must be md5-identical to the delivered tiles, with the same nm/px, on the compute the delivered MANIFEST names. The test only reads that folder.
 
 ## Queue folder
 ```
