@@ -33,13 +33,14 @@
   },
   "base": {
    "type": "string",
-   "description": "Base pull id (roboflow_pull_*) or, for older packages, an export id"
+   "description": "Base pull id (roboflow_pull_*) or, for older packages, an export id; for kind=prediction the prediction_set id (ps_*)"
   },
   "base_kind": {
    "type": "string",
    "enum": [
     "pull",
-    "export"
+    "export",
+    "prediction_set"
    ]
   },
   "model": {
