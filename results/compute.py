@@ -44,9 +44,11 @@ when the sample has no EV; pct_multilayer_reviewer is null with no reviewed imag
 per image nm_per_px is null when images.csv has no confirmed nm/px (that sample is then refused); `refused`
 is null unless something was refused.
 
-A sample whose images differ in tile size or nm/px, or lack a confirmed nm/px, is refused (left out of
-`samples`, reason in `refused`), never mixed or defaulted. A set whose status.json is missing or not "done"
-is refused whole.
+A sample whose images differ in tile size, or whose nm/px values spread (max - min) by more than NM_TOLERANCE
+(1 %) of their median, or that lack a confirmed nm/px, is refused (left out of `samples`, reason in `refused`),
+never mixed or defaulted. Within the tolerance the sample counts as one scale (contract section 8): each image
+keeps and uses its OWN nm/px (diameters are converted per image) and the sample reports the range used
+(nm_per_px_min, nm_per_px_max). A set whose status.json is missing or not "done" is refused whole.
 """
 
 from __future__ import annotations
@@ -56,6 +58,7 @@ import io
 import json
 import math
 import os
+import statistics
 import threading
 from dataclasses import dataclass
 from datetime import datetime
@@ -71,12 +74,15 @@ from inference.model_classes import ev_class_ids, model_classes
 SCHEMA = "results/1"
 CONF = 0.5
 MULTILAYER_RULE = "geometry: outline containing another outline"
+NM_TOLERANCE = 0.01   # nm/px spread (max - min) <= this x median = one scale; tests pin the other copies equal
+NM_EPS = 1e-12        # float slack on that comparison: exactly 1 % is accepted (pinned equal too)
 REVIEWER_CLASSES = {"EV", "MV", "inner", "nonEV"}
 REVIEWER_ROLE = {"EV": "standalone", "MV": "multilayer", "inner": "inner-layer"}   # agreeing geometry role
 SAMPLE_FIELDS = ["n_images", "n_reviewed", "ev_total", "ev_per_image_mean", "diam_nm_median", "diam_nm_q1",
                  "diam_nm_q3", "pct_multilayer_geometry", "inner_layers_excluded", "nonev_total",
                  "reviewed_images", "ev_reviewed_geometry", "reviewer_ev", "reviewer_mv", "reviewer_inner",
-                 "reviewer_nonev", "pct_multilayer_reviewer", "reviewer_geometry_disagree"]
+                 "reviewer_nonev", "pct_multilayer_reviewer", "reviewer_geometry_disagree", "nm_per_px_min",
+                 "nm_per_px_max"]
 IMAGE_FIELDS = ["sample_label", "reviewed", "edited", "nm_per_px", "ev", "multilayer", "inner", "nonev"]
 IMAGES_CSV_COLUMNS = {"image", "file", "sample_label", "nm_per_px", "nm_confirmed_by"}
 _TINY = 16   # below this many pixels, ask analysis.morphology whether the chain would keep the outline
@@ -259,7 +265,21 @@ def _sample(imgs: list[dict]) -> dict:
         "reviewer_nonev": sum(i["_rev_nonev"] for i in rev),
         "pct_multilayer_reviewer": _r(100.0 * rev_mv / rev_ev) if rev_ev else None,
         "reviewer_geometry_disagree": sum(i["_disagree"] for i in rev),
+        "nm_per_px_min": min(i["nm_per_px"] for i in imgs),
+        "nm_per_px_max": max(i["nm_per_px"] for i in imgs),
     }
+
+
+def nm_spread(values) -> float:
+    """(max - min) / median of nm/px values, one per image (0.0 for a single value)."""
+    vals = [float(v) for v in values]
+    return (max(vals) - min(vals)) / statistics.median(vals)
+
+
+def one_scale(values) -> bool:
+    """True when these nm/px values (one per image of one sample) count as one scale: spread <= NM_TOLERANCE
+    (+ NM_EPS, so exactly 1 % is not lost to float rounding)."""
+    return nm_spread(values) <= NM_TOLERANCE + NM_EPS
 
 
 def _refusal(label: str, imgs: list[dict]) -> str | None:
@@ -269,9 +289,10 @@ def _refusal(label: str, imgs: list[dict]) -> str | None:
         return (f"sample {label!r}: no confirmed nm_per_px for image(s) {', '.join(no_nm)} "
                 f"(images.csv needs nm_per_px and nm_confirmed_by)")
     why = []
-    nms = sorted({i["nm_per_px"] for i in imgs})
-    if len(nms) > 1:
-        why.append(f"nm/px {', '.join(f'{v:g}' for v in nms)}")
+    per_image = [i["nm_per_px"] for i in imgs]
+    if not one_scale(per_image):
+        why.append(f"nm/px {', '.join(f'{v:g}' for v in sorted(set(per_image)))} (spread "
+                   f"{100 * nm_spread(per_image):.2g} % of the median, over the {100 * NM_TOLERANCE:g} % tolerance)")
     sizes = sorted({i["_size"] for i in imgs})
     if len(sizes) > 1:
         why.append(f"tile sizes {', '.join(f'{w}x{h}' for w, h in sizes)}")

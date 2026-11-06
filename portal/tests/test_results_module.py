@@ -48,6 +48,8 @@ NOEDIT = GPS                                     # results from model prediction
 REVIEWED = "ps_20261105_abc124"                  # results with the golden reviewed.json (0002 reviewed)
 REFUSED = "ps_20261105_bbb222"                   # S1 mixes nm/px -> refused; S2 (label = XSS) still shown
 EDITED = "ps_20261105_fff666"                    # 0001 edited but not marked reviewed
+RANGE = "ps_20261105_f1a001"                     # S1 at 1.4724 / 1.4734 nm/px (0.07 %): one scale, counted
+OVER = "ps_20261105_f1a002"                      # S1 at 1.4724 / 1.4890 nm/px (1.12 %): refused
 TODO1, TODO2, TODO3 = "ps_20261105_ccc331", "ps_20261105_ccc332", "ps_20261105_ccc334"   # not computed
 PKG = "ps_20261105_ccc333"                       # not computed; has an (unedited) review package
 RUNNING = "ps_20261105_ddd444"                   # predictions still running
@@ -116,6 +118,11 @@ def image_rows(page: str) -> dict:
     return out
 
 
+def html_unescape(page: str) -> str:
+    import html
+    return html.unescape(page)
+
+
 def num(text: str) -> float:
     return float(re.match(r"[-\d.]+", text).group(0))
 
@@ -136,6 +143,8 @@ class Base(unittest.TestCase):
         compute_and_write(make_set(cls.root, REFUSED, nm_0002="2.0", label_s2=XSS))
         compute_and_write(make_set(cls.root, EDITED), golden_reviewed(EDITED, edited_0001=True))
         compute_and_write(make_set(cls.root, OTHERS, owner="other"))
+        compute_and_write(make_set(cls.root, RANGE, nm_0002="1.4734"))
+        compute_and_write(make_set(cls.root, OVER, nm_0002="1.4890"))
         for ps in (TODO1, TODO2, TODO3, PKG):
             make_set(cls.root, ps)
         make_set(cls.root, RUNNING, state="running")
@@ -279,6 +288,33 @@ class Golden(Base):
         for img in ("0001", "0002"):                                   # S1 refused: not counted, muted
             self.assertEqual((rows[img]["chip"], rows[img]["muted"]), ("Not counted (sample refused)", True))
         self.assertEqual((rows["0003"]["chip"], rows["0003"]["muted"]), ("Model only", False))   # control
+
+    def test_pixel_size_range_within_tolerance(self):
+        """Contract section 8: S1's two images at 1.4724 and 1.4734 nm/px (0.07 % apart) are counted as one sample;
+        the range shows on the page, in the CSV # lines and the README. Control: the golden set (one value) shows
+        a single value and no range note; 1.12 % apart is refused."""
+        import importlib
+        self.assertEqual(R.NM_TOLERANCE, importlib.import_module("results.compute").NM_TOLERANCE)
+        page = self.page(RANGE)
+        self.assertNotIn('id="cj-results-refused"', page)
+        self.assertEqual(sorted(re.findall(r'<tr data-sample="([^"]+)">', page)), ["S1", "S2"])
+        self.assertEqual(int(cells(page, "S1")["ev_total"][0]), 5)                   # same geometry as golden
+        self.assertIn("S1 1.4724–1.4734; S2 1.4724 (varies within 1 % between images of a sample; each image's "
+                      "diameters use its own value)", html_unescape(page))
+        self.assertIn("Pixel size differs slightly between the images of S1 (1.4724–1.4734 nm/px), within 1 %",
+                      html_unescape(page))
+        body = self.get(f"/results/{RANGE}/download/per_sample.csv", "owner")[2].decode()
+        self.assertIn("# nm_per_px=S1 1.4724–1.4734; S2 1.4724 (varies within 1 %", body)
+        rows = {r["sample_label"]: r for r in csv.DictReader(x for x in body.splitlines() if not x.startswith("#"))}
+        self.assertEqual((rows["S1"]["nm_per_px_min"], rows["S1"]["nm_per_px_max"]), ("1.4724", "1.4734"))
+        z = zipfile.ZipFile(io.BytesIO(self.get(f"/results/{RANGE}/download/results_{RANGE}.zip", "owner")[2]))
+        self.assertIn("Pixel size (nm per pixel): S1 1.4724–1.4734", z.read("README.txt").decode())
+        golden = html_unescape(self.page(NOEDIT))                                     # control: one value
+        self.assertIn("S1 1.4724; S2 1.4724</dd>", golden)
+        self.assertNotIn("Pixel size differs slightly", golden)
+        over = html_unescape(self.page(OVER))
+        self.assertIn("mixes nm/px 1.4724, 1.489 (spread 1.1 % of the median, over the 1 % tolerance)", over)
+        self.assertEqual(re.findall(r'<tr data-sample="([^"]+)">', over), ["S2"])
 
     def test_edited_only_headline(self):
         d = make_set(self.root, "ps_20261105_abc777")
