@@ -5,7 +5,9 @@ packages that point outside the known roots), search by id and sample label, the
 thumbnails (a real JPEG of at most 240 px, disk-cached, private + nosniff) and their path safety (an id that resolves
 outside the known roots, traversal tries, bad indexes, links out), privacy of prediction sets, the registry cache,
 and the pages in a browser (Playwright, Edge channel: 390 and 1280 px, light and dark, no horizontal scroll,
-same-origin requests only, no console errors). Screenshots go to $CJ_SHOT_DIR when set.
+same-origin requests only, no console errors), and the Lineage tab (a temp chain model -> run -> dataset -> label
+version -> sessions, unknown parents, cycles, hidden prediction sets, escaping, the pages in a browser).
+Screenshots go to $CJ_SHOT_DIR when set.
 
 Temp roster / registry / data folders only (cjtest.Env); never the real ones. The two data roots are temp folders
 named through CRYOEV_LAPTOP_ROOT / CRYOEV_PROCESSING_ROOT.
@@ -20,6 +22,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cjtest as T  # noqa: E402
@@ -732,6 +735,407 @@ class Browser(Base):
             page.goto(self.p.origin + "/data/images/ps_20261105_bbbbbb")
             self.assertIn("Not found", page.text_content("main"))
             self.check_clean({**rec, "console": [c for c in rec["console"] if "404" not in c]})
+        finally:
+            ctx.close()
+
+
+LIN_BAD = '<img src=x onerror=alert(1)>'
+
+
+def lineage_records() -> dict:
+    """Chain rows added on top of the fixture registry: entity -> [record]."""
+    def rec(entity, **kw):
+        return {"schema": f"{entity}/1", "logged": "2026-11-05T12:00:00", **kw}
+    return {
+        "model": [rec("model", id="m_chain", run="r_chain", dataset="ds_chain", status="candidate", imgsz=1440,
+                      classes=["EV"], weights="models/m_chain/best.pt"),
+                  rec("model", id="m_orphan", status="candidate"),
+                  rec("model", id="m_ghost", run="r_ghost", dataset="ds_ghost", status="candidate"),
+                  rec("model", id="m_xss", run="r_xss", status="candidate"),
+                  rec("model", id="m_mine", dataset="ds_mine", status="candidate"),
+                  rec("model", id="m_theirs", dataset="ds_theirs", status="candidate"),
+                  rec("model", id="m_loop", dataset="ds_loop", status="candidate")],
+        "run": [rec("run", id="r_chain", dataset="ds_chain", status="finished",
+                    config={"arch": "yolov8m-seg", "epochs": 300, "imgsz": 1440}, machine="ML desktop",
+                    metrics={"mask_map50": 0.9}),
+                rec("run", id="r_xss", dataset=LIN_BAD, status="finished")],
+        "dataset": [rec("dataset", id="ds_listed", status="built",
+                        image_list={"file": "lists/ds_listed.tsv", "n": 3}),
+                    rec("dataset", id="ds_privexp", source={"kind": "roboflow_export", "id": "priv exp"},
+                        status="built"),
+                    rec("dataset", id="ds_chain", label_version="lv_chain", status="built",
+                        counts={"train": {"images": 5}, "valid": {"images": 2}}, classes=["EV"]),
+                    rec("dataset", id="ds_mine", source={"kind": "prediction_set", "id": "ps_20261105_aaaaaa"},
+                        status="built"),
+                    rec("dataset", id="ds_theirs", source={"kind": "prediction_set", "id": "ps_20261105_bbbbbb"},
+                        status="built"),
+                    rec("dataset", id="ds_loop", label_version="lv_loop", status="built")],
+        "label_version": [rec("label_version", id="lv_unreg", pkg="pred_ps_20261101_abcdef", status="active"),
+                          rec("label_version", id="lv_unreg_in", status="active",
+                              inputs=[{"id": "ps_20261101_abcdef", "role": "edits", "entity": "prediction_set"}]),
+                          rec("label_version", id="lv_unreg_mine", pkg="pred_ps_20261101_a1a1a1", status="active"),
+                          rec("label_version", id="lv_chain", pkg="pkg_chain", base="pull_chain", status="active",
+                              n_images_applied=2),
+                          rec("label_version", id="lv_loop", base="ds_loop", status="active")],
+        "review_package": [rec("review_package", id="pkg_startpriv", path="x/review/pkg_startpriv", kind="review",
+                               base="ps_20261105_bbbbbb", base_kind="prediction_set", n_images=1, status="in_review"),
+                           rec("review_package", id="pkg_chain", path="x/review/pkg_chain", kind="prediction",
+                               owner="adv", prediction_set="ps_20261105_aaaaaa", n_images=2, status="in_review")],
+        "pull": [rec("pull", id="pull_chain", created="2026-11-03T10:00", n_images=2, path="x/pull_chain")],
+        "roboflow_image": [rec("roboflow_image", id="rf1", name="t1.jpg", first_seen_pull="pull_chain"),
+                           rec("roboflow_image", id="rf2", name="t2.jpg", first_seen_pull="pull_chain")],
+        "image": [rec("image", id="t1", rf_name="t1.jpg", session="20261104", session_grid="1", grid=None),
+                  rec("image", id="t2", rf_name="t2.jpg", session="20261104", session_grid="2", grid=None)],
+        "roboflow_export": [rec("roboflow_export", id="priv exp", owner="otherperson", classes=[]),
+                            rec("roboflow_export", id="cyc a", derived_from="cyc b", classes=[]),
+                            rec("roboflow_export", id="cyc b", derived_from="cyc a", classes=[]),
+                            rec("roboflow_export", id="plain exp", classes=[])],
+        "prediction_set": [
+            rec("prediction_set", id="ps_20261105_aaaaaa", created="2026-11-05T10:00:00", owner="adv",
+                model="v9_prod_20261101", path="p", source={"kind": "session", "session": "20261104"}, n_images=2,
+                status="done", conf=0.25),
+            rec("prediction_set", id="ps_20261105_bbbbbb", created="2026-11-05T11:00:00", owner="otherperson",
+                model="v9_prod_20261101", path="p", source={"kind": "session", "session": "20261104"}, n_images=2,
+                status="done", conf=0.25)],
+        "grid": [rec("grid", id="2699", sample_label=LIN_BAD, grid_type="Gold grid")],
+    }
+
+
+def add_lineage_records(registry: Path):
+    predict = Path(os.environ["CRYOEV_LAPTOP_ROOT"]) / "predict"
+    for ps, owner in (("ps_20261101_abcdef", "otherperson"), ("ps_20261101_a1a1a1", "adv")):
+        (predict / ps).mkdir(parents=True, exist_ok=True)           # on disk with an owner, NOT in the registry
+        (predict / ps / "request.json").write_text(json.dumps({"owner": owner}), encoding="utf-8")
+    (registry / "lists").mkdir(exist_ok=True)
+    (registry / "lists" / "ds_listed.tsv").write_text("t1\ttrain\nt2\tvalid\nzz_untraced\ttest\n",
+                                                      encoding="utf-8")
+    for entity, recs in lineage_records().items():
+        with open(registry / f"{entity}.jsonl", "a", encoding="utf-8") as fh:
+            fh.write("".join(json.dumps(r) + "\n" for r in recs))
+    sess = {"schema": "session/1", "id": "20261111", "logged": "2026-11-05T12:00:00", "status": "processed",
+            "session_grids": {"1": "2699"}}
+    with open(registry / "session.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(sess) + "\n")
+    D._registry_cache.clear()
+    D._files_cache.clear()
+    D._package_cache.clear()
+    D._owner_cache.clear()
+
+
+def walk(node):
+    yield node
+    for parent in node["parents"]:
+        yield from walk(parent)
+
+
+def by_type(tree, ntype):
+    return [n for n in walk(tree["root"]) if n["type"] == ntype]
+
+
+class LineageBase(Base):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        add_lineage_records(cls.env.registry)
+
+
+class Lineage(LineageBase):
+    def tree(self, kind, eid, role="admin"):
+        return self.api(f"/data/api/lineage/{kind}/{quote(eid, safe='')}", role)
+
+    def test_full_chain_model_to_session(self):
+        t = self.tree("model", "m_chain")
+        root = t["root"]
+        self.assertEqual((t["schema"], root["type"], root["id"]), ("cj_data/1", "model", "m_chain"))
+        chain = [root]
+        while chain[-1]["parents"]:
+            chain.append(chain[-1]["parents"][0])
+        self.assertEqual([n["type"] for n in chain[:4]], ["model", "run", "dataset", "label"])
+        lv = chain[3]
+        kinds = {p["type"]: p for p in lv["parents"]}
+        self.assertEqual(set(kinds), {"pull", "images"})
+        ps = kinds["images"]["parents"][0]                           # review package -> prediction set -> session
+        self.assertEqual((ps["type"], ps["id"]), ("images", "ps_20261105_aaaaaa"))
+        self.assertEqual([p["id"] for p in ps["parents"]], ["20261104"])
+        grid = kinds["pull"]["parents"][0]                           # download -> grid -> session
+        self.assertEqual((grid["type"], grid["id"]), ("grid", "2602"))
+        self.assertIn("20261104", [p["id"] for p in grid["parents"]])
+        session = next(n for n in walk(root) if n["type"] == "session" and n["id"] == "20261104")
+        shown = {f[0]: f[1] for f in session["fields"]}
+        self.assertEqual(shown["Instrument"], "Glacios")
+        self.assertEqual(shown["Magnification"], "11,000× and 45,000×")
+        self.assertEqual(shown["Pixel size"], "1.8 Å/px and 7.36 Å/px")
+        self.assertIn("-3.5 µm", shown["Defocus"])
+        self.assertIn("3.6 e/Å²", shown["Dose"])
+        self.assertTrue(session["thumbs"] and len(session["thumbs"]["thumbs"]) == D.LINEAGE_THUMBS)
+        self.assertEqual(t["summary"]["hidden"], 0)
+        self.assertEqual(self.get(session["thumbs"]["thumbs"][0]["url"])[0], 200)
+        page = main_html(self.page("/data/lineage/model/m_chain/"))
+        for want in ("Lineage of m_chain", "Training run", "Dataset", "Label version", "Roboflow download", "Grid 2602",
+                     "Session 20261104", "Glacios", "Made from"):
+            self.assertIn(want, page)
+        self.assertGreaterEqual(page.count('class="cj-data-img"'), 4)
+
+    def test_every_kind_has_a_lineage_page_and_api(self):
+        for kind, eid in (("session", "20261104"), ("grid", "2602"), ("images", "ps_20261105_aaaaaa"),
+                          ("labels", "lv_chain"), ("dataset", "ds_chain"), ("model", "m_chain"),
+                          ("images", "roboflow - 20261028 cryoai v5 S1")):
+            with self.subTest(kind=kind):
+                self.assertEqual(self.tree(kind, eid)["root"]["id"], eid)
+                self.assertIn("Lineage of", self.page(f"/data/lineage/{kind}/{quote(eid, safe='')}/"))
+        self.assertEqual(self.get("/data/lineage/model/m_chain")[0], 200)       # no trailing slash works too
+        for bad in ("/data/lineage/model/nope/", "/data/lineage/bogus/x/", "/data/lineage/run/r_chain/"):
+            self.assertEqual(self.get(bad)[0], 404, bad)
+        self.assertEqual(self.get("/data/api/lineage/model/nope")[0], 404)
+        self.assertEqual(self.get("/data/lineage/model/m_chain/", "basic")[0], 403)
+        self.assertEqual(self.get("/data/api/lineage/model/m_chain", "basic")[0], 403)
+
+    def test_link_on_every_catalog_item(self):
+        for path in ("/data/list/sessions", "/data/list/grids", "/data/list/images", "/data/list/labels",
+                     "/data/list/datasets", "/data/list/models", "/data/search?q=m_chain"):
+            with self.subTest(path=path):
+                t = main_html(self.page(path))
+                n_items = t.count('class="cj-data-row"')
+                self.assertGreater(n_items, 0)
+                self.assertEqual(t.count(">Lineage</a>"), n_items)
+        self.assertIn('href="/data/lineage/model/m_chain/"', self.page("/data/list/models"))
+        self.assertIn('href="/data/lineage/model/m_chain/"', self.page("/data/model/m_chain"))
+        for row in self.api("/data/api/list/models")["rows"]:
+            self.assertEqual(row["lineage"], f"/data/lineage/model/{row['id']}/")
+
+    def test_missing_parents_are_unknown(self):
+        t = self.tree("model", "m_orphan")
+        kinds = [(n["type"], n["status"]) for n in t["root"]["parents"]]
+        self.assertEqual(kinds, [("run", "unknown"), ("dataset", "unknown")])
+        self.assertEqual(t["summary"]["unknown"], 2)
+        page = main_html(self.page("/data/lineage/model/m_orphan/"))
+        self.assertIn("Unknown", page)
+        self.assertIn("does not say which training run", page)
+        # recorded but absent: the id is quoted as recorded, nothing is filled in
+        g = self.tree("model", "m_ghost")
+        self.assertEqual([(n["type"], n["status"], n.get("recorded")) for n in g["root"]["parents"]],
+                         [("run", "unknown", "r_ghost"), ("dataset", "unknown", "ds_ghost")])
+        self.assertTrue(all(n["id"] is None for n in g["root"]["parents"]))
+        # a session has no parents and is not "unknown"
+        s = self.tree("session", "20261104")
+        self.assertEqual((s["root"]["parents"], s["summary"]["unknown"]), ([], 0))
+        # an export made from an export the registry does not hold
+        e = self.tree("images", "roboflow - 20261028 cryoai v5 S1")
+        self.assertEqual([(n["status"], n.get("recorded")) for n in e["root"]["parents"]],
+                         [("unknown", "roboflow - 20261028 cryoai v5")])
+        # an export that records no source at all
+        e = self.tree("images", "plain exp")
+        self.assertEqual([(n["status"], n["id"]) for n in e["root"]["parents"]], [("unknown", None)])
+
+    def test_cycle_terminates(self):
+        for kind, eid in (("images", "cyc a"), ("model", "m_loop")):
+            with self.subTest(root=eid):
+                t = self.tree(kind, eid)
+                loops = [n for n in walk(t["root"]) if n["status"] == "loop"]
+                self.assertEqual(len(loops), 1)
+                self.assertEqual(t["summary"]["loop"], 1)
+                self.assertLessEqual(t["summary"]["steps"], 5)
+                self.assertIn("links this step back", main_html(self.page(
+                    f"/data/lineage/{kind}/{eid.replace(' ', '%20')}/")))
+
+    def test_depth_and_size_caps(self):
+        old = D.LINEAGE_MAX_DEPTH
+        D.LINEAGE_MAX_DEPTH = 2
+        try:
+            t = self.tree("model", "m_chain")
+        finally:
+            D.LINEAGE_MAX_DEPTH = old
+        cut = [n for n in walk(t["root"]) if n["status"] == "cut"]
+        self.assertTrue(cut)
+        self.assertEqual([(n["type"], n["id"], n["parents"]) for n in cut], [("dataset", "ds_chain", [])])
+        self.assertEqual((len(list(walk(t["root"]))), t["summary"]["cut"]), (3, 1))
+
+    def test_other_users_prediction_set_is_hidden(self):
+        mine, theirs = "ps_20261105_aaaaaa", "ps_20261105_bbbbbb"
+        # control: the owner and admin see the chain through their own set
+        for role in ("advanced", "admin"):
+            with self.subTest(role=role):
+                t = self.tree("model", "m_mine", role)
+                ps = by_type(t, "images")[0]
+                self.assertEqual((ps["status"], ps["id"]), ("ok", mine))
+                self.assertEqual(t["summary"]["hidden"], 0)
+        self.assertEqual(by_type(self.tree("model", "m_mine", "admin"), "session")[0]["id"], "20261104")
+        # someone else's set: admin sees it, an advanced user sees "not visible to you" and no id
+        self.assertEqual(by_type(self.tree("model", "m_theirs", "admin"), "images")[0]["id"], theirs)
+        for url, kind in ((f"/data/api/lineage/model/m_theirs", "api"), ("/data/lineage/model/m_theirs/", "page")):
+            with self.subTest(view=kind):
+                body = self.get(url, "advanced")[2].decode()
+                self.assertNotIn(theirs, body)
+                self.assertNotIn("otherperson", body)
+                self.assertIn("Not visible to you", body)
+        t = self.tree("model", "m_theirs", "advanced")
+        hidden = [n for n in walk(t["root"]) if n["status"] == "hidden"]
+        self.assertEqual(len(hidden), 1)
+        self.assertEqual((hidden[0]["id"], hidden[0]["url"], hidden[0]["fields"], hidden[0]["parents"],
+                          hidden[0]["thumbs"]), (None, None, [], [], None))
+        self.assertEqual(t["summary"]["hidden"], 1)
+        # the root itself being hidden is a plain 404, the same as an id that does not exist
+        self.assertEqual(self.get(f"/data/api/lineage/images/{theirs}", "advanced")[0], 404)
+        self.assertEqual(self.get(f"/data/lineage/images/{theirs}/", "advanced")[0], 404)
+        self.assertEqual(self.get(f"/data/api/lineage/images/{theirs}", "admin")[0], 200)
+        # unregistered prediction packages with no known owner fail closed
+        self.assertEqual(self.get("/data/api/lineage/images/pred_ps_20261105_cccccc", "advanced")[0], 404)
+        self.assertEqual(self.get("/data/api/lineage/images/pred_ps_20261105_cccccc", "admin")[0], 200)
+
+    def test_hidden_package_under_a_label_version(self):
+        # lv_owned's package belongs to someone else: the label version shows, the package does not
+        t = self.tree("labels", "lv_owned", "advanced")
+        self.assertEqual([n["status"] for n in t["root"]["parents"]], ["hidden"])
+        self.assertNotIn("pkg_owned", json.dumps(t))
+        self.assertEqual(t["root"]["thumbs"], None)
+        ta = self.tree("labels", "lv_owned", "admin")
+        self.assertEqual([n["id"] for n in ta["root"]["parents"]], ["pkg_owned"])
+
+    def test_paths_for_admins_only(self):
+        adm, adv = json.dumps(self.tree("model", "m_chain")), json.dumps(self.tree("model", "m_chain", "advanced"))
+        self.assertIn("models/m_chain/best.pt", adm)
+        self.assertNotIn("models/m_chain/best.pt", adv)
+        self.assertIn("Cryo-image-processing/20261104", json.dumps(self.tree("session", "20261104")))
+        self.assertNotIn("Cryo-image-processing/20261104", json.dumps(self.tree("session", "20261104", "advanced")))
+        self.assertNotIn("x/review/pkg_chain", json.dumps(self.tree("images", "pkg_chain", "advanced")))
+
+    def test_escaping(self):
+        raw = LIN_BAD
+        esc_text = "&lt;img src=x onerror=alert(1)&gt;"
+        pages = (self.page("/data/lineage/model/m_xss/"), self.page("/data/lineage/grid/2699/"))
+        for page in pages:
+            t = main_html(page)
+            self.assertNotIn(raw, t)
+            self.assertIn(esc_text, t)
+        self.assertIn("Recorded as " + esc_text, main_html(pages[0]))      # an unknown parent id is quoted, escaped
+        self.assertIn("Sample", main_html(pages[1]))
+        data = self.tree("grid", "2699")                                    # JSON carries the raw text as data
+        self.assertEqual([f[1] for f in data["root"]["fields"] if f[0] == "Sample"], [raw])
+        # an id with markup in the URL is escaped in the breadcrumb of the 404 and never echoed raw
+        st, _, body = self.get("/data/lineage/model/%3Cb%3Ex%3C%2Fb%3E/")
+        self.assertEqual(st, 404)
+        self.assertNotIn(b"<b>x</b>", body)
+
+    def test_unregistered_private_ids_are_never_quoted(self):
+        for lv in ("lv_unreg", "lv_unreg_in"):
+            with self.subTest(lv=lv):
+                t = self.tree("labels", lv, "advanced")
+                self.assertNotIn("abcdef", json.dumps(t))
+                self.assertNotIn("abcdef", main_html(self.page(f"/data/lineage/labels/{lv}/", "advanced")))
+                self.assertEqual([n["status"] for n in t["root"]["parents"]], ["hidden"])
+                self.assertEqual(t["root"]["parents"][0]["type"], "hidden")
+                ta = self.tree("labels", lv, "admin")                   # control: admin may see the owner's id
+                self.assertEqual([(n["status"], n.get("recorded")) for n in ta["root"]["parents"]],
+                                 [("unknown", "pred_ps_20261101_abcdef" if lv == "lv_unreg" else "ps_20261101_abcdef")])
+        mine = self.tree("labels", "lv_unreg_mine", "advanced")         # control: the owner sees their own id
+        self.assertEqual([(n["status"], n.get("recorded")) for n in mine["root"]["parents"]],
+                         [("unknown", "pred_ps_20261101_a1a1a1")])
+
+    def test_export_parent_follows_visibility(self):
+        t = self.tree("dataset", "ds_privexp", "advanced")
+        self.assertEqual([n["status"] for n in t["root"]["parents"]], ["hidden"])
+        self.assertNotIn("priv exp", json.dumps(t))
+        self.assertNotIn("priv exp", self.page("/data/lineage/dataset/ds_privexp/", "advanced"))
+        ta = self.tree("dataset", "ds_privexp", "admin")
+        self.assertEqual([(n["status"], n["id"]) for n in ta["root"]["parents"]], [("ok", "priv exp")])
+
+    def test_existing_pages_do_not_quote_hidden_ids(self):
+        for path in ("/data/dataset/ds_theirs", "/data/images/pkg_startpriv", "/data/api/dataset/ds_theirs",
+                     "/data/api/images/pkg_startpriv"):
+            with self.subTest(path=path):
+                body = self.get(path, "advanced")[2].decode()
+                self.assertNotIn("bbbbbb", body)
+                self.assertIn("Not visible to you", body)
+                self.assertIn("bbbbbb", self.get(path, "admin")[2].decode())     # control
+
+    def test_dataset_image_list_traces_sessions(self):
+        t = self.tree("dataset", "ds_listed")
+        self.assertEqual(t["root"]["note"], "2 of 3 images traced to sessions 20261104.")
+        ids = [(n["type"], n["id"]) for n in t["root"]["parents"]]
+        self.assertEqual(ids, [("grid", "2602"), ("session", "20261104")])
+        self.assertIn("2 of 3 images traced", main_html(self.page("/data/lineage/dataset/ds_listed/")))
+        self.assertIsNone(self.tree("dataset", "ds_chain")["root"]["note"])    # control: no list, no note
+
+    def test_total_steps_are_capped_on_a_wide_graph(self):
+        records = {e: {} for e in D.ENTITIES}
+        for layer in range(12):
+            for j in range(25):
+                nxt = [{"id": f"d{layer + 1}_{k}", "entity": "dataset", "role": "source"} for k in range(25)]
+                records["dataset"][f"d{layer}_{j}"] = {"id": f"d{layer}_{j}", "inputs": nxt}
+        viewer = D.Viewer(lambda user, owner: True, {"id": "a", "role": "admin"})
+        t = D.lineage_tree(records, viewer, "dataset", "d0_0")
+        self.assertLessEqual(len(list(walk(t["root"]))), 2 * D.LINEAGE_MAX_NODES)
+        self.assertLess(len(json.dumps(t)), 200_000)
+        self.assertTrue(any(n["status"] == "more" for n in walk(t["root"])))
+
+    def test_cut_step_without_a_page_has_no_dead_hint(self):
+        old = D.LINEAGE_MAX_DEPTH
+        D.LINEAGE_MAX_DEPTH = 1
+        try:
+            t = self.tree("model", "m_chain")
+        finally:
+            D.LINEAGE_MAX_DEPTH = old
+        cut = next(n for n in walk(t["root"]) if n["status"] == "cut")
+        self.assertEqual((cut["type"], cut["note"]), ("run", "Not shown: limit reached."))
+
+    def test_reads_do_not_write_the_registry(self):
+        before = {f.name: f.read_bytes() for f in self.env.registry.glob("*.jsonl")}
+        self.page("/data/lineage/model/m_chain/")
+        self.tree("images", "ps_20261105_aaaaaa")
+        after = {f.name: f.read_bytes() for f in self.env.registry.glob("*.jsonl")}
+        self.assertEqual(before, after)
+
+
+class LineageBrowser(Browser):
+    test_pages_sizes_and_schemes = None
+    test_search_form_and_advanced_user = None
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        add_lineage_records(cls.env.registry)
+
+    def test_lineage_pages_at_two_widths(self):
+        paths = (("model", "/data/lineage/model/m_chain/"), ("orphan", "/data/lineage/model/m_orphan/"),
+                 ("cycle", "/data/lineage/images/cyc%20a/"), ("session", "/data/lineage/session/20261104/"),
+                 ("catalog", "/data/list/models"))
+        for scheme in ("light", "dark"):
+            for width in (390, 1280):
+                ctx, page, rec = self.session(width, scheme)
+                try:
+                    for name, path in paths:
+                        with self.subTest(page=name, width=width, scheme=scheme):
+                            page.goto(self.p.origin + path)
+                            page.wait_for_load_state("networkidle")
+                            page.wait_for_selector("#cj-bar")
+                            sw, iw = page.evaluate("[document.documentElement.scrollWidth, window.innerWidth]")
+                            self.assertLessEqual(sw, iw, "horizontal scroll")
+                            page.evaluate("Promise.all(Array.from(document.images).map(i => { i.loading = 'eager'; "
+                                          "return i.complete ? 1 : "
+                                          "new Promise(r => { i.onload = i.onerror = r; }); }))")
+                            self.assertEqual(page.evaluate("Array.from(document.images).filter(i => !i.naturalWidth)"
+                                                           ".length"), 0, "broken thumbnail")
+                            self.assertEqual(page.locator("script:not([src])").count(), 0)
+                            if name == "model":
+                                self.assertIn("Session 20261104", page.text_content("main"))
+                                self.assertGreaterEqual(page.locator("main img.cj-data-img").count(), 4)
+                            page.screenshot(path=str(self.shots / f"lineage_{name}_{width}_{scheme}.png"),
+                                            full_page=True)
+                    self.check_clean(rec)
+                finally:
+                    ctx.close()
+
+    def test_catalog_link_leads_to_lineage(self):
+        ctx, page, rec = self.session(390, "light", key=self.adv_key)
+        try:
+            page.goto(self.p.origin + "/data/list/models")
+            page.click('a[href="/data/lineage/model/m_chain/"]')
+            page.wait_for_load_state("networkidle")
+            self.assertIn("Lineage of m_chain", page.text_content("main"))
+            page.goto(self.p.origin + "/data/lineage/model/m_theirs/")
+            self.assertIn("Not visible to you", page.text_content("main"))
+            self.assertNotIn("bbbbbb", page.content())
+            self.check_clean(rec)
         finally:
             ctx.close()
 
