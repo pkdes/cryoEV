@@ -299,9 +299,14 @@ def _push_predict_locked(ps_dir, reg, share, job_id, copier, check_origin, max_h
                 registry.new_job("predict", "desktop", ps_id, images=lst, root=reg, date=jid[4:12],
                                  note=f"prediction set {ps_id}")
         except Exception as e:                         # roll back without deleting: the runner skips a CANCELled job
-            cancel(jid, share, who="pujan", reason=f"push-predict: the registry job was not created ({e})")
+            try:
+                cancel(jid, share, who="pujan", reason=f"push-predict: the registry job was not created ({e})")
+            except Exception as ce:                    # never hides the first error: both are reported
+                raise SyncError(f"{jid} was queued but its registry job was not created ({e}), and writing its "
+                                f"CANCEL failed too ({type(ce).__name__}: {ce}): cancel it by hand "
+                                f"(`sync.py cancel {jid}`) before the runner picks it") from e
             raise SyncError(f"{jid} was queued but its registry job was not created ({e}); CANCEL written, so the "
-                            f"runner skips it. Fix the registry, then push again with a new job (or --job)")
+                            f"runner skips it. Fix the registry, then push again with a new job (or --job)") from e
     PS.write_status(ps_dir, state="queued", n_done=0, n_total=len(rows), where="desktop", job=jid, error=None,
                     pid=None, waiting=None)
     try:

@@ -194,7 +194,7 @@ class CreateTests(PredictRoots, unittest.TestCase):
                        **{k: v for k, v in kw.items() if k not in ("manifest", "sample_label_column")})
         self.assertEqual(C.read_json(ps / "status.json")["n_total"], 4)
 
-    def test_only_names_size_cap_and_formula_cells(self):
+    def test_only_names_and_size_cap(self):
         with self.assertRaisesRegex(PS.PredictSetError, "plain file names"):
             self.make(names=["golden_0001.png", "../src/golden_0002.png"])
         with self.assertRaisesRegex(PS.PredictSetError, "plain file names"):
@@ -203,18 +203,35 @@ class CreateTests(PredictRoots, unittest.TestCase):
         d = self.tmp / "big"
         d.mkdir()
         png(d / "wide.png", (PS.MAX_SIDE + 1, 4))
-        kw = dict(sample_label="=SUM(A1)", sample_label_column=None, nm_per_px=1.0, nm_from_manifest=False,
-                  manifest=None)
+        kw = dict(sample_label="S", sample_label_column=None, nm_per_px=1.0, nm_from_manifest=False, manifest=None)
         with self.assertRaisesRegex(PS.PredictSetError, "wide.png: 8193x4 px: a side over 8192"):
             self.make(src=d, **kw)
         self.assert_nothing_written()
         (d / "wide.png").unlink()                          # control: 8192 is allowed
-        png(d / "@edge.png", (PS.MAX_SIDE, 4))
+        png(d / "edge.png", (PS.MAX_SIDE, 4))
         ps = self.make(src=d, **kw)
-        row = assert_contract_layout(self, ps, done=False)[0]
-        self.assertEqual((row["sample_label"], row["orig_name"]), ("'=SUM(A1)", "'@edge.png"))
+        self.assertEqual(PS.read_images(ps)[0]["orig_name"], "edge.png")
         ps2 = self.make(names=["golden_0003.png", "golden_0001.png"])   # control: plain names, name order
         self.assertEqual([r["orig_name"] for r in PS.read_images(ps2)], ["golden_0001.png", "golden_0003.png"])
+
+    def test_formula_like_labels_and_names_refused(self):
+        kw = dict(sample_label_column=None, nm_per_px=1.4724, nm_from_manifest=False, manifest=None)
+        with self.assertRaisesRegex(PS.PredictSetError, r"sample label '\+EDTA' starts with '\+': a spreadsheet "
+                                                        r"would run it as a formula"):
+            self.make(sample_label="+EDTA", **kw)
+        bad = self.tmp / "formula.csv"                     # from the manifest: named per image
+        bad.write_text(self.manifest.read_text(encoding="utf-8").replace(",S2,", ",-80C,"), encoding="utf-8")
+        with self.assertRaisesRegex(PS.PredictSetError, r"golden_0003.png: sample label '-80C' starts with '-'"):
+            self.make(manifest=bad)
+        d = self.tmp / "named"
+        shutil.copytree(self.src, d)
+        (d / "golden_0002.png").rename(d / "@golden_0002.png")
+        with self.assertRaisesRegex(PS.PredictSetError, r"@golden_0002.png: the file name starts with '@'"):
+            self.make(src=d, sample_label="S", **kw)
+        self.assert_nothing_written()
+        label = 'EV prep A, 50% EDTA "wash" (n=3) µm'      # control: commas, quotes, unicode kept exactly
+        ps = self.make(sample_label=label, **kw)
+        self.assertEqual({r["sample_label"] for r in PS.read_images(ps)}, {label})
 
     def test_write_status_threads(self):
         import threading

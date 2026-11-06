@@ -11,8 +11,8 @@ Writes <root>/<ps id>/ (default root <CryoAI-laptop>/predict; the id ps_<YYYYMMD
   images/<nnnn>.png|.jpg   the tiles, numbered in name order; the extension comes from the content. Copied (md5
                            checked); hard-linked only with --link, on the same drive and not from a protected folder.
                            The original file name is never in a path, only in images.csv orig_name
-  images.csv               image,file,orig_name,sample_label,nm_per_px,nm_confirmed_by,source,md5 (cells that start
-                           with = + - @ get a leading ' so a spreadsheet never runs them)
+  images.csv               image,file,orig_name,sample_label,nm_per_px,nm_confirmed_by,source,md5 (raw values: it is
+                           machine-read; labels and names a spreadsheet would run are refused at create)
   request.json             ps, owner, model, conf, max_det, imgsz, source, created
   status.json              state queued, n_done 0, n_total, where laptop, job null, error null, updated, pid null,
                            waiting null
@@ -22,7 +22,7 @@ renamed into place, so a reader never sees half a set.
 Refused, with every problem listed and nothing written: no images, or more than 200; a file that is not an 8-bit
 PNG or JPEG by its content (the extension is not trusted; MANIFEST.csv, the --manifest file and OS files such as
 desktop.ini are skipped), or one with a side over 8192 px (checked before it is decoded); nm/px missing for any
-image; no --nm-confirmed-by; mixed tile sizes (or mixed nm/px) within one sample label; an unknown model; --only
+image; no --nm-confirmed-by; a sample label or file name starting with = + - @ (a spreadsheet would run it); mixed tile sizes (or mixed nm/px) within one sample label; an unknown model; --only
 names that are not plain file names. The manifest's name column is output_name (or image, file_name, filename,
 name), its nm/px column nm_per_px.
 
@@ -78,7 +78,7 @@ PERSON_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")       # registry/schemas/pred
 SESSION_RE = re.compile(r"^\d{8}(-\d+)?$")
 PNG_SIG, JPEG_SIG = b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff"
 PNG_MODES, JPEG_MODES = {"L", "LA", "RGB", "RGBA", "P"}, {"L", "RGB"}
-FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+FORMULA_START = ("=", "+", "-", "@")
 MODELS_YAML = REPO / "models" / "models.yaml"
 LAPTOP_PREFIX = "<CryoAI-laptop>"
 REGISTRY_LOCK = ".prediction_set.lock"           # in the registry folder: id choice + read-modify-append
@@ -303,10 +303,9 @@ def _num(v):
     return x if math.isfinite(x) and x > 0 else None
 
 
-def _cell(s) -> str:
-    """A CSV cell a spreadsheet won't run as a formula."""
-    s = str(s)
-    return "'" + s if s.startswith(FORMULA_START) else s
+def _formula_like(s) -> bool:
+    """Starts like a spreadsheet formula (= + - @): refused at create, so images.csv can stay raw."""
+    return str(s).startswith(FORMULA_START)
 
 
 def _list(problems):
@@ -372,6 +371,9 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
     elif sample_label is not None and (not str(sample_label).strip() or len(str(sample_label)) > 80
                                        or any(ord(ch) < 32 for ch in str(sample_label))):
         problems.append(f"sample label {sample_label!r}: 1-80 printable characters")
+    elif sample_label is not None and _formula_like(str(sample_label).strip()):
+        problems.append(f"sample label {sample_label!r} starts with {str(sample_label).strip()[0]!r}: a spreadsheet "
+                        f"would run it as a formula; start it with a letter or digit (e.g. 'EDTA+' or 'with EDTA')")
     if (nm_from_manifest or sample_label_column) and manifest is None:
         problems.append("--nm-from-manifest / --sample-label-from manifest:... need --manifest")
     if manifest is not None and not manifest.is_file():
@@ -440,6 +442,12 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
         label = str(sample_label).strip() if sample_label is not None else str((row or {}).get(label_col) or "").strip()
         if not label:
             problems.append(f"{p.name}: no sample label" + ("" if row else " (no manifest row)"))
+        elif sample_label is None and _formula_like(label):
+            problems.append(f"{p.name}: sample label {label!r} starts with {label[0]!r}: a spreadsheet would run it "
+                            f"as a formula; fix the manifest's {label_col} column")
+        if _formula_like(p.name):
+            problems.append(f"{p.name}: the file name starts with {p.name[0]!r}: a spreadsheet would run it as a "
+                            f"formula; rename the file")
         items.append({"src": p, "ext": ext, "size": size, "nm": nm, "label": label, "md5": md5_file(p)})
     if problems:
         raise PredictSetError(f"refused ({len(problems)} problem(s)):" + _list(problems))
@@ -489,8 +497,8 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
         for i, it in enumerate(items, 1):
             name = f"{i:04d}{it['ext']}"
             how[_place(it["src"], inc / IMAGES / name, it["md5"], link)] += 1
-            rows.append({"image": f"{i:04d}", "file": f"{IMAGES}/{name}", "orig_name": _cell(it["src"].name),
-                         "sample_label": _cell(it["label"]), "nm_per_px": repr(float(it["nm"])),
+            rows.append({"image": f"{i:04d}", "file": f"{IMAGES}/{name}", "orig_name": it["src"].name,
+                         "sample_label": it["label"], "nm_per_px": repr(float(it["nm"])),
                          "nm_confirmed_by": nm_confirmed_by, "source": tag, "md5": it["md5"]})
         with open(inc / IMAGES_CSV, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=CSV_COLUMNS, lineterminator="\n")

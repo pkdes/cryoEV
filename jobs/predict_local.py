@@ -85,8 +85,7 @@ def start_detached(ps_dir, root=None, registry_root=None, allow_cpu=False) -> in
     out.parent.mkdir(parents=True, exist_ok=True)
     kw = {}
     if os.name == "nt":
-        kw["creationflags"] = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-                               | subprocess.CREATE_NO_WINDOW)
+        kw["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP   # hidden console
     else:
         kw["start_new_session"] = True
     with open(out, "ab") as f:

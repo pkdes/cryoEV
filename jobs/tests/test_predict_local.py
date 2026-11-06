@@ -181,12 +181,51 @@ class PredictLocalTests(PredictRoots, unittest.TestCase):
         self.assertIsNone(C.read_json(self.ps / "status.json")["waiting"])
         assert_contract_layout(self, self.ps)
 
+    def test_labels_round_trip_into_results(self):
+        """images.csv keeps raw values: odd but legal sample labels reach results.json exactly (B4a's engine)."""
+        from results.compute import compute
+        labels = {"S1": 'EV prep A, 50% EDTA "wash"', "S2": "control (n=3) µm"}
+        man = self.tmp / "labels.csv"
+        man.write_text(self.manifest.read_text(encoding="utf-8").replace(",S1,", ',"EV prep A, 50% EDTA ""wash""",')
+                       .replace(",S2,", ",control (n=3) µm,"), encoding="utf-8")
+        ps = self.make(manifest=man)
+        self.assertEqual(PL.main(["--ps", ps.name, "--root", str(self.root), "--registry", str(self.reg),
+                                  "--poll-s", "0.1"]), PL.EXIT_DONE)
+        res = compute(ps)
+        self.assertIsNone(res["refused"])
+        self.assertEqual(set(res["samples"]), set(labels.values()))
+        self.assertEqual(res["samples"][labels["S1"]]["n_images"], 2)
+
+    def visible_windows(self, pids):
+        """Visible top-level windows owned by these pids (a console window counts as its client process's)."""
+        import ctypes
+        from ctypes import wintypes
+        u32, found = ctypes.windll.user32, []
+        proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def cb(hwnd, _):
+            pid = wintypes.DWORD()
+            u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value in pids and u32.IsWindowVisible(hwnd):
+                found.append((pid.value, hwnd))
+            return True
+        u32.EnumWindows(proc(cb), 0)
+        return found
+
     def test_start_detached(self):
+        os.environ["FAKE_PRED_DELAY"] = "1.0"
         pid = PL.start_detached(self.ps, root=self.root, registry_root=self.reg)
         self.assertIsInstance(pid, int)
-        deadline = time.time() + 60
+        deadline, windows, checked = time.time() + 60, [], 0
         while time.time() < deadline and C.read_json(self.ps / "status.json")["state"] not in ("done", "failed"):
+            if os.name == "nt":                            # no window for predict_local or its predictor
+                pids = {pid, C.read_json(self.ps / "status.json").get("pid")} - {None}
+                windows += self.visible_windows(pids)
+                checked += 1
             time.sleep(0.2)
+        self.assertEqual(windows, [], "a detached run showed a window")
+        if os.name == "nt":
+            self.assertGreater(checked, 5)
         log = self.root / PL.LOG_DIR / f"{self.ps.name}.out"
         self.assertEqual(C.read_json(self.ps / "status.json")["state"], "done",
                          log.read_text(encoding="utf-8", errors="replace") if log.exists() else "no log")

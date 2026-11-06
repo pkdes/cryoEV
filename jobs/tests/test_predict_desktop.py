@@ -202,6 +202,13 @@ class DesktopTests(PredictRoots, unittest.TestCase):
         self.assertEqual(C.read_json(self.ps / "status.json")["job"], None, "the set is not marked queued")
         self.assertEqual(self.run_job(), 1)                # the runner skips it: cancelled before it started
         self.assertEqual(self.done(jid)["status"], "cancelled")
+        ps3 = self.make()                                  # the rollback's own failure never hides the first error
+        with mock.patch.object(registry, "new_job", side_effect=registry.RegistryError("refused: first")), \
+                mock.patch.object(sync, "cancel", side_effect=OSError("share gone")):
+            with self.assertRaisesRegex(sync.SyncError, r"not created \(refused: first\).*CANCEL failed too "
+                                                        r"\(OSError: share gone\)") as cm:
+                sync.push_predict(ps3.name, self.share, copier="shutil", check_origin=False)
+        self.assertIsInstance(cm.exception.__cause__, registry.RegistryError)
         ps2 = self.make()                                  # control: a normal push makes the job after the copy
         q = sync.push_predict(ps2.name, self.share, copier="shutil", check_origin=False)
         self.assertEqual(registry.current(root=self.reg)[q.name]["type"], "predict")
