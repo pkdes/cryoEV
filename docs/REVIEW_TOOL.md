@@ -164,6 +164,8 @@ The mode menu has two modes:
 
 The tool runs on packages without the optional fields: those flags and counts are simply absent.
 
+Optional top level: `cand_conf` (prediction packages): the starting value of the Editor's prediction slider and the cards' confidence filter. Without it they start at 0.45 and 0.35, as before.
+
 ## Edit record (`<package>/edits/<file>.json` = `{"file", "edit"}`)
 ```
 edit = {dec: {key: {v, t, who, p?, server_t?}}, gt?, gtT?, reviewed, reviewedT, modified, t}
@@ -242,10 +244,61 @@ Known limit: older items without a decision key or `t` still follow the whole-li
 Repeat at any time; each new lv supersedes the last. Unreviewed images keep their base labels until someone
 reviews them. Rules: [LABEL_CHANGES.md](LABEL_CHANGES.md#apply-rule).
 
+## Prediction packages (CJ portal)
+A user's prediction set (`<CryoAI-laptop>/predict/<ps>/`) becomes a package `review/pred_<ps>/` for this same tool. The contract is in BUILD_CONTRACTS.md, section 3.
+```bash
+python -m annotation.prediction_package build --ps <CryoAI-laptop>/predict/<ps> [--review-root <dir>] [--owner <id>]
+python -m annotation.multi_review_server [--root <CryoAI-laptop>/review] [--port 8767]
+python -m annotation.prediction_package reviewed --pkg <review>/pred_<ps>     # -> <pkg>/reviewed.json
+python -m annotation.prediction_package spotcheck --pkg <review>/pred_<ps> [--n 10] [--seed 0] [--mode representative|prioritised]
+```
+- **Labels** are the predictions at conf ≥ 0.50. A label nobody touches counts as present, so the reviewer only deletes, reclasses or reshapes. A stub COCO of them is kept in `labels.coco.json` (EV = 0, non-EV = 1).
+- **Candidates** are the predictions at 0.25 ≤ conf < 0.50, shown as unmatched predictions (`u`, image flag `fp`) to accept or reject.
+  - `data.js` sets `cand_conf: 0.25`, so the Editor's prediction slider and the cards' confidence filter start at 0.25 and every candidate shows. Packages without `cand_conf` (every other package) keep the old defaults: slider 0.45, cards 0.35.
+  - Phone: cards in **flagged objects** mode. For MV / inner calls, use **class review** with scope **all labels**.
+- `categories` lists all 8 tool classes, so none is marked "(new class)".
+- `split` is the sample label, reduced to `[A-Za-z0-9 _.-]`; the real label stays in `prediction_package.json`. The page now also escapes file, split, categories and run wherever it builds HTML.
+- `images.csv` rows must be image `<nnnn>`, file `images/<nnnn>.png|jpg|jpeg`.
+- The other files:
+  - `prediction_package.json`: per image, its size, sample label, and the label ids and candidate confidences.
+  - `review_package.json`: the registry line (`kind: "prediction"`, `owner`, `prediction_set`, `base_kind: "prediction_set"`). It is written last.
+  - `.review_key`: kept when the package is rebuilt.
+- The package is built in `.building_*` and renamed into place when complete. A package that already has saved edits is never rebuilt, because the edits point at its label ids.
+- **reviewed.json** (`reviewed/1` + the section 3 amendment) is built with `review_server.effective_labels`.
+  - Per image, `reviewed` is the Reviewed flag. `edited` is true when the image has any saved decision or an edited label list.
+  - **An edited or reviewed image reports its labels as the tool shows them.** The phone cards never press Reviewed, so their decisions count through `edited`. Any other image reports the model's predictions at ≥ 0.50.
+  - `reviewer_label`: the class the object stands at (the reviewer's pick, or the model's class for an object nobody changed). It is null on images that report the model's predictions.
+  - `reviewer_class`: EV, MV and inner map to themselves; Low conf EV, Incomplete and Overlapping map to EV; VLDL and non-EV map to nonEV. Any other label gives null and is counted in the top-level `unknown_labels`.
+  - `cls`: 0 for EV / MV / inner, 1 for nonEV. With `reviewer_class` null, it is the model object's class (0 for a drawn outline).
+  - `source`: `"model"` for an outline as the model drew it, `"human"` for one drawn or reshaped by a reviewer.
+  - `conf`: the model's value, kept on a reshaped outline; `null` on a drawn one.
+  - `reviewed_by`: the **authors of decisions**, i.e. the `who` of the image's decisions. The tool doesn't record who pressed Reviewed, so an image marked Reviewed with no decisions has `[]`.
+- **Spot check:** a seeded subset written to `<pkg>/spotcheck.json` with its `mode` and `rule`.
+  - `representative` (default): a uniform draw within each sample, with n split in proportion to sample size and at least 1 per sample. When n is smaller than the number of samples, n samples are chosen at random.
+  - `prioritised`: round-robin over the samples, each pick weighted by 1 + the image's number of candidates.
+- **Multi-package server** (port 8767) serves `/<pkg id>/…`, each package through `review_server.make_handler`. `review_server.py` is wrapped, not changed.
+  - It serves only complete `pred_*` folders (`data.js` + `review_package.json`), so it never writes the edits of a package that the :8766 server has open. A folder is served only under its exact name, so a case or 8.3 alias can't become a second package.
+  - Each package has its own key (`.review_key`; a package without one is not served) and its own cookie, `review_key_<port>_<pkg id>`.
+  - The key is checked before anything is made for the package: no handler, cache entry or `edits/` folder for a request without it.
+  - **An unknown id and a wrong key both get the same 403,** so ids can't be enumerated. A malformed id, or a path with `..`, `\` or `:`, gets 400. `/` gets 404. `/<id>` with its key redirects to `/<id>/`.
+  - A package built after start is found on its first request. A rebuilt `data.js` or a new key is picked up on the next one.
+
 ## Tests
 ```bash
 python -m unittest discover -s annotation/tests -v
 ```
+- `test_prediction_package.py` runs on the golden fixtures (`tests/fixtures/cj_golden`, read only, checked unchanged).
+  - Labels vs candidates; the `images.csv` checks; the temp-folder build.
+  - Control: with no edits, the objects are the prediction files at ≥ 0.50.
+  - The golden review of 0002, through the multi server's HTTP API, equals `reviewed.json`.
+  - Card decisions with no Reviewed press give `edited: true, reviewed: false`; the `reviewer_class` map.
+  - The multi server: per-package keys and cookies, one 403 for an unknown id and a wrong key, aliases, nothing made without the key, incomplete packages, 400, a late package, and the CLI.
+  - Both spot-check modes.
+- `test_prediction_package_browser.py` (Playwright):
+  - `cand_conf` sets the slider and the cards' filter, and the 0.30 candidate shows in the Editor and the cards.
+  - Without it, the controls are exactly as before.
+  - Markup in file, split, category or run shows as text.
+  - Against the previous page, the `cand_conf` and escaping tests fail and the defaults test passes.
 - `test_review_server.py`, standard library only: a live server on a free 127.0.0.1 port.
   - API: ping, PUT, a merge by timestamp, the new / redraw decisions, claims (and their cap), access-key rejection.
   - Sandbox and cookies: the flag in `data.js` for `--sandbox` and a `SANDBOX_` package (a real package's `data.js` byte-identical); two servers with different keys and one cookie jar both stay signed in; the legacy cookie accepted only with this server's key. The browser tests check the bar at 400 and 1280 px (`SandboxBarTests`).
