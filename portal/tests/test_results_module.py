@@ -364,7 +364,8 @@ class Golden(Base):
         page = self.page(ps_id)
         self.assertIn(f"These results are older than the latest review edits (last edit {R.hhmm(done + 120)}).",
                       page)
-        self.assertIn("Compute again.", page)
+        self.assertIn("Update the results to include the latest review.", page)
+        self.assertIn("Update results now", page)
         self.assertTrue(self.status(ps_id)["out_of_date"])
         idx = self.get("/results/", "owner")[2].decode()
         card = re.search(r'href="/results/%s/">(.*?)</a>' % ps_id, idx, re.S).group(1)
