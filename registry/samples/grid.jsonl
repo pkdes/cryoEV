@@ -1,1 +1,1 @@
-{"schema": "grid/1", "id": "2602", "logged": "2026-10-30T12:00:00", "recorded_by": "backfill:registry/validate.py sample", "replaced_by": null}
+{"schema": "grid/1", "id": "2602", "logged": "2026-10-30T12:00:00", "recorded_by": "backfill:registry/validate.py sample", "sample_label": "Example sample A", "prep_date": "2026-10-05", "grid_type": "Example carbon grid", "replicate": 2, "glow_discharge": "25 mA, 45 s, 10 s hold", "storage": "box 1 / slot 1", "n_montages": 9, "notes": "20261007: example note; 20261027: re-image", "replaced_by": null}

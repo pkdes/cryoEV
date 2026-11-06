@@ -11,6 +11,79 @@
    "type": "string",
    "pattern": "^\\d{4,}$"
   },
+  "sample_label": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "description": "imaged_grids_master.csv sample_label (earliest session's non-empty value)"
+  },
+  "project": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "description": "imaged_grids_master.csv project"
+  },
+  "prep_date": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+   "description": "imaged_grids_master.csv prep_date"
+  },
+  "grid_type": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "description": "imaged_grids_master.csv grid_type"
+  },
+  "replicate": {
+   "type": [
+    "integer",
+    "string",
+    "null"
+   ],
+   "description": "imaged_grids_master.csv replicate"
+  },
+  "glow_discharge": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "description": "imaged_grids_master.csv glow_discharge"
+  },
+  "storage": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "description": "imaged_grids_master.csv storage"
+  },
+  "n_montages": {
+   "type": [
+    "integer",
+    "null"
+   ],
+   "minimum": 0,
+   "description": "imaged_grids_master.csv n_montages, summed over the grid's sessions"
+  },
+  "notes": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "description": "imaged_grids_master.csv notes (a grid imaged in several sessions: `<session>: <text>` joined by '; ')"
+  },
+  "flags": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "description": "imaged_grids_master.csv flags (same joining as notes)"
+  },
   "replaced_by": {
    "type": [
     "string",

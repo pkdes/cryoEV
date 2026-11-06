@@ -18,11 +18,27 @@ v2 (jobs and inputs, TRACKING_CONTRACT.md addendum):
   A package's `applied` status never makes its job done (only an explicit set-status line does).
 - a run folder with its own `run.json` (run_experiments.py, 2026-11-02) gives status (finished; error/oom ->
   failed, with a note), job_bundle and config as written; older run folders are derived as before.
+
+Raw imaging (2026-11-05, additive; nothing in Cryo-image-processing is written):
+- grid: imaged_grids_master.csv fields (sample_label, project, prep_date, grid_type, replicate, glow_discharge,
+  storage, n_montages = sum over the grid's rows, notes / flags prefixed by session when a grid has several rows).
+- session: acquisition summary of the .mdoc/.idoc files in `<session>/2. Raw images/`, parsed by the canonical
+  `processing scripts/cryoem_core/metadata.py` parse_metadata (loaded by path, no bytecode written). Atlas files
+  count in n_mdoc, instrument, voltage and dates, not in the per-image stats. Parsed summaries are cached per file
+  (mtime + size) in `<registry>/cache/mdoc_summaries.json`. Plus local_folder and sample_labels (sample_key.csv).
+  No raw folder / no parser -> `acquisition_gap` says why.
+- image: montage and source_file from the session MANIFEST row. A `YYYYMMDD-N` session's tiles get their grid
+  from the master rows whose key_source names that folder (validate.master_folder).
 """
 import hashlib
+import importlib.util
+import json
 import re
+import statistics
 import subprocess
+import sys
 from collections import Counter, defaultdict
+from datetime import datetime
 from pathlib import Path
 
 import ids
@@ -42,6 +58,14 @@ DROPPED = "DROPPED"                      # split_assignment.csv `split` values l
 SPLIT_ORDER = {"train": 0, "valid": 1, "test": 2}
 LISTS = "lists"                          # <registry>/lists/<dataset>.tsv  (stem \t split)
 APP_PORT = 8766                          # review app port for the real review (NEXT_ITERATION.md)
+RAW_DIR = "2. Raw images"                # <session>/2. Raw images/**/*.mdoc|*.idoc (current layout)
+NOTES_DIR = "1. Notes + reports"
+PARSER_REL = Path("processing scripts") / "cryoem_core" / "metadata.py"
+MDOC_CACHE = Path("cache") / "mdoc_summaries.json"
+MDOC_CACHE_SCHEMA = "mdoc_cache/1"       # bump when file_summary() changes: older entries are then re-parsed
+ATLAS = re.compile(r"atlas", re.IGNORECASE)
+GRID_FIELDS = ("sample_label", "project", "prep_date", "grid_type", "replicate", "glow_discharge", "storage")
+HEADER_TIME = re.compile(r"\s+\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}(:\d{2})?\s*$")
 
 
 def split_membership(csv_path):
@@ -137,12 +161,183 @@ def _date_id(d):
     return (d or "").replace("-", "")[:8] or None
 
 
+# ---------------------------------------------------------------- raw imaging metadata
+def load_metadata_parser(proc=None):
+    """parse_metadata from `<Cryo-image-processing>/processing scripts/cryoem_core/metadata.py`, the canonical
+    SerialEM parser, loaded by file path (importing the cryoem_core package would pull in numpy/torch) with
+    bytecode writing off, so nothing is written next to it. None when the file is not found."""
+    cands = [Path(p) / PARSER_REL for p in (proc, PROCESSING) if p]
+    path = next((p for p in cands if p.is_file()), None)
+    if path is None:
+        return None
+    spec = importlib.util.spec_from_file_location("_cryoem_core_metadata_readonly", path)
+    mod = importlib.util.module_from_spec(spec)
+    old, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.dont_write_bytecode = old
+    return mod.parse_metadata
+
+
+def scope_name(header):
+    """`[T = SerialEM: <scope>   27-Oct-26  16:27:16 ]` header value -> `<scope>` (None if empty)."""
+    h = re.sub(r"^SerialEM:\s*", "", str(header or "").strip().rstrip("]").strip())
+    return HEADER_TIME.sub("", h).strip() or None
+
+
+def acq_time(text):
+    """SerialEM DateTime (`27-Oct-2026  16:27:27`, older `27-Oct-26 ...`) -> ISO seconds, or None."""
+    s = " ".join(str(text or "").split())
+    for fmt in ("%d-%b-%Y %H:%M:%S", "%d-%b-%y %H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt).isoformat(timespec="seconds")
+        except ValueError:
+            pass
+    return None
+
+
+def _int_if_whole(v):
+    return int(v) if float(v).is_integer() else v
+
+
+def file_summary(global_params, pieces):
+    """parse_metadata() output -> the per-file values a session summary needs. Image sections only ([ZValue] in an
+    .mdoc, [Image] in an .idoc); [MontSection] repeats the montage's values and would count them twice.
+    The per-image values (mag, px, defocus, target, dose, binning) come from imaging images only: those with a
+    calibrated dose (ExposureDose > 0). Low-mag and search maps record dose 0 and defocus 0 or -100; a file
+    with no ExposureDose at all keeps every image."""
+    ims = [p for p in pieces if p.get("_section") in ("ZValue", "Image")]
+    dosed = [p for p in ims if (_num(p.get("ExposureDose")) or 0) > 0]
+    img = dosed if any("ExposureDose" in p for p in ims) else ims
+
+    def nums(key, src=img):
+        return [v for v in (_num(p.get(key)) for p in src) if v is not None]
+    px = nums("PixelSpacing") or ([v for v in [_num(global_params.get("PixelSpacing"))] if v is not None] if img else [])
+    kv = [v for v in [_num(global_params.get("Voltage")), *nums("Voltage", ims)] if v is not None]
+    times = sorted(t for t in (acq_time(p.get("DateTime")) for p in ims) if t)
+    return {"scope": scope_name(global_params.get("[T")), "n_images": len(ims), "n_imaging": len(img),
+            "mag": sorted({int(v) for v in nums("Magnification")}), "px": sorted({round(v, 4) for v in px}),
+            "defocus": [round(v, 4) for v in nums("Defocus")],
+            "target": sorted({round(v, 3) for v in nums("TargetDefocus")}),
+            "dose": [round(v, 4) for v in nums("ExposureDose")], "kv": sorted({round(v, 1) for v in kv}),
+            "binning": sorted(set(nums("Binning"))), "first": times[0] if times else None,
+            "last": times[-1] if times else None}
+
+
+def spread(values, nd=3):
+    return {"min": round(min(values), nd), "median": round(statistics.median(values), nd),
+            "max": round(max(values), nd)} if values else None
+
+
+def session_acquisition(summaries):
+    """[(file name, file_summary)] -> session fields. Atlas files (name contains `atlas`: grid overview maps)
+    count in n_mdoc, instrument, voltage and the acquisition dates, not in the per-image stats (which also leave
+    out dose-0 low-mag / search images, see file_summary)."""
+    acq = [s for name, s in summaries if not ATLAS.search(name)]
+    scopes = sorted({s["scope"] for _, s in summaries if s.get("scope")})
+    times = sorted(t for _, s in summaries for t in (s.get("first"), s.get("last")) if t)
+    union = lambda key, src: sorted({_int_if_whole(v) for s in src for v in s.get(key) or []})   # noqa: E731
+    return {"instrument": "; ".join(scopes) or None,
+            "magnification": union("mag", acq) or None,
+            "pixel_size_a": union("px", acq) or None,
+            "defocus_um": spread([v for s in acq for v in s.get("defocus") or []]),
+            "target_defocus_um": union("target", acq) or None,
+            "dose": spread([v for s in acq for v in s.get("dose") or [] if v > 0]),
+            "voltage_kv": union("kv", [s for _, s in summaries]) or None,
+            "binning": union("binning", acq) or None,
+            "acq_dates": {"first": times[0], "last": times[-1]} if times else None,
+            "n_mdoc": len(summaries)}
+
+
+class MdocCache:
+    """Parsed per-file summaries keyed by path (relative to the processing root) + [mtime_ns, size]: a file is
+    parsed again only when it changed. Lives next to the registry; written by Importer.write (not on dry runs)."""
+
+    def __init__(self, path):
+        self.path, self.files, self.seen = Path(path), {}, set()
+        self.parsed = self.hits = 0
+        self.dirty = False
+        try:
+            d = read_json(self.path)
+            if d.get("schema") == MDOC_CACHE_SCHEMA:
+                self.files = d.get("files") or {}
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    def get(self, key, stat, parse):
+        sig = [stat.st_mtime_ns, stat.st_size]
+        self.seen.add(key)
+        e = self.files.get(key)
+        if isinstance(e, dict) and e.get("sig") == sig:
+            self.hits += 1
+            return e["s"]
+        s = parse()
+        self.files[key] = {"sig": sig, "s": s}
+        self.parsed += 1
+        self.dirty = True
+        return s
+
+    def text(self):
+        files = {k: self.files[k] for k in sorted(self.seen) if k in self.files}   # files gone since: dropped
+        return json.dumps({"schema": MDOC_CACHE_SCHEMA, "files": files}, separators=(",", ":")) + "\n"
+
+
+def sample_labels(session_dir):
+    """`sample_key.csv` (`1. Notes + reports/` or the session root; columns `#`, `Label`, as cryoem_core
+    load_sample_key reads it) -> {slot: label}, or None."""
+    for f in (Path(session_dir) / NOTES_DIR / "sample_key.csv", Path(session_dir) / "sample_key.csv"):
+        if not f.is_file():
+            continue
+        try:
+            rows = read_csv(f)
+        except UnicodeDecodeError:
+            import csv
+            with open(f, newline="", encoding="cp1252") as fh:
+                rows = list(csv.DictReader(fh))
+        out = {}
+        for r in rows:
+            try:
+                slot = str(int((r.get("#") or "").strip()))
+            except ValueError:
+                continue
+            if (r.get("Label") or "").strip():
+                out[slot] = r["Label"].strip()
+        return out or None
+    return None
+
+
+def grid_fields(rows):
+    """[(session folder, imaged_grids_master.csv row)] of one grid -> grid record fields. Single-valued fields: the
+    earliest session's non-empty value. n_montages: the sum over rows. notes / flags: as written for a grid with one
+    row, else `<session>: <text>` per row joined by `; `."""
+    def slot(r):
+        s = (r.get("session_grid") or "").strip()
+        return int(s) if s.isdigit() else 0
+    rows = sorted(rows, key=lambda x: (x[0], slot(x[1])))
+    val = lambda r, k: str(r.get(k) or "").strip()          # noqa: E731
+    out = {k: next((val(r, k) for _, r in rows if val(r, k)), None) for k in GRID_FIELDS}
+    if out["prep_date"] and not re.match(r"^\d{4}-\d{2}-\d{2}$", out["prep_date"]):
+        out["prep_date"] = None
+    if out["replicate"] and out["replicate"].isdigit():
+        out["replicate"] = int(out["replicate"])
+    n = [int(val(r, "n_montages")) for _, r in rows if val(r, "n_montages").isdigit()]
+    out["n_montages"] = sum(n) if n else None
+    for k in ("notes", "flags"):
+        vals = [(f, val(r, k)) for f, r in rows if val(r, k)]
+        out[k] = (vals[0][1] if len(rows) == 1 else "; ".join(f"{f}: {v}" for f, v in vals)) if vals else None
+    return out
+
+
 class Importer:
-    def __init__(self, root, laptop=None, cache=None, processing=PROCESSING):
+    def __init__(self, root, laptop=None, cache=None, processing=PROCESSING, parser=None):
+        """`parser`: parse_metadata-compatible callable; default = the canonical one (load_metadata_parser)."""
         self.root = Path(root)
         self.laptop = Path(laptop) if laptop else config.laptop_root(required=False)
         self.cache = Path(cache) if cache else config.cryoai_root(required=False)
         self.proc = Path(processing) if processing else None
+        self._parser = parser
+        self.mdoc_cache = MdocCache(self.root / MDOC_CACHE)
         self.tag = f"backfill:importers {git_sha()}"
         self.out = []                       # (entity, record)
         self.refused = Counter()
@@ -267,9 +462,13 @@ class Importer:
                 src = src or f"{sess}__{ids.image_key(d['source_file'])}"
             src = src if src in known else None                 # only link to a tile that is registered
             grid = d.get("grid") if ids.is_id("grid", d.get("grid") or "") else None
+            # MANIFEST source_file / montage; a generic copy (blind_NN) whose row names only itself has neither
+            real_src = bool(d.get("source_file")) and ids.image_key(d["source_file"]) != key
             self.add("image", id=iid, session=sess, grid=grid, session_date_basis="folder",
                      session_grid=d.get("session_grid") or None, output_name=d.get("name"),
-                     nm_per_px=_num(d.get("nm_per_px")), md5=d.get("md5") or None, copy_of=src)
+                     nm_per_px=_num(d.get("nm_per_px")), md5=d.get("md5") or None, copy_of=src,
+                     montage=d.get("montage") if real_src or not generic else None,
+                     source_file=d.get("source_file") if real_src or not generic else None)
             sessions.add(sess)
             if d.get("rf_id") and ids.is_id("rf_id", d["rf_id"]):
                 self.add("roboflow_image", id=d["rf_id"], stem=iid, project=self.project, name=d.get("name"),
@@ -281,10 +480,46 @@ class Importer:
             info = s.sessions.get(sid, {})
             basis = "folder" if info.get("folder") else "tracker" if info.get("tracker") or info.get("master") else "inferred"
             slots = {slot: g for (ss, slot), g in s.slot_grid.items() if ss == sid and slot}
+            sdir = self.proc / sid if self.proc and (self.proc / sid).is_dir() else None
             self.add("session", id=sid, date=f"{sid[:4]}-{sid[4:6]}-{sid[6:8]}", date_basis=basis,
-                     session_grids=slots or None, status="processed" if info.get("folder") else "imaged")
+                     session_grids=slots or None, status="processed" if info.get("folder") else "imaged",
+                     local_folder=f"{self.proc.name}/{sid}" if sdir else None,
+                     sample_labels=sample_labels(sdir) if sdir else None, **self.acquisition(sid, sdir))
         for g in sorted(s.grids):
-            self.add("grid", id=g)
+            self.add("grid", id=g, **grid_fields(s.grid_master.get(g, [])))
+
+    @property
+    def parser(self):
+        if self._parser is None:
+            self._parser = load_metadata_parser(self.proc) or False
+        return self._parser or None
+
+    def acquisition(self, sid, sdir):
+        """Session acquisition summary from `<session>/2. Raw images/**/*.mdoc|*.idoc` (read only), or a gap."""
+        if sid[:8] in EXCLUDED_SESSIONS:
+            return {}
+        if sdir is None:
+            return {"acquisition_gap": "no local session folder: raw metadata not read"}
+        raw = sdir / RAW_DIR
+        if not raw.is_dir():
+            return {"acquisition_gap": f"no `{RAW_DIR}/` folder (older layout): raw metadata not read"}
+        files = sorted({*raw.rglob("*.mdoc"), *raw.rglob("*.idoc")})
+        if not files:
+            return {"acquisition_gap": f"no .mdoc/.idoc in `{RAW_DIR}/`"}
+        if self.parser is None:
+            return {"n_mdoc": len(files), "acquisition_gap": "canonical parser cryoem_core/metadata.py not found"}
+        out, bad = [], 0
+        for f in files:
+            try:
+                key = f.relative_to(self.proc).as_posix()
+                out.append((f.name, self.mdoc_cache.get(key, f.stat(), lambda f=f: file_summary(*self.parser(str(f))))))
+            except (OSError, ValueError, UnicodeDecodeError):
+                bad += 1
+        res = session_acquisition(out) if out else {}
+        res["n_mdoc"] = len(files)
+        if bad:
+            res["acquisition_gap"] = f"{bad} of {len(files)} .mdoc/.idoc files unreadable (left out)"
+        return res
 
     def copy_map(self):
         """(session, blind key) -> source image id, from <session>/5. Model + labeling/*selection_PRIVATE.csv."""
@@ -413,6 +648,9 @@ class Importer:
                 if e["folder"].upper().startswith("SANDBOX"):
                     self.excluded["review_package (SANDBOX)"] += 1
                     continue
+                if e.get("base_kind") == "prediction_set":     # registered by its builder (owner, prediction_set);
+                    self.excluded["review_package (prediction, own line)"] += 1    # deriving it here would drop those
+                    continue
                 d = read_datajs(e["path"] / "data.js")
                 run = (d.get("run") or "").split(" ")[0]
                 model = run if run in s.models else run_to_model.get(run)
@@ -519,8 +757,22 @@ class Importer:
             tmp.replace(path)
         return n
 
+    def write_mdoc_cache(self, dry_run=False):
+        """The parsed .mdoc/.idoc summaries next to the registry, when anything was parsed or dropped."""
+        c = self.mdoc_cache
+        if dry_run or not (c.dirty or set(c.files) - c.seen) or not c.seen:
+            return False
+        registry._guard(self.root)
+        registry._guard(c.path)
+        c.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = c.path.with_name(c.path.name + ".tmp")
+        tmp.write_text(c.text(), encoding="utf-8")
+        tmp.replace(c.path)
+        return True
+
     def write(self, dry_run=False):
         lists_written = self.write_lists(dry_run)
+        self.write_mdoc_cache(dry_run)
         cur = registry.current(root=self.root)
         appended = Counter()
         img_session = {k: v.get("session") for k, v in cur.items() if v.get("schema") == "image/1"}

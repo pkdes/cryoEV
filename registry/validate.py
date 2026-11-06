@@ -81,6 +81,17 @@ def read_jsonl(path):
     return out
 
 
+def master_folder(sid, key_source):
+    """Session folder of an imaged_grids_master.csv row. The master keys rows by date, so a second session that
+    day is told apart only by the folder its key_source names (`20260827-2/1. Notes + reports/sample_key.csv`).
+    -> that `YYYYMMDD-N` folder, else the date id."""
+    for part in str(key_source or "").split("+"):
+        head = part.strip().replace("\\", "/").split("/")[0].strip()
+        if head != sid and head[:8] == sid and ids.is_id("session", head):
+            return head
+    return sid
+
+
 def under(path, root):
     a = os.path.normcase(os.path.abspath(str(path)))
     b = os.path.normcase(os.path.abspath(str(root)))
@@ -140,6 +151,8 @@ class Scan:
         self.key_sessions = defaultdict(set)   # image key -> session folders whose MANIFESTs list it
         self.pulls, self.exports, self.packages, self.models, self.runs, self.datasets = {}, {}, {}, {}, {}, {}
         self.bundles, self.sessions, self.grids, self.slot_grid = {}, {}, {}, {}
+        self.slot_folder = {}                  # (date id, slot) -> session folder named by the master row's key_source
+        self.grid_master = defaultdict(list)   # inventory Grid# -> [(session folder, master row)]
 
     def ok(self, root):
         return root is not None and Path(root).is_dir()
@@ -250,11 +263,20 @@ class Scan:
                     continue
                 sess[sid]["master"] = True
                 inv = (r.get("inventory_id") or "").strip()
+                slot = (r.get("session_grid") or "").strip()
+                folder = master_folder(sid, r.get("key_source"))
+                self.slot_folder[(sid, slot)] = folder
                 if inv:
                     sess[sid]["grids"].add(inv)
                     grids[inv]["master"] = True
                     grids[inv]["sessions"].add(sid)
-                    self.slot_grid[(sid, (r.get("session_grid") or "").strip())] = inv
+                    self.slot_grid[(sid, slot)] = inv
+                    self.grid_master[inv].append((folder, r))
+                    if folder != sid:                   # second session that day (e.g. 20260827-2): key by folder too
+                        sess[folder]["master"] = True
+                        sess[folder]["grids"].add(inv)
+                        grids[inv]["sessions"].add(folder)
+                        self.slot_grid[(folder, slot)] = inv
                 else:
                     no_inv[sid] += 1
         else:
@@ -341,7 +363,8 @@ class Scan:
                     key = self.note_stem(name, session_date=sdir.name, session_date_basis="folder",
                                          session_grid=slot, grid=self.slot_grid.get((sdir.name, slot)),
                                          nm_per_px=r.get("nm_per_px"), md5=r.get("md5"), manifest=str(mf),
-                                         rf_id=r.get("roboflow_id"), uploaded=upload or None)
+                                         rf_id=r.get("roboflow_id"), uploaded=upload or None,
+                                         montage=r.get("montage"), source_file=r.get("source_file"))
                     if key:
                         self.key_sessions[key].add(sdir.name)
                         if upload and r.get("source_file") == name:
@@ -501,10 +524,15 @@ class Scan:
                 probs.append("folder name != data.js id")
             src = d.get("source") or ""
             m = re.search(r"(roboflow_pull_\d{8}_\d{4})", src)
-            base = m.group(1) if m else src
+            ps = re.match(r"^prediction_set:(ps_\d{8}_[0-9a-f]{6})$", src.strip())
+            base = m.group(1) if m else ps.group(1) if ps else src
+            base_kind = "pull" if m else "prediction_set" if ps else "export"
             if m:
                 if base not in self.pulls:
                     probs.append("base pull not found")
+            elif ps:                                    # prediction package: base = <CryoAI-laptop>/predict/<ps_id>/
+                if not (self.ok(self.laptop) and (self.laptop / "predict" / base).is_dir()):
+                    probs.append("base prediction set not found")
             elif base not in self.exports:
                 probs.append("base export not found locally")
             run = (d.get("run") or "").split(" ")[0]
@@ -533,7 +561,8 @@ class Scan:
                     probs.append("edit record pkg != data.js id")
                 if unknown:
                     probs.append("edit record image not in base pull")
-            self.packages.setdefault(pid, []).append({"folder": folder, "base": base, "path": f.parent})
+            self.packages.setdefault(pid, []).append({"folder": folder, "base": base, "path": f.parent,
+                                                      "base_kind": base_kind})
             t.add(f"{folder} (id {pid})" if folder != pid else pid, ids.is_id("pkg", pid or ""), probs)
         t.notes.append("status (built/in_review/reviewed/applied) is not recorded anywhere yet; derived only")
 

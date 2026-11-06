@@ -63,7 +63,8 @@
    "type": [
     "string",
     "null"
-   ]
+   ],
+   "description": "Montage name from the session MANIFEST (e.g. grid5_3)"
   },
   "position": {
    "type": [
@@ -87,7 +88,8 @@
    "type": [
     "string",
     "null"
-   ]
+   ],
+   "description": "MANIFEST source_file: the montage tile this raster was made from"
   },
   "duplicate_of": {
    "type": [

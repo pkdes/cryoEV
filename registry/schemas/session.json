@@ -28,12 +28,157 @@
     "string",
     "null"
    ],
-   "enum": [
-    "glacios_serialem",
-    "smartscope",
-    "unknown",
-    null
-   ]
+   "description": "Scope name from the SerialEM `[T = SerialEM: <scope> <date>]` header of the session's raw .mdoc/.idoc files (several scopes: joined by '; '). Older lines may hold a kind (glacios_serialem / smartscope / unknown)."
+  },
+  "magnification": {
+   "type": [
+    "array",
+    "null"
+   ],
+   "items": {
+    "type": "integer"
+   },
+   "uniqueItems": true,
+   "description": "Distinct nominal magnifications (x) of the imaging images (ExposureDose > 0; atlas files and dose-0 low-mag / search maps left out)"
+  },
+  "pixel_size_a": {
+   "type": [
+    "array",
+    "null"
+   ],
+   "items": {
+    "type": "number"
+   },
+   "uniqueItems": true,
+   "description": "Distinct PixelSpacing values (Å/px as recorded, binning included) of the imaging images (ExposureDose > 0; atlas files and dose-0 low-mag / search maps left out)"
+  },
+  "defocus_um": {
+   "type": [
+    "object",
+    "null"
+   ],
+   "properties": {
+    "min": {
+     "type": "number"
+    },
+    "median": {
+     "type": "number"
+    },
+    "max": {
+     "type": "number"
+    }
+   },
+   "required": [
+    "min",
+    "median",
+    "max"
+   ],
+   "additionalProperties": false,
+   "description": "Measured Defocus (µm, SerialEM sign: negative = underfocus) of the imaging images (ExposureDose > 0; atlas files and dose-0 low-mag / search maps left out): min / median / max"
+  },
+  "target_defocus_um": {
+   "type": [
+    "array",
+    "null"
+   ],
+   "items": {
+    "type": "number"
+   },
+   "uniqueItems": true,
+   "description": "Distinct TargetDefocus values (µm) of the imaging images (ExposureDose > 0; atlas files and dose-0 low-mag / search maps left out)"
+  },
+  "dose": {
+   "type": [
+    "object",
+    "null"
+   ],
+   "properties": {
+    "min": {
+     "type": "number"
+    },
+    "median": {
+     "type": "number"
+    },
+    "max": {
+     "type": "number"
+    }
+   },
+   "required": [
+    "min",
+    "median",
+    "max"
+   ],
+   "additionalProperties": false,
+   "description": "ExposureDose per image (e/Å²) of the imaging images (ExposureDose > 0; atlas files and dose-0 low-mag / search maps left out): min / median / max"
+  },
+  "voltage_kv": {
+   "type": [
+    "array",
+    "null"
+   ],
+   "items": {
+    "type": "number"
+   },
+   "uniqueItems": true,
+   "description": "Distinct Voltage values (kV), all files"
+  },
+  "binning": {
+   "type": [
+    "array",
+    "null"
+   ],
+   "items": {
+    "type": "number"
+   },
+   "uniqueItems": true,
+   "description": "Distinct camera Binning values of the imaging images (ExposureDose > 0; atlas files and dose-0 low-mag / search maps left out)"
+  },
+  "acq_dates": {
+   "type": [
+    "object",
+    "null"
+   ],
+   "properties": {
+    "first": {
+     "type": "string",
+     "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2})?$"
+    },
+    "last": {
+     "type": "string",
+     "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2})?$"
+    }
+   },
+   "required": [
+    "first",
+    "last"
+   ],
+   "additionalProperties": false,
+   "description": "First and last image DateTime over all the session's raw .mdoc/.idoc files (scope clock)"
+  },
+  "n_mdoc": {
+   "type": [
+    "integer",
+    "null"
+   ],
+   "minimum": 0,
+   "description": ".mdoc + .idoc files in `<session>/2. Raw images/` (atlas files included)"
+  },
+  "acquisition_gap": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "description": "Why the acquisition fields are missing or partial (no raw folder, parser not found, unreadable files)"
+  },
+  "sample_labels": {
+   "type": [
+    "object",
+    "null"
+   ],
+   "additionalProperties": {
+    "type": "string"
+   },
+   "description": "scope slot -> sample label, from the session's sample_key.csv"
   },
   "session_grids": {
    "type": "object",
@@ -50,7 +195,8 @@
    "type": [
     "string",
     "null"
-   ]
+   ],
+   "description": "Session folder, as `<processing root name>/<session id>`"
   },
   "logged": {
    "type": "string",
