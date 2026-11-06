@@ -57,7 +57,8 @@ def fixture_records() -> dict:
             "local_folder": "Cryo-image-processing/20261104", "status": "processed"}
     prod = {"schema": "model/1", "id": "v9_prod_20261101", "logged": "2026-11-02T10:00:00", "run": "r9",
             "weights": "models/v9/best.pt", "imgsz": 1440, "classes": ["EV", "non-EV"], "conf": 0.5,
-            "init_from": "v5_evnonev_y8m_20261029", "status": "production", "dataset": "roboflow_20261028_cryoai_v5_S1_evnonev",
+            "init_from": "v5_evnonev_y8m_20261029", "status": "production",
+            "dataset": "roboflow_20261028_cryoai_v5_S1_evnonev",
             "metrics": {"mask_map50": 0.612, "mask_map50_95": 0.3214, "per_class": {"EV": 0.7}}}
     pkgs = [{"schema": "review_package/1", "id": "pkg_ok", "logged": "2026-11-01T10:00:00", "path": "x/review/pkg_ok",
              "kind": "review", "base": "b", "base_kind": "pull", "n_images": 3, "built": "2026-11-01T10:00:00",
@@ -65,9 +66,18 @@ def fixture_records() -> dict:
             {"schema": "review_package/1", "id": "pkg_outside", "logged": "2026-11-01T10:00:00", "path": "@OUTSIDE@",
              "kind": "review", "base": "b", "base_kind": "pull", "n_images": 1, "built": "2026-11-01T10:00:00",
              "status": "in_review"},
-            {"schema": "review_package/1", "id": "pkg_escape", "logged": "2026-11-01T10:00:00", "path": "x/review/pkg_escape",
+            {"schema": "review_package/1", "id": "pkg_escape", "logged": "2026-11-01T10:00:00",
+             "path": "x/review/pkg_escape",
              "kind": "review", "base": "b", "base_kind": "pull", "n_images": 3, "built": "2026-11-01T10:00:00",
-             "status": "in_review"}]
+             "status": "in_review"},
+            {"schema": "review_package/1", "id": "pkg_owned", "logged": "2026-11-01T10:00:00", "path": "x",
+             "kind": "review", "owner": "otherperson", "base": "b", "base_kind": "pull", "n_images": 2,
+             "built": "2026-11-01T10:00:00", "status": "in_review"}]
+    labels = [{"schema": "label_version/1", "id": "lv_priv", "logged": "2026-11-02T00:00:00",
+               "pkg": "pred_ps_20261105_cccccc",
+               "status": "active", "n_images_applied": 1},
+              {"schema": "label_version/1", "id": "lv_owned", "logged": "2026-11-02T00:00:00", "pkg": "pkg_owned",
+               "status": "active", "n_images_applied": 1}]
     ps = [{"schema": "prediction_set/1", "id": "ps_20261105_aaaaaa", "logged": "2026-11-05T10:00:00",
            "created": "2026-11-05T10:00:00", "owner": "adv", "model": "v9_prod_20261101", "path": "p",
            "source": {"kind": "upload"}, "n_images": 2, "status": "done", "conf": 0.25},
@@ -76,7 +86,8 @@ def fixture_records() -> dict:
            "source": {"kind": "upload"}, "n_images": 2, "status": "done", "conf": 0.25}]
     grid = {"schema": "grid/1", "id": "2603", "logged": "2026-11-05T09:00:00", "sample_label": "Second grid sample",
             "grid_type": "Gold grid", "prep_date": "2026-10-06", "n_montages": 4}
-    return {"session": [sess], "model": [prod], "review_package": pkgs, "prediction_set": ps, "grid": [grid]}
+    return {"session": [sess], "model": [prod], "review_package": pkgs, "prediction_set": ps, "grid": [grid],
+            "label_version": labels}
 
 
 def write_registry(root: Path, outside: Path):
@@ -91,9 +102,10 @@ def write_registry(root: Path, outside: Path):
     for ent, recs in extra.items():
         if not (root / f"{ent}.jsonl").exists():
             (root / f"{ent}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
-    D._reg_cache.clear()
+    D._registry_cache.clear()
     D._files_cache.clear()
-    D._pkg_cache.clear()
+    D._package_cache.clear()
+    D._owner_cache.clear()
 
 
 def build_data(lap: Path, proc: Path, outside: Path):
@@ -116,18 +128,41 @@ def build_data(lap: Path, proc: Path, outside: Path):
     write_img(outside / "secret.png")
     (pe / "data.js").write_text("window.REVIEW_DATA = " + json.dumps({"id": "pkg_escape", "images": [
         {"src": "images/ok.png"}, {"src": "../../secret_in_laptop.png"}, {"src": "../../../outside/secret.png"},
-        {"src": str(outside / "secret.png")}, {"src": "images/nope.png"}, {"src": "images/ok.txt"}]}) + ";", encoding="utf-8")
+        {"src": str(outside / "secret.png")}, {"src": "images/nope.png"},
+        {"src": "images/ok.txt"}]}) + ";", encoding="utf-8")
     write_img(outside / "pkg_outside" / "images" / "o.png")
     (outside / "pkg_outside" / "data.js").write_text("window.REVIEW_DATA = " + json.dumps({"images": [
         {"src": "images/o.png"}]}) + ";", encoding="utf-8")
     for ps in ("ps_20261105_aaaaaa", "ps_20261105_bbbbbb"):
         for i in range(2):
             write_img(lap / "predict" / ps / "images" / f"{i + 1:04d}.png", (500, 400))
+    build_private_packages(lap)
     lv = lap / "review" / "prelipo_v5F5_review_v2"      # the sample label version's package
     for i in range(2):
         write_img(lv / "images" / f"s{i}.jpg")
     (lv / "data.js").write_text("window.REVIEW_DATA = " + json.dumps({"images": [
         {"src": "images/s0.jpg"}, {"src": "images/s1.jpg"}]}) + ";", encoding="utf-8")
+
+
+def make_package(folder: Path, n=2, **meta):
+    """A review package folder: images + data.js (+ review_package.json when meta is given)."""
+    names = []
+    for i in range(n):
+        write_img(folder / "images" / f"i{i}.png", (300, 200))
+        names.append({"src": f"images/i{i}.png"})
+    (folder / "data.js").write_text("window.REVIEW_DATA = " + json.dumps({"images": names}) + ";", encoding="utf-8")
+    if meta:
+        (folder / "review_package.json").write_text(json.dumps(meta), encoding="utf-8")
+
+
+def build_private_packages(lap: Path):
+    """Prediction packages that are on disk but NOT in the registry, and one with a registry owner."""
+    make_package(lap / "review" / "pkg_owned")
+    make_package(lap / "review" / "pred_ps_20261105_cccccc")                         # no owner anywhere
+    make_package(lap / "review" / "pred_ps_20261105_dddddd", owner="adv")             # owner in review_package.json
+    make_package(lap / "review" / "pred_ps_20261105_eeeeee")                         # owner only in request.json
+    (lap / "predict" / "ps_20261105_eeeeee").mkdir(parents=True)
+    (lap / "predict" / "ps_20261105_eeeeee" / "request.json").write_text(json.dumps({"owner": "adv"}), encoding="utf-8")
 
 
 def launch(p):
@@ -215,12 +250,13 @@ class Pages(Base):
     def test_overview(self):
         t = main_html(self.page("/data/"))
         for word in ("Sessions", "Image sets", "Label versions", "Datasets", "Models", "Session 20261104",
-                     "Session 20261027", "v9_prod_20261101", "production", 'name="q"'):
+                     "Session 20261027", "v9_prod_20261101", "Production", 'name="q"'):
             self.assertIn(word, t)
         ov = self.api("/data/api/overview")
         c = ov["counts"]
-        self.assertEqual((c["sessions"], c["labels"], c["datasets"], c["models"], c["grids"]), (2, 1, 1, 2, 2))
-        self.assertEqual(c["images"], 4 + 3 + 1)                # 4 packages + 3 prediction sets (admin sees all) + 1 export
+        self.assertEqual((c["sessions"], c["labels"], c["datasets"], c["models"], c["grids"]), (2, 3, 1, 2, 2))
+        # 5 packages + 3 prediction sets + 3 pred_ folders not in the registry + 1 export
+        self.assertEqual(c["images"], 5 + 3 + 3 + 1)
         models = next(x for x in ov["cards"] if x["kind"] == "models")["rows"]
         self.assertEqual(models[0]["id"], "v9_prod_20261101")     # production first
         self.assertTrue(models[0]["hl"])
@@ -231,8 +267,8 @@ class Pages(Base):
         t = main_html(self.page("/data/session/20261104"))
         for want in ("Glacios", "11,000× and 45,000×", "1.8 Å/px and 7.36 Å/px",
                      "median -3.5 µm (range -9.5 to -1.5)", "median 3.6 e/Å² (range 3.5 to 60.1)",
-                     "200 kV", "2026-11-04 10:05 to 2026-11-04 18:16", "10", "2 below 5,000× (2,600×)",
-                     "Grid 2602", "Example carbon grid", "14 images", "Processed images", "16"):
+                     "200 kV", "2026-11-04 10:05 to 2026-11-04 18:16", "10", "2 files below 5,000× (2,600×)",
+                     "Grid 2602", "Example carbon grid", "14 images (processed files)", "Processed images", "16"):
             self.assertIn(want, t)
         self.assertEqual(t.count('class="cj-data-img"'), D.STRIP_N)
         self.assertNotIn("<b>EV</b>", t)                          # escaped
@@ -244,6 +280,23 @@ class Pages(Base):
         self.assertEqual((d["n_images"], len(d["thumbs"])), (16, 12))
         self.assertEqual(d["acquisition"]["magnification"], [11000, 45000])
         self.assertEqual([g["n_images"] for g in d["grids"]], [14, 2])
+
+    def test_session_all_images_paged_view(self):
+        strip = main_html(self.page("/data/session/20261104"))
+        self.assertIn("See all 16 images", strip)
+        self.assertIn("/data/session/20261104?page=1", strip)
+        full = main_html(self.page("/data/session/20261104?page=1"))
+        self.assertEqual(full.count('class="cj-data-img"'), 16)
+        self.assertNotIn("See all", full)
+        self.assertEqual(self.api("/data/api/session/20261104?page=1")["view"], "paged")
+
+    def test_plain_wording(self):
+        self.assertEqual((D.plural(1, "image"), D.plural(0, "image"), D.plural(2, "imaging file")),
+                         ("1 image", "0 images", "2 imaging files"))
+        self.assertEqual(D.status_word("in_review"), "In review")
+        self.assertEqual(D.metric_name("mask_map50_95", "EV"), "Mask mAP50-95 (EV)")
+        grids = [r["id"] for r in self.api("/data/api/list/grids")["rows"]]
+        self.assertEqual(grids, sorted(grids, key=int, reverse=True))              # numeric, newest first
 
     def test_sample_session_with_sparse_data(self):
         t = main_html(self.page("/data/session/20261027"))        # in the registry, no images on disk
@@ -262,7 +315,7 @@ class Pages(Base):
         with open(self.env.registry / "session.jsonl", "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec) + "\n")
         self.addCleanup(self._drop_last_line, "session.jsonl")
-        dm._reg_cache.clear()
+        dm._registry_cache.clear()
         p1 = main_html(self.page("/data/grid/2603"))
         self.assertEqual(p1.count('class="cj-data-img"'), 24)
         self.assertIn("Showing 1-24 of 30", p1)
@@ -277,16 +330,17 @@ class Pages(Base):
         p = self.env.registry / name
         lines = p.read_text(encoding="utf-8").splitlines()[:-1]
         p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        D._reg_cache.clear()
+        D._registry_cache.clear()
 
     def test_model_page(self):
         t = main_html(self.page("/data/model/v9_prod_20261101"))
-        for want in ("production", "mask_map50", "0.612", "per_class EV", "1440 px", "Started from",
+        for want in ("Production", "Mask mAP50", "Mask mAP50-95", "0.612", "Score by class (EV)", "1440 px",
+                     "Started from",
                      "v5_evnonev_y8m_20261029", "roboflow_20261028_cryoai_v5_S1_evnonev"):
             self.assertIn(want, t)
         t2 = main_html(self.page("/data/model/v5_evnonev_y8m_20261029"))
-        self.assertIn("candidate", t2)
-        self.assertNotIn(">production<", t2)
+        self.assertIn("Candidate", t2)
+        self.assertNotIn(">Production<", t2)
         self.assertIn("Checks on new images", t2)
 
     def test_dataset_labels_and_images_pages(self):
@@ -371,6 +425,51 @@ class Privacy(Base):
         self.assertEqual(self.get(f"/data/api/images/{theirs}", "advanced")[0], 404)
 
 
+    def test_unregistered_prediction_packages_fail_closed(self):
+        none_id, json_id, req_id = "pred_ps_20261105_cccccc", "pred_ps_20261105_dddddd", "pred_ps_20261105_eeeeee"
+        for pid, adv_sees in ((none_id, False), (json_id, True), (req_id, True)):
+            with self.subTest(pid=pid):
+                for role, expect in (("advanced", adv_sees), ("admin", True)):
+                    self.assertEqual(self.get(f"/data/images/{pid}", role)[0], 200 if expect else 404, (pid, role))
+                    self.assertEqual(self.get(f"/data/thumb/images/{pid}/0.jpg", role)[0], 200 if expect else 404)
+                    self.assertEqual(self.get(f"/data/api/images/{pid}", role)[0], 200 if expect else 404)
+                    for url in ("/data/api/list/images", f"/data/api/search?q={pid}", "/data/api/overview"):
+                        body = json.loads(self.get(url, role)[2])
+                        shown = pid in json.dumps(body.get("groups", body.get("rows", [])))   # not the echoed query
+                        if url.endswith("overview"):
+                            continue                                  # the overview lists only the 5 newest
+                        self.assertEqual(shown, expect, (pid, role, url))
+                    self.assertEqual(f'/data/images/{pid}' in self.page("/data/list/images", role), expect)
+        self.assertNotIn(none_id.encode(), self.get(f"/data/images/{none_id}", "advanced")[2])    # nothing leaks
+        self.assertEqual(self.get("/data/images/pred_ps_20261105_ffffff", "admin")[0], 404)   # control: absent
+
+    def test_open_in_review_link_only_for_allowed(self):
+        t = main_html(self.page("/data/images/pred_ps_20261105_dddddd", "advanced"))
+        self.assertIn('href="/review/pred_ps_20261105_dddddd/"', t)
+        self.assertNotIn("/review/", main_html(self.page("/data/images/pkg_ok")))
+
+    def test_owned_review_package(self):
+        self.assertEqual(self.get("/data/images/pkg_owned", "advanced")[0], 404)
+        self.assertEqual(self.get("/data/thumb/images/pkg_owned/0.jpg", "advanced")[0], 404)
+        self.assertEqual(self.get("/data/images/pkg_owned", "admin")[0], 200)
+        self.assertEqual(self.get("/data/thumb/images/pkg_owned/0.jpg", "admin")[0], 200)
+        self.assertNotIn(b"pkg_owned", self.get("/data/api/list/images", "advanced")[2])
+        self.assertIn(b"pkg_owned", self.get("/data/api/list/images", "admin")[2])
+
+    def test_label_version_hides_a_private_package(self):
+        for lv, pkg in (("lv_priv", "pred_ps_20261105_cccccc"), ("lv_owned", "pkg_owned")):
+            with self.subTest(lv=lv):
+                t = main_html(self.page(f"/data/labels/{lv}", "advanced"))
+                self.assertNotIn(pkg, t)
+                self.assertEqual(t.count('class="cj-data-img"'), 0)
+                self.assertNotIn(pkg, self.get(f"/data/api/labels/{lv}", "advanced")[2].decode())
+                self.assertEqual(self.get(f"/data/thumb/labels/{lv}/0.jpg", "advanced")[0], 404)
+                ta = main_html(self.page(f"/data/labels/{lv}", "admin"))
+                self.assertIn(pkg, ta)
+                self.assertEqual(ta.count('class="cj-data-img"'), 2)
+                self.assertEqual(self.get(f"/data/thumb/labels/{lv}/0.jpg", "admin")[0], 200)
+
+
 class Thumbnails(Base):
     def thumb(self, path, role="admin"):
         return self.get(path, role)
@@ -394,6 +493,53 @@ class Thumbnails(Base):
         self.assertEqual(len(list((self.env.state / "data_thumbs").rglob("*.jpg"))), before)
         st, h, body = self.thumb("/data/thumb/images/pkg_ok/1.jpg")                       # a PNG source
         self.assertEqual((st, body[:3]), (200, JPEG))
+
+    def test_version_in_url_and_cache_header(self):
+        d = self.api("/data/api/session/20261104")
+        url = d["thumbs"][0]["url"]
+        self.assertRegex(url, r"\.jpg\?v=[0-9a-f]{12}$")
+        st, h, _ = self.get(url)
+        self.assertEqual((st, T.hget(h, "cache-control")), (200, "private, max-age=86400"))
+        st, h, _ = self.get(url.split("?")[0] + "?v=stale")
+        self.assertEqual((st, T.hget(h, "cache-control")), (200, "private, max-age=60"))
+
+    def test_16_bit_input(self):
+        from PIL import Image
+        f = self.proc / "20261104" / D.PROCESSED / "3a. Individual tiles" / "grid2_99_sixteen.png"
+        im = Image.new("I;16", (400, 300), 1000)
+        im.paste(30000, (100, 100, 300, 200))
+        im.save(f)
+        self.addCleanup(D._files_cache.clear)
+        self.addCleanup(f.unlink)
+        D._files_cache.clear()
+        idx = [p.name for p in D.session_images("20261104")].index("grid2_99_sixteen.png")
+        st, h, body = self.get(f"/data/thumb/session/20261104/{idx}.jpg")
+        self.assertEqual((st, body[:3]), (200, JPEG))
+        import io
+        from PIL import Image as I
+        with I.open(io.BytesIO(body)) as out:
+            self.assertEqual(out.mode, "L")
+            self.assertGreater(out.getextrema()[1] - out.getextrema()[0], 100)       # stretched, not black
+
+    def test_missing_processing_root(self):
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"CRYOEV_PROCESSING_ROOT": str(self.env.tmp / "no_such_root")}):
+            D._files_cache.clear()
+            t = main_html(self.page("/data/session/20261104"))
+            self.assertIn("No images found", t)
+            self.assertEqual(self.get("/data/thumb/session/20261104/0.jpg")[0], 404)
+            self.assertEqual(self.api("/data/api/session/20261104")["n_images"], 0)
+        D._files_cache.clear()
+
+    def test_text_check_before_disk(self):
+        touched = []
+        real = Path.is_dir
+        from unittest import mock
+        with mock.patch.object(Path, "is_dir", lambda self_: (touched.append(str(self_)), real(self_))[1]):
+            D._files_cache.clear()
+            self.assertEqual(D.scan_images(self.outside / "pkg_outside" / "images", self.lap / "review"), [])
+            self.assertEqual(D.scan_images(Path("//no-such-host/share/x"), self.lap / "review"), [])
+        self.assertEqual(touched, [])                                    # refused as text, nothing was opened
 
     def test_source_is_untouched(self):
         f = self.proc / "20261104" / D.PROCESSED / "3a. Individual tiles" / "grid1_00_r0c0_t00.jpg"
@@ -439,8 +585,10 @@ class Thumbnails(Base):
                 else:
                     self.assertIn(st, (400, 404))
                     self.assertFalse(body.startswith(JPEG))
-        for raw_path in (b"GET /data/thumb/images/x\\..\\y/0.jpg HTTP/1.1", b"GET /data/thumb/images/x\x00/0.jpg HTTP/1.1"):
-            resp = T.raw(self.p.port, raw_path + b"\r\nHost: x\r\nCookie: " + f"{A.COOKIE}={self.tok['admin']}".encode() + b"\r\n\r\n")
+        cookie = f"{A.COOKIE}={self.tok['admin']}".encode()
+        for raw_path in (b"GET /data/thumb/images/x\\..\\y/0.jpg HTTP/1.1",
+                         b"GET /data/thumb/images/x\x00/0.jpg HTTP/1.1"):
+            resp = T.raw(self.p.port, raw_path + b"\r\nHost: x\r\nCookie: " + cookie + b"\r\n\r\n")
             self.assertNotEqual(T.raw_status(resp), 200)
 
     def test_link_out_of_roots_refused(self):
@@ -477,14 +625,14 @@ class Cache(unittest.TestCase):
             self.assertIsNot(a, c)
             self.assertEqual(c["model"], {})
         finally:
-            D._reg_cache.clear()
+            D._registry_cache.clear()
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_missing_registry(self):
         S, err = D.read_registry(Path(tempfile.gettempdir()) / "cj_no_such_registry_dir")
         self.assertTrue(err)
         self.assertEqual(S["session"], {})
-        D._reg_cache.clear()
+        D._registry_cache.clear()
 
 
 class Browser(Base):
@@ -544,7 +692,7 @@ class Browser(Base):
         self.addCleanup(lambda: (self.env.registry / "session.jsonl").write_text(
             "\n".join((self.env.registry / "session.jsonl").read_text(encoding="utf-8").splitlines()[:-1]) + "\n",
             encoding="utf-8"))
-        D._reg_cache.clear()
+        D._registry_cache.clear()
         for scheme in ("light", "dark"):
             for width in (390, 1280):
                 ctx, page, rec = self.session(width, scheme)
@@ -557,7 +705,8 @@ class Browser(Base):
                             sw, iw = page.evaluate("[document.documentElement.scrollWidth, window.innerWidth]")
                             self.assertLessEqual(sw, iw, "horizontal scroll")
                             page.evaluate("Promise.all(Array.from(document.images).map(i => { i.loading = 'eager'; "
-                                          "return i.complete ? 1 : new Promise(r => { i.onload = i.onerror = r; }); }))")
+                                          "return i.complete ? 1 : "
+                                          "new Promise(r => { i.onload = i.onerror = r; }); }))")
                             bad = page.evaluate("Array.from(document.images).filter(i => !i.naturalWidth).length")
                             self.assertEqual(bad, 0, "broken thumbnail")
                             bg = page.evaluate("getComputedStyle(document.body).backgroundColor")
