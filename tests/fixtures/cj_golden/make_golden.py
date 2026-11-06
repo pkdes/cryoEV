@@ -81,7 +81,7 @@ def main():
                                                  indent=1) + "\n", encoding="utf-8")
     (root / "p" / MODEL / "summary.csv").write_text(
         "image,model_id,n_detections,mean_conf\n" + "".join(
-            f"{i},{MODEL},{sum(1 for o in OBJECTS if o[1] == i)},"
+            f"{i}.png,{MODEL},{sum(1 for o in OBJECTS if o[1] == i)},"
             f"{sum(o[6] for o in OBJECTS if o[1] == i) / sum(1 for o in OBJECTS if o[1] == i):.4f}\n"
             for i in ("0001", "0002", "0003")), encoding="utf-8")
 
