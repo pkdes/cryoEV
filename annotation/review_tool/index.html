@@ -312,11 +312,17 @@ const clone = o => JSON.parse(JSON.stringify(o));
 const esc = v => String(v == null ? "" : v).replace(/[&<>"']/g, ch => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"})[ch]);
 // The server accepts who = [\w .-]{0,40} (review_server.valid_who); a typed name must fit, or every save would get a 400.
 const WHO_OK = v => /^[\p{L}\p{N}_ .\-]{1,40}$/u.test(v);
+// Portal sign-in: multi_review_server.py, reached through the CJ portal, puts window.REVIEW_IDENTITY = {who, locked: true}
+// in this page. The reviewer is then that signed-in user: never asked, not changeable here, not stored (the server
+// stamps every save with it anyway). Without it (the real review, the sandbox, a file), everything is as before.
+const LOCKED_WHO = (r => r && r.locked === true && typeof r.who === "string" && WHO_OK(r.who) ? r.who : "")(window.REVIEW_IDENTITY);
 const cv = $("cv"), ctx = cv.getContext("2d"), stage = $("stage");
 // Drafts in localStorage, per package. A SANDBOX_ copy has the real package's id, so the sandbox (the server's
 // REVIEW_SERVER.sandbox flag) gets its own key: on one origin, the real review would otherwise take sandbox drafts
 // for its own unsaved edits and upload them. A real package keeps the exact old key, so no draft is orphaned.
-const KEY = "cryoev-review:" + D.id + ((window.REVIEW_SERVER || {}).sandbox ? ":sandbox" : "");
+// Portal sign-in: drafts per signed-in user too (":u:<id>"), so on a shared browser one user's unsent edits are never
+// uploaded under the next user's id.
+const KEY = "cryoev-review:" + D.id + ((window.REVIEW_SERVER || {}).sandbox ? ":sandbox" : "") + (LOCKED_WHO ? ":u:" + LOCKED_WHO : "");
 
 // ---------- state ----------
 let edits = {};            // file -> {gt:[...], reviewed:bool, modified:bool}
@@ -367,9 +373,11 @@ const curImg = () => D.images[cur];
 // Reviewer (who): a roster id from /api/people (annotation/people.json), or a name typed under "Other", saved as
 // typed. Asked once, kept in localStorage (memory too, if storage is blocked); every edit needs one (needWho).
 let whoMem = "", roster = null;  // roster: [{id, name, aliases}], or null when /api/people is unavailable
+if (LOCKED_WHO) whoMem = LOCKED_WHO;  // portal sign-in (LOCKED_WHO, above): the reviewer, never stored
 const me = () => { if (whoMem) return whoMem; try { return localStorage.getItem("cryoev-review:who") || ""; } catch (e) { return ""; } };
 const whoSrc = () => { try { return localStorage.getItem("cryoev-review:whoSrc") || ""; } catch (e) { return ""; } };
 function setWho(v, src) {
+  if (LOCKED_WHO) return;  // portal sign-in: the name is the signed-in user's
   whoMem = String(v || "").trim().slice(0, 40);
   try { localStorage.setItem("cryoev-review:who", whoMem); localStorage.setItem("cryoev-review:whoSrc", src); } catch (e) {}
 }
@@ -1640,6 +1648,7 @@ let whoPending = null, peopleP = null, peopleDone = false;
 const actCtx = () => !$("tri").hidden ? "t:" + (tri.queue[tri.pos] ? caseId(tri.queue[tri.pos]) : "") : "e:" + cur + ":" + JSON.stringify(sel) + ":" + redrawKey;
 function needWho(retry) { if (me()) return true; const at = actCtx(); openWho(retry && (() => { if (actCtx() === at) retry(); })); return false; }
 function openWho(retry) {
+  if (LOCKED_WHO) return;  // portal sign-in: no picker (needWho never gets here: me() is set)
   if (!peopleP) peopleP = loadPeople();
   if (roster === null && !peopleDone) { peopleP.then(() => openWho(retry)); return; }
   whoPending = retry || (!$("whoDlg").hidden ? whoPending : null);  // a second ask keeps the first one's edit
@@ -1671,6 +1680,7 @@ function showWho() {
   const t = "👤 " + (me() ? dispName(me()) : "set name");
   $("whoBtn").textContent = t; $("triWho").textContent = t;
   $("whoBtn").title = $("triWho").title = me() ? `Saved with your edits as "${me()}". Tap to change` : "Pick your name before editing";
+  if (LOCKED_WHO) $("whoBtn").title = $("triWho").title = `Signed in to the portal as "${LOCKED_WHO}": saved with your edits`;
 }
 function checkWhoText() {  // required, and only the characters the server accepts
   const v = $("whoText").value.trim(), ok = WHO_OK(v);
