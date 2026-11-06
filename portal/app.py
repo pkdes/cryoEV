@@ -73,7 +73,7 @@ CORE_ROLES = {"/review": ("admin",), "/history": ("admin",)}   # built-in defaul
                                                                 # one with a valid entry (manifest_rules)
 CORE_IDS = {"/review": "review", "/history": "history"}       # the only entry that may set each core prefix
 PRED_PORT = 8767                                              # annotation/multi_review_server.py
-PRED_ID_RE = re.compile(r"^pred_ps_\d{8}_[0-9a-f]{6}$")         # prediction review package ids (never "app")
+PRED_ID_RE = re.compile(r"^pred_ps_\d{8}_[0-9a-f]{6}\Z")         # prediction review package ids (never "app")
 OWNER_PATH_RE = re.compile(r"^/review/(?!app(?:/|$))[^/]+(?:/|$)")   # /review/<pkg id>...: owner-checked routes
 TPL_RE = re.compile(r"\{\{(\w+)\}\}")
 # module icons (24 x 24, stroked; design direction A)
