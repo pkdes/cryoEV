@@ -137,20 +137,31 @@ python -m jobs.predict_local --ps ps_20261105_abc123
 python jobs/sync.py push-predict --ps ps_20261105_abc123 --share \\<desktop>\cj
 python jobs/sync.py pull --share \\<desktop>\cj
 ```
-- **Set folder:** `images\<nnnn>.png|.jpg` (never the client's file name; `images.csv` keeps it as `orig_name`), `images.csv`, `request.json`, `status.json` (`state` queued / running / done / failed, `n_done`, `n_total`, `where`, `job`, `error`), `p\<model>\predictions\<nnnn>.txt` + `p\<model>\summary.csv`, and `predict.log`.
+- **Set folder:** `images\<nnnn>.png|.jpg` (never the client's file name; `images.csv` keeps it as `orig_name`), `images.csv`, `request.json`, `status.json` (`state` queued / running / done / failed, `n_done`, `n_total`, `where`, `job`, `error`, `updated`, `pid`, `waiting`), `p\<model>\predictions\<nnnn>.txt` + `p\<model>\summary.csv`, and `predict.log`.
   - `p\` appears only when the set is complete: the laptop writes into `.p_tmp\` and renames it; pull stages in `.pull_tmp_p\`.
-  - Tiles are hard-linked when on the same drive, else copied; never linked from a protected folder (Cryo-image-processing, Box).
-- **Create refuses** (nothing written, every problem listed): no images or more than 200; a file that isn't an 8-bit PNG/JPEG by content; nm/px missing for any image; no `--nm-confirmed-by`; mixed tile sizes or nm/px within one sample label; an unknown model. `MANIFEST.csv` and OS files (`desktop.ini`) in the folder are skipped.
+  - Tiles are copied, and `images.csv` records each one's `md5`. `--link` hard-links instead (same drive only, never from a protected folder such as Cryo-image-processing or Box).
+  - `images.csv` cells that start with `= + - @` get a leading `'`, so a spreadsheet never runs them.
+  - `status.json` is written atomically, read-modify-write under `<root>\.locks\<ps>.status.lock`. While running, `updated` is refreshed every poll and `pid` is the predictor's: a stale `updated` with `running` means a crash, not a model still loading.
+- **Create refuses** (nothing written, every problem listed): no images or more than 200; a file that isn't an 8-bit PNG/JPEG by content; a side over 8192 px (read from the header, before decoding); nm/px missing for any image; no `--nm-confirmed-by`; mixed tile sizes or nm/px within one sample label; an unknown model; `--only` entries that aren't plain file names; a bad `conf` / `max_det` / `imgsz`. `MANIFEST.csv` and OS files (`desktop.ini`) in the folder are skipped.
 - **`predict_local`** runs `inference/predict_models.py --no-overlays` at the request's `conf` / `max_det` / `imgsz` (null = the model's registered size). One run at a time (`<root>\predict.lock`, exit 3).
-  - The GPU must be free (the runner's rule: any python process, ≥ 256 MB, or > 2 GB in total), else failed, exit 4. `--allow-cpu` runs on the CPU instead.
+  - The GPU must be free (the runner's rule: any python process, ≥ 256 MB, or > 2 GB in total; this process and its parent excluded).
+    - Busy: the set stays **queued** with `waiting: "gpu busy: ..."`, exit 4.
+    - No NVIDIA GPU: failed, exit 4.
+    - `--allow-cpu` runs on the CPU instead.
+  - Any error while the predictor runs (a status write, Ctrl+C, a bug) kills the predictor and its children and marks the set failed.
+  - The final `.p_tmp` → `p` rename is retried with backoff; if it never succeeds, the set is failed.
   - A failed set can run again; a done one is refused (exit 2). It prints the time and peak GPU memory.
+  - **Portal:** `predict_local.start_detached(ps_dir) -> pid` starts a run detached (no console window; its own output goes to `<root>\.logs\<ps>.out`).
+    - Call `predict_set.create()` from a worker thread: it reads, md5s and decodes every tile.
+    - Imported as `jobs.*`, neither module changes `sys.path`; the registry is loaded by path as `cj_registry` (as `portal/app.py` does).
 - **Desktop path.**
-  - `push-predict` makes the registry job `job_<today>_<ps id>` (`--type predict --where desktop`).
-  - It sends an images-only dataset pack (`ds\<sha>\`, the same cache; no `labels\`) and a thin zip `<ps>\JOB.json` (`job_type: predict`) + `request.json` + `images.csv`.
+  - `push-predict` holds `<root>\predict.lock`, so it never pushes while a local run is going.
+  - It creates the registry job `job_<today>_<ps id>` (`--type predict --where desktop`) only after the push succeeds. If that registry write then fails, it writes `q\<job>\CANCEL` (nothing is deleted).
+  - It sends an images-only dataset pack (`ds\<sha>\`, the same cache; no `labels\`). The pack has fixed zip times, so the same tiles always give the same pack and a second set reuses `ds\<sha>\`. It also sends a thin zip `<ps>\JOB.json` (`job_type: predict`) + `request.json` + `images.csv`.
   - `run_job.py` keeps the md5, pack, commit, Ultralytics, path, disk and GPU-busy checks and skips the training size and worker rules. It runs `predict_models` into `work\<job>\p\`.
   - The job is done only with exit 0, a prediction file per image and `summary.csv`. `d\<job>\` gets `p\`, `predict.log`, `status.json`, `DONE.json` (+ `job_type`, `ps`, `model`, `n_done`, `n_total`). Default `--max-hours` 2.
   - `pull` copies a done job's `p\` into the set (never over an existing `p\`) and sets the set's `status.json` and record. Blocked → failed with the reason, cancelled → cancelled; nothing is copied for those. The registry importer runs only when a train job was pulled.
-- **Flag.** With `CRYOEV_PREDICT_JOBS` unset, `push-predict` refuses and `run_job.py` / the watcher leave predict jobs queued, untouched. Train jobs behave the same either way.
+- **Flag.** With `CRYOEV_PREDICT_JOBS` unset, `push-predict` refuses and `run_job.py` / the watcher leave predict jobs queued, untouched. Train jobs behave the same either way. `watch.json`, and the Live view's `watcher`, has `predict_jobs: true|false`, so the Jobs page can explain a waiting predict job.
 - **Live tab.** A running predict job shows as `{"kind": "predict", "n_done", "n_total", "eta_s", "hung"}`.
   - `n_done` counts the prediction files in `work\<job>\p\`, which are listed, never opened.
   - `hung` means no new file for max(10 × the time per image, 10 min).

@@ -57,6 +57,24 @@ class PackTests(T.TempRoots, unittest.TestCase):
         self.assertEqual(sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()), sorted(md5s))
         self.assertEqual(dataset_cache.write_pack(self.tmp / "out", src, files)[4], True, "same images: reused")
 
+    def test_fixed_time_pack_is_deterministic(self):
+        """Predict packs are rebuilt per push: the same tiles a second later must give the same bytes (else the
+        share refuses "same dataset hash, different pack"). Control: without fixed_time the bytes differ."""
+        src = self.tmp / "ps"
+        (src / "images").mkdir(parents=True)
+        for f in sorted((GOLDEN / "images").iterdir()):
+            (src / "images" / f.name).write_bytes(f.read_bytes())
+        files = sorted((src / "images").iterdir())
+        md5 = {}
+        for i, fixed in enumerate((True, True, False, False)):
+            for f in files:                                # new mtimes (zip time resolution is 2 s), as a fresh copy has
+                os.utime(f, (time.time() - 1000 * i, time.time() - 1000 * i))
+            out = self.tmp / f"o{i}"
+            out.mkdir()
+            md5[i] = dataset_cache.write_pack(out, src, files, fixed_time=fixed)[2]
+        self.assertEqual(md5[0], md5[1])
+        self.assertNotEqual(md5[2], md5[3])
+
 
 class DesktopTests(PredictRoots, unittest.TestCase):
     def setUp(self):
@@ -165,6 +183,37 @@ class DesktopTests(PredictRoots, unittest.TestCase):
         self.assertEqual(self.run_job(), 0)
         sync.pull(self.share, copier="shutil")
         assert_contract_layout(self, self.ps)
+
+    def test_push_predict_lock_and_registry_rollback(self):
+        from data_utils.oslock import acquire_lock
+        lock = acquire_lock(self.root / sync.PREDICT_LOCK)     # a local run of this root
+        try:
+            with self.assertRaisesRegex(sync.SyncError, "local prediction run holds"):
+                sync.push_predict(self.ps.name, self.share, copier="shutil", check_origin=False)
+        finally:
+            lock.close()
+        self.assertEqual(list((self.share / C.Q).iterdir()), [])
+        with mock.patch.object(registry, "new_job", side_effect=registry.RegistryError("refused: test")):
+            with self.assertRaisesRegex(sync.SyncError, "registry job was not created .*CANCEL written"):
+                sync.push_predict(self.ps.name, self.share, copier="shutil", check_origin=False)
+        jid = f"job_{time.strftime('%Y%m%d')}_{self.ps.name}"
+        self.assertTrue((self.share / C.Q / jid / C.CANCEL).is_file())
+        self.assertNotIn(jid, registry.current(root=self.reg), "no registry job")
+        self.assertEqual(C.read_json(self.ps / "status.json")["job"], None, "the set is not marked queued")
+        self.assertEqual(self.run_job(), 1)                # the runner skips it: cancelled before it started
+        self.assertEqual(self.done(jid)["status"], "cancelled")
+        ps2 = self.make()                                  # control: a normal push makes the job after the copy
+        q = sync.push_predict(ps2.name, self.share, copier="shutil", check_origin=False)
+        self.assertEqual(registry.current(root=self.reg)[q.name]["type"], "predict")
+
+    def test_watch_json_says_whether_predict_jobs_are_on(self):
+        import watch
+        for on in (True, False):
+            with mock.patch.dict(os.environ, {C.PREDICT_ENV: "1" if on else "0"}):
+                watch.Watcher(self.share, T.REPO).state("idle")
+            w = C.read_json(self.share / C.WATCH_JSON)
+            self.assertIs(w["predict_jobs"], on)
+            self.assertIs(M.watcher_view(sync.watch_state(self.share))["predict_jobs"], on)
 
     def test_gpu_busy_predict_is_blocked_and_recognised(self):
         q = sync.push_predict(self.ps.name, self.share, copier="shutil", check_origin=False)

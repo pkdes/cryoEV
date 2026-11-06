@@ -360,7 +360,8 @@ def watcher_view(w) -> dict:
     else:
         display = st or "unknown"
     return {"display": display, "state": st, "detail": detail, "job": w.get("job"), "age_s": age, "stale": stale,
-            "machine": w.get("machine"), "heartbeat": w.get("heartbeat")}
+            "machine": w.get("machine"), "heartbeat": w.get("heartbeat"),
+            "predict_jobs": w.get("predict_jobs")}     # None: a watcher from before predict jobs (= off)
 
 
 def read_queue(share: Path, now=None) -> dict:

@@ -5,16 +5,23 @@
 
 Runs inference/predict_models.py as a subprocess (--images <ps>/images --out <ps>/.p_tmp --models <model> --conf
 --max-det [--imgsz] --device cuda --no-overlays; the same argv as the desktop runner, run_job.predict_argv) and keeps
-<ps>/status.json current: running, n_done = prediction files written so far (checked every 2 s), then done, or failed
-with the error. On success .p_tmp/summary.csv moves to <model>/summary.csv and .p_tmp is renamed to p/, so p/ exists
-only for a complete set. The registry record follows: running, then done or failed.
-  - GPU: no NVIDIA GPU, or one in use (run_job.gpu_state: any python process, >= 256 MB, or > 2 GB in total) ->
-    failed with that error, exit 4. --allow-cpu runs on the CPU instead (slow); never silently.
+<ps>/status.json current: running with the predictor's pid; every poll (2 s) n_done = prediction files so far and a
+fresh `updated` (a stale `updated` with state running = a crash, not a model still loading); then done, or failed
+with the error. On success .p_tmp/summary.csv moves to <model>/summary.csv and .p_tmp is renamed to p/ (retried with
+backoff; failed if it never succeeds), so p/ exists only for a complete set. The registry record follows.
+  - Any error while the predictor runs (a status write, Ctrl+C, a bug) kills the predictor and its children and marks
+    the set failed with the reason: never an orphaned predictor under a "running" status.
+  - GPU busy (run_job.gpu_state, this process and its parent excluded: any python process, >= 256 MB, or > 2 GB in
+    total): the set stays queued with waiting "gpu busy: ...", exit 4. No NVIDIA GPU at all: failed, exit 4.
+    --allow-cpu runs on the CPU instead (slow); never silently.
   - One run at a time per root: <root>/predict.lock (a second run exits 3 and changes nothing).
-  - Runs a queued or failed set (a failed one's .p_tmp is cleared first). A done set, one running elsewhere, or one
-    queued on the desktop (status.json job set) is refused, exit 2.
+  - Runs a queued or failed set (a failed one's .p_tmp is cleared first). A done set, or one queued on the desktop
+    (status.json job set), is refused, exit 2.
   - The predictor's output is appended to <ps>/predict.log; the elapsed time and peak GPU memory are printed.
 Exit: 0 done, 1 failed, 2 refused, 3 lock held, 4 GPU busy or unavailable.
+
+Python API (the portal): start_detached(ps_dir) -> pid starts this as a detached process (no console window) and
+returns at once; status.json says the rest. run(ps, ...) runs it in this process.
 """
 from __future__ import annotations
 
@@ -28,18 +35,24 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
-sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(REPO))
-import common as C  # noqa: E402
-import predict_set as PS  # noqa: E402
-import run_job  # noqa: E402
+if __package__:                                  # jobs.predict_local (the portal, python -m): sys.path untouched
+    from . import common as C
+    from . import predict_set as PS
+else:
+    for _p in (HERE, REPO):
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
+    import common as C  # noqa: E402
+    import predict_set as PS  # noqa: E402
 from data_utils import config  # noqa: E402
 from data_utils.oslock import acquire_lock  # noqa: E402
 
 LOCK_FILE = "predict.lock"
 PRED_TMP = ".p_tmp"                     # <ps>/.p_tmp while predicting; renamed to p/ when complete
 POLL_S = 2.0
+RENAME_TRIES, RENAME_BACKOFF_S = 6, 0.5  # .p_tmp -> p: antivirus / indexer / Explorer can hold a folder briefly
 EXIT_DONE, EXIT_FAILED, EXIT_REFUSED, EXIT_LOCKED, EXIT_GPU = 0, 1, 2, 3, 4
+LOG_DIR = ".logs"                       # <root>/.logs/<ps>.out: a detached run's own console output
 
 
 class Refused(Exception):
@@ -48,9 +61,43 @@ class Refused(Exception):
         self.code = code
 
 
+def _run_job():
+    """jobs/run_job.py, imported only when a run starts (it puts jobs/ and training/ on sys.path for itself)."""
+    if __package__:
+        from . import run_job
+    else:
+        import run_job
+    return run_job
+
+
+def start_detached(ps_dir, root=None, registry_root=None, allow_cpu=False) -> int:
+    """Start `python -m jobs.predict_local --ps <ps_dir>` detached (no console window; survives the caller) and
+    return its pid at once. Its console output goes to <root>/.logs/<ps>.out; progress and errors to status.json."""
+    ps_dir = Path(ps_dir)
+    argv = [sys.executable, "-m", "jobs.predict_local", "--ps", str(ps_dir)]
+    if root:
+        argv += ["--root", str(root)]
+    if registry_root:
+        argv += ["--registry", str(registry_root)]
+    if allow_cpu:
+        argv.append("--allow-cpu")
+    out = ps_dir.parent / LOG_DIR / f"{ps_dir.name}.out"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    kw = {}
+    if os.name == "nt":
+        kw["creationflags"] = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                               | subprocess.CREATE_NO_WINDOW)
+    else:
+        kw["start_new_session"] = True
+    with open(out, "ab") as f:
+        p = subprocess.Popen(argv, cwd=REPO, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
+                             env={**os.environ, "PYTHONIOENCODING": "utf-8"}, close_fds=True, **kw)
+    return p.pid
+
+
 def gpu_memory_mb():
     """(used, total) MB of the first NVIDIA GPU from nvidia-smi, or None (tests: None, no real GPU read)."""
-    if run_job.hooks().get("gpu") is not None:
+    if _run_job().hooks().get("gpu") is not None:
         return None
     try:
         r = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
@@ -62,21 +109,25 @@ def gpu_memory_mb():
 
 
 def gpu_check(allow_cpu: bool) -> tuple:
-    """-> (device, note). Raises Refused(code 4) when the GPU is missing or busy and allow_cpu is off."""
-    st = run_job.gpu_state()
+    """-> (device, note, None) to run, or (None, why, "busy" | "missing") when the GPU can't be used and allow_cpu
+    is off. This process and its parent (the portal, a shell) never count as busy."""
+    rj = _run_job()
+    st = rj.gpu_state()
+    mine = {os.getpid(), os.getppid()}
+    busy = [b for b in st["busy"] if b[0] not in mine]
     if not st.get("total_mb"):
-        why = "no NVIDIA GPU found (nvidia-smi reports none): CUDA unavailable"
-    elif st["busy"]:
-        why = "GPU busy: " + ", ".join(f"pid {p} {Path(n).name} {m} MB" for p, n, m in st["busy"][:3])
+        why, kind = "no NVIDIA GPU found (nvidia-smi reports none): CUDA unavailable", "missing"
+    elif busy:
+        why, kind = "gpu busy: " + ", ".join(f"pid {p} {Path(n).name} {m} MB" for p, n, m in busy[:3]), "busy"
     else:
-        return "cuda", f"GPU {st['total_mb']} MB, {st.get('used_mb') or 0} MB in use"
+        return "cuda", f"GPU {st['total_mb']} MB, {st.get('used_mb') or 0} MB in use", None
     if allow_cpu:
-        return "cpu", f"{why}; running on the CPU (--allow-cpu)"
-    raise Refused(f"{why}. Try again when it is free, or --allow-cpu (slow)", EXIT_GPU)
+        return "cpu", f"{why}; running on the CPU (--allow-cpu)", None
+    return None, why, kind
 
 
-def fail(ps_dir, ps_id, reg, error, n_done=None) -> dict:
-    st = PS.write_status(ps_dir, state="failed", error=error, **({} if n_done is None else {"n_done": n_done}))
+def fail(ps_dir, ps_id, reg, error, **fields) -> dict:
+    st = PS.write_status(ps_dir, state="failed", error=error, pid=None, waiting=None, **fields)
     record(ps_id, reg, "failed")
     return st
 
@@ -89,9 +140,22 @@ def record(ps_id, reg, status, **fields):
         print(f"[predict_local] registry not updated ({ps_id} -> {status}): {e}", file=sys.stderr)
 
 
+def rename_retry(src: Path, dst: Path, tries=None, backoff=None):
+    """src.rename(dst), retried with backoff (0.5, 1, 2, ... s). Raises the last OSError."""
+    tries = RENAME_TRIES if tries is None else tries
+    backoff = RENAME_BACKOFF_S if backoff is None else backoff
+    for i in range(tries):
+        try:
+            return src.rename(dst)
+        except OSError:
+            if i == tries - 1:
+                raise
+            time.sleep(backoff * 2 ** i)
+
+
 def run(ps, root=None, registry_root=None, allow_cpu=False, wait=0.0, poll_s=POLL_S) -> dict:
     """Predict one set here. -> {"exit", "status", "elapsed_s", "device", "gpu_mb": (before, peak, total) or None}.
-    Raises Refused (nothing changed, except a GPU refusal, which marks the set failed with that error)."""
+    Raises Refused: nothing changed, except a GPU refusal (queued + waiting when busy, failed when there is none)."""
     reg = Path(registry_root) if registry_root else config.registry_root()
     try:
         ps_dir = PS.find(ps, root, reg)
@@ -107,6 +171,7 @@ def run(ps, root=None, registry_root=None, allow_cpu=False, wait=0.0, poll_s=POL
 
 
 def _run_locked(ps_dir: Path, reg: Path, allow_cpu: bool, poll_s: float) -> dict:
+    rj = _run_job()
     try:
         req, st, rows = PS.read_request(ps_dir), PS.read_status(ps_dir), PS.read_images(ps_dir)
     except (OSError, ValueError) as e:
@@ -132,71 +197,89 @@ def _run_locked(ps_dir: Path, reg: Path, allow_cpu: bool, poll_s: float) -> dict
         PS.model_spec(model)
     except PS.PredictSetError as e:
         raise Refused(f"{ps_id}: {e}")
-    try:
-        device, note = gpu_check(allow_cpu)
-    except Refused as e:
-        fail(ps_dir, ps_id, reg, str(e), n_done=0)
-        raise
+    device, note, refused = gpu_check(allow_cpu)
+    if refused == "busy":                              # someone else's work: stays queued, try again later
+        PS.write_status(ps_dir, state="queued", waiting=note, pid=None, error=None)
+        if state != "queued":
+            record(ps_id, reg, "queued")
+        raise Refused(f"{note}. The set stays queued; start it again when the GPU is free, or --allow-cpu (slow)",
+                      EXIT_GPU)
+    if refused == "missing":
+        fail(ps_dir, ps_id, reg, f"{note}; use --allow-cpu (slow)", n_done=0)
+        raise Refused(f"{note}; use --allow-cpu (slow)", EXIT_GPU)
     out = ps_dir / PRED_TMP
     if out.exists():                                   # this tool's own scratch from a failed attempt
         shutil.rmtree(out)
     pred = out / model / "predictions"
     log = ps_dir / C.PREDICT_LOG
-    argv = run_job.predict_argv(req, ps_dir / PS.IMAGES, out, device)
+    argv = rj.predict_argv(req, ps_dir / PS.IMAGES, out, device)
     n_total = len(rows)
-    PS.write_status(ps_dir, state="running", n_done=0, n_total=n_total, where="laptop", job=None, error=None)
+    PS.write_status(ps_dir, state="running", n_done=0, n_total=n_total, where="laptop", job=None, error=None,
+                    pid=None, waiting=None)
     record(ps_id, reg, "running", where="laptop", job=None)
     print(f"[predict_local] {ps_id}: {n_total} image(s), model {model}, device {device} ({note})", flush=True)
     mem0 = gpu_memory_mb()
     peak = mem0[0] if mem0 else None
-    t0, n_done, interrupted = time.time(), 0, False
+    t0, n_done, rc, error = time.time(), 0, None, None
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-    with open(log, "ab") as lf:
-        lf.write(f"\n=== {C.now()} predict_local {ps_id} on {device}: {' '.join(argv)}\n".encode("utf-8"))
-        lf.flush()
-        p = subprocess.Popen(argv, cwd=REPO, env=env, stdout=lf, stderr=subprocess.STDOUT)
-        try:
+    p = None
+    try:
+        with open(log, "ab") as lf:
+            lf.write(f"\n=== {C.now()} predict_local {ps_id} on {device}: {' '.join(argv)}\n".encode("utf-8"))
+            lf.flush()
+            p = subprocess.Popen(argv, cwd=REPO, env=env, stdout=lf, stderr=subprocess.STDOUT)
+            PS.write_status(ps_dir, pid=p.pid)
             while True:
                 try:
                     rc = p.wait(timeout=poll_s)
                     break
                 except subprocess.TimeoutExpired:
-                    n = C.count_predictions(pred)
-                    if n != n_done:
-                        n_done = n
-                        PS.write_status(ps_dir, n_done=n_done)
+                    n_done = C.count_predictions(pred)
+                    PS.write_status(ps_dir, n_done=n_done)       # every poll: a fresh `updated` is the heartbeat
                     m = gpu_memory_mb()
                     if m and (peak is None or m[0] > peak):
                         peak = m[0]
-        except KeyboardInterrupt:
-            interrupted = True
-            run_job.kill_tree(p)
-            rc = p.wait()
+    except KeyboardInterrupt:
+        error = "interrupted (Ctrl+C)"
+    except Exception as e:                              # a status write, the log, a bug: never orphan the predictor
+        error = f"predict_local error while running: {type(e).__name__}: {e}"
+    finally:
+        if p is not None and rc is None:
+            rj.kill_tree(p)
+            p.wait()
     elapsed = round(time.time() - t0, 1)
     n_done = C.count_predictions(pred)
     gpu = (mem0[0], peak, mem0[1]) if mem0 else None
-    error = None
-    if interrupted:
-        error = "interrupted (Ctrl+C)"
-    elif rc != 0:
-        error = f"predict_models exit {rc}: {run_job.log_tail(log)}"
-    else:
-        lost = [s for s in stems if not (pred / f"{s}.txt").is_file()]
-        if lost:
-            error = f"{len(lost)} of {n_total} images have no prediction file, e.g. {lost[:3]}"
-        elif not (out / "summary.csv").is_file():
-            error = f"predict_models wrote no summary.csv; see {C.PREDICT_LOG}"
-    if error is None:
-        (out / "summary.csv").replace(out / model / "summary.csv")
-        out.rename(ps_dir / C.PS_PRED)
-        status = PS.write_status(ps_dir, state="done", n_done=n_done, error=None)
-        record(ps_id, reg, "done")
-    else:
+    try:
+        if error is None and rc != 0:
+            error = f"predict_models exit {rc}: {rj.log_tail(log)}"
+        if error is None:
+            lost = [s for s in stems if not (pred / f"{s}.txt").is_file()]
+            if lost:
+                error = f"{len(lost)} of {n_total} images have no prediction file, e.g. {lost[:3]}"
+            elif not (out / "summary.csv").is_file():
+                error = f"predict_models wrote no summary.csv; see {C.PREDICT_LOG}"
+        if error is None:
+            (out / "summary.csv").replace(out / model / "summary.csv")
+            try:
+                rename_retry(out, ps_dir / C.PS_PRED)
+            except OSError as e:
+                error = f"predictions complete but {PRED_TMP} could not be renamed to p/: {e}"
+        if error is None:
+            status = PS.write_status(ps_dir, state="done", n_done=n_done, error=None, pid=None, waiting=None)
+            record(ps_id, reg, "done")
+        else:
+            status = fail(ps_dir, ps_id, reg, error, n_done=n_done)
+    except Exception as e:                              # finishing failed: still never a "running" set
+        error = f"predict_local error while finishing: {type(e).__name__}: {e}"
         status = fail(ps_dir, ps_id, reg, error, n_done=n_done)
     stats = f"{elapsed:g} s, {n_done}/{n_total} images, device {device}" + (
         f", GPU memory {gpu[0]} MB before, peak {gpu[1]} MB of {gpu[2]} MB" if gpu else "")
-    with open(log, "a", encoding="utf-8") as f:
-        f.write(f"=== {C.now()} {status['state']}: {stats}" + (f"; {error}" if error else "") + "\n")
+    try:
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(f"=== {C.now()} {status['state']}: {stats}" + (f"; {error}" if error else "") + "\n")
+    except OSError:
+        pass
     print(f"[predict_local] {ps_id}: {status['state']} ({stats})" + (f": {error}" if error else ""), flush=True)
     return {"exit": EXIT_DONE if error is None else EXIT_FAILED, "status": status, "elapsed_s": elapsed,
             "device": device, "gpu_mb": gpu, "ps_dir": str(ps_dir)}

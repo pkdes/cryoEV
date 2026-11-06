@@ -209,6 +209,7 @@ def push_pack(job, bundle, share, copier="auto") -> dict:
     return fields
 
 
+PREDICT_LOCK = "predict.lock"                    # <predict root>/predict.lock, held by jobs/predict_local.py
 PREDICT_HOURS = 2.0                              # push-predict's default --max-hours (200 tiles take minutes)
 
 
@@ -219,11 +220,11 @@ def push_predict(ps, share, job_id=None, copier="auto", check_origin=True, max_h
       <ps>__job_<stamp>.zip = <ps>/JOB.json (job_type predict, model, conf, max_det, imgsz, the pack), request.json,
       images.csv; both go up like a train job's (push, push_pack);
     - the set's status.json and registry record: queued, where desktop, job.
+    Holds <predict root>/predict.lock (never while predict_local runs). The registry job is created only after the
+    push succeeded; if that then fails, q/<job>/CANCEL is written (nothing is deleted) and SyncError raised.
     -> q/<job>. Refused: the flag off, a done or running set, a set already queued as a job, a missing image."""
-    import tempfile
-    import ids
     import predict_set as PS
-    import registry
+    from data_utils.oslock import acquire_lock
     if not C.predict_enabled():
         raise SyncError(f"predict jobs are off: set {C.PREDICT_ENV}=1 (on this machine, and on the desktop runner "
                         f"before it can run them)")
@@ -233,8 +234,25 @@ def push_predict(ps, share, job_id=None, copier="auto", check_origin=True, max_h
     reg = config.registry_root()
     try:
         ps_dir = PS.find(ps, registry_root=reg)
+    except PS.PredictSetError as e:
+        raise SyncError(str(e))
+    lock = acquire_lock(ps_dir.parent / PREDICT_LOCK, 0)   # never while predict_local runs a set of this root
+    if lock is None:
+        raise SyncError(f"a local prediction run holds {ps_dir.parent / PREDICT_LOCK}; push when it has finished")
+    try:
+        return _push_predict_locked(ps_dir, reg, share, job_id, copier, check_origin, max_hours, hold)
+    finally:
+        lock.close()
+
+
+def _push_predict_locked(ps_dir, reg, share, job_id, copier, check_origin, max_hours, hold):
+    import tempfile
+    import ids
+    import predict_set as PS
+    import registry
+    try:
         req, st, rows = PS.read_request(ps_dir), PS.read_status(ps_dir), PS.read_images(ps_dir)
-    except (PS.PredictSetError, OSError, ValueError) as e:
+    except (OSError, ValueError) as e:
         raise SyncError(str(e))
     ps_id = req["ps"]
     state = st.get("state")
@@ -247,7 +265,7 @@ def push_predict(ps, share, job_id=None, copier="auto", check_origin=True, max_h
     if not rows or missing:
         raise SyncError(f"{ps_id}: images missing from the set: {missing[:3] or 'none listed'}")
     commit = git("rev-parse", "HEAD").stdout.strip() or None
-    if check_origin:                                   # before any registry line: a refused push leaves none
+    if check_origin:
         why = commit_on_origin(commit)
         if why:
             raise SyncError(why)
@@ -255,20 +273,11 @@ def push_predict(ps, share, job_id=None, copier="auto", check_origin=True, max_h
     cur = registry_job(jid)
     if cur is None and job_id:
         raise SyncError(f"{job_id} is not in the registry (leave --job out to make job_<today>_{ps_id})")
-    if cur is None:
-        with tempfile.TemporaryDirectory(prefix="cj_pl_") as td:
-            lst = Path(td) / "images.txt"
-            lst.write_text("".join(r["image"] + "\n" for r in rows), encoding="utf-8")
-            try:
-                jid = registry.new_job("predict", "desktop", ps_id, images=lst, root=reg,
-                                       date=jid[4:12], note=f"prediction set {ps_id}")["id"]
-            except registry.RegistryError as e:
-                raise SyncError(str(e))
-    elif cur.get("type") != "predict":
+    if cur is not None and cur.get("type") != "predict":
         raise SyncError(f"{jid} is a {cur.get('type')} job in the registry, not predict; pass another --job")
     with tempfile.TemporaryDirectory(prefix="cj_pp_") as td:
         td = Path(td)
-        pack, sha, pack_md5, md5s, _ = dataset_cache.write_pack(td, ps_dir, sorted(files))
+        pack, sha, pack_md5, md5s, _ = dataset_cache.write_pack(td, ps_dir, sorted(files), fixed_time=True)
         zp = td / f"{ps_id}__job_{time.strftime('%Y%m%d-%H%M%S')}.zip"
         job = {"bundle_id": zp.stem, "dataset_name": ps_id, "job_type": "predict", "ps": ps_id,
                "model": req["model"], "conf": req.get("conf", 0.25), "max_det": req.get("max_det", 1000),
@@ -279,13 +288,26 @@ def push_predict(ps, share, job_id=None, copier="auto", check_origin=True, max_h
             for name in (PS.REQUEST, PS.IMAGES_CSV):
                 z.write(ps_dir / name, f"{ps_id}/{name}")
         Path(str(zp) + ".md5").write_text(f"{C.md5_file(zp)}  {zp.name}\n", encoding="utf-8")
-        q = push(jid, zp, share, copier, check_registry=True, check_origin=False, max_hours=max_hours, hold=hold,
+        # the registry job only once the push has succeeded: a refused or failed push leaves no registry line
+        q = push(jid, zp, share, copier, check_registry=False, check_origin=False, max_hours=max_hours, hold=hold,
                  job_type="predict", extra={"ps": ps_id, "model": req["model"], "n_images": len(rows)})
-    PS.write_status(ps_dir, state="queued", n_done=0, n_total=len(rows), where="desktop", job=jid, error=None)
+    if cur is None:
+        try:
+            with tempfile.TemporaryDirectory(prefix="cj_pl_") as td:
+                lst = Path(td) / "images.txt"
+                lst.write_text("".join(r["image"] + "\n" for r in rows), encoding="utf-8")
+                registry.new_job("predict", "desktop", ps_id, images=lst, root=reg, date=jid[4:12],
+                                 note=f"prediction set {ps_id}")
+        except Exception as e:                         # roll back without deleting: the runner skips a CANCELled job
+            cancel(jid, share, who="pujan", reason=f"push-predict: the registry job was not created ({e})")
+            raise SyncError(f"{jid} was queued but its registry job was not created ({e}); CANCEL written, so the "
+                            f"runner skips it. Fix the registry, then push again with a new job (or --job)")
+    PS.write_status(ps_dir, state="queued", n_done=0, n_total=len(rows), where="desktop", job=jid, error=None,
+                    pid=None, waiting=None)
     try:
         PS.update_record(ps_id, reg, recorded_by="jobs/sync.py push-predict", status="queued", where="desktop",
                          job=jid)
-    except (PS.PredictSetError, registry.RegistryError) as e:
+    except Exception as e:
         print(f"[push-predict] registry record of {ps_id} not updated: {e}", file=sys.stderr)
     return q
 

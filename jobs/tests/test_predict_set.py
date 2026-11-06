@@ -28,7 +28,7 @@ GOLDEN = T.REPO / "tests" / "fixtures" / "cj_golden" / "predict" / "ps_20261105_
 MODEL = "v5_evnonev_y8m_20261029"
 GOLDEN_PRED = GOLDEN / "p" / MODEL / "predictions"
 FAKE_PRED = [sys.executable, str(T.TESTS / "fake_predictor.py")]
-STATUS_KEYS = {"state", "n_done", "n_total", "where", "job", "error", "updated"}
+STATUS_KEYS = set(PS.STATUS_KEYS)              # the contract keys + pid, waiting
 REQUEST_KEYS = {"ps", "owner", "model", "conf", "max_det", "imgsz", "source", "created"}
 
 
@@ -106,11 +106,14 @@ class CreateTests(PredictRoots, unittest.TestCase):
         keep = ["image", "file", "orig_name", "sample_label", "nm_per_px", "nm_confirmed_by"]
         self.assertEqual([{k: r[k] for k in keep} for r in rows], [{k: r[k] for k in keep} for r in self.golden_rows])
         self.assertEqual({r["source"] for r in rows}, {"session:20261027"})
-        for r in rows:                                 # same bytes as the golden tiles; hard links on one drive
+        for r in rows:                                 # same bytes as the golden tiles; copied (not linked), md5 kept
             self.assertEqual((ps / r["file"]).read_bytes(), (GOLDEN / r["file"]).read_bytes())
-            self.assertGreaterEqual(os.stat(ps / r["file"]).st_nlink, 2)
+            self.assertEqual(os.stat(ps / r["file"]).st_nlink, 1)
+            self.assertEqual(r["md5"], C.md5_file(GOLDEN / r["file"]))
         self.assertEqual(set(C.read_json(GOLDEN / "request.json")), REQUEST_KEYS)   # the golden agrees
-        self.assertEqual(set(C.read_json(GOLDEN / "status.json")), STATUS_KEYS)
+        self.assertLessEqual(set(C.read_json(GOLDEN / "status.json")), STATUS_KEYS)
+        linked = self.make(link=True)                  # --link: hard links on one drive
+        self.assertGreaterEqual(os.stat(linked / "images" / "0001.png").st_nlink, 2)
         req = C.read_json(ps / "request.json")
         self.assertEqual((req["ps"], req["model"], req["conf"], req["max_det"], req["imgsz"], req["owner"]),
                          (ps.name, MODEL, 0.25, 1000, None, "pujan"))
@@ -128,16 +131,16 @@ class CreateTests(PredictRoots, unittest.TestCase):
         from PIL import Image
         Image.open(GOLDEN / "images" / "0002.png").save(jpg, format="JPEG")
         ps = self.make(sample_label="EV prep A", sample_label_column=None, nm_per_px=1.4724, nm_from_manifest=False,
-                       manifest=None, link=False)
+                       manifest=None)
         rows = assert_contract_layout(self, ps, done=False)
         self.assertEqual([r["file"] for r in rows], ["images/0001.png", "images/0002.jpg", "images/0003.png"])
         self.assertEqual({r["source"] for r in rows} | {r["sample_label"] for r in rows}, {"upload", "EV prep A"})
-        self.assertEqual(os.stat(ps / "images" / "0001.png").st_nlink, 1, "link=False copies")
+        self.assertEqual(os.stat(ps / "images" / "0001.png").st_nlink, 1, "copies by default")
         self.assertEqual(C.read_json(ps / "request.json")["source"], {"kind": "upload"})
         src = str(self.src.resolve()).lower()              # the source sits under a protected root (processing)
         with mock.patch.object(PS, "protected_problem",
                                lambda p: "protected" if str(Path(p).resolve()).lower().startswith(src) else None):
-            ps2 = self.make(nm_per_px=1.4724, nm_from_manifest=False)
+            ps2 = self.make(nm_per_px=1.4724, nm_from_manifest=False, link=True)
         self.assertEqual(os.stat(ps2 / "images" / "0001.png").st_nlink, 1, "a protected source is never linked")
 
     def test_refusals_write_nothing(self):
@@ -146,6 +149,9 @@ class CreateTests(PredictRoots, unittest.TestCase):
             "nm-confirmed-by is required": dict(nm_confirmed_by=None),
             "unknown model": dict(model="v9_nope_20991231"),
             "owner": dict(owner="Not An Id"),
+            "conf 'abc' must be a number": dict(conf="abc"),
+            "max_det 'x' must be a whole number": dict(max_det="x"),
+            "imgsz 10 must be": dict(imgsz=10),
         }
         for msg, kw in cases.items():
             with self.subTest(msg), self.assertRaisesRegex(PS.PredictSetError, msg):
@@ -187,6 +193,49 @@ class CreateTests(PredictRoots, unittest.TestCase):
         ps = self.make(src=d, manifest=man, sample_label_column="manifest:sample_label",
                        **{k: v for k, v in kw.items() if k not in ("manifest", "sample_label_column")})
         self.assertEqual(C.read_json(ps / "status.json")["n_total"], 4)
+
+    def test_only_names_size_cap_and_formula_cells(self):
+        with self.assertRaisesRegex(PS.PredictSetError, "plain file names"):
+            self.make(names=["golden_0001.png", "../src/golden_0002.png"])
+        with self.assertRaisesRegex(PS.PredictSetError, "plain file names"):
+            self.make(names=[str(self.src / "golden_0001.png")])
+        self.assert_nothing_written()
+        d = self.tmp / "big"
+        d.mkdir()
+        png(d / "wide.png", (PS.MAX_SIDE + 1, 4))
+        kw = dict(sample_label="=SUM(A1)", sample_label_column=None, nm_per_px=1.0, nm_from_manifest=False,
+                  manifest=None)
+        with self.assertRaisesRegex(PS.PredictSetError, "wide.png: 8193x4 px: a side over 8192"):
+            self.make(src=d, **kw)
+        self.assert_nothing_written()
+        (d / "wide.png").unlink()                          # control: 8192 is allowed
+        png(d / "@edge.png", (PS.MAX_SIDE, 4))
+        ps = self.make(src=d, **kw)
+        row = assert_contract_layout(self, ps, done=False)[0]
+        self.assertEqual((row["sample_label"], row["orig_name"]), ("'=SUM(A1)", "'@edge.png"))
+        ps2 = self.make(names=["golden_0003.png", "golden_0001.png"])   # control: plain names, name order
+        self.assertEqual([r["orig_name"] for r in PS.read_images(ps2)], ["golden_0001.png", "golden_0003.png"])
+
+    def test_write_status_threads(self):
+        import threading
+        ps = self.make()
+        errors = []
+
+        def work(k):
+            try:
+                for i in range(25):
+                    PS.write_status(ps, n_done=i, error=f"t{k}" if k % 2 else None)
+            except Exception as e:                     # noqa: BLE001 - the test reports any
+                errors.append(e)
+        ts = [threading.Thread(target=work, args=(k,)) for k in range(8)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        self.assertEqual(errors, [])
+        st = C.read_json(ps / "status.json")
+        self.assertEqual((set(st), st["n_done"], st["state"]), (STATUS_KEYS, 24, "queued"))
+        self.assertEqual([p.name for p in ps.iterdir() if p.name.endswith(".tmp")], [])
 
     def test_more_than_200_refused(self):
         d = self.tmp / "many"

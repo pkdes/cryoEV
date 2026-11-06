@@ -61,10 +61,15 @@ def valid_sha(sha) -> bool:
 
 
 # ---------------------------------------------------------------- laptop: write a pack
-def write_pack(out_dir: Path, root: Path, files: list) -> tuple:
+FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
+
+
+def write_pack(out_dir: Path, root: Path, files: list, fixed_time=False) -> tuple:
     """Write (or reuse) <out_dir>/ds_<sha12>.zip + .md5 for `files` (absolute paths under images/ and labels/ of
     `root`). -> (pack path, sha256, pack md5, {rel: md5}, reused). An existing pack with the same name is reused
-    only if its sidecar md5 and its MANIFEST match; otherwise SystemExit (never overwritten)."""
+    only if its sidecar md5 and its MANIFEST match; otherwise SystemExit (never overwritten).
+    fixed_time=True (predict packs, rebuilt for every push): every member dated 1980-01-01, so the same files always
+    give the same pack bytes and md5, and a second set with the same tiles reuses ds/<sha>/ on the share."""
     out_dir = Path(out_dir)
     md5s = {}
     for p in files:
@@ -87,8 +92,16 @@ def write_pack(out_dir: Path, root: Path, files: list) -> tuple:
     with zipfile.ZipFile(tmp, "w") as z:
         for p in sorted(files):
             rel = p.relative_to(root).as_posix()
-            z.write(p, rel, compress_type=zipfile.ZIP_STORED if p.suffix.lower() in STORED else zipfile.ZIP_DEFLATED)
-        z.writestr(MANIFEST, json.dumps(manifest, indent=1, sort_keys=True), compress_type=zipfile.ZIP_DEFLATED)
+            kind = zipfile.ZIP_STORED if p.suffix.lower() in STORED else zipfile.ZIP_DEFLATED
+            if fixed_time:
+                z.writestr(zipfile.ZipInfo(rel, FIXED_ZIP_TIME), p.read_bytes(), compress_type=kind)
+            else:
+                z.write(p, rel, compress_type=kind)
+        man = json.dumps(manifest, indent=1, sort_keys=True)
+        if fixed_time:
+            z.writestr(zipfile.ZipInfo(MANIFEST, FIXED_ZIP_TIME), man, compress_type=zipfile.ZIP_DEFLATED)
+        else:
+            z.writestr(MANIFEST, man, compress_type=zipfile.ZIP_DEFLATED)
     tmp.replace(pack)
     got = C.md5_file(pack)
     side_path.write_text(f"{got}  {pack.name}\n", encoding="utf-8")

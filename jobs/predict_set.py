@@ -5,54 +5,71 @@
         --model <model id> --owner <person>
         (--sample-label <label> | --sample-label-from manifest:<column>)
         (--nm-per-px <x> | --nm-from-manifest) --nm-confirmed-by <person>
-        [--conf 0.25] [--max-det 1000] [--imgsz N] [--session YYYYMMDD] [--registry <dir>] [--root <dir>]
+        [--conf 0.25] [--max-det 1000] [--imgsz N] [--session YYYYMMDD] [--link] [--registry <dir>] [--root <dir>]
 
 Writes <root>/<ps id>/ (default root <CryoAI-laptop>/predict; the id ps_<YYYYMMDD>_<6 hex> is made here):
-  images/<nnnn>.png|.jpg   the tiles, numbered in name order; the extension comes from the content. Hard-linked
-                           when on the same drive (and not from a protected folder), else copied. The original file
-                           name is never in a path, only in images.csv orig_name
-  images.csv               image,file,orig_name,sample_label,nm_per_px,nm_confirmed_by,source
+  images/<nnnn>.png|.jpg   the tiles, numbered in name order; the extension comes from the content. Copied (md5
+                           checked); hard-linked only with --link, on the same drive and not from a protected folder.
+                           The original file name is never in a path, only in images.csv orig_name
+  images.csv               image,file,orig_name,sample_label,nm_per_px,nm_confirmed_by,source,md5 (cells that start
+                           with = + - @ get a leading ' so a spreadsheet never runs them)
   request.json             ps, owner, model, conf, max_det, imgsz, source, created
-  status.json              state queued, n_done 0, n_total, where laptop, job null, error null, updated
+  status.json              state queued, n_done 0, n_total, where laptop, job null, error null, updated, pid null,
+                           waiting null
 and appends a prediction_set/1 record (status queued) to the registry. The folder is built in <root>/.incoming/ and
 renamed into place, so a reader never sees half a set.
 
 Refused, with every problem listed and nothing written: no images, or more than 200; a file that is not an 8-bit
 PNG or JPEG by its content (the extension is not trusted; MANIFEST.csv, the --manifest file and OS files such as
-desktop.ini are skipped); nm/px missing for any image; no --nm-confirmed-by; mixed tile sizes (or mixed nm/px)
-within one sample label; an unknown model. The manifest's name column is output_name (or image, file_name, filename,
+desktop.ini are skipped), or one with a side over 8192 px (checked before it is decoded); nm/px missing for any
+image; no --nm-confirmed-by; mixed tile sizes (or mixed nm/px) within one sample label; an unknown model; --only
+names that are not plain file names. The manifest's name column is output_name (or image, file_name, filename,
 name), its nm/px column nm_per_px.
 
-Python API (the portal): create(...) -> the set's folder; find(ps) -> folder; read_status / write_status;
-update_record(ps_id, **fields) appends the registry line that follows a status change.
+Python API (the portal): create(...) -> the set's folder. It reads, md5s and decodes every tile (seconds for 200):
+call it from a worker thread, never on the event loop. find(ps) -> folder; read_status / write_status (atomic,
+read-modify-write under a lock); update_record(ps_id, **fields) appends the registry line after a status change.
+Imported as jobs.predict_set it changes no sys.path and loads registry/registry.py by path (as cj_registry, like
+portal/app.py), so no portal module is shadowed.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
+import importlib.util
+import json
 import math
 import os
 import re
 import secrets
 import shutil
 import sys
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
-sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / "registry"))
-import common as C  # noqa: E402
+if __package__:                                  # jobs.predict_set (the portal, python -m): sys.path untouched
+    from . import common as C
+else:                                            # a script, or the jobs/ modules that import it by name
+    for _p in (HERE, REPO):
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
+    import common as C  # noqa: E402
 from data_utils import config  # noqa: E402
+from data_utils.oslock import acquire_lock  # noqa: E402
 from data_utils.path_guard import protected_problem  # noqa: E402
 
 MAX_IMAGES = 200
+MAX_SIDE = 8192                                  # px, per side, read from the header before any decode
 PREDICT_DIR = "predict"                          # <CryoAI-laptop>/predict/<ps id>/
-INCOMING = ".incoming"
+INCOMING, LOCKS = ".incoming", ".locks"
 IMAGES, IMAGES_CSV, REQUEST, STATUS = "images", "images.csv", "request.json", "status.json"
-CSV_COLUMNS = ["image", "file", "orig_name", "sample_label", "nm_per_px", "nm_confirmed_by", "source"]
+CSV_COLUMNS = ["image", "file", "orig_name", "sample_label", "nm_per_px", "nm_confirmed_by", "source", "md5"]
+STATUS_KEYS = ("state", "n_done", "n_total", "where", "job", "error", "updated", "pid", "waiting")
 NAME_COLUMNS = ("output_name", "image", "file_name", "filename", "name")   # as inference/inference_check.py
 NM_COLUMN = "nm_per_px"
 SKIP_NAMES = {"manifest.csv", "desktop.ini", "thumbs.db", ".ds_store"}
@@ -61,13 +78,70 @@ PERSON_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")       # registry/schemas/pred
 SESSION_RE = re.compile(r"^\d{8}(-\d+)?$")
 PNG_SIG, JPEG_SIG = b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff"
 PNG_MODES, JPEG_MODES = {"L", "LA", "RGB", "RGBA", "P"}, {"L", "RGB"}
+FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
 MODELS_YAML = REPO / "models" / "models.yaml"
 LAPTOP_PREFIX = "<CryoAI-laptop>"
+REGISTRY_LOCK = ".prediction_set.lock"           # in the registry folder: id choice + read-modify-append
+LOCK_WAIT = 30.0
 SHOW = 12                                        # problems listed per refusal
 
 
 class PredictSetError(ValueError):
     """A refusal or a broken set; the message lists every problem found."""
+
+
+# ---------------------------------------------------------------- registry, locks, atomic writes
+_REG_LOCK = threading.Lock()
+_THREAD_LOCKS: dict = {}
+_THREAD_LOCKS_LOCK = threading.Lock()
+
+
+def registry_module():
+    """registry/registry.py loaded by path as `cj_registry` (once per process, as portal/app.py names it)."""
+    with _REG_LOCK:
+        mod = sys.modules.get("cj_registry")
+        if mod is None:
+            spec = importlib.util.spec_from_file_location("cj_registry", REPO / "registry" / "registry.py")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            sys.modules["cj_registry"] = mod
+        return mod
+
+
+@contextlib.contextmanager
+def locked(path: Path, wait=LOCK_WAIT):
+    """Exclusive across threads (a lock per path) and processes (an OS lock on `path`)."""
+    path = Path(path)
+    key = os.path.normcase(str(path.resolve()))
+    with _THREAD_LOCKS_LOCK:
+        tl = _THREAD_LOCKS.setdefault(key, threading.Lock())
+    with tl:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        f = acquire_lock(path, wait)
+        if f is None:
+            raise PredictSetError(f"busy: another process held {path} for {wait:g} s")
+        try:
+            yield
+        finally:
+            f.close()
+
+
+def write_json_atomic(path, obj):
+    """A tmp file unique to this process and thread, then os.replace (retried: a reader may hold the target)."""
+    path = Path(path)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(json.dumps(obj, indent=1, default=str), encoding="utf-8")
+    for i in range(6):
+        try:
+            return os.replace(tmp, path)
+        except PermissionError:
+            if i == 5:
+                raise
+            time.sleep(0.1 * 2 ** i)
+
+
+def md5_file(path) -> str:
+    return C.md5_file(path)
 
 
 # ---------------------------------------------------------------- where sets live
@@ -110,8 +184,7 @@ def find(ps, root=None, registry_root=None) -> Path:
         cands.append(Path(root) / ps)
     else:
         try:
-            import registry
-            rec = registry.current("prediction_set", registry_root).get(ps)
+            rec = registry_module().current("prediction_set", registry_root).get(ps)
         except (config.ConfigError, OSError):
             rec = None
         got = resolve_record_path((rec or {}).get("path"))
@@ -133,13 +206,21 @@ def read_status(ps_dir) -> dict:
     return C.read_json(Path(ps_dir) / STATUS)
 
 
+def status_lock_path(ps_dir) -> Path:
+    """<root>/.locks/<ps>.status.lock: outside the set folder, which keeps the contract layout."""
+    ps_dir = Path(ps_dir)
+    return ps_dir.parent / LOCKS / f"{ps_dir.name}.status.lock"
+
+
 def write_status(ps_dir, **fields) -> dict:
-    """Merge fields into status.json (atomic write), with `updated` = now. -> the new status."""
+    """Merge fields into status.json, `updated` = now: read-modify-write under the set's status lock, written
+    atomically. Keys: state n_done n_total where job error updated pid waiting. -> the new status."""
     p = Path(ps_dir) / STATUS
-    st = C.read_json(p) if p.is_file() else {}
-    st.update(fields, updated=C.now())
-    out = {k: st.get(k) for k in ("state", "n_done", "n_total", "where", "job", "error", "updated")}
-    C.write_json(p, out)
+    with locked(status_lock_path(ps_dir)):
+        st = C.read_json(p) if p.is_file() else {}
+        st.update(fields, updated=C.now())
+        out = {k: st.get(k) for k in STATUS_KEYS}
+        write_json_atomic(p, out)
     return out
 
 
@@ -149,19 +230,22 @@ def read_images(ps_dir) -> list:
 
 
 def update_record(ps_id, registry_root=None, recorded_by="jobs/predict_set.py", **fields):
-    """Append the set's registry line with `fields` changed (status, where, job, ...). -> the stored line.
-    Raises PredictSetError when the set has no record."""
-    import registry
-    cur = registry.current("prediction_set", registry_root).get(ps_id)
-    if cur is None:
-        raise PredictSetError(f"{ps_id} has no prediction_set record in the registry")
-    rec = {**cur, **fields, "logged": C.now(), "recorded_by": recorded_by}
-    return registry.append(rec, registry_root)
+    """Append the set's registry line with `fields` changed (status, where, job, ...): read and append under the
+    registry's prediction_set lock. -> the stored line. Raises PredictSetError when the set has no record."""
+    reg = registry_module()
+    root = Path(registry_root) if registry_root else config.registry_root()
+    with locked(root / REGISTRY_LOCK):
+        cur = reg.current("prediction_set", root).get(ps_id)
+        if cur is None:
+            raise PredictSetError(f"{ps_id} has no prediction_set record in the registry")
+        rec = {**cur, **fields, "logged": C.now(), "recorded_by": recorded_by}
+        return reg.append(rec, root)
 
 
 # ---------------------------------------------------------------- checks
 def inspect_image(path: Path) -> tuple:
-    """-> (ext, (w, h)) for an 8-bit PNG or JPEG, judged by content. Raises ValueError with the reason."""
+    """-> (ext, (w, h)) for an 8-bit PNG or JPEG, judged by content; each side <= MAX_SIDE before any decode.
+    Raises ValueError with the reason."""
     with open(path, "rb") as f:
         head = f.read(32)
     if head.startswith(PNG_SIG):
@@ -177,9 +261,13 @@ def inspect_image(path: Path) -> tuple:
         raise ValueError("not a PNG or JPEG (by content)")
     from PIL import Image
     try:
-        with Image.open(path) as im:
+        with Image.open(path) as im:                   # reads the header only
             mode, size = im.mode, im.size
+            if max(size) > MAX_SIDE:
+                raise ValueError(f"{size[0]}x{size[1]} px: a side over {MAX_SIDE} px")
             im.load()                                  # a truncated or corrupt file fails here, not on the GPU
+    except ValueError:
+        raise
     except Exception as e:
         raise ValueError(f"unreadable {ext[1:].upper()}: {type(e).__name__}: {e}")
     if mode not in modes:
@@ -215,14 +303,23 @@ def _num(v):
     return x if math.isfinite(x) and x > 0 else None
 
 
+def _cell(s) -> str:
+    """A CSV cell a spreadsheet won't run as a formula."""
+    s = str(s)
+    return "'" + s if s.startswith(FORMULA_START) else s
+
+
 def _list(problems):
     more = f"\n  ... and {len(problems) - SHOW} more" if len(problems) > SHOW else ""
     return "\n  " + "\n  ".join(problems[:SHOW]) + more
 
 
 def _scan(from_dir: Path, manifest: Path | None, names) -> list:
-    """The candidate files, sorted by name (names: only these)."""
+    """The candidate files, sorted by name (names: only these plain file names)."""
     if names is not None:
+        bad = [n for n in names if not n or Path(n).name != n or n in (".", "..")]
+        if bad:
+            raise PredictSetError("refused: --only takes plain file names in --from-dir, not paths:" + _list(bad))
         missing = [n for n in names if not (from_dir / n).is_file()]
         if missing:
             raise PredictSetError(f"{len(missing)} listed file(s) not in {from_dir}:" + _list(missing))
@@ -232,7 +329,8 @@ def _scan(from_dir: Path, manifest: Path | None, names) -> list:
                    and not p.name.startswith(".") and p.resolve() not in skip), key=lambda p: p.name)
 
 
-def _link_or_copy(src: Path, dst: Path, link: bool) -> str:
+def _place(src: Path, dst: Path, md5: str, link: bool) -> str:
+    """Copy (md5 checked), or with link=True hard-link when on one drive and not from a protected folder."""
     if link and protected_problem(src) is None and os.stat(src).st_dev == os.stat(dst.parent).st_dev:
         try:
             os.link(src, dst)
@@ -240,16 +338,17 @@ def _link_or_copy(src: Path, dst: Path, link: bool) -> str:
         except OSError:
             pass
     shutil.copy2(src, dst)
-    if dst.stat().st_size != src.stat().st_size:
-        raise PredictSetError(f"copy of {src.name} is incomplete")
+    if md5_file(dst) != md5:
+        raise PredictSetError(f"copy of {src.name} differs from the source (md5)")
     return "copy"
 
 
 # ---------------------------------------------------------------- create
 def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_label_column=None, nm_per_px=None,
            nm_from_manifest=False, manifest=None, names=None, conf=0.25, max_det=1000, imgsz=None, session=None,
-           registry_root=None, root=None, link=True, where="laptop") -> Path:
-    """Make a prediction set (see the module doc). -> its folder. Raises PredictSetError (nothing written)."""
+           registry_root=None, root=None, link=False, where="laptop") -> Path:
+    """Make a prediction set (see the module doc). -> its folder. Raises PredictSetError (nothing written).
+    Slow (md5 + decode of every tile): the portal calls it from a worker thread."""
     from_dir = Path(from_dir)
     root = Path(root) if root else default_root()
     reg = Path(registry_root) if registry_root else config.registry_root()
@@ -277,12 +376,25 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
         problems.append("--nm-from-manifest / --sample-label-from manifest:... need --manifest")
     if manifest is not None and not manifest.is_file():
         problems.append(f"--manifest {manifest} not found")
-    if not 0 < float(conf) < 1:
-        problems.append(f"conf {conf} must be between 0 and 1")
-    if int(max_det) < 1:
-        problems.append(f"max_det {max_det} must be >= 1")
-    if imgsz is not None and int(imgsz) < 32:
-        problems.append(f"imgsz {imgsz} must be >= 32")
+    try:
+        conf = float(conf)
+        if not 0 < conf < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        problems.append(f"conf {conf!r} must be a number between 0 and 1")
+    try:
+        if isinstance(max_det, bool) or int(max_det) != float(max_det) or int(max_det) < 1:
+            raise ValueError
+        max_det = int(max_det)
+    except (TypeError, ValueError):
+        problems.append(f"max_det {max_det!r} must be a whole number >= 1")
+    if imgsz is not None:
+        try:
+            if isinstance(imgsz, bool) or int(imgsz) != float(imgsz) or not 32 <= int(imgsz) <= MAX_SIDE:
+                raise ValueError
+            imgsz = int(imgsz)
+        except (TypeError, ValueError):
+            problems.append(f"imgsz {imgsz!r} must be a whole number from 32 to {MAX_SIDE}")
     if session is not None and not SESSION_RE.match(str(session)):
         problems.append(f"session {session!r} is not YYYYMMDD[-N]")
     if where not in ("laptop", "desktop"):
@@ -328,7 +440,7 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
         label = str(sample_label).strip() if sample_label is not None else str((row or {}).get(label_col) or "").strip()
         if not label:
             problems.append(f"{p.name}: no sample label" + ("" if row else " (no manifest row)"))
-        items.append({"src": p, "ext": ext, "size": size, "nm": nm, "label": label})
+        items.append({"src": p, "ext": ext, "size": size, "nm": nm, "label": label, "md5": md5_file(p)})
     if problems:
         raise PredictSetError(f"refused ({len(problems)} problem(s)):" + _list(problems))
     by_label = {}
@@ -348,60 +460,61 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
     if problems:
         raise PredictSetError(f"refused ({len(problems)} problem(s)); results would refuse mixed sets:"
                               + _list(problems))
-    # ---- id, record (validated before anything is written)
-    import registry
-    from schema_check import check_record
-    taken = set(registry.current("prediction_set", reg)) if (reg / "prediction_set.jsonl").exists() else set()
+    # ---- id + record, validated before anything is written; the id is reserved by its .incoming folder
+    regm = registry_module()
     day = datetime.now().strftime("%Y%m%d")
-    for _ in range(50):
-        ps_id = f"ps_{day}_{secrets.token_hex(3)}"
-        if ps_id not in taken and not (root / ps_id).exists() and not (root / INCOMING / ps_id).exists():
-            break
-    else:
-        raise PredictSetError("could not make a free prediction set id")
+    with locked(reg / REGISTRY_LOCK):
+        taken = set(regm.current("prediction_set", reg))
+        for _ in range(50):
+            ps_id = f"ps_{day}_{secrets.token_hex(3)}"
+            if ps_id not in taken and not (root / ps_id).exists() and not (root / INCOMING / ps_id).exists():
+                break
+        else:
+            raise PredictSetError("could not make a free prediction set id")
+        inc = root / INCOMING / ps_id
+        (inc / IMAGES).mkdir(parents=True)
     created = C.now()
     final = root / ps_id
     src = {"kind": "session", "session": str(session)} if session else {"kind": "upload"}
     rec = {"schema": "prediction_set/1", "id": ps_id, "logged": created, "created": created, "owner": owner,
            "model": model, "job": None, "where": where, "path": record_path(final), "source": src,
-           "n_images": len(items), "conf": float(conf), "max_det": int(max_det), "status": "queued",
+           "n_images": len(items), "conf": conf, "max_det": max_det, "status": "queued",
            "review_package": None, "results": None, "recorded_by": "jobs/predict_set.py create"}
-    errs = check_record(rec, registry.schemas())
-    if errs:
-        raise PredictSetError(f"refused: registry record invalid: {'; '.join(errs[:4])}")
-    # ---- write: .incoming/<id>/, then rename into place, then the registry line
-    inc = root / INCOMING / ps_id
-    (inc / IMAGES).mkdir(parents=True)
     try:
+        errs = regm.check_record(rec, regm.schemas())
+        if errs:
+            raise PredictSetError(f"refused: registry record invalid: {'; '.join(errs[:4])}")
         rows, how = [], {"link": 0, "copy": 0}
         tag = f"session:{session}" if session else "upload"
         for i, it in enumerate(items, 1):
             name = f"{i:04d}{it['ext']}"
-            how[_link_or_copy(it["src"], inc / IMAGES / name, link)] += 1
-            rows.append({"image": f"{i:04d}", "file": f"{IMAGES}/{name}", "orig_name": it["src"].name,
-                         "sample_label": it["label"], "nm_per_px": repr(float(it["nm"])),
-                         "nm_confirmed_by": nm_confirmed_by, "source": tag})
+            how[_place(it["src"], inc / IMAGES / name, it["md5"], link)] += 1
+            rows.append({"image": f"{i:04d}", "file": f"{IMAGES}/{name}", "orig_name": _cell(it["src"].name),
+                         "sample_label": _cell(it["label"]), "nm_per_px": repr(float(it["nm"])),
+                         "nm_confirmed_by": nm_confirmed_by, "source": tag, "md5": it["md5"]})
         with open(inc / IMAGES_CSV, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=CSV_COLUMNS, lineterminator="\n")
             w.writeheader()
             w.writerows(rows)
         source = {"kind": "session", "session": str(session), "dir": str(from_dir.resolve())} if session \
             else {"kind": "upload"}
-        C.write_json(inc / REQUEST, {"ps": ps_id, "owner": owner, "model": model, "conf": float(conf),
-                                     "max_det": int(max_det), "imgsz": int(imgsz) if imgsz is not None else None,
-                                     "source": source, "created": created})
-        C.write_json(inc / STATUS, {"state": "queued", "n_done": 0, "n_total": len(rows), "where": where,
-                                    "job": None, "error": None, "updated": created})
-        inc.rename(final)
+        write_json_atomic(inc / REQUEST, {"ps": ps_id, "owner": owner, "model": model, "conf": conf,
+                                          "max_det": max_det, "imgsz": imgsz, "source": source, "created": created})
+        write_json_atomic(inc / STATUS, {"state": "queued", "n_done": 0, "n_total": len(rows), "where": where,
+                                         "job": None, "error": None, "updated": created, "pid": None,
+                                         "waiting": None})
+        with locked(reg / REGISTRY_LOCK):
+            inc.rename(final)
+            try:
+                regm.append(rec, reg)
+            except Exception as e:
+                write_status(final, state="failed", error=f"registry record not written: {e}")
+                raise PredictSetError(f"{final} was written but its registry record was not ({e}); "
+                                      f"status set to failed")
     except BaseException:
         shutil.rmtree(inc, ignore_errors=True)          # only this call's own half-built folder
         raise
-    try:
-        registry.append(rec, reg)
-    except Exception as e:
-        write_status(final, state="failed", error=f"registry record not written: {e}")
-        raise PredictSetError(f"{final} was written but its registry record was not ({e}); status set to failed")
-    print(f"[predict_set] {ps_id}: {len(rows)} image(s) ({how['link']} linked, {how['copy']} copied), "
+    print(f"[predict_set] {ps_id}: {len(rows)} image(s) ({how['copy']} copied, {how['link']} linked), "
           f"{len(by_label)} sample(s), model {model} -> {final}")
     return final
 
@@ -423,10 +536,11 @@ def main(argv=None):
     n.add_argument("--nm-per-px", type=float, help="nm per pixel, the same for every image")
     n.add_argument("--nm-from-manifest", action="store_true", help=f"per image, from the manifest's {NM_COLUMN}")
     c.add_argument("--nm-confirmed-by", help="person id who confirmed the nm/px (required)")
-    c.add_argument("--conf", type=float, default=0.25)
-    c.add_argument("--max-det", type=int, default=1000)
-    c.add_argument("--imgsz", type=int, help="inference size (default: the model's registered imgsz)")
+    c.add_argument("--conf", default=0.25)
+    c.add_argument("--max-det", default=1000)
+    c.add_argument("--imgsz", help="inference size (default: the model's registered imgsz)")
     c.add_argument("--session", help="YYYYMMDD when the tiles are a session's (source kind session)")
+    c.add_argument("--link", action="store_true", help="hard-link tiles on the same drive instead of copying")
     c.add_argument("--registry", type=Path, help="registry folder (default <CryoAI-laptop>/registry)")
     c.add_argument("--root", type=Path, help=f"where sets live (default <CryoAI-laptop>/{PREDICT_DIR})")
     a = ap.parse_args(argv)
@@ -438,7 +552,8 @@ def main(argv=None):
         ps = create(a.from_dir, a.model, a.owner, a.nm_confirmed_by, sample_label=a.sample_label,
                     sample_label_column=a.sample_label_from, nm_per_px=a.nm_per_px,
                     nm_from_manifest=a.nm_from_manifest, manifest=a.manifest, names=names, conf=a.conf,
-                    max_det=a.max_det, imgsz=a.imgsz, session=a.session, registry_root=a.registry, root=a.root)
+                    max_det=a.max_det, imgsz=a.imgsz, session=a.session, registry_root=a.registry, root=a.root,
+                    link=a.link)
     except (PredictSetError, config.ConfigError, OSError) as e:
         print(f"[predict_set] {e}", file=sys.stderr)
         return 2
