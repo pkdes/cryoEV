@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from datetime import datetime, timezone
@@ -29,6 +30,7 @@ from urllib.parse import urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cjtest as T  # noqa: E402
+from portal import audit as PA  # noqa: E402
 from portal import auth as A  # noqa: E402
 from portal.modules import admin as ADM  # noqa: E402
 
@@ -74,9 +76,10 @@ class Base(unittest.TestCase):
         os.environ["CRYOEV_SERVICES_CONFIG"] = str(cls.svc_cfg)
         os.environ.pop("CJ_BACKUP_REPO", None)
         cls.saved_mod = {k: getattr(ADM, k) for k in ("SERVICES_SCRIPT", "GIT", "SCHTASKS", "BACKUP_TASK",
-                                                      "HEALTH_TTL_S")}
+                                                      "HEALTH_TTL_S", "tailnet_base")}
         ADM.BACKUP_TASK = "cj-test-no-such-task-c1"
         ADM.HEALTH_TTL_S = 0
+        ADM.tailnet_base = lambda: None                  # never this PC's real tailnet name in a test page
         cls.p = T.Portal(cls.env.config())
         cls.tok = {"admin": T.login(cls.p.port, cls.env.key), "advanced": T.login(cls.p.port, cls.adv_key),
                    "basic": T.login(cls.p.port, cls.bas_key)}
@@ -224,10 +227,14 @@ class People(Base):
         tok = T.login(self.p.port, key)
         self.assertEqual(self.get("/admin/", tok)[0], 403)
         st, h, _ = self.post("/admin/people/role", {"id": "rolly", "role": "admin"})
-        self.assertEqual((st, T.hget(h, "location")), (303, "/admin/?done=role&id=rolly"))
+        loc = T.hget(h, "location")
+        self.assertEqual(st, 303)
+        self.assertRegex(loc, r"^/admin/\?f=[A-Za-z0-9_-]+$")
         self.assertEqual(person(self.env, "rolly")["key_sha256"], A.sha256_hex(key))    # same key
         self.assertEqual(self.get("/admin/", tok)[0], 200)                               # same session
-        self.assertIn(b"Role changed for rolly", self.get("/admin/?done=role&id=rolly")[2])
+        self.assertEqual(self.get(loc, tok)[2].count(b"class=\"cj-admin-note"), 0)              # another session: none
+        self.assertIn(b"rolly is now Admin", self.get(loc)[2])
+        self.assertNotIn(b"rolly is now Admin", self.get(loc)[2])                        # taken once
         st, _, _ = self.post("/admin/people/role", {"id": "rolly", "role": "basic"})
         self.assertEqual(st, 303)
         self.assertEqual(self.get("/admin/", tok)[0], 403)
@@ -238,6 +245,14 @@ class People(Base):
         self.assertEqual(st, 404)
         st, _, _ = self.post("/admin/people/role", {"id": "rolly", "role": "root"})
         self.assertEqual(st, 400)
+        for bad in ("Rolly", "a b", "../x", ""):
+            self.assertEqual(self.post("/admin/people/role", {"id": bad, "role": "basic"})[0], 400, bad)
+            self.assertEqual(self.post("/admin/people/revoke", {"id": bad, "confirm": "yes"})[0], 400, bad)
+
+    def test_no_message_without_a_post(self):
+        for q in ("?done=revoked&id=bas", "?done=role&id=bas", "?f=forged", "?f="):
+            page = self.get("/admin/" + q)[2]
+            self.assertNotIn(b"class=\"cj-admin-note", page, q)
 
     def test_role_change_same_size_back_and_forth(self):
         """admin <-> basic keeps the file size; the Roster cache must still see every change at once."""
@@ -264,7 +279,8 @@ class People(Base):
         self.assertIn(b"Yes, revoke gone1", body)
         self.assertNotIn("revoked", person(self.env, "gone1"))
         st, h, _ = self.post("/admin/people/revoke", {"id": "gone1", "confirm": "yes"})
-        self.assertEqual((st, T.hget(h, "location")), (303, "/admin/?done=revoked&id=gone1"))
+        self.assertEqual(st, 303)
+        self.assertIn(b"gone1 is revoked and signed out", self.get(T.hget(h, "location"))[2])
         self.assertEqual(self.get("/", tok)[0], 403)                       # the session ended
         st, _, _ = T.request(self.p.port, "GET", f"/login?k={key}")
         self.assertEqual(st, 403)                                         # the key no longer works
@@ -580,7 +596,6 @@ class Health(Base):
         ADM.SCHTASKS = "cj-no-such-schtasks-c1"
         box = {}
         th = threading.Thread(target=lambda: box.setdefault("r", self.get("/admin/api/health")))
-        import time
         t0 = time.monotonic()
         th.start()
         time.sleep(0.3)
@@ -589,6 +604,278 @@ class Health(Base):
         self.assertLess(time.monotonic() - t0, 1.5)
         th.join(30)
         self.assertEqual(box["r"][0], 200)
+
+
+WRITER = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from portal import audit as PA
+for i in range(int(sys.argv[4])):
+    PA.audit(sys.argv[2], "proc", "cancel", f"job_{sys.argv[3]}_{i}", {"reason": "x" * 200, "result": "ok",
+                                                                    "phase": "result"})
+"""
+
+
+class SharedAudit(Base):
+    """portal/audit.py: one log for Admin and Jobs."""
+
+    def test_mixed_admin_and_jobs_lines_render(self):
+        from portal.modules import jobs as J
+        cfg = self.env.config()
+        path = PA.audit_path(cfg.state_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:           # a line in Jobs' first format (before portal/audit.py)
+            f.write(json.dumps({"time": "2026-11-05T10:00:00+00:00", "actor": "adv", "action": "cancel",
+                                "job": "job_20261105_old", "reason": "<b>old</b>", "result": "ok"}) + "\n")
+        J.audit(cfg, "adv", "cancel", "job_20261105_new", "wrong set", "requested")
+        J.audit(cfg, "adv", "cancel", "job_20261105_new", "wrong set", "ok")
+        self.add("mixed1", "basic")
+        rows = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()]
+        for r in rows[1:]:
+            self.assertEqual(set(r), {"t", "actor", "action", "target", "detail"})
+        self.assertEqual(rows[1]["detail"], {"reason": "wrong set", "result": "requested", "phase": "requested"})
+        self.assertEqual(rows[2]["detail"]["phase"], "result")
+        api = json.loads(self.get("/admin/api/audit")[2])["entries"]
+        self.assertEqual([(e["actor"], e["action"], e["target"]) for e in api[:4]],
+                         [("tester", "person_added", "mixed1"), ("adv", "cancel", "job_20261105_new"),
+                          ("adv", "cancel", "job_20261105_new"), ("adv", "cancel", "job_20261105_old")])
+        self.assertEqual(api[3]["t"], "2026-11-05T10:00:00+00:00")                  # `time` read as t
+        self.assertEqual(api[3]["detail"], {"reason": "<b>old</b>", "result": "ok"})
+        page = html.unescape(re.sub(r"<[^>]+>", "", self.get("/admin/audit")[2].decode()))
+        self.assertIn("Recent actions", page)
+        self.assertIn("tester added mixed1", page)
+        self.assertIn("adv asked to cancel job_20261105_new (reason: wrong set, result: requested)", page)
+        self.assertIn("adv cancel result for job_20261105_new (reason: wrong set, result: ok)", page)
+        self.assertIn("adv cancel job_20261105_old (reason: <b>old</b>, result: ok)", page)
+        self.assertNotIn(b"<b>old</b>", self.get("/admin/audit")[2])                # escaped
+
+    def test_concurrent_writers_never_corrupt_lines(self):
+        """Threads (Admin's and Jobs' helpers) and two other processes append at once: every line is whole."""
+        from portal.modules import jobs as J
+        state = self.env.tmp / "conc_state"
+        cfg = types.SimpleNamespace(state_dir=state)
+        procs = [subprocess.Popen([sys.executable, "-c", WRITER, str(T.REPO), str(state), f"p{i}", "150"])
+                 for i in range(2)]
+
+        def admin_writer(i):
+            for k in range(150):
+                ADM.audit(types.SimpleNamespace(cfg=cfg), "tester", "role_changed", f"a{i}_{k}",
+                          {"from": "basic", "to": "advanced", "pad": "y" * 300})
+
+        def jobs_writer(i):
+            for k in range(150):
+                J.audit(cfg, "adv", "release", f"job_j{i}_{k}", None, "ok")
+        ths = [threading.Thread(target=f, args=(i,)) for i in range(2) for f in (admin_writer, jobs_writer)]
+        for t in ths:
+            t.start()
+        for t in ths:
+            t.join(120)
+        for pr in procs:
+            self.assertEqual(pr.wait(120), 0)
+        lines = PA.audit_path(state).read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 6 * 150)
+        recs = [json.loads(x) for x in lines]                    # raises on a torn or interleaved line
+        self.assertEqual(len({r["target"] for r in recs}), 6 * 150)
+        self.assertTrue(all(set(r) == {"t", "actor", "action", "target", "detail"} for r in recs))
+
+    def test_lock_timeout_raises_never_unlocked_append(self):
+        from data_utils.oslock import acquire_lock
+        state = self.env.tmp / "lock_state"
+        path = PA.audit_path(state)
+        path.parent.mkdir(parents=True)
+        held = acquire_lock(path.with_name(path.name + ".lock"))
+        self.assertIsNotNone(held)
+        old = PA.LOCK_WAIT_S
+        PA.LOCK_WAIT_S = 0.2
+        try:
+            with self.assertRaises(OSError):
+                PA.audit(state, "tester", "x", "y")
+        finally:
+            PA.LOCK_WAIT_S = old
+            held.close()
+        self.assertFalse(path.exists())
+        PA.audit(state, "tester", "x", "y")                      # the lock is free again
+        self.assertEqual(len(path.read_text(encoding="utf-8").splitlines()), 1)
+
+
+CLI = [sys.executable, "-m", "portal.auth"]
+
+
+class RosterSafety(Base):
+    def cli(self, *args):
+        return subprocess.Popen(CLI + list(args) + ["--roster", str(self.env.roster)], cwd=str(T.REPO),
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+    def slow_reads(self, delay=2.0):
+        """load_roster sleeps after reading: the window where an unlocked read-modify-write would lose a write."""
+        real = ADM.load_roster
+
+        def slow(path):
+            doc = real(path)
+            time.sleep(delay)
+            return doc
+        ADM.load_roster = slow
+        self.addCleanup(setattr, ADM, "load_roster", real)
+
+    def race(self, pid):
+        """A portal role change of `pid` (slowed) while the CLI revokes `pid`. -> the final roster entry."""
+        A.add_key(self.env.roster, pid, "basic")
+        token = self.form_token()                                 # before reads are slowed (the page reads too)
+        self.slow_reads()
+        out = {}
+        th = threading.Thread(target=lambda: out.setdefault("r", self.post("/admin/people/role",
+                                                                            {"id": pid, "role": "advanced"},
+                                                                            token=token)))
+        th.start()
+        time.sleep(0.3)                                           # the portal has read the roster (and slept)
+        pr = self.cli("revoke", "--id", pid)
+        th.join(60)
+        text, _ = pr.communicate(timeout=60)
+        self.assertEqual(pr.returncode, 0, text)
+        self.assertEqual(out["r"][0], 303)
+        return person(self.env, pid)
+
+    def test_cli_revoke_racing_a_role_change_never_resurrects(self):
+        p = self.race("racer")
+        self.assertIn("revoked", p)                               # the CLI waited for the lock, then revoked
+        self.assertEqual(p["role"], "advanced")
+
+    def test_control_without_the_lock_the_race_is_real(self):
+        """Known answer: with the portal's lock switched off, the same race loses the CLI's revoke. Shows the test
+        above can see the bug it guards against."""
+        import contextlib
+        real = ADM.roster_lock
+        ADM.roster_lock = lambda path: contextlib.nullcontext()
+        self.addCleanup(setattr, ADM, "roster_lock", real)
+        p = self.race("control")
+        self.assertNotIn("revoked", p)                            # resurrected: the bug, without the lock
+
+    def test_cli_waits_while_the_portal_holds_the_lock(self):
+        A.add_key(self.env.roster, "waiter", "basic")
+        with A.roster_lock(self.env.roster):
+            pr = self.cli("revoke", "--id", "waiter")
+            time.sleep(1.5)
+            self.assertIsNone(pr.poll())                          # still waiting
+            self.assertNotIn("revoked", person(self.env, "waiter"))
+        pr.communicate(timeout=30)
+        self.assertEqual(pr.returncode, 0)
+        self.assertIn("revoked", person(self.env, "waiter"))
+
+    def test_write_failure_changes_nothing_and_leaves_no_temp(self):
+        A.add_key(self.env.roster, "wf", "basic")
+        before = self.env.roster.read_bytes()
+        calls = []
+
+        def deny(src, dst):
+            calls.append(1)
+            raise PermissionError(13, "in use")
+        real = ADM._os_replace
+        ADM._os_replace = deny
+        self.addCleanup(setattr, ADM, "_os_replace", real)
+        for path, fields in (("/admin/people/role", {"id": "wf", "role": "advanced"}),
+                             ("/admin/people/revoke", {"id": "wf", "confirm": "yes"}),
+                             ("/admin/people/add", {"id": "wf2", "role": "basic"})):
+            st, _, body = self.post(path, fields)
+            self.assertEqual(st, 503, path)
+            self.assertIn(b"Nothing was changed", body)
+            self.assertNotIn(b"login?k=", body)
+        self.assertEqual(len(calls), 3 * ADM.REPLACE_TRIES)        # retried each time
+        self.assertEqual(self.env.roster.read_bytes(), before)
+        self.assertEqual(list(self.env.roster.parent.glob("*.tmp")), [])
+        # a reader holding the file for a moment: retried, then done
+        n = {"left": 3}
+
+        def flaky(src, dst):
+            if n["left"]:
+                n["left"] -= 1
+                raise PermissionError(13, "in use")
+            os.replace(src, dst)
+        ADM._os_replace = flaky
+        self.assertEqual(self.post("/admin/people/role", {"id": "wf", "role": "advanced"})[0], 303)
+        self.assertEqual(person(self.env, "wf")["role"], "advanced")
+        self.assertEqual(list(self.env.roster.parent.glob("*.tmp")), [])
+
+    def test_write_roster_raises_when_the_file_does_not_change(self):
+        real, tries = ADM._os_replace, ADM.SIG_TRIES
+        ADM._os_replace = lambda src, dst: None                  # "succeeds" but the roster never changes
+        ADM.SIG_TRIES = 3
+        self.addCleanup(setattr, ADM, "_os_replace", real)
+        self.addCleanup(setattr, ADM, "SIG_TRIES", tries)
+        with self.assertRaises(OSError):
+            ADM.write_roster(self.env.roster, {"schema": "cj_roster/1", "people": []})
+        self.assertEqual(list(self.env.roster.parent.glob("*.tmp")), [])
+
+    def test_lock_busy_means_nothing_changed(self):
+        from data_utils.oslock import acquire_lock
+        A.add_key(self.env.roster, "busy1", "basic")
+        before = self.env.roster.read_bytes()
+        result = {}
+
+        def other_process_holds():
+            held = acquire_lock(self.env.roster.with_name(self.env.roster.name + ".lock"))
+            result["held"] = held is not None
+            time.sleep(3)
+            held.close()
+        th = threading.Thread(target=other_process_holds)
+        real = ADM.roster_lock
+        ADM.roster_lock = lambda path: A.roster_lock(path, wait=0.3)
+        self.addCleanup(setattr, ADM, "roster_lock", real)
+        th.start()
+        time.sleep(0.3)
+        st, _, body = self.post("/admin/people/role", {"id": "busy1", "role": "advanced"})
+        th.join()
+        self.assertTrue(result["held"])
+        self.assertEqual(st, 503)
+        self.assertIn(b"being changed elsewhere", body)
+        self.assertEqual(self.env.roster.read_bytes(), before)
+
+
+class HealthOnce(Base):
+    def test_concurrent_misses_share_one_check(self):
+        ADM._health_cache.clear()
+        calls = []
+        real = ADM.services_status
+
+        def slow():
+            calls.append(1)
+            time.sleep(0.8)
+            return {"ok": True, "rows": [], "problem": None}
+        ADM.services_status = slow
+        ADM.HEALTH_TTL_S = 30
+        ADM.SCHTASKS = "cj-no-such-schtasks-c1"
+        self.addCleanup(setattr, ADM, "services_status", real)
+        self.addCleanup(setattr, ADM, "HEALTH_TTL_S", 0)
+        self.addCleanup(ADM._health_cache.clear)
+        res = []
+        ths = [threading.Thread(target=lambda: res.append(self.get("/admin/api/health")[0])) for _ in range(5)]
+        for t in ths:
+            t.start()
+        for t in ths:
+            t.join(60)
+        self.assertEqual(res, [200] * 5)
+        self.assertEqual(len(calls), 1)
+
+
+class LinkBase(Base):
+    def test_link_base_order(self):
+        cfg = types.SimpleNamespace(origins=("https://portal.example:8446/",))
+        self.assertEqual(ADM.link_base(cfg, "http://127.0.0.1:1"), "https://portal.example:8446")
+        none = types.SimpleNamespace(origins=())
+        self.assertEqual(ADM.link_base(none, "http://127.0.0.1:8770"), "http://127.0.0.1:8770")
+        self.assertEqual(ADM.link_base(none, "https://u:p@home-laptop.example:8446/x?y"),
+                         "https://home-laptop.example:8446")
+        self.assertEqual(ADM.link_base(none, "http://[::1]:8770"), "http://[::1]:8770")
+        for bad in (None, "", "null", "javascript:alert(1)", "http://"):
+            self.assertEqual(ADM.link_base(none, bad), "", bad)
+        ADM.tailnet_base = lambda: "https://home-laptop.tailnet.example:8446"
+        try:
+            self.assertEqual(ADM.link_base(none, "http://127.0.0.1:8770"), "https://home-laptop.tailnet.example:8446")
+            self.assertEqual(ADM.link_base(cfg, None), "https://portal.example:8446")     # --origin wins
+            st, _, body = self.post("/admin/people/add", {"id": "tailnet1", "role": "basic"})
+            self.assertEqual(st, 200)
+            self.assertIn(b"https://home-laptop.tailnet.example:8446/login?k=", body)
+        finally:
+            ADM.tailnet_base = lambda: None
 
 
 def launch(p):
@@ -700,7 +987,7 @@ class Browser(Base):
                 self.check(page, rec, scheme)
                 page.screenshot(path=str(self.shots / f"admin_revoke_confirm_390_{scheme}.png"), full_page=True)
                 page.click(".cj-admin-dangerbtn")
-                page.wait_for_url(f"**/admin/?done=revoked&id={pid}")
+                page.wait_for_url("**/admin/?f=*")
                 self.assertIn(f"{pid} is revoked", page.text_content(".cj-admin-note"))
                 self.check(page, rec, scheme)
                 page.screenshot(path=str(self.shots / f"admin_revoked_390_{scheme}.png"), full_page=True)

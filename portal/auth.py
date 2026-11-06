@@ -19,6 +19,7 @@ A later `access` mode (Cloudflare, C3) gets its own port and middleware; it is n
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import hmac
 import json
@@ -30,6 +31,11 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+from data_utils.oslock import acquire_lock  # noqa: E402
 
 COOKIE = "__Host-cj_session"
 SESSION_S = 30 * 86400            # 30 days
@@ -171,6 +177,33 @@ class Auth:
 
 
 # ---------------------------------------------------------------- roster tool
+ROSTER_LOCK_WAIT_S = 10.0
+_roster_rlock = threading.RLock()
+_roster_depth = [0]
+
+
+@contextlib.contextmanager
+def roster_lock(path: Path, wait: float = ROSTER_LOCK_WAIT_S):
+    """Every roster read-modify-write (this tool, the portal's Admin page) runs inside this: a re-entrant lock in
+    this process plus an OS lock on <roster>.lock for other processes. Raises OSError if it can't be had in `wait`
+    seconds (nothing is changed then)."""
+    with _roster_rlock:
+        held = None
+        if _roster_depth[0] == 0:
+            lp = Path(path).with_name(Path(path).name + ".lock")
+            lp.parent.mkdir(parents=True, exist_ok=True)
+            held = acquire_lock(lp, wait=wait)
+            if held is None:
+                raise OSError("the roster is being changed by another process; try again")
+        _roster_depth[0] += 1
+        try:
+            yield
+        finally:
+            _roster_depth[0] -= 1
+            if held is not None:
+                held.close()
+
+
 def _load(path: Path) -> dict:
     try:
         doc = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -187,24 +220,26 @@ def add_key(path: Path, pid: str, role: str) -> str:
         raise ValueError(f"bad id {pid!r}: lower-case letters, digits, '_', '.', '-'")
     if role not in ROLES:
         raise ValueError(f"role must be one of {ROLES}")
-    doc = _load(path)
-    key = secrets.token_urlsafe(KEY_BYTES)
-    entry = {"id": pid, "role": role, "key_sha256": sha256_hex(key),
-             "added": datetime.now().isoformat(timespec="seconds")}
-    doc["people"] = [p for p in doc["people"] if p.get("id") != pid] + [entry]
-    write_json_atomic(path, doc)
+    with roster_lock(path):
+        doc = _load(path)
+        key = secrets.token_urlsafe(KEY_BYTES)
+        entry = {"id": pid, "role": role, "key_sha256": sha256_hex(key),
+                 "added": datetime.now().isoformat(timespec="seconds")}
+        doc["people"] = [p for p in doc["people"] if p.get("id") != pid] + [entry]
+        write_json_atomic(path, doc)
     return key
 
 
 def revoke(path: Path, pid: str) -> bool:
-    doc = _load(path)
-    hit = False
-    for p in doc["people"]:
-        if p.get("id") == pid and not p.get("revoked"):
-            p["revoked"] = datetime.now().isoformat(timespec="seconds")
-            hit = True
-    if hit:
-        write_json_atomic(path, doc)
+    with roster_lock(path):
+        doc = _load(path)
+        hit = False
+        for p in doc["people"]:
+            if p.get("id") == pid and not p.get("revoked"):
+                p["revoked"] = datetime.now().isoformat(timespec="seconds")
+                hit = True
+        if hit:
+            write_json_atomic(path, doc)
     return hit
 
 

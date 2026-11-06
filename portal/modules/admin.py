@@ -9,11 +9,11 @@ Admin module (CJ portal, admin only): people and their key links, health at a gl
     POST /admin/people/role      id + role -> the roster entry's role (same key; the Gate re-reads the roster on
                                  every request, so it takes effect on that person's next request)
     GET  /admin/people/revoke    ?id= -> the confirmation page (a form; no script, no confirm())
-    POST /admin/people/revoke    id + confirm=yes -> revoked (auth.revoke): that person's sessions end at once
+    POST /admin/people/revoke    id + confirm=yes -> revoked: that person's sessions end at once
     GET  /admin/health           services (tools/services.py status --json, in a subprocess), the GPU computers'
                                  watchers (<registry>/live/live.json), the backup (last commit of the backup clone,
                                  the scheduled task's last result)
-    GET  /admin/audit            the last AUDIT_SHOW audit entries, newest first
+    GET  /admin/audit            Recent actions: the last AUDIT_SHOW audit lines (every module), newest first
     GET  /admin/api/people | /admin/api/health | /admin/api/audit     the same as JSON
     GET  /admin/admin.js         the key page's Copy button (a file: no inline script)
 
@@ -22,12 +22,16 @@ Rules:
     (HMAC with a per-process secret) is checked as well. A portal restart makes open forms stale (reload).
   - Never leave the portal without an admin: demoting or revoking the last active admin is refused (yourself or
     anyone). Demoting or revoking yourself while other admins remain is allowed (you are signed out / sent home).
-  - The roster is the private file auth.py reads (cfg.roster). Adds and revokes go through auth.add_key /
-    auth.revoke; the role change (`set_role`, not in auth.py) uses the same format and atomic write. All three run
-    under one lock in this process; the `python -m portal.auth` tool does not take it.
-  - Audit log: <state dir>/audit/portal.jsonl, append only, one JSON object per line
-    {"t": UTC time, "actor", "action", "target", "detail"}. `audit(ctx, actor, action, target, detail)` is for other
-    modules too. Never put a key, hash or session id in it.
+  - The roster is the private file auth.py reads (cfg.roster), in auth.py's format. Add, role change and revoke
+    are each one read-modify-write inside auth.roster_lock (a thread lock + an OS lock on <roster>.lock, which the
+    `python -m portal.auth` tool takes too), written atomically with os.replace retried briefly; the file's
+    (mtime, size) must change (the Gate's Roster cache keys on it) or it raises. Any OSError (lock or write):
+    "Nothing was changed", no temp file left.
+  - After a change the page shows a one-time message bound to the session (?f=<token>); a bare URL shows none.
+  - The key link points at the first --origin, else the tailnet address (auth.default_base), else the request's
+    Origin reduced to scheme://host[:port].
+  - Audit: portal/audit.py (shared with Jobs), <state dir>/audit/portal.jsonl. `audit(ctx, actor, action, target,
+    detail)` here is a thin wrapper. The Recent actions page shows the last AUDIT_SHOW lines of every module.
   - Health never blocks the event loop (threads), and every source may be missing: "unknown", never an error page.
     Backup clone: env CJ_BACKUP_REPO, else "backup_repo" in <state dir>/admin.json. Task: BACKUP_TASK.
 """
@@ -48,15 +52,17 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import parse_qs, quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
 
+from portal import audit as PA
 from portal import auth as A
 
 PREFIX = "/admin"
@@ -74,19 +80,20 @@ SUBPROC_TIMEOUT_S = 10.0
 HEALTH_TTL_S = 10.0           # one health read serves every request for 10 s
 BACKUP_OLD_S = 36 * 3600      # a daily backup older than this is late
 STALE_FACTOR = 3              # live.json older than 3 x interval_s is stale (as home and Jobs)
-AUDIT_SHOW = 200
-AUDIT_TAIL_BYTES = 2 * 1024 * 1024
+AUDIT_SHOW = PA.SHOW
+REPLACE_TRIES = 20          # os.replace retries, 50 ms apart
+SIG_TRIES = 50              # roster rewrites until its (mtime, size) changes, 20 ms apart
+FLASH_S = 120               # a message for the page after a POST, taken once
 MAX_FORM = 8 * 1024
 ROLE_WORD = {"admin": "Admin", "advanced": "Advanced", "basic": "Basic"}
 ROLE_DESC = {"admin": "everything, including people and health",
              "advanced": "jobs, history, training (when it opens)",
              "basic": "their own uploads, predictions and results"}
-ACTION_WORD = {"person_added": "added", "role_changed": "changed role", "person_revoked": "revoked"}
+ACTION_WORD = {"person_added": "added", "role_changed": "changed the role of", "person_revoked": "revoked",
+               "cancel": "cancel", "release": "release"}
 
 esc = html.escape
 log = logging.getLogger("cj.admin")
-_roster_lock = threading.Lock()
-_audit_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------- small helpers
@@ -165,82 +172,25 @@ def run(argv, timeout=SUBPROC_TIMEOUT_S, env=None) -> tuple:
     return p.returncode, out, None
 
 
-# ---------------------------------------------------------------- audit log
+# ---------------------------------------------------------------- audit log (portal/audit.py, shared)
 def audit_path(cfg) -> Path:
-    return Path(cfg.state_dir) / "audit" / "portal.jsonl"
-
-
-def _clip(x, n=300):
-    if isinstance(x, str):
-        return x[:n]
-    if isinstance(x, dict):
-        return {str(k)[:60]: _clip(v, n) for k, v in list(x.items())[:20]}
-    if isinstance(x, (list, tuple)):
-        return [_clip(v, n) for v in list(x)[:20]]
-    if x is None or isinstance(x, (bool, int, float)):
-        return x
-    return str(x)[:n]
+    return PA.audit_path(cfg.state_dir)
 
 
 def audit(ctx, actor, action, target, detail=None) -> dict:
-    """Append one line to <state dir>/audit/portal.jsonl (append only; one lock per process plus an OS lock for
-    other processes). `ctx` is the module ctx (or anything with .cfg.state_dir, or a Config). Never pass a key,
-    hash or session id. Raises OSError when the line can't be written: the caller decides what to tell the user."""
+    """portal.audit.audit for a module ctx (or anything with .cfg.state_dir, or a Config). Raises OSError."""
     cfg = getattr(ctx, "cfg", ctx)
-    rec = {"t": utc_now(), "actor": _clip(str(actor or "-"), 80), "action": _clip(str(action), 60),
-           "target": _clip(None if target is None else str(target), 120), "detail": _clip(detail)}
-    path = audit_path(cfg)
-    line = json.dumps(rec, ensure_ascii=False) + "\n"
-    with _audit_lock:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        lk = None
-        try:
-            if str(REPO) not in sys.path:
-                sys.path.insert(0, str(REPO))
-            from data_utils.oslock import acquire_lock
-            lk = acquire_lock(path.with_name(path.name + ".lock"), wait=5.0)
-        except ImportError:
-            pass
-        try:
-            with open(path, "a", encoding="utf-8", newline="\n") as f:
-                f.write(line)
-                f.flush()
-        finally:
-            if lk is not None:
-                lk.close()
-    return rec
+    return PA.audit(cfg.state_dir, actor, action, target, detail)
 
 
 def read_audit(cfg, n=AUDIT_SHOW) -> tuple:
-    """-> (last n entries newest first, problem or None). Reads only the file's tail; bad lines are skipped."""
-    path = audit_path(cfg)
-    try:
-        with open(path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            f.seek(max(0, size - AUDIT_TAIL_BYTES))
-            data = f.read()
-    except FileNotFoundError:
-        return [], None
-    except OSError as e:
-        return [], f"audit log not readable ({type(e).__name__})"
-    lines = data.decode("utf-8", "replace").splitlines()
-    if size > AUDIT_TAIL_BYTES and lines:
-        lines = lines[1:]                               # the first line may be cut
-    out = []
-    for ln in reversed(lines):
-        try:
-            rec = json.loads(ln)
-        except ValueError:
-            continue
-        if isinstance(rec, dict):
-            out.append(rec)
-            if len(out) >= n:
-                break
-    return out, None
+    return PA.read_audit(cfg.state_dir, n)
 
 
-# ---------------------------------------------------------------- roster (auth.py's file format)
+# ---------------------------------------------------------------- roster (auth.py's file format and lock)
+roster_lock = A.roster_lock          # module attribute so a test can show the race it prevents
+
+
 def load_roster(path) -> dict:
     """As auth._load: a missing roster is empty; an unreadable one raises ValueError (never overwritten)."""
     try:
@@ -252,6 +202,49 @@ def load_roster(path) -> dict:
     if not isinstance(doc, dict) or not isinstance(doc.get("people"), list):
         raise ValueError("roster has no people list")
     return doc
+
+
+def _os_replace(src, dst):
+    os.replace(src, dst)
+
+
+def _replace(tmp: Path, path: Path) -> None:
+    """os.replace, retried briefly: on Windows a reader holding the roster makes it fail for a moment."""
+    for i in range(REPLACE_TRIES):
+        try:
+            return _os_replace(tmp, path)
+        except PermissionError:
+            if i == REPLACE_TRIES - 1:
+                raise
+            time.sleep(0.05)
+
+
+def write_roster(path, doc: dict) -> None:
+    """Atomic write (temp file + os.replace, retried) that is made sure to change the file's (mtime, size)
+    signature: the Roster cache re-reads on it, and a role change can keep the size (admin <-> basic) inside one
+    clock tick. Raises OSError after its tries; the temp file never stays behind."""
+    path = Path(path)
+    try:
+        st = path.stat()
+        before = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        before = None
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    data = json.dumps(doc, indent=1)
+    try:
+        for _ in range(SIG_TRIES):
+            tmp.write_text(data, encoding="utf-8")
+            _replace(tmp, path)
+            st = path.stat()
+            if (st.st_mtime_ns, st.st_size) != before:
+                return
+            time.sleep(0.02)
+        raise OSError("the roster file did not change on disk")
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def is_admin(p) -> bool:
@@ -280,46 +273,47 @@ class Refused(Exception):
         self.status = status
 
 
-def _write_changed(path: Path, doc: dict) -> None:
-    """auth.write_json_atomic, made sure to change the file's (mtime, size) signature: the Roster cache re-reads
-    on that signature, and a role change can keep the size (admin <-> basic) inside one clock tick."""
-    try:
-        st = path.stat()
-        before = (st.st_mtime_ns, st.st_size)
-    except OSError:
-        before = None
-    for _ in range(50):
-        A.write_json_atomic(path, doc)
-        st = path.stat()
-        if (st.st_mtime_ns, st.st_size) != before:
-            return
-        time.sleep(0.02)
+BAD_ID = "An id is 1 to 40 lower-case letters, digits, '_', '.' or '-', starting with a letter or digit."
+
+
+def _check_id(pid) -> None:
+    if not isinstance(pid, str) or not A.ID_RE.fullmatch(pid):
+        raise Refused(BAD_ID, 400)
 
 
 def _admins_left(doc, pid) -> int:
     return sum(1 for p in doc["people"] if isinstance(p, dict) and is_admin(p) and p.get("id") != pid)
 
 
+def _active(doc, pid) -> list:
+    return [p for p in doc["people"] if isinstance(p, dict) and p.get("id") == pid and not p.get("revoked")]
+
+
 def add_person(path, pid: str, role: str) -> str:
-    """-> the new key (the caller shows it once and forgets it). Refuses an id that is already active."""
-    if not A.ID_RE.fullmatch(pid or ""):
-        raise Refused("An id is 1 to 40 lower-case letters, digits, '_', '.' or '-', starting with a letter or "
-                      "digit.", 400)
+    """-> the new key (the caller shows it once and forgets it). Same entry as auth.add_key; refuses an id that is
+    already active. Raises Refused, ValueError (unreadable roster) or OSError (lock or write: nothing changed)."""
+    _check_id(pid)
     if role not in A.ROLES:
         raise Refused("Pick a role: Admin, Advanced or Basic.", 400)
-    with _roster_lock:
+    with roster_lock(path):
         doc = load_roster(path)
-        if any(isinstance(p, dict) and p.get("id") == pid and not p.get("revoked") for p in doc["people"]):
+        if _active(doc, pid):
             raise Refused(f"{pid} is already on the list. To give them a new key link, revoke them first, then add "
                           "them again.")
-        return A.add_key(Path(path), pid, role)
+        key = secrets.token_urlsafe(A.KEY_BYTES)
+        entry = {"id": pid, "role": role, "key_sha256": A.sha256_hex(key),
+                 "added": datetime.now().isoformat(timespec="seconds")}
+        doc["people"] = [p for p in doc["people"] if not (isinstance(p, dict) and p.get("id") == pid)] + [entry]
+        write_roster(path, doc)
+        return key
 
 
 def set_role(path, pid: str, role: str) -> str:
     """Change an active person's role (same key, sessions kept). -> the old role."""
+    _check_id(pid)
     if role not in A.ROLES:
         raise Refused("Pick a role: Admin, Advanced or Basic.", 400)
-    with _roster_lock:
+    with roster_lock(path):
         doc = load_roster(path)
         hits = [p for p in doc["people"] if isinstance(p, dict) and p.get("id") == pid]
         if not hits:
@@ -334,36 +328,110 @@ def set_role(path, pid: str, role: str) -> str:
             raise Refused(f"{pid} is the last admin. Make someone else an admin first.")
         p["role"] = role
         p["role_changed"] = datetime.now().isoformat(timespec="seconds")
-        _write_changed(Path(path), doc)
+        write_roster(path, doc)
         return old
 
 
 def revoke_person(path, pid: str) -> str:
-    """Revoke an active person (auth.revoke). -> their role. Refuses the last active admin."""
-    with _roster_lock:
+    """Revoke an active person (as auth.revoke). -> their role. Refuses the last active admin."""
+    _check_id(pid)
+    with roster_lock(path):
         doc = load_roster(path)
-        hits = [p for p in doc["people"] if isinstance(p, dict) and p.get("id") == pid and not p.get("revoked")]
+        hits = _active(doc, pid)
         if not hits:
             raise Refused(f"{pid} is not on the list, or already revoked.", 404)
         if any(is_admin(p) for p in hits) and _admins_left(doc, pid) == 0:
             raise Refused(f"{pid} is the last admin. Make someone else an admin first.")
-        if not A.revoke(Path(path), pid):
-            raise Refused(f"{pid} is not on the list, or already revoked.", 404)
+        stamp = datetime.now().isoformat(timespec="seconds")
+        for p in hits:
+            p["revoked"] = stamp
+        write_roster(path, doc)
         return str(hits[-1].get("role"))
 
 
 def revoke_check(path, pid: str) -> str | None:
     """-> why revoking `pid` would be refused, or None."""
+    if not isinstance(pid, str) or not A.ID_RE.fullmatch(pid):
+        return BAD_ID
     try:
         doc = load_roster(path)
     except ValueError as e:
         return str(e)
-    hits = [p for p in doc["people"] if isinstance(p, dict) and p.get("id") == pid and not p.get("revoked")]
+    hits = _active(doc, pid)
     if not hits:
         return f"{pid} is not on the list, or already revoked."
     if any(is_admin(p) for p in hits) and _admins_left(doc, pid) == 0:
         return f"{pid} is the last admin. Make someone else an admin first."
     return None
+
+
+def why_not_written(e: OSError) -> str:
+    if "another process" in str(e):
+        return "Nothing was changed: the roster is being changed elsewhere right now. Try again."
+    return f"Nothing was changed: the roster could not be written ({type(e).__name__}). Try again."
+
+
+# ---------------------------------------------------------------- key link address
+_tailnet: dict = {}
+
+
+def tailnet_base() -> str | None:
+    """auth.default_base() when it finds this PC's tailnet name (https://<name>:8446), else None. Asked once."""
+    if "base" not in _tailnet:
+        try:
+            b = A.default_base()
+        except Exception:
+            b = None
+        _tailnet["base"] = b if b and b.startswith("https://") else None
+    return _tailnet["base"]
+
+
+def link_base(cfg, request_origin) -> str:
+    """Where the key link points: the first configured --origin, else the tailnet address, else the request's
+    Origin (which the Gate checked) reduced to scheme://host[:port]; '' if none (a relative link)."""
+    origins = tuple(getattr(cfg, "origins", ()) or ())
+    if origins and _s(origins[0]):
+        return origins[0].rstrip("/")
+    t = tailnet_base()
+    if t:
+        return t.rstrip("/")
+    try:
+        u = urlsplit(request_origin or "")
+        host, port = u.hostname, u.port
+    except ValueError:
+        return ""
+    if u.scheme not in ("http", "https") or not host:
+        return ""
+    host = f"[{host}]" if ":" in host else host
+    return f"{u.scheme}://{host}" + (f":{port}" if port else "")
+
+
+# ---------------------------------------------------------------- flash messages (only after a real POST)
+_flash: dict = {}
+_flash_lock = threading.Lock()
+
+
+def flash_put(session: str, text: str) -> str:
+    tok = secrets.token_urlsafe(12)
+    now = time.monotonic()
+    with _flash_lock:
+        for k in [k for k, v in _flash.items() if v[2] < now]:
+            del _flash[k]
+        _flash[tok] = (hashlib.sha256(session.encode()).hexdigest(), text, now + FLASH_S)
+    return tok
+
+
+def flash_take(session: str, tok) -> str | None:
+    if not isinstance(tok, str) or not tok:
+        return None
+    with _flash_lock:
+        rec = _flash.get(tok)
+        if not rec or rec[2] < time.monotonic():
+            return None
+        if not hmac.compare_digest(rec[0], hashlib.sha256(session.encode()).hexdigest()):
+            return None
+        del _flash[tok]
+        return rec[1]
 
 
 # ---------------------------------------------------------------- health
@@ -458,7 +526,7 @@ def backup_commit(cfg, now=None) -> dict:
     if not repo.is_dir():
         return {"configured": True, "time": None, "age_s": None, "late": None, "subject": None,
                 "problem": "Unknown: the backup folder is not on this computer."}
-    code, out, prob = run([GIT, "-C", str(repo), "log", "-1", "--format=%cI%x09%s"])
+    code, out, prob = run([GIT, "-c", "core.fsmonitor=", "-C", str(repo), "log", "-1", "--format=%cI%x09%s"])
     if prob or code != 0 or not out.strip():
         why = prob or ("no commits yet" if code == 0 else "not a git folder, or git failed")
         return {"configured": True, "time": None, "age_s": None, "late": None, "subject": None,
@@ -512,14 +580,20 @@ _health_cache: dict = {}
 
 
 def health(cfg) -> dict:
-    """Everything the Health page shows (schema cj_admin_health/1). Blocking: call it off the event loop."""
-    now = time.time()
+    """Everything the Health page shows (schema cj_admin_health/1). Blocking: call it off the event loop.
+    One check at a time: requests that miss the cache while a check runs wait for it and share its answer."""
     key = (str(getattr(cfg, "registry", None)), str(cfg.state_dir))
     with _health_lock:
         hit = _health_cache.get(key)
         if hit and 0 <= time.monotonic() - hit[0] < HEALTH_TTL_S:
             return hit[1]
-    from concurrent.futures import ThreadPoolExecutor
+        out = _check_health(cfg)
+        _health_cache[key] = (time.monotonic(), out)
+        return out
+
+
+def _check_health(cfg) -> dict:
+    now = time.time()
     with ThreadPoolExecutor(3) as ex:                    # the subprocesses run side by side
         fs = ex.submit(services_status)
         fc = ex.submit(backup_commit, cfg, now)
@@ -531,8 +605,6 @@ def health(cfg) -> dict:
                                                "problem": "The status snapshot could not be read."}),
                "backup": {"commit": _safe(fc, {"configured": None, "problem": "Unknown: the check failed."}),
                           "task": _safe(ft, {"found": False, "problem": "The backup task check failed."})}}
-    with _health_lock:
-        _health_cache[key] = (time.monotonic(), out)
     return out
 
 
@@ -559,7 +631,7 @@ def chip(label, tone) -> str:
 
 def subnav(active: str) -> str:
     items = (("people", "People", PREFIX + "/"), ("health", "Health", PREFIX + "/health"),
-             ("audit", "Audit log", PREFIX + "/audit"))
+             ("audit", "Recent actions", PREFIX + "/audit"))
     cur = ' aria-current="page"'
     links = "".join(f'<a href="{href}"{cur if k == active else ""}>{esc(name)}</a>' for k, name, href in items)
     return f'<nav class="cj-admin-sub" aria-label="Admin sections">{links}</nav>'
@@ -768,24 +840,29 @@ def render_audit(entries, problem) -> str:
     else:
         items = []
         for e in entries:
-            e = _d(e)
+            e = PA.normalise(_d(e))
             t = parse_time(_s(e.get("t")))
             act = str(e.get("action") or "?")
             detail = e.get("detail")
+            word = ACTION_WORD.get(act, act.replace("_", " "))
             if isinstance(detail, dict):
-                dtext = ", ".join(f"{k}: {v}" for k, v in detail.items())
+                if detail.get("phase") == "requested":       # write-ahead line of a Jobs action
+                    word = f"asked to {word}"
+                elif detail.get("phase") == "result":
+                    word = f"{word} result for"
+                dtext = ", ".join(f"{k}: {v}" for k, v in detail.items() if v is not None and k != "phase")
             else:
                 dtext = "" if detail is None else str(detail)
             dspan = f' <span class="cj-mut">({esc(dtext)})</span>' if dtext else ""
             items.append(f'<li class="cj-admin-aud"><span class="cj-mut cj-num">'
                          f'{esc(datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S") if t else "?")}</span>'
                          f'<span><b class="cj-wrap">{esc(str(e.get("actor") or "-"))}</b> '
-                         f'{esc(ACTION_WORD.get(act, act.replace("_", " ")))} '
+                         f'{esc(word)} '
                          f'<b class="cj-wrap">{esc(str(e.get("target") or ""))}</b>'
                          f'{dspan}</span></li>')
         body = f'<ol class="cj-card cj-admin-auds">{"".join(items)}</ol>'
-    return (f'<h1>Audit log</h1><p class="cj-mut">The last {AUDIT_SHOW} admin actions, newest first. Times are this '
-            f'computer\'s.</p>{body}')
+    return (f'<h1>Recent actions</h1><p class="cj-mut">The last {AUDIT_SHOW} actions in the portal (people, job '
+            f'cancels and releases), newest first. Times are this computer\'s.</p>{body}')
 
 
 _PH = re.compile(r"\{\{(sub|content)\}\}")
@@ -877,28 +954,37 @@ def routes(ctx) -> list:
             return note(f"The change was made, but the audit log could not be written ({type(e).__name__}).", "warn")
 
     def index(request: Request):                         # sync: Starlette runs it in a worker thread
-        msg = ""
-        done, pid = request.query_params.get("done"), request.query_params.get("id") or ""
-        if A.ID_RE.fullmatch(pid):
-            if done == "role":
-                msg = note(f"Role changed for {pid}. It applies from their next click.")
-            elif done == "revoked":
-                msg = note(f"{pid} is revoked and signed out.")
-        return people_page(request, msg)
+        text = flash_take(request.cookies.get(A.COOKIE) or "", request.query_params.get("f"))
+        return people_page(request, note(text) if text else "")
+
+    def done(request: Request, text: str):
+        """303 to People with a one-time message for this session (a bare URL shows nothing)."""
+        tok = flash_put(request.cookies.get(A.COOKIE) or "", text)
+        return ctx.no_store(RedirectResponse(f"{PREFIX}/?f={quote(tok)}", status_code=303))
+
+    async def change(request: Request, fn, *args):
+        """-> (result, None) or (None, the People page saying why nothing was changed)."""
+        try:
+            return await run_in_threadpool(fn, ctx.cfg.roster, *args), None
+        except Refused as e:
+            msg, status = str(e), e.status
+        except ValueError as e:
+            msg, status = f"Nothing was changed: {e}.", 500
+        except OSError as e:                             # lock not had, or the write failed after its retries
+            log.error("admin: roster not written (%s)", type(e).__name__)
+            msg, status = why_not_written(e), 503
+        return None, await run_in_threadpool(people_page, request, note(msg, "warn"), status)
 
     async def add(request: Request):
         f, err = await form(request)
         if err:
             return err
         pid, role, actor = f.get("id", "").lower(), f.get("role", ""), me(request)
-        try:
-            key = await run_in_threadpool(add_person, ctx.cfg.roster, pid, role)
-        except Refused as e:
-            return await run_in_threadpool(people_page, request, note(str(e), "warn"), e.status)
-        except ValueError as e:
-            return await run_in_threadpool(people_page, request, note(f"Nothing was changed: {e}.", "warn"), 500)
+        key, err = await change(request, add_person, pid, role)
+        if err:
+            return err
         warn = await run_in_threadpool(try_audit, actor, "person_added", pid, {"role": role})
-        base = request.headers.get("origin") or ""       # the Gate checked it is this portal's own origin
+        base = await run_in_threadpool(link_base, ctx.cfg, request.headers.get("origin"))
         link = f"{base}/login?k={key}"
         del key
         r = show(request, f"Key link for {pid}", "people", warn + render_key(pid, role, link))
@@ -911,18 +997,15 @@ def routes(ctx) -> list:
         if err:
             return err
         pid, new, actor = f.get("id", ""), f.get("role", ""), me(request)
-        try:
-            old = await run_in_threadpool(set_role, ctx.cfg.roster, pid, new)
-        except Refused as e:
-            return await run_in_threadpool(people_page, request, note(str(e), "warn"), e.status)
-        except ValueError as e:
-            return await run_in_threadpool(people_page, request, note(f"Nothing was changed: {e}.", "warn"), 500)
+        old, err = await change(request, set_role, pid, new)
+        if err:
+            return err
         warn = await run_in_threadpool(try_audit, actor, "role_changed", pid, {"from": old, "to": new})
         if warn:
             return await run_in_threadpool(people_page, request, warn)
         if pid == actor and new != "admin":              # no longer an admin: /admin/ would answer 403
             return ctx.no_store(RedirectResponse("/", status_code=303))
-        return ctx.no_store(RedirectResponse(f"{PREFIX}/?done=role&id={quote(pid)}", status_code=303))
+        return done(request, f"{pid} is now {ROLE_WORD[new]}. It applies from their next click.")
 
     def revoke_page(request: Request):
         pid = request.query_params.get("id") or ""
@@ -940,18 +1023,15 @@ def routes(ctx) -> list:
         if f.get("confirm") != "yes":
             why = await run_in_threadpool(revoke_check, ctx.cfg.roster, pid)
             return show(request, f"Revoke {pid}", "people", render_revoke(pid, actor, why, token(request)))
-        try:
-            old = await run_in_threadpool(revoke_person, ctx.cfg.roster, pid)
-        except Refused as e:
-            return await run_in_threadpool(people_page, request, note(str(e), "warn"), e.status)
-        except ValueError as e:
-            return await run_in_threadpool(people_page, request, note(f"Nothing was changed: {e}.", "warn"), 500)
+        old, err = await change(request, revoke_person, pid)
+        if err:
+            return err
         warn = await run_in_threadpool(try_audit, actor, "person_revoked", pid, {"role": old})
         if warn:
             return await run_in_threadpool(people_page, request, warn)
         if pid == actor:
             return ctx.no_store(RedirectResponse("/", status_code=303))
-        return ctx.no_store(RedirectResponse(f"{PREFIX}/?done=revoked&id={quote(pid)}", status_code=303))
+        return done(request, f"{pid} is revoked and signed out.")
 
     async def health_page(request: Request):
         h = await asyncio.to_thread(health, ctx.cfg)
@@ -962,7 +1042,7 @@ def routes(ctx) -> list:
 
     def audit_page(request: Request):
         entries, prob = read_audit(ctx.cfg)
-        return show(request, "Audit log", "audit", render_audit(entries, prob))
+        return show(request, "Recent actions", "audit", render_audit(entries, prob))
 
     def api_audit(request: Request):
         entries, prob = read_audit(ctx.cfg)

@@ -901,7 +901,7 @@ class Actions(ActionBase):
         st, out, _ = self.post("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "x"})
         self.assertEqual(st, 502)
         self.assertFalse(self.cancel_file("job_20261105_admin_q").exists())
-        self.assertEqual(self.audit_lines()[-1]["result"], "error: SyncError")
+        self.assertEqual(self.audit_lines()[-1]["detail"]["result"], "error: SyncError")
 
     def test_audit_lines(self):
         self.post("/jobs/api/cancel", {"job": "job_20261105_adv_q", "reason": "because"}, "advanced")
@@ -909,14 +909,16 @@ class Actions(ActionBase):
         self.post("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "x"}, "adv2")   # refused: no line
         lines = self.audit_lines()
         self.assertEqual(len(lines), 4)                       # write-ahead: "requested", then the outcome
-        self.assertEqual([(x["actor"], x["action"], x["job"], x["reason"], x["result"]) for x in lines],
+        self.assertEqual([(x["actor"], x["action"], x["target"], x["detail"]["reason"], x["detail"]["result"])
+                          for x in lines],
                          [("adv", "cancel", "job_20261105_adv_q", "because", "requested"),
                           ("adv", "cancel", "job_20261105_adv_q", "because", "ok"),
                           ("tester", "release", "job_20261105_hold", None, "requested"),
                           ("tester", "release", "job_20261105_hold", None, "ok")])
         for x in lines:
-            self.assertTrue({"time", "actor", "action", "job", "reason", "result"} <= set(x))
-            self.assertRegex(x["time"], r"^\d{4}-\d\d-\d\dT")
+            self.assertEqual(set(x), {"t", "actor", "action", "target", "detail"})      # portal/audit.py schema
+            self.assertEqual(x["detail"]["phase"], "requested" if x["detail"]["result"] == "requested" else "result")
+            self.assertRegex(x["t"], r"^\d{4}-\d\d-\d\dT")
         text = self.audit_file.read_text(encoding="utf-8")
         for secret in (self.env.key, self.adv_key, self.tok["admin"], self.tok["advanced"]):
             self.assertNotIn(secret, text)
@@ -989,7 +991,7 @@ class Actions(ActionBase):
         self.assertEqual({(st, o["message"]) for st, o in others},
                          {(409, "A cancel was already requested for this job.")})
         lines = self.audit_lines()
-        self.assertEqual([x["result"] for x in lines], ["requested", "ok"])      # no line for the refused seven
+        self.assertEqual([x["detail"]["result"] for x in lines], ["requested", "ok"])      # no line for the refused seven
 
     def test_busy_pool_says_try_again(self):
         held = [J._slots.acquire(blocking=False) for _ in range(J.POOL_SIZE)]

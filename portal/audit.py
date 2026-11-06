@@ -1,0 +1,112 @@
+"""
+The portal's one audit log: <state dir>/audit/portal.jsonl (outside the registry), append only, one JSON object per
+line:
+    {"t": UTC ISO time, "actor": portal id, "action": "person_added" | "cancel" | ..., "target": what it acted on,
+     "detail": {...} or null}
+Every writer (Admin's people actions, Jobs' cancel / release, later modules) goes through `audit()`: a thread lock
+for this process plus an OS file lock (<file>.lock, data_utils/oslock.py) for other processes, so lines from
+concurrent writers never interleave. A lock that can't be had in LOCK_WAIT_S raises OSError: never an unlocked
+append. Never put a key, hash or session id in a line.
+
+`read_audit()` returns the newest lines first, normalised to that schema; lines written before it (Jobs' first
+format {time, actor, action, job, reason, result}) are read too: `time` -> t, `job` -> target, reason / result ->
+detail.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from data_utils.oslock import acquire_lock  # noqa: E402
+
+LOCK_WAIT_S = 5.0
+SHOW = 200
+TAIL_BYTES = 2 * 1024 * 1024
+_lock = threading.Lock()
+
+
+def audit_path(state_dir) -> Path:
+    return Path(state_dir) / "audit" / "portal.jsonl"
+
+
+def _clip(x, n=300):
+    if isinstance(x, str):
+        return x[:n]
+    if isinstance(x, dict):
+        return {str(k)[:60]: _clip(v, n) for k, v in list(x.items())[:20]}
+    if isinstance(x, (list, tuple)):
+        return [_clip(v, n) for v in list(x)[:20]]
+    if x is None or isinstance(x, (bool, int, float)):
+        return x
+    return str(x)[:n]
+
+
+def audit(state_dir, actor, action, target, detail=None) -> dict:
+    """Append one line. -> the record written. Raises OSError when it can't be written (folder, file or lock):
+    the caller decides; a write-ahead caller does nothing then."""
+    rec = {"t": datetime.now(timezone.utc).isoformat(timespec="seconds"), "actor": _clip(str(actor or "-"), 80),
+           "action": _clip(str(action), 60), "target": None if target is None else _clip(str(target), 120),
+           "detail": _clip(detail)}
+    line = json.dumps(rec, ensure_ascii=False) + "\n"
+    path = audit_path(state_dir)
+    with _lock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lk = acquire_lock(path.with_name(path.name + ".lock"), wait=LOCK_WAIT_S)
+        if lk is None:
+            raise OSError("the audit log is locked by another process")
+        try:
+            with open(path, "a", encoding="utf-8", newline="\n") as f:
+                f.write(line)
+                f.flush()
+        finally:
+            lk.close()
+    return rec
+
+
+def normalise(rec: dict) -> dict:
+    """Any line -> {t, actor, action, target, detail} (the old Jobs format included)."""
+    if "t" in rec and "target" in rec:
+        return {k: rec.get(k) for k in ("t", "actor", "action", "target", "detail")}
+    detail = rec.get("detail")
+    if detail is None and ("reason" in rec or "result" in rec):
+        detail = {k: rec.get(k) for k in ("reason", "result") if rec.get(k) is not None}
+    return {"t": rec.get("t") or rec.get("time"), "actor": rec.get("actor"), "action": rec.get("action"),
+            "target": rec.get("target") if rec.get("target") is not None else rec.get("job"), "detail": detail}
+
+
+def read_audit(state_dir, n=SHOW) -> tuple:
+    """-> (the last n entries, newest first, normalised; problem or None). Reads the file's tail only; lines that
+    are not JSON objects are skipped."""
+    path = audit_path(state_dir)
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - TAIL_BYTES))
+            data = f.read()
+    except FileNotFoundError:
+        return [], None
+    except OSError as e:
+        return [], f"The log can't be read ({type(e).__name__})."
+    lines = data.decode("utf-8", "replace").splitlines()
+    if size > TAIL_BYTES and lines:
+        lines = lines[1:]                               # the first line may be cut
+    out = []
+    for ln in reversed(lines):
+        try:
+            rec = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            out.append(normalise(rec))
+            if len(out) >= n:
+                break
+    return out, None
