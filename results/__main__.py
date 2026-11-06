@@ -24,7 +24,7 @@ def main(argv=None) -> int:
 
     res = compute(args.ps, args.reviewed)
     print(describe(res["model"]))
-    print(f"rule: conf >= {CONF} (unreviewed images), EV classes {res['rule']['ev_classes']} before layer roles, "
+    print(f"rule: conf >= {CONF} (images neither edited nor reviewed), EV classes {res['rule']['ev_classes']} before layer roles, "
           f"inner layers excluded, multilayer = {MULTILAYER_RULE}")
     n_rev = sum(i["reviewed"] for i in res["images"].values())
     print(f"input: {'reviewed polygons ' + str(args.reviewed) if args.reviewed else 'model predictions'}; "

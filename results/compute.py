@@ -2,28 +2,47 @@
 
     from results import compute, write_results
     res = compute(ps_dir)                       # model predictions at conf >= 0.5
-    res = compute(ps_dir, "reviewed.json")      # reviewed polygons (contract section 3); a dict also works
+    res = compute(ps_dir, "reviewed.json")      # with reviewed images (contract section 3); a dict also works
     write_results(res, ps_dir / "results")      # results.json + per_image.csv + per_sample.csv
+
+compute() reads and rasterizes every outline, so a big set takes minutes: callers run it in a background
+job or thread (or `python -m results`), and pages read the cached <ps>/results/results.json.
 
 The rule is the existing counting chain (size_profile_from_predictions -> add_layer_roles ->
 summarize_detections), called, not re-implemented:
-  * EV class    inference.model_classes.ev_class_ids (class 0 for a multi-class model; every class for a
-                single-class one), applied BEFORE layer roles, so an EV inside a non-EV outline stays an EV;
+  * EV class    inference.model_classes.ev_class_ids on each outline's `cls` (class 0 for a multi-class
+                model; every class for a single-class one), applied BEFORE layer roles, so an EV inside a
+                non-EV outline stays an EV;
   * outlines    model predictions: training.train_yolo.load_predictions_yolo_format at conf >= 0.5;
                 reviewed polygons: analysis.multilayer_containment.polygon_to_mask (same int truncation);
   * roles       analysis.add_layer_roles.roles_for (containment 0.99, size ratio 0.75): 'inner-layer'
                 outlines are not EVs, a 'multilayer' outline is one multilayer EV;
-  * diameter    analysis.morphology.analyze_instances equivalent_diameter (area-equivalent, nm via the
-                image's nm_per_px); an outline that rasterizes to nothing is dropped, as in the chain;
+  * diameter    area-equivalent, sqrt(4 * mask pixels / pi) * nm_per_px: analysis.morphology's
+                equivalent_diameter formula, without the contour / hull / ellipse work it also does.
+                An outline analyze_instances would drop (no pixels, or a zero-length contour) is dropped;
+                the test suite checks the diameters equal analyze_instances' on golden and real sessions;
   * non-EV      accepted outlines of the other classes, counted separately (as summarize_detections n_nonev).
 
-Reviewed images (reviewed.json `reviewed: true`): every object listed is accepted (a reviewer may keep a
-0.25-0.50 candidate or draw a new outline). A set `reviewer_class` wins over `cls`: EV / MV / inner -> EV
-class, nonEV -> non-EV. pct_multilayer_reviewer = share of the EVs on reviewed images that the reviewer
-classed MV; null when the sample has no reviewed image. Unreviewed images keep conf >= 0.5.
+reviewed.json images with `edited: true` or `reviewed: true` (a missing `edited` key counts as equal to
+`reviewed`): the objects listed are the outlines (a reviewer may delete, redraw, keep a 0.25-0.50 candidate
+or add one), so deletions and redraws move the geometry numbers. Only `reviewed: true` images count toward
+n_reviewed / reviewed_images and the reviewer columns; an edited-but-not-reviewed image (e.g. the phone card
+flow) moves the geometry numbers only. `reviewer_label` (raw) is not read; `reviewer_class` is.
+`reviewer_class` labels NEVER move the geometry headline; they feed only the reviewer columns:
+reviewer_ev (EV + MV calls), reviewer_mv, reviewer_inner, pct_multilayer_reviewer = reviewer_mv / reviewer_ev,
+and reviewer_geometry_disagree (EV/MV/inner calls whose geometry role is not standalone / multilayer /
+inner-layer respectively; a call on a non-EV-class outline always disagrees; nonEV calls are not compared).
+Images neither edited nor reviewed always come from the prediction .txt at conf >= 0.5, never from
+reviewed.json, so editing one image cannot shift another.
+
+Nullable fields: per sample diam_nm_median / diam_nm_q1 / diam_nm_q3 and pct_multilayer_geometry are null
+when the sample has no EV; pct_multilayer_reviewer is null with no reviewed image or no reviewer EV/MV call;
+per image nm_per_px is null when images.csv has no confirmed nm/px (that sample is then refused); `refused`
+is null unless something was refused.
 
 A sample whose images differ in tile size or nm/px, or lack a confirmed nm/px, is refused (left out of
-`samples`, reason in `refused`), never mixed or defaulted.
+`samples`, reason in `refused`), never mixed or defaulted. A set whose status.json is missing or not "done"
+is refused whole.
 """
 
 from __future__ import annotations
@@ -33,6 +52,7 @@ import io
 import json
 import math
 import os
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -47,41 +67,52 @@ from inference.model_classes import ev_class_ids, model_classes
 SCHEMA = "results/1"
 CONF = 0.5
 MULTILAYER_RULE = "geometry: outline containing another outline"
-REVIEWER_EV = {"EV", "MV", "inner"}
-REVIEWER_NONEV = {"nonEV"}
+REVIEWER_CLASSES = {"EV", "MV", "inner", "nonEV"}
+REVIEWER_ROLE = {"EV": "standalone", "MV": "multilayer", "inner": "inner-layer"}   # agreeing geometry role
 SAMPLE_FIELDS = ["n_images", "n_reviewed", "ev_total", "ev_per_image_mean", "diam_nm_median", "diam_nm_q1",
-                 "diam_nm_q3", "pct_multilayer_geometry", "pct_multilayer_reviewer", "inner_layers_excluded",
-                 "nonev_total"]
+                 "diam_nm_q3", "pct_multilayer_geometry", "inner_layers_excluded", "nonev_total",
+                 "reviewed_images", "ev_reviewed_geometry", "reviewer_ev", "reviewer_mv", "reviewer_inner",
+                 "pct_multilayer_reviewer", "reviewer_geometry_disagree"]
 IMAGE_FIELDS = ["sample_label", "reviewed", "nm_per_px", "ev", "multilayer", "inner", "nonev"]
 IMAGES_CSV_COLUMNS = {"image", "file", "sample_label", "nm_per_px", "nm_confirmed_by"}
+_TINY = 16   # below this many pixels, ask analysis.morphology whether the chain would keep the outline
 
 
-# ---- the existing chain, imported in one place ------------------------------------------------------------
+# ---- the existing chain, imported once ---------------------------------------------------------------------
+
+_CHAIN = None
+_CHAIN_LOCK = threading.Lock()
+
 
 def _chain():
-    """(load_predictions_yolo_format, polygon_to_mask, roles_for, analyze_instances) from the counting chain.
+    """(load_predictions_yolo_format, polygon_to_mask, roles_for, compute_morphology) from the counting chain,
+    imported once per process under a lock.
 
     analysis.add_layer_roles takes its validated containment pair (0.99 / 0.75) from analysis.layer_count_stats,
     whose module body resolves the CryoAI training folder for its own CLI defaults and raises ConfigError on a
     host without one. Counting never reads that folder, so on that error the import is retried with
-    $CRYOEV_CRYOAI_ROOT pointed at the repo for the duration of the import only (the thresholds stay the
-    chain's own, not a copy)."""
-    from training.train_yolo import load_predictions_yolo_format
-    from analysis.multilayer_containment import polygon_to_mask
-    from analysis.morphology import analyze_instances
-    try:
-        from analysis.add_layer_roles import roles_for
-    except config.ConfigError:
-        old = os.environ.get("CRYOEV_CRYOAI_ROOT")
-        os.environ["CRYOEV_CRYOAI_ROOT"] = str(config.REPO)
-        try:
-            from analysis.add_layer_roles import roles_for
-        finally:
-            if old is None:
-                os.environ.pop("CRYOEV_CRYOAI_ROOT", None)
-            else:
-                os.environ["CRYOEV_CRYOAI_ROOT"] = old
-    return load_predictions_yolo_format, polygon_to_mask, roles_for, analyze_instances
+    $CRYOEV_CRYOAI_ROOT pointed at the repo, inside the lock and restored before the lock is released; it
+    happens at most once per process (the result is cached). The thresholds stay the chain's own."""
+    global _CHAIN
+    with _CHAIN_LOCK:
+        if _CHAIN is None:
+            from training.train_yolo import load_predictions_yolo_format
+            from analysis.multilayer_containment import polygon_to_mask
+            from analysis.morphology import compute_morphology
+            try:
+                from analysis.add_layer_roles import roles_for
+            except config.ConfigError:
+                old = os.environ.get("CRYOEV_CRYOAI_ROOT")
+                os.environ["CRYOEV_CRYOAI_ROOT"] = str(config.REPO)
+                try:
+                    from analysis.add_layer_roles import roles_for
+                finally:
+                    if old is None:
+                        os.environ.pop("CRYOEV_CRYOAI_ROOT", None)
+                    else:
+                        os.environ["CRYOEV_CRYOAI_ROOT"] = old
+            _CHAIN = (load_predictions_yolo_format, polygon_to_mask, roles_for, compute_morphology)
+        return _CHAIN
 
 
 # ---- inputs -----------------------------------------------------------------------------------------------
@@ -89,7 +120,6 @@ def _chain():
 @dataclass
 class _Obj:
     mask: np.ndarray
-    conf: float | None
     cls: int
     reviewer_class: str | None = None
 
@@ -110,7 +140,8 @@ def _read_images_csv(ps_dir: Path) -> list[dict]:
         if r["image"] in seen:
             raise ValueError(f"{path}: image {r['image']} listed twice")
         seen.add(r["image"])
-        if not (r["sample_label"] or "").strip():
+        r["sample_label"] = (r["sample_label"] or "").strip()
+        if not r["sample_label"]:
             raise ValueError(f"{path}: image {r['image']} has no sample_label")
     return sorted(rows, key=lambda r: r["image"])
 
@@ -134,56 +165,60 @@ def _image_size(ps_dir: Path, rel: str) -> tuple[int, int]:
         return im.size
 
 
-def _is_ev(o: _Obj, ev_ids: set[int] | None) -> bool:
-    if o.reviewer_class is not None:
-        if o.reviewer_class in REVIEWER_EV:
-            return True
-        if o.reviewer_class in REVIEWER_NONEV:
-            return False
-        raise ValueError(f"unknown reviewer_class {o.reviewer_class!r}")
-    return ev_ids is None or o.cls in ev_ids
-
-
 def _objects_from_predictions(pred_dir: Path, image: str, w: int, h: int, load) -> list[_Obj]:
     masks, confs, classes = load(prediction_file(pred_dir, image, image), w, h)   # missing file = error
-    return [_Obj(m, c, k) for m, c, k in zip(masks, confs, classes) if c >= CONF]
+    return [_Obj(m, k) for m, c, k in zip(masks, confs, classes) if c >= CONF]
 
 
 def _objects_from_reviewed(entry: dict, image: str, w: int, h: int, to_mask) -> list[_Obj]:
+    """A reviewed or edited image's outlines: every object listed (no conf floor; human outlines have conf
+    null)."""
     out = []
     for n, o in enumerate(entry.get("objects") or []):
         poly = o.get("poly") or []
         if len(poly) < 3:
             raise ValueError(f"reviewed image {image} object {n}: polygon has {len(poly)} point(s)")
-        conf = o.get("conf")
-        if not entry.get("reviewed") and conf is not None and conf < CONF:
-            continue   # unreviewed image: model predictions at conf >= 0.5 only (contract section 3)
-        mask = to_mask([float(c) for xy in poly for c in xy], w, h)
-        out.append(_Obj(mask, conf, int(o["cls"]), o.get("reviewer_class")))
+        rc = o.get("reviewer_class")
+        if rc is not None and rc not in REVIEWER_CLASSES:
+            raise ValueError(f"reviewed image {image} object {n}: unknown reviewer_class {rc!r}")
+        out.append(_Obj(to_mask([float(c) for xy in poly for c in xy], w, h), int(o["cls"]), rc))
     return out
 
 
 # ---- per image --------------------------------------------------------------------------------------------
 
-def _measure(objs: list[_Obj], nm_per_px: float | None, ev_ids, roles_for, analyze_instances) -> dict:
-    """Counts for one image's accepted outlines, plus the EV diameters (nm) and reviewer-MV count."""
-    ev_objs = [o for o in objs if _is_ev(o, ev_ids)]
-    masks = [o.mask for o in ev_objs]
-    role, _ = roles_for(masks)
-    recs = analyze_instances(masks, pixel_size=nm_per_px)   # drops an outline that rasterizes to nothing
-    ev = ml = inner = mv = 0
+def _diameter(mask: np.ndarray, nm_per_px: float | None, compute_morphology) -> float | None:
+    """analysis.morphology's equivalent_diameter for this mask, or None where analyze_instances drops it."""
+    area_px = float(mask.sum())
+    if area_px == 0 or (area_px < _TINY and compute_morphology(mask) is None):
+        return None
+    return float(np.sqrt(4 * area_px / np.pi) * (nm_per_px if nm_per_px is not None else 1.0))
+
+
+def _measure(objs: list[_Obj], nm_per_px: float | None, ev_ids, roles_for, compute_morphology) -> dict:
+    """Geometry counts for one image's accepted outlines (classes from `cls` only), the EV diameters (nm),
+    and the reviewer-label tallies (zero unless some object carries a reviewer_class)."""
+    ev_idx = [k for k, o in enumerate(objs) if ev_ids is None or o.cls in ev_ids]
+    role, _ = roles_for([objs[k].mask for k in ev_idx])
+    geo_role = {k: role[j] for j, k in enumerate(ev_idx)}
+    ev = ml = inner = 0
     diam = []
-    for r in recs:
-        i = r["object_id"]
-        if role[i] == "inner-layer":
+    for k in ev_idx:
+        d = _diameter(objs[k].mask, nm_per_px, compute_morphology)
+        if d is None:
+            continue
+        if geo_role[k] == "inner-layer":
             inner += 1
             continue
         ev += 1
-        diam.append(float(r["equivalent_diameter"]))
-        ml += role[i] == "multilayer"
-        mv += ev_objs[i].reviewer_class == "MV"
-    return {"ev": ev, "multilayer": ml, "inner": inner, "nonev": len(objs) - len(ev_objs),
-            "_diam": diam, "_mv": mv}
+        diam.append(d)
+        ml += geo_role[k] == "multilayer"
+    calls = [(o.reviewer_class, geo_role.get(k)) for k, o in enumerate(objs) if o.reviewer_class is not None]
+    return {"ev": ev, "multilayer": ml, "inner": inner, "nonev": len(objs) - len(ev_idx), "_diam": diam,
+            "_rev_ev": sum(rc in ("EV", "MV") for rc, _ in calls),
+            "_rev_mv": sum(rc == "MV" for rc, _ in calls),
+            "_rev_inner": sum(rc == "inner" for rc, _ in calls),
+            "_disagree": sum(rc in REVIEWER_ROLE and g != REVIEWER_ROLE[rc] for rc, g in calls)}
 
 
 # ---- per sample -------------------------------------------------------------------------------------------
@@ -198,7 +233,7 @@ def _sample(imgs: list[dict]) -> dict:
     d = np.array([x for i in imgs for x in i["_diam"]], dtype=float)
     q1, med, q3 = (np.percentile(d, [25, 50, 75]) if len(d) else (None, None, None))
     rev = [i for i in imgs if i["reviewed"]]
-    ev_rev = sum(i["ev"] for i in rev)
+    rev_ev, rev_mv = sum(i["_rev_ev"] for i in rev), sum(i["_rev_mv"] for i in rev)
     return {
         "n_images": len(imgs),
         "n_reviewed": len(rev),
@@ -208,9 +243,15 @@ def _sample(imgs: list[dict]) -> dict:
         "diam_nm_q1": _r(q1),
         "diam_nm_q3": _r(q3),
         "pct_multilayer_geometry": _r(100.0 * ml / ev_total) if ev_total else None,
-        "pct_multilayer_reviewer": _r(100.0 * sum(i["_mv"] for i in rev) / ev_rev) if ev_rev else None,
         "inner_layers_excluded": sum(i["inner"] for i in imgs),
         "nonev_total": sum(i["nonev"] for i in imgs),
+        "reviewed_images": len(rev),
+        "ev_reviewed_geometry": sum(i["ev"] for i in rev),
+        "reviewer_ev": rev_ev,
+        "reviewer_mv": rev_mv,
+        "reviewer_inner": sum(i["_rev_inner"] for i in rev),
+        "pct_multilayer_reviewer": _r(100.0 * rev_mv / rev_ev) if rev_ev else None,
+        "reviewer_geometry_disagree": sum(i["_disagree"] for i in rev),
     }
 
 
@@ -236,7 +277,8 @@ def _refusal(label: str, imgs: list[dict]) -> str | None:
 
 def compute(ps_dir, reviewed_json=None) -> dict:
     """results/1 dict for the prediction_set folder `ps_dir` (contract section 4). `reviewed_json`: None (model
-    predictions at conf >= 0.5), a path to reviewed.json, or the dict reviewed_polygons() returns."""
+    predictions at conf >= 0.5), a path to reviewed.json, or the dict reviewed_polygons() returns. Slow on big
+    sets: call it from a background job or thread."""
     ps_dir = Path(ps_dir)
     request = _read_json(ps_dir / "request.json")
     ps_id, model = request["ps"], request["model"]
@@ -257,12 +299,12 @@ def compute(ps_dir, reviewed_json=None) -> dict:
               "samples": {}, "images": {}, "refused": None}
 
     status_path = ps_dir / "status.json"
-    if status_path.is_file():
-        status = _read_json(status_path)
-        if status.get("state") != "done":
-            result["refused"] = (f"prediction set is {status.get('state')!r} "
-                                 f"({status.get('n_done')}/{status.get('n_total')} images); count when done")
-            return result
+    status = _read_json(status_path) if status_path.is_file() else None
+    if status is None or status.get("state") != "done":
+        result["refused"] = ("set not finished: no status.json" if status is None else
+                             f"set not finished: status {status.get('state')!r} "
+                             f"({status.get('n_done')}/{status.get('n_total')} images); count when done")
+        return result
 
     rows = _read_images_csv(ps_dir)
     if reviewed is not None:
@@ -271,22 +313,21 @@ def compute(ps_dir, reviewed_json=None) -> dict:
             raise ValueError(f"reviewed json images differ from images.csv: missing {sorted(listed - have)}, "
                              f"extra {sorted(have - listed)}")
 
-    load, to_mask, roles_for, analyze_instances = _chain()
+    load, to_mask, roles_for, compute_morphology = _chain()
     pred_dir = ps_dir / "p" / model / "predictions"
     per_image = {}
     for r in rows:
         image = r["image"]
         w, h = _image_size(ps_dir, r["file"])
         nm = _nm_per_px(r)
-        if reviewed is None:
-            is_rev, objs = False, _objects_from_predictions(pred_dir, image, w, h, load)
-        else:
-            entry = reviewed["images"][image]
-            is_rev, objs = bool(entry.get("reviewed")), _objects_from_reviewed(entry, image, w, h, to_mask)
-        m = _measure(objs, nm, ev_ids, roles_for, analyze_instances)
+        entry = reviewed["images"][image] if reviewed is not None else None
+        is_rev = bool(entry and entry.get("reviewed"))
+        is_edited = bool(entry and entry.get("edited", entry.get("reviewed")))   # no key: same as reviewed
+        objs = (_objects_from_reviewed(entry, image, w, h, to_mask) if (is_rev or is_edited)
+                else _objects_from_predictions(pred_dir, image, w, h, load))
+        m = _measure(objs, nm, ev_ids, roles_for, compute_morphology)
         per_image[image] = {"sample_label": r["sample_label"], "reviewed": is_rev, "nm_per_px": nm,
-                            **{k: m[k] for k in ("ev", "multilayer", "inner", "nonev")},
-                            "_diam": m["_diam"], "_mv": m["_mv"], "_size": (w, h), "_image": image}
+                            **m, "_size": (w, h), "_image": image}
 
     by_sample = {}
     for img in per_image.values():
@@ -309,11 +350,19 @@ def _atomic_write(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def _cell(v):
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    return v
+
+
 def _csv_text(header: list[str], rows: list[list]) -> str:
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
     w.writerow(header)
-    w.writerows([["" if v is None else v for v in row] for row in rows])
+    w.writerows([[_cell(v) for v in row] for row in rows])
     return buf.getvalue()
 
 
@@ -330,6 +379,6 @@ def write_results(result: dict, out_dir) -> Path:
 
 
 def compute_and_write(ps_dir, reviewed_json=None, out_dir=None) -> tuple[dict, Path]:
-    """compute() then write_results() to `out_dir` (default <ps_dir>/results)."""
+    """compute() then write_results() to `out_dir` (default <ps_dir>/results). Run it off the request path."""
     res = compute(ps_dir, reviewed_json)
     return res, write_results(res, out_dir or Path(ps_dir) / "results")

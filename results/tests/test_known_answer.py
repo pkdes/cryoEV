@@ -25,8 +25,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from data_utils import config  # noqa: E402
 from results import compute  # noqa: E402
+from test_compute import diameter_pairs  # noqa: E402
 
 SESSIONS = [s.strip() for s in os.environ.get("RESULTS_KNOWN_ANSWER", "20260827-2").split(",") if s.strip()]
 COUNTS = "5. Model + labeling"
@@ -79,26 +82,37 @@ class KnownAnswer(unittest.TestCase):
             self.skipTest("processing datasets folder not found (set CRYOEV_PROCESSING_ROOT)")
         for session in SESSIONS:
             session_dir = root / session
-            if not (session_dir / COUNTS / "figures" / "detections_summary.csv").is_file():
-                self.skipTest(f"{session}: no delivered detections_summary.csv")
-            with self.subTest(session=session), tempfile.TemporaryDirectory() as tmp:
-                ps, delivered = build_view(session_dir, Path(tmp))
-                res = compute(ps)
-                self.assertIsNone(res["refused"])
-                print(f"\n{session} ({res['model']}): delivered summarize_detections / results.compute")
-                print("  grid    " + "  ".join(f"{c[0]:>17}" for c in COMPARE))
-                bad = []
-                for row in delivered:
-                    s = res["samples"][f"grid{row['grid']}"]
-                    cells = []
-                    for label, col, field, fmt in COMPARE:
-                        mine = "" if s[field] is None else fmt % s[field]
-                        cells.append(f"{row[col]:>8}/{mine:<8}" + ("" if mine == row[col] else "!"))
-                        if mine != row[col]:
-                            bad.append((row["grid"], label, row[col], mine))
-                    print(f"  {row['grid']:<6}  " + "  ".join(f"{c:>17}" for c in cells))
-                self.assertEqual(set(res["samples"]), {f"grid{r['grid']}" for r in delivered})
-                self.assertEqual(bad, [], "differs from the delivered detections_summary.csv")
+            with self.subTest(session=session):
+                if not (session_dir / COUNTS / "figures" / "detections_summary.csv").is_file():
+                    self.skipTest(f"{session}: no delivered detections_summary.csv")   # this session only
+                self._session(session_dir)
+
+    def _session(self, session_dir):
+        session = session_dir.name
+        with tempfile.TemporaryDirectory() as tmp:
+            ps, delivered = build_view(session_dir, Path(tmp))
+            n_obj = 0
+            for image, theirs, mine in diameter_pairs(ps):   # results' diameter == analyze_instances'
+                self.assertEqual(mine, theirs, image)
+                n_obj += len(mine)
+            print(f"\n{session}: diameters of {n_obj} EV-class outlines identical to "
+                  f"analysis.morphology.analyze_instances")
+            res = compute(ps)
+            self.assertIsNone(res["refused"])
+            print(f"\n{session} ({res['model']}): delivered summarize_detections / results.compute")
+            print("  grid    " + "  ".join(f"{c[0]:>17}" for c in COMPARE))
+            bad = []
+            for row in delivered:
+                s = res["samples"][f"grid{row['grid']}"]
+                cells = []
+                for label, col, field, fmt in COMPARE:
+                    mine = "" if s[field] is None else fmt % s[field]
+                    cells.append(f"{row[col]:>8}/{mine:<8}" + ("" if mine == row[col] else "!"))
+                    if mine != row[col]:
+                        bad.append((row["grid"], label, row[col], mine))
+                print(f"  {row['grid']:<6}  " + "  ".join(f"{c:>17}" for c in cells))
+            self.assertEqual(set(res["samples"]), {f"grid{r['grid']}" for r in delivered})
+            self.assertEqual(bad, [], "differs from the delivered detections_summary.csv")
 
 
 if __name__ == "__main__":

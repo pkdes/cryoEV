@@ -3,10 +3,11 @@
     python -m unittest discover -s results/tests        (from the repo root)
 
 The fixtures and their hand-derived expectations are tests/fixtures/cj_golden (make_golden.py explains the
-scene); they are read, never written: every test that changes an input works on a temp copy.
+scene); they are read, never written: every test that changes an input works on a temp copy. The reviewer
+columns added after QC (contract section 4 amendment) are not in the fixture files; their expected values
+are derived by hand below (REVIEWER_*).
 """
 
-import copy
 import csv
 import json
 import os
@@ -23,16 +24,42 @@ from PIL import Image
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
+import importlib  # noqa: E402
+
+import numpy as np  # noqa: E402
+
 from results import compute, write_results  # noqa: E402
+
+C = importlib.import_module("results.compute")   # the module (results.compute is also the function's name)
 
 GOLDEN = REPO / "tests" / "fixtures" / "cj_golden"
 PS = GOLDEN / "predict" / "ps_20261105_abc123"
 REVIEWED = GOLDEN / "reviewed.json"
 MODEL = "v5_evnonev_y8m_20261029"
 
+# Hand-derived reviewer columns. No reviewed image -> all zero, pct null. Reviewed scenario: only 0002 is
+# reviewed; its outlines F (cls 0, reviewer MV), H (cls 1, nonEV), I (cls 1, nonEV), J (cls 0, EV, inside I).
+# Geometry EVs there: F and J (J is not inside another EV-class outline) -> ev_reviewed_geometry 2.
+# Reviewer: EV+MV calls = F, J -> 2; MV = F -> 1; inner 0; 1/2 = 50 %. Disagree: F is MV by the reviewer but
+# geometry-standalone -> 1 (J: EV vs standalone agrees; nonEV calls are not compared).
+REVIEWER_NONE = {"reviewed_images": 0, "ev_reviewed_geometry": 0, "reviewer_ev": 0, "reviewer_mv": 0,
+                 "reviewer_inner": 0, "pct_multilayer_reviewer": None, "reviewer_geometry_disagree": 0}
+REVIEWER_S1 = {"reviewed_images": 1, "ev_reviewed_geometry": 2, "reviewer_ev": 2, "reviewer_mv": 1,
+               "reviewer_inner": 0, "pct_multilayer_reviewer": 50.0, "reviewer_geometry_disagree": 1}
+GEOMETRY = ["n_images", "ev_total", "ev_per_image_mean", "diam_nm_median", "diam_nm_q1", "diam_nm_q3",
+            "pct_multilayer_geometry", "inner_layers_excluded", "nonev_total"]
+
 
 def load(name):
     return json.loads((GOLDEN / name).read_text(encoding="utf-8"))
+
+
+def expected(name):
+    """A fixture expectation plus the hand-derived reviewer columns."""
+    exp = load(name)
+    for s, e in exp["samples"].items():
+        e.update(REVIEWER_S1 if (name == "expected_results_reviewed.json" and s == "S1") else REVIEWER_NONE)
+    return exp
 
 
 def assert_matches(tc, got, exp):
@@ -57,6 +84,25 @@ def assert_matches(tc, got, exp):
 
 def without_time(res):
     return {k: v for k, v in res.items() if k != "computed"}
+
+
+def diameter_pairs(ps_dir):
+    """Per image: (analysis.morphology.analyze_instances equivalent diameters, results' _diameter) for the same
+    EV masks at conf >= 0.5 from the prediction files. Used by the golden and known-answer tests."""
+    from analysis.morphology import analyze_instances
+    from inference.model_classes import ev_class_ids
+    load_txt, _, _, cm = C._chain()
+    ps_dir = Path(ps_dir)
+    model = json.loads((ps_dir / "request.json").read_text(encoding="utf-8"))["model"]
+    ev_ids = ev_class_ids(model)
+    for r in C._read_images_csv(ps_dir):
+        w, h = C._image_size(ps_dir, r["file"])
+        nm = C._nm_per_px(r)
+        objs = C._objects_from_predictions(ps_dir / "p" / model / "predictions", r["image"], w, h, load_txt)
+        masks = [o.mask for o in objs if ev_ids is None or o.cls in ev_ids]
+        theirs = [rec["equivalent_diameter"] for rec in analyze_instances(masks, pixel_size=nm)]
+        mine = [d for d in (C._diameter(m, nm, cm) for m in masks) if d is not None]
+        yield r["image"], theirs, mine
 
 
 class TempPS:
@@ -84,31 +130,88 @@ class TempPS:
             w.writerows(rows)
 
 
+def txt_objects(image, min_conf=0.0):
+    """reviewed.json-style objects (pixel polygons, no reviewer label) from a golden prediction file."""
+    with Image.open(PS / "images" / f"{image}.png") as im:
+        w, h = im.size
+    out = []
+    for line in (PS / "p" / MODEL / "predictions" / f"{image}.txt").read_text(encoding="utf-8").splitlines():
+        p = line.split()
+        xy = [float(v) for v in p[2:]]
+        if float(p[1]) >= min_conf:
+            out.append({"cls": int(p[0]), "conf": float(p[1]), "source": "model", "reviewer_class": None,
+                        "poly": [[xy[i] * w, xy[i + 1] * h] for i in range(0, len(xy), 2)]})
+    return out
+
+
 class Golden(unittest.TestCase):
     def test_noedit_equals_expected(self):
-        assert_matches(self, compute(PS), load("expected_results_noedit.json"))
+        assert_matches(self, compute(PS), expected("expected_results_noedit.json"))
 
     def test_reviewed_equals_expected(self):
-        assert_matches(self, compute(PS, REVIEWED), load("expected_results_reviewed.json"))
+        assert_matches(self, compute(PS, REVIEWED), expected("expected_results_reviewed.json"))
 
     def test_reviewed_dict_same_as_path(self):
         self.assertEqual(without_time(compute(PS, load("reviewed.json"))), without_time(compute(PS, REVIEWED)))
 
-    def test_reviewed_json_of_unedited_predictions_equals_noedit(self):
-        """The two input paths agree: a reviewed.json holding every prediction line (pixel polygons, nothing
-        reviewed, the conf-0.30 outline D included) gives the no-edit result exactly, diameters too."""
-        rv = {"schema": "reviewed/1", "package": "pred_x", "prediction_set": PS.name, "model": MODEL, "images": {}}
-        for txt in sorted((PS / "p" / MODEL / "predictions").glob("*.txt")):
-            with Image.open(PS / "images" / f"{txt.stem}.png") as im:
-                w, h = im.size
-            objs = []
-            for line in txt.read_text(encoding="utf-8").splitlines():
-                p = line.split()
-                xy = [float(v) for v in p[2:]]
-                objs.append({"cls": int(p[0]), "conf": float(p[1]), "source": "model", "reviewer_class": None,
-                             "poly": [[xy[i] * w, xy[i + 1] * h] for i in range(0, len(xy), 2)]})
-            rv["images"][txt.stem] = {"reviewed": False, "reviewed_by": [], "objects": objs}
-        self.assertEqual(without_time(compute(PS, rv)), without_time(compute(PS)))
+    def test_unreviewed_images_come_from_predictions(self):
+        """Only 0002 reviewed: 0001 and 0003 equal the no-edit run exactly, even when reviewed.json's copies of
+        their outlines are wrong (emptied here), because unreviewed images are read from the .txt files."""
+        rv = load("reviewed.json")
+        rv["images"]["0001"]["objects"] = []
+        rv["images"]["0003"]["objects"] = []
+        got, base = compute(PS, rv), compute(PS)
+        for i in ("0001", "0003"):
+            self.assertEqual(got["images"][i], base["images"][i])
+        self.assertEqual(got["samples"]["S2"], base["samples"]["S2"])
+
+    def test_edited_not_reviewed_moves_geometry_only(self):
+        """0002 edited (G deleted, F/J labelled) but Reviewed never pressed: its outlines come from reviewed.json,
+        so geometry equals the reviewed scenario, but it is not a reviewed image (n_reviewed 0, reviewer columns
+        empty), and the reviewer labels on it are not counted."""
+        rv = load("reviewed.json")
+        rv["images"]["0002"].update(reviewed=False, edited=True)
+        got, as_reviewed = compute(PS, rv), compute(PS, REVIEWED)
+        self.assertEqual(got["images"]["0002"], dict(as_reviewed["images"]["0002"], reviewed=False))
+        s, r = got["samples"]["S1"], as_reviewed["samples"]["S1"]
+        self.assertEqual({f: s[f] for f in GEOMETRY}, {f: r[f] for f in GEOMETRY})
+        self.assertEqual(s["n_reviewed"], 0)
+        self.assertEqual({f: s[f] for f in REVIEWER_NONE}, REVIEWER_NONE)
+
+    def test_not_edited_not_reviewed_reads_predictions(self):
+        """`edited: false, reviewed: false` -> the .txt, whatever reviewed.json lists for that image."""
+        rv = load("reviewed.json")
+        rv["images"]["0002"].update(reviewed=False, edited=False)   # its listed objects lack G
+        got, base = compute(PS, rv), compute(PS)
+        self.assertEqual(got["images"], base["images"])
+        self.assertEqual(without_time(got)["samples"], base["samples"])
+
+    def test_reviewed_polygons_reproduce_prediction_geometry(self):
+        """Every image 'reviewed' with exactly its conf >= 0.5 predictions as pixel polygons and no reviewer
+        labels: the geometry numbers equal the no-edit run exactly, diameters too (same rasterization)."""
+        rv = {"schema": "reviewed/1", "package": "pred_x", "prediction_set": PS.name, "model": MODEL,
+              "images": {i: {"reviewed": True, "reviewed_by": ["t"], "objects": txt_objects(i, 0.5)}
+                         for i in ("0001", "0002", "0003")}}
+        got, base = compute(PS, rv), compute(PS)
+        for i, img in base["images"].items():
+            self.assertEqual(got["images"][i], dict(img, reviewed=True))
+        for s, smp in base["samples"].items():
+            self.assertEqual({f: got["samples"][s][f] for f in GEOMETRY}, {f: smp[f] for f in GEOMETRY})
+            self.assertEqual(got["samples"][s]["ev_reviewed_geometry"], smp["ev_total"])
+            self.assertIsNone(got["samples"][s]["pct_multilayer_reviewer"])
+
+    def test_diameter_equals_analyze_instances(self):
+        n = 0
+        for image, theirs, mine in diameter_pairs(PS):
+            self.assertEqual(mine, theirs, image)
+            n += len(mine)
+        self.assertEqual(n, 9)   # EV-class outlines at conf >= 0.5: A B C | F G J | K L N (D is below 0.5)
+        cm = C._chain()[3]
+        empty, dot = np.zeros((5, 5), bool), np.zeros((5, 5), bool)
+        dot[2, 2] = True   # one pixel: zero-length contour, analyze_instances drops it
+        self.assertEqual((C._diameter(empty, 1.0, cm), C._diameter(dot, 1.0, cm)), (None, None))
+        from analysis.morphology import analyze_instances
+        self.assertEqual(analyze_instances([empty, dot], pixel_size=1.0), [])
 
 
 class ClassBeforeRoles(unittest.TestCase):
@@ -118,23 +221,49 @@ class ClassBeforeRoles(unittest.TestCase):
         self.assertEqual((img["ev"], img["multilayer"], img["inner"], img["nonev"]), (3, 0, 0, 2))
 
     def test_control_containment_sees_j_inside_i(self):
-        """Control with a known answer: make I an EV (reviewer reclass) and the same geometry must call I
+        """Control with a known answer: give I the EV class (a reviewed redraw) and the same geometry must call I
         multilayer and J its inner layer. If this failed, the test above would prove nothing."""
         rv = load("reviewed.json")
-        objs = rv["images"]["0002"]["objects"]
-        i_obj = max(objs, key=lambda o: max(x for x, _ in o["poly"]) - min(x for x, _ in o["poly"]))   # I is r45
+        i_obj = self._largest(rv["images"]["0002"]["objects"])   # I is r45
         self.assertEqual(i_obj["cls"], 1)
-        i_obj["reviewer_class"] = "EV"
+        i_obj["cls"] = 0
         img = compute(PS, rv)["images"]["0002"]
         self.assertEqual((img["ev"], img["multilayer"], img["inner"], img["nonev"]), (2, 1, 1, 1))
 
-    def test_reviewer_nonev_wins_over_class(self):
+    @staticmethod
+    def _largest(objs):
+        return max(objs, key=lambda o: max(x for x, _ in o["poly"]) - min(x for x, _ in o["poly"]))
+
+
+class ReviewerLabels(unittest.TestCase):
+    """Reviewer class labels move only the reviewer columns, never the geometry headline."""
+
+    def relabel(self, labels):
         rv = load("reviewed.json")
-        for o in rv["images"]["0002"]["objects"]:
-            if o["reviewer_class"] == "EV":   # J
-                o["reviewer_class"] = "nonEV"
-        img = compute(PS, rv)["images"]["0002"]
-        self.assertEqual((img["ev"], img["nonev"]), (1, 3))
+        objs = rv["images"]["0002"]["objects"]
+        by_old = {o["reviewer_class"]: o for o in objs if o["reviewer_class"] in ("MV", "EV")}   # F, J
+        for old, new in labels.items():
+            if old == "I":
+                ClassBeforeRoles._largest(objs)["reviewer_class"] = new
+            else:
+                by_old[old]["reviewer_class"] = new
+        return compute(PS, rv)
+
+    def test_labels_do_not_move_geometry(self):
+        base = compute(PS, REVIEWED)
+        got = self.relabel({"MV": "inner", "EV": "nonEV"})   # F -> inner, J -> nonEV
+        self.assertEqual(got["images"], base["images"])
+        for f in GEOMETRY + ["ev_reviewed_geometry"]:
+            self.assertEqual(got["samples"]["S1"][f], base["samples"]["S1"][f], f)
+        s = got["samples"]["S1"]
+        self.assertEqual((s["reviewer_ev"], s["reviewer_mv"], s["reviewer_inner"], s["pct_multilayer_reviewer"],
+                          s["reviewer_geometry_disagree"]), (0, 0, 1, None, 1))   # F inner vs standalone
+
+    def test_call_on_nonev_outline_disagrees(self):
+        s = self.relabel({"I": "EV"})["samples"]["S1"]   # I is class 1: no geometry role
+        self.assertEqual((s["reviewer_ev"], s["reviewer_mv"], s["pct_multilayer_reviewer"],
+                          s["reviewer_geometry_disagree"]), (3, 1, 33.3333, 2))
+        self.assertEqual(s["ev_total"], 4)
 
     def test_unknown_reviewer_class_is_an_error(self):
         rv = load("reviewed.json")
@@ -186,6 +315,21 @@ class Refusals(unittest.TestCase):
         self.assertIn("running", res["refused"])
         self.assertEqual((res["samples"], res["images"]), ({}, {}))
 
+    def test_missing_status_is_not_finished(self):
+        with TempPS() as t:
+            (t.ps / "status.json").unlink()
+            res = compute(t.ps)
+        self.assertIn("set not finished", res["refused"])
+        self.assertEqual((res["samples"], res["images"]), ({}, {}))
+
+    def test_sample_label_is_stripped(self):
+        with TempPS() as t:
+            t.edit_images_csv("0002", sample_label=" S1 ")
+            res = compute(t.ps)
+        self.assertIsNone(res["refused"])
+        self.assertEqual(set(res["samples"]), {"S1", "S2"})
+        self.assertEqual(res["samples"]["S1"]["n_images"], 2)
+
 
 class InputErrors(unittest.TestCase):
     def test_missing_prediction_file(self):
@@ -217,10 +361,11 @@ class Outputs(unittest.TestCase):
                 rows = {r["sample_label"]: r for r in csv.DictReader(fh)}
             self.assertEqual(rows["S1"]["ev_total"], "4")
             self.assertEqual(rows["S1"]["pct_multilayer_reviewer"], "50.0")
+            self.assertEqual(rows["S1"]["reviewer_geometry_disagree"], "1")
             self.assertEqual(rows["S2"]["pct_multilayer_reviewer"], "")
             with (out / "per_image.csv").open(newline="", encoding="utf-8") as fh:
                 imgs = {r["image"]: r for r in csv.DictReader(fh)}
-            self.assertEqual([imgs[i]["reviewed"] for i in ("0001", "0002", "0003")], ["False", "True", "False"])
+            self.assertEqual([imgs[i]["reviewed"] for i in ("0001", "0002", "0003")], ["false", "true", "false"])
 
     def test_cli(self):
         with TempPS() as t:
@@ -228,7 +373,7 @@ class Outputs(unittest.TestCase):
                                cwd=REPO, capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             got = json.loads((t.ps / "results" / "results.json").read_text(encoding="utf-8"))
-            assert_matches(self, got, load("expected_results_reviewed.json"))
+            assert_matches(self, got, expected("expected_results_reviewed.json"))
             self.assertTrue((t.ps / "results" / "per_image.csv").is_file())
             t.edit_images_csv("0002", nm_per_px="0.7362")
             r = subprocess.run([sys.executable, "-m", "results", "--ps", str(t.ps)],
@@ -236,14 +381,25 @@ class Outputs(unittest.TestCase):
             self.assertEqual(r.returncode, 2, r.stderr)
             self.assertIn("REFUSED", r.stderr)
 
-    def test_works_without_cryoai_folder(self):
-        """add_layer_roles -> layer_count_stats resolves the CryoAI folder at import; counting must not need it."""
-        env = dict(os.environ, CRYOEV_CRYOAI_ROOT=str(REPO / "no_such_cryoai_folder"))
-        code = ("import sys, json; from results import compute; r = compute(sys.argv[1]); "
-                "print(json.dumps([r['samples']['S1']['ev_total'], r['samples']['S2']['ev_total']]))")
+    def test_threads_without_cryoai_folder(self):
+        """add_layer_roles -> layer_count_stats resolves the CryoAI folder at import; counting must not need it.
+        Eight threads start compute() at once: the chain is imported once, every thread gets the same answer,
+        and $CRYOEV_CRYOAI_ROOT is left exactly as it was."""
+        missing = str(REPO / "no_such_cryoai_folder")
+        env = dict(os.environ, CRYOEV_CRYOAI_ROOT=missing)
+        code = (
+            "import json, os, sys, threading\n"
+            "from results import compute\n"
+            "out = []\n"
+            "def go():\n"
+            "    r = compute(sys.argv[1]); out.append((r['samples']['S1']['ev_total'], r['samples']['S2']['ev_total']))\n"
+            "ts = [threading.Thread(target=go) for _ in range(8)]\n"
+            "[t.start() for t in ts]; [t.join() for t in ts]\n"
+            "print(json.dumps({'out': sorted(set(out)), 'n': len(out), 'env': os.environ['CRYOEV_CRYOAI_ROOT']}))\n")
         r = subprocess.run([sys.executable, "-c", code, str(PS)], cwd=REPO, env=env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1]), [5, 2])
+        got = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertEqual(got, {"out": [[5, 2]], "n": 8, "env": missing})
 
 
 if __name__ == "__main__":
