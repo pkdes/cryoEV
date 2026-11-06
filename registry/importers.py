@@ -20,6 +20,15 @@ v2 (jobs and inputs, TRACKING_CONTRACT.md addendum):
   A package's `applied` status never makes its job done (only an explicit set-status line does).
 - a run folder with its own `run.json` (run_experiments.py, 2026-11-02) gives status (finished; error/oom ->
   failed, with a note), job_bundle and config as written; older run folders are derived as before.
+- export membership (2026-11-05, additive): each roboflow_export gets `image_list` {file, sha256, method, n}
+  (`<root>/lists/exports/<slug>_<sha8 of id>.tsv`, `stem\tsplit`), counts_listed and not_listed, from its own COCO
+  files (exact; excluded-session images counted, not listed), else from tracking/v2 `in: <export>` (tracked images
+  only; method says so), else image_list null + image_list_gap. Image ids: the export file name's key, else the
+  image whose rf_name is the COCO `extra.name` (a name two images claim is not used). The portal's Lineage follows
+  it from an export to its images' grids / sessions.
+- list files are written with their record's line, under the registry lock (append files=, replace_files=True), so
+  a refused line leaves no list behind; a list whose unchanged record already names it is only repaired if missing
+  or different.
 
 Raw imaging (2026-11-05, additive; nothing in Cryo-image-processing is written):
 - grid: imaged_grids_master.csv fields (sample_label, project, prep_date, grid_type, replicate, glow_discharge,
@@ -101,6 +110,14 @@ def list_text(pairs):
     """{(stem, split)} -> sorted `stem\tsplit` lines (split order, then stem)."""
     rows = sorted(set(pairs), key=lambda x: (SPLIT_ORDER.get(x[1], 9), x[1], x[0]))
     return "".join(f"{stem}\t{split}\n" for stem, split in rows)
+
+
+def export_list_name(export_id):
+    """Export id -> its image list file, `lists/exports/<slug>_<sha256(id)[:8]>.tsv` (slug: runs of other characters
+    -> `_`). It depends on the id alone, so a later export never renames an existing file, and the hash keeps two ids
+    with one slug apart."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", export_id).strip("_") or "x"
+    return f"{LISTS}/exports/{slug}_{hashlib.sha256(export_id.encode('utf-8')).hexdigest()[:8]}.tsv"
 
 
 def split_counts(pairs):
@@ -470,6 +487,70 @@ class Importer:
                 "counts_listed": split_counts({p for p in pairs if p[0] in known}),
                 "not_listed": dict(sorted(why.items())) or None}      # reason -> n (no excluded ids written)
 
+    def image_by_rf_name(self):
+        """Roboflow name -> image id, from image.rf_name (names claimed by two images are left out)."""
+        if not hasattr(self, "_by_rf_name"):
+            seen = defaultdict(set)
+            recs = {**registry.current("image", self.root), **{r["id"]: r for e, r in self.out if e == "image"}}
+            for iid, r in recs.items():
+                if r.get("rf_name"):
+                    seen[r["rf_name"]].add(iid)
+            self._by_rf_name = {n: next(iter(v)) for n, v in seen.items() if len(v) == 1}
+        return self._by_rf_name
+
+    def export_key(self, im):
+        """Export COCO image -> registry image id: the file name's key (`<stem>.rf.<hash>.jpg` -> image_key), else
+        the image whose rf_name is the Roboflow name (`extra.name`), else the file name's key (not in the registry)."""
+        key = ids.image_key(im["file_name"])
+        if key in self.registry_image_ids():
+            return key
+        return self.image_by_rf_name().get((im.get("extra") or {}).get("name"), key)
+
+    def export_membership(self, eid, rel, members):
+        """Which images went into an export -> image_list {file, sha256, method, n} (`stem\tsplit`, like datasets),
+        counts_listed, not_listed; or image_list null + image_list_gap (unknown, never empty). Sources, in order:
+        - the export's own COCO files (members = [(coco image, split, kept)]): exact. Excluded-session images are
+          counted in not_listed.excluded_session and left out of the list, as they are out of `counts`.
+        - tracking/v2 prelipo_tracking.csv `in: <export>` column, used only when the export has no local COCO and no
+          row says `unread`: membership of the TRACKED images only (backfill_tracking.py's pinned set), so the method
+          says so; an export image the tracker does not list is not known here.
+        """
+        known = self.registry_image_ids()
+        excluded = 0
+        if members is not None:
+            pairs = set()
+            for im, split, kept in members:
+                if kept:
+                    pairs.add((self.export_key(im), split))
+                else:
+                    excluded += 1
+            method = "export COCO split folders"
+        else:
+            col = f"in: {eid}"
+            vals = {stem: (r.get(col) or "").strip() for stem, r in self.tracking.items() if col in r}
+            if not vals or any(v.lower() == "unread" for v in vals.values()) or not any(vals.values()):
+                gap = ("no local COCO for this export, and tracking/v2 does not record its images (unread or absent)")
+                return {"image_list": None, "image_list_gap": gap}
+            pairs = set()
+            for stem, v in vals.items():
+                split = v.split(" ")[0]
+                if not v or split not in SPLIT_ORDER:
+                    continue
+                if self.s.is_excluded_stem(stem):
+                    excluded += 1
+                    continue
+                pairs.add((ids.image_key(stem), split))
+            method = (f"tracking/v2 prelipo_tracking.csv `{col}` column: tracked images only (no local COCO); "
+                      "an export image the tracker does not list is not known")
+        text = list_text(pairs)
+        self.lists[rel] = text
+        missing = sum(1 for stem, _ in pairs if stem not in known)
+        why = {k: v for k, v in (("excluded_session", excluded), ("not_in_registry", missing)) if v}
+        return {"image_list": {"file": rel, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                               "method": method, "n": len(pairs)},
+                "counts_listed": split_counts({p for p in pairs if p[0] in known}),
+                "not_listed": why or None, "image_list_gap": None}
+
     def pulls_and_rf_images(self):
         for pid, p in sorted(self.s.pulls.items()):
             if not p["coco"]:
@@ -606,17 +687,19 @@ class Importer:
         self.export_stems = {}
         for eid, e in sorted(s.exports.items()):
             d = self.cache / "training images" / eid
-            counts, classes, lines = {}, [], []
+            counts, classes, lines, members = {}, [], [], []
             for split, n in e["counts"].items():
                 c = read_json(d / split / "_annotations.coco.json")
                 keep = {im["id"] for im in c["images"] if not s.is_excluded_stem(ids.stem_of_export(im["file_name"]))}
                 counts[split] = {"images": n, "instances": sum(1 for a in c["annotations"] if a["image_id"] in keep)}
                 classes = classes or [k["name"] for k in c["categories"] if k.get("supercategory") != "none"]
                 lines += [f"{split}\t{ids.image_key(im['file_name'])}\n" for im in c["images"] if im["id"] in keep]
+                members += [(im, split, im["id"] in keep) for im in c["images"]]
             self.export_stems[eid] = (hashlib.sha256("".join(sorted(lines)).encode()).hexdigest() if lines else None)
             self.add("roboflow_export", id=eid, path=str(d), counts=counts, classes=classes,
                      derived_from=e["derived_from"], split_file=e["split_file"].name if e["split_file"] else None,
-                     note=None if counts else "local placeholder: no COCO in the cache")
+                     note=None if counts else "local placeholder: no COCO in the cache",
+                     **self.export_membership(eid, export_list_name(eid), members if counts else None))
         self.exp_counts = {r["id"]: r for ent, r in self.out if ent == "roboflow_export"}
         for did, d in sorted(s.datasets.items()):
             if not did:
@@ -835,11 +918,25 @@ class Importer:
             self.add("inference_check", id=bid, owner=f"{bj}#{bid}")
 
     # ------------------------------------------------------------ write
-    def write_lists(self, dry_run=False):
-        """Image lists next to the registry; (re)written only when the text changed. -> n files to write."""
+    def list_files(self, rec):
+        """{rel: bytes} for the image list a record names, when this import built its text, else None."""
+        il = rec.get("image_list")
+        rel = il.get("file") if isinstance(il, dict) else None
+        return {rel: self.lists[rel].encode("utf-8")} if rel in self.lists else None
+
+    def changed_files(self, files):
+        """How many of {rel: bytes} are missing or differ on disk."""
+        return sum(1 for rel, data in (files or {}).items()
+                   if not (self.root / rel).is_file() or (self.root / rel).read_bytes() != data)
+
+    def write_lists(self, dry_run=False, only=None):
+        """Image lists next to the registry (those in `only`); (re)written only when the text changed. -> n files to
+        write. Used to repair a list whose record is unchanged; a new or changed record's list goes with its line."""
         n = 0
         for rel, text in sorted(self.lists.items()):
-            path = self.root / rel
+            if only is not None and rel not in only:
+                continue
+            path = registry.registry_file(self.root, rel)
             if path.exists() and path.read_bytes() == text.encode("utf-8"):
                 continue
             n += 1
@@ -867,7 +964,9 @@ class Importer:
         return True
 
     def write(self, dry_run=False):
-        lists_written = self.write_lists(dry_run)
+        """Append new / changed records. A record's image list is written with its line under the registry lock
+        (nothing for a refused line); a list whose record is unchanged is repaired afterwards if missing or changed."""
+        lists_written, repair = 0, set()
         self.write_mdoc_cache(dry_run)
         cur = registry.current(root=self.root)
         appended = Counter()
@@ -895,23 +994,28 @@ class Importer:
                     rec["note"] = old["note"]
                 if old.get("blocked_reason") and not rec.get("blocked_reason"):     # job: blocked by hand
                     rec["blocked_reason"] = old["blocked_reason"]
+            files = self.list_files(rec)
             if old is not None:
                 full = registry.derive(entity, rec)
                 if {k: v for k, v in full.items() if k not in IGNORE} == \
                         {k: v for k, v in old.items() if k not in IGNORE}:
+                    repair |= set(files or ())
                     continue
             rec = dict(rec, recorded_by=self.tag)
-            if not dry_run:
-                try:
-                    registry.append(rec, root=self.root)
-                except registry.RegistryError as e:
-                    self.refuse(f"{entity}: {str(e)[:90]}", rid)
-                    continue
+            try:
+                n_files = self.changed_files(files)
+                if not dry_run:
+                    registry.append(rec, root=self.root, files=files, replace_files=True)
+            except registry.RegistryError as e:
+                self.refuse(f"{entity}: {str(e)[:90]}", rid)
+                continue
             appended[entity] += 1
+            lists_written += n_files
             if entity == "image":
                 img_session[rid] = rec.get("session")
             if entity == "roboflow_image":
                 stem_rf[rec["stem"]] = rid
+        lists_written += self.write_lists(dry_run, only=repair)
         if lists_written:
             appended["(image list files)"] += lists_written
         prod_id, who = PRODUCTION
@@ -924,6 +1028,7 @@ class Importer:
 
 REQUIRED_NULL = {"image": ("session", "grid"), "model": ("run",),
                  "dataset": ("images_sha256", "image_list", "counts_trained", "counts_listed"),
+                 "roboflow_export": ("image_list",),
                  "review_package": (), "label_version": ()}
 
 

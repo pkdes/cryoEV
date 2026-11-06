@@ -39,7 +39,10 @@ Rules:
     prediction sets and prediction packages). A hidden object is shown as "not visible to you" with no id, and
     nothing below it is followed. A parent the registry does not record is "unknown", never guessed. The walk is
     capped (depth and number of steps) and stops at a step it is already inside, so bad registry data cannot loop.
-    Folder paths are shown to admins only.
+    Folder paths are shown to admins only. A Roboflow export with an image list (registry `lists/`, written by the
+    importer) leads to its images' grids and sessions; a re-split shows them under the export it was made from only
+    when the viewer may see that one and its list leads to exactly the same grids and sessions. The summary counts
+    listed images (datasets and exports shown) that trace to no session, as a number only.
   - Plain words; every value is escaped; no script on the page.
 """
 from __future__ import annotations
@@ -1231,6 +1234,25 @@ def read_image_list(root, record):
     return [ln.split("\t")[0].strip() for ln in lines if ln.strip()]
 
 
+def list_trace(records, root, record):
+    """A dataset's / export's image list -> (listed stems, image_sources result, stems with no session in the
+    registry), or None when there is no readable list."""
+    stems = read_image_list(root, record)
+    if stems is None:
+        return None
+    wanted = set(stems)
+    found = image_sources(records, lambda image: image.get("id") in wanted)
+    untraced = {s for s in wanted if not _text(_dict(records["image"].get(s)).get("session"))}
+    return wanted, found, untraced
+
+
+def traced_note(wanted, found) -> str:
+    sessions = sorted(found["all_sessions"])
+    shown = ", ".join(sessions[:6]) + (f" and {len(sessions) - 6} more" if len(sessions) > 6 else "")
+    return (f"{found['n']} of {len(wanted)} images traced to sessions {shown}." if sessions else
+            f"0 of {len(wanted)} images traced to a session.")
+
+
 def capped(specs: list, make, label: str) -> list:
     """The first LINEAGE_FANOUT specs, then a ('more', n, label) marker."""
     out = [make(s) for s in specs[:LINEAGE_FANOUT]]
@@ -1246,6 +1268,7 @@ class Lineage:
     def __init__(self, records, viewer, root=None):
         self.records, self.viewer, self.root, self.count = records, viewer, root, 0
         self.admin = _dict(viewer.user).get("role") == "admin"
+        self.untraced = set()       # listed images (datasets / exports shown) with no session in the registry
 
     # ---- lookup and visibility
     def lookup(self, ntype, nid):
@@ -1417,14 +1440,11 @@ class Lineage:
                 specs.append(ref_spec(self.records, self.viewer, ref_id, hint))
         specs += input_specs(self.records, self.viewer, rec, seen)
         note = None
-        stems = read_image_list(self.root, rec)
-        if stems:
-            wanted = set(stems)
-            found = image_sources(self.records, lambda image: image.get("id") in wanted)
-            sessions = sorted(found["all_sessions"])
-            shown = ", ".join(sessions[:6]) + (f" and {len(sessions) - 6} more" if len(sessions) > 6 else "")
-            note = (f"{found['n']} of {len(wanted)} images traced to sessions {shown}." if sessions else
-                    f"0 of {len(wanted)} images traced to a session.")
+        trace = list_trace(self.records, self.root, rec)
+        if trace and trace[0]:
+            wanted, found, untraced = trace
+            self.untraced |= untraced
+            note = traced_note(wanted, found)
             specs += self.source_specs(found["grids"], found["sessions"])
         if not specs:
             specs = [unknown_spec("source", "The registry does not say what this dataset was built from.")]
@@ -1477,12 +1497,38 @@ class Lineage:
                 seen.add(ref_id)
                 specs.append(ref_spec(self.records, self.viewer, ref_id, hint))
         specs += input_specs(self.records, self.viewer, rec, seen)
+        note = None
+        trace = list_trace(self.records, self.root, rec)
+        if trace is not None:
+            wanted, found, untraced = trace
+            self.untraced |= untraced
+            note = traced_note(wanted, found)
+            if str(_dict(rec.get("image_list")).get("method", "")).startswith("tracking"):
+                note += " The image list comes from the image tracker, which lists only the images it tracks."
+            # a re-split shows its grids / sessions under the export it was made from only when that one is visible,
+            # lists its images and they lead to exactly the same grids and sessions; otherwise it shows its own
+            if not (parent and self.same_sources_as_parent(parent, found)):
+                specs += self.source_specs(found["grids"], found["sessions"])
+            if not specs:
+                specs = [unknown_spec("session", "No image in this export is matched to an imaging session in the "
+                                                 "registry.")]
         if not specs:
             specs = [unknown_spec("source", "The registry does not record which images went into this export.")]
         fields = present(field("Classes", ", ".join(map(str, _list(rec.get("classes"))))),
                          field("Images per split", split_counts(rec)),
-                         field("Made from export", parent, self.link("images", parent) if parent else None))
-        return nid, [("Roboflow export", "acc")], fields, specs, None
+                         field("Made from export", hide_private(self.records, self.viewer, parent, "roboflow_export")
+                               if parent else None, self.link("images", parent) if parent else None))
+        return nid, [("Roboflow export", "acc")], fields, specs, note
+
+    def same_sources_as_parent(self, parent, found) -> bool:
+        """True when the parent export is visible to this viewer, has a readable image list, and its images lead to
+        the same grids and the same sessions (those with no recorded grid) as this export's."""
+        got = self.lookup("export", parent)
+        if not got or got[0] != "export":
+            return False
+        trace = list_trace(self.records, self.root, got[1])
+        return trace is not None and (set(trace[1]["grids"]), set(trace[1]["sessions"])) == \
+            (set(found["grids"]), set(found["sessions"]))
 
     def describe_pull(self, nid, rec):
         grids, sessions = pull_sources(self.records, nid)
@@ -1577,6 +1623,7 @@ def lineage_tree(records, viewer, kind, entity_id, root=None):
         for parent in node["parents"]:
             tally(parent)
     tally(root)
+    counts["untraced_images"] = len(walker.untraced)        # a number only: never the ids
     return {"schema": SCHEMA, "kind": kind, "id": entity_id, "title": root["title"], "summary": counts,
             "limits": {"depth": LINEAGE_MAX_DEPTH, "steps": LINEAGE_MAX_NODES}, "root": root}
 
@@ -1812,8 +1859,10 @@ def render_lineage(tree, error) -> str:
     s = tree["summary"]
     cut = f", {s['cut']} not followed" if s["cut"] else ""
     loop = f", {plural(s['loop'], 'loop')} in the registry" if s["loop"] else ""
+    untraced = (f" {plural(s['untraced_images'], 'listed image')} not traced to an imaging session."
+                if s.get("untraced_images") else "")
     summary = (f'{plural(s["steps"], "step")}: {s["known"]} found, {s["unknown"]} unknown, '
-               f'{s["hidden"]} not visible to you{cut}{loop}.')
+               f'{s["hidden"]} not visible to you{cut}{loop}.{untraced}')
     return (breadcrumb(("Data", PREFIX + "/"), (KIND_TITLES[DETAIL_LIST[kind]], f"{PREFIX}/list/{DETAIL_LIST[kind]}"),
                        (tree["title"], entity_href(kind, tree["id"])))
             + f'<h1 class="cj-wrap">Lineage of {esc(tree["title"])}</h1>'

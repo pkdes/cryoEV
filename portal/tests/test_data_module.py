@@ -789,7 +789,28 @@ def lineage_records() -> dict:
         "roboflow_export": [rec("roboflow_export", id="priv exp", owner="otherperson", classes=[]),
                             rec("roboflow_export", id="cyc a", derived_from="cyc b", classes=[]),
                             rec("roboflow_export", id="cyc b", derived_from="cyc a", classes=[]),
-                            rec("roboflow_export", id="plain exp", classes=[])],
+                            rec("roboflow_export", id="plain exp", classes=[]),
+                            rec("roboflow_export", id="list exp", classes=[],
+                                image_list={"file": "lists/export_list_exp.tsv", "n": 3,
+                                            "method": "export COCO split folders"}),
+                            rec("roboflow_export", id="list exp S1", derived_from="list exp", classes=[],
+                                image_list={"file": "lists/export_list_exp_S1.tsv", "n": 2,
+                                            "method": "export COCO split folders"}),
+                            rec("roboflow_export", id="drop resplit", derived_from="list exp", classes=[],
+                                image_list={"file": "lists/export_drop.tsv", "n": 1,
+                                            "method": "export COCO split folders"}),
+                            rec("roboflow_export", id="orphan resplit", derived_from="gone exp", classes=[],
+                                image_list={"file": "lists/export_list_exp_S1.tsv", "n": 2,
+                                            "method": "export COCO split folders"}),
+                            rec("roboflow_export", id="resplit of priv", derived_from="priv exp", classes=[],
+                                image_list={"file": "lists/export_list_exp_S1.tsv", "n": 2,
+                                            "method": "export COCO split folders"}),
+                            rec("roboflow_export", id="tracked exp", classes=[],
+                                image_list={"file": "lists/export_list_exp.tsv", "n": 3,
+                                            "method": "tracking/v2 prelipo_tracking.csv `in: tracked exp` column"}),
+                            rec("roboflow_export", id="untraced exp", classes=[],
+                                image_list={"file": "lists/export_untraced.tsv", "n": 1,
+                                            "method": "export COCO split folders"})],
         "prediction_set": [
             rec("prediction_set", id="ps_20261105_aaaaaa", created="2026-11-05T10:00:00", owner="adv",
                 model="v9_prod_20261101", path="p", source={"kind": "session", "session": "20261104"}, n_images=2,
@@ -809,6 +830,11 @@ def add_lineage_records(registry: Path):
     (registry / "lists").mkdir(exist_ok=True)
     (registry / "lists" / "ds_listed.tsv").write_text("t1\ttrain\nt2\tvalid\nzz_untraced\ttest\n",
                                                       encoding="utf-8")
+    (registry / "lists" / "export_list_exp.tsv").write_text("t1\ttrain\nt2\tvalid\nzz_untraced\ttest\n",
+                                                            encoding="utf-8")
+    (registry / "lists" / "export_list_exp_S1.tsv").write_text("t1\ttest\nt2\ttrain\n", encoding="utf-8")
+    (registry / "lists" / "export_untraced.tsv").write_text("zz_untraced\ttrain\n", encoding="utf-8")
+    (registry / "lists" / "export_drop.tsv").write_text("t2\ttrain\n", encoding="utf-8")       # drops t1's grid
     for entity, recs in lineage_records().items():
         with open(registry / f"{entity}.jsonl", "a", encoding="utf-8") as fh:
             fh.write("".join(json.dumps(r) + "\n" for r in recs))
@@ -1055,6 +1081,58 @@ class Lineage(LineageBase):
         self.assertEqual(ids, [("grid", "2602"), ("session", "20261104")])
         self.assertIn("2 of 3 images traced", main_html(self.page("/data/lineage/dataset/ds_listed/")))
         self.assertIsNone(self.tree("dataset", "ds_chain")["root"]["note"])    # control: no list, no note
+
+    def parents(self, node):
+        return [(n["type"], n["id"] if n["status"] != "unknown" else n.get("recorded"), n["status"])
+                for n in node["parents"]]
+
+    def test_export_image_list_traces_sessions(self):
+        t = self.tree("images", "list exp")
+        self.assertEqual(t["root"]["note"], "2 of 3 images traced to sessions 20261104.")
+        self.assertEqual(self.parents(t["root"]), [("grid", "2602", "ok"), ("session", "20261104", "ok")])
+        self.assertIn("2 of 3 images traced", main_html(self.page("/data/lineage/images/list%20exp/")))
+        plain = self.tree("images", "plain exp")["root"]                     # control: no list -> unknown, no note
+        self.assertIsNone(plain["note"])
+        self.assertEqual([(n["status"], n["note"]) for n in plain["parents"]],
+                         [("unknown", "The registry does not record which images went into this export.")])
+        none = self.tree("images", "untraced exp")["root"]                   # a list with no traced image
+        self.assertEqual(none["note"], "0 of 1 images traced to a session.")
+        self.assertEqual([n["status"] for n in none["parents"]], ["unknown"])
+
+    def test_resplit_traces_through_its_parent_export(self):
+        t = self.tree("images", "list exp S1")
+        self.assertEqual(t["root"]["note"], "2 of 2 images traced to sessions 20261104.")
+        self.assertEqual(self.parents(t["root"]), [("export", "list exp", "ok")])      # no duplicate grids here
+        self.assertEqual(self.parents(t["root"]["parents"][0]), [("grid", "2602", "ok"), ("session", "20261104", "ok")])
+        drop = self.tree("images", "drop resplit")["root"]                   # drops a grid: shows its own
+        self.assertEqual(self.parents(drop), [("export", "list exp", "ok"), ("session", "20261104", "ok")])
+        self.assertEqual(drop["note"], "1 of 1 images traced to sessions 20261104.")
+        orphan = self.tree("images", "orphan resplit")["root"]               # parent not in the registry
+        self.assertEqual(self.parents(orphan), [("export", "gone exp", "unknown"), ("grid", "2602", "ok"),
+                                                ("session", "20261104", "ok")])
+
+    def test_resplit_of_a_hidden_export(self):
+        t = self.tree("images", "resplit of priv", "advanced")
+        self.assertEqual([n["status"] for n in t["root"]["parents"]], ["hidden", "ok", "ok"])
+        self.assertNotIn("priv exp", json.dumps(t))
+        self.assertNotIn("priv exp", self.page("/data/lineage/images/resplit%20of%20priv/", "advanced"))
+        ta = self.tree("images", "resplit of priv", "admin")                 # control: admin sees the parent
+        self.assertEqual(self.parents(ta["root"]), [("export", "priv exp", "ok"), ("grid", "2602", "ok"),
+                                                    ("session", "20261104", "ok")])
+
+    def test_summary_counts_listed_images_with_no_session(self):
+        t = self.tree("images", "list exp")
+        self.assertEqual((t["summary"]["unknown"], t["summary"]["untraced_images"]), (0, 1))     # zz_untraced
+        self.assertNotIn("zz_untraced", json.dumps(t))                        # a number, never the ids
+        self.assertIn("1 listed image not traced to an imaging session.",
+                      main_html(self.page("/data/lineage/images/list%20exp/")))
+        self.assertEqual(self.tree("images", "list exp S1")["summary"]["untraced_images"], 1)   # via its parent
+        self.assertEqual(self.tree("images", "plain exp")["summary"]["untraced_images"], 0)     # control: no list
+        self.assertNotIn("not traced to an imaging session", main_html(self.page("/data/lineage/images/plain%20exp/")))
+
+    def test_tracked_export_list_says_so(self):
+        note = self.tree("images", "tracked exp")["root"]["note"]
+        self.assertTrue(note.startswith("2 of 3 images traced") and "only the images it tracks" in note, note)
 
     def test_total_steps_are_capped_on_a_wide_graph(self):
         records = {e: {} for e in D.ENTITIES}

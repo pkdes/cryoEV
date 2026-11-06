@@ -114,6 +114,56 @@
     "null"
    ],
    "pattern": "^lv_\\d{8}_\\d{4}$"
+  },
+  "image_list": {
+   "type": [
+    "object",
+    "null"
+   ],
+   "properties": {
+    "file": {
+     "type": "string"
+    },
+    "sha256": {
+     "type": [
+      "string",
+      "null"
+     ],
+     "pattern": "^[0-9a-f]{64}$"
+    },
+    "method": {
+     "type": "string"
+    },
+    "n": {
+     "type": "integer",
+     "minimum": 0
+    }
+   },
+   "required": [
+    "file"
+   ],
+   "description": "which images went into this export: (stem, split) lines in registry/<file> (lists/exports/<slug>_<sha256(id)[:8]>.tsv); method says where they come from. null = unknown"
+  },
+  "image_list_gap": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "description": "why image_list is unknown"
+  },
+  "counts_listed": {
+   "type": [
+    "object",
+    "null"
+   ],
+   "description": "per-split counts of the listed images that are in the registry"
+  },
+  "not_listed": {
+   "type": [
+    "object",
+    "null"
+   ],
+   "description": "reason -> n: excluded_session (in the export, left out of the list), not_in_registry (listed, no image record)"
   }
  },
  "required": [
