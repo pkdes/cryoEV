@@ -20,6 +20,11 @@ sets, label versions, datasets, models) and the processed images on disk.
     GET /data/api/overview | search?q= | list/<kind> | <kind>/<id>[?page=N]    the same information as JSON
                                         (schema cj_data/1; other modules reuse it)
     GET /data/api/lineage/<kind>/<id>   the lineage as a JSON tree (schema cj_data/1)
+    GET /data/lineage/graph/[?focus=<entity>|<id>]
+                                        the Lab graph: History's lineage graph (label sets -> datasets -> models ->
+                                        review / revise) for the whole lab, drawn by /data/data.js
+    GET /data/api/lineage/graph[?focus=<entity>|<id>]   its data as JSON (schema cj_data/1)
+    GET /data/data.js                   the Lab graph's script (portal/static/data.js; no inline script)
 
 Rules:
   - Nothing here writes to the registry or to a data folder. The only write is the thumbnail cache in the portal's
@@ -43,7 +48,15 @@ Rules:
     importer) leads to its images' grids and sessions; a re-split shows them under the export it was made from only
     when the viewer may see that one and its list leads to exactly the same grids and sessions. The summary counts
     listed images (datasets and exports shown) that trace to no session, as a number only.
-  - Plain words; every value is escaped; no script on the page.
+  - Lab graph: History's own reader and builders (registry/history_page.py read_registry, build_model ->
+    graph_model, imported, never changed), run on a FILTERED registry: every prediction set, review package and
+    Roboflow export the viewer may not see (set_is_visible, the rule above) is removed BEFORE the graph is built,
+    and so is every job that names one (any value, or its own id, containing a hidden id) and any record whose id
+    contains a hidden id. So the fade-out and the node order never reflect a hidden record; a label version or
+    dataset built from a hidden set stays and only that edge goes. Each node sends only its id (History's box
+    text), kind, column, faded flag, part-of, subtitle, status and its Data Lineage address; edges are
+    [from, to, role]. ?focus names a node to highlight; a key the viewer may not see highlights nothing.
+  - Plain words; every value is escaped; no script on the pages except the Lab graph's file /data/data.js.
 """
 from __future__ import annotations
 
@@ -1628,6 +1641,134 @@ def lineage_tree(records, viewer, kind, entity_id, root=None):
             "limits": {"depth": LINEAGE_MAX_DEPTH, "steps": LINEAGE_MAX_NODES}, "root": root}
 
 
+# ---------------------------------------------------------------- Lab graph (History's lineage graph, filtered)
+GRAPH_PAGE_KIND = {"roboflow_export": "images", "prediction_set": "images", "review_package": "images",
+                   "label_version": "labels", "dataset": "dataset", "model": "model"}   # pulls and jobs: no page
+GRAPH_SHORT = {"roboflow_export": "export", "review_package": "package", "label_version": "label version",
+               "prediction_set": "predictions"}                 # the box's tag, as History's drawGraph SHORT
+GRAPH_NODE_KEYS = ("title", "kind", "col", "hist", "part", "sub", "status", "url")   # everything a node sends
+SCRIPT = HERE.parent / "static" / "data.js"                    # served as /data/data.js (app.py serves only /cj/*)
+_graph_cache: dict = {}
+_history_module_cache = None
+
+
+def _history_module():
+    """registry/history_page.py, loaded once by path (read only here: its reader and builders are reused)."""
+    global _history_module_cache
+    if _history_module_cache is None:
+        spec = importlib.util.spec_from_file_location("cj_data_history_page", REPO / "registry" / "history_page.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _history_module_cache = mod
+    return _history_module_cache
+
+
+def history_registry(root) -> tuple:
+    """History's own read of <root>/*.jsonl -> ((stamp, current, history, stats) or None, error or None), one read
+    per root per REGISTRY_TTL_S. Records are shared between requests and never changed."""
+    if root is None:
+        return None, "no registry folder configured"
+    if not Path(root).is_dir():
+        return None, "registry folder not found"
+
+    def compute():
+        try:
+            hp = _history_module()
+            current, history, stats = hp.read_registry(hp.input_files([Path(root)]))
+        except Exception as exc:                       # an unreadable registry must not take the page down
+            return None, f"registry not readable ({type(exc).__name__})"
+        return (time.monotonic(), current, history, stats), None
+    return cached(_graph_cache, ("read", str(root)), compute, REGISTRY_TTL_S)
+
+
+def _strings_in(value):
+    """Every string inside a record value (nested dicts and lists included)."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _strings_in(v)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _strings_in(v)
+
+
+def graph_hidden(viewer: Viewer, current: dict) -> tuple:
+    """-> (keys to leave out of the graph's INPUT, hidden set ids). A prediction set, review package or Roboflow
+    export the viewer may not see; a job that names one anywhere (inputs, outputs, package, its own id ...); any
+    record whose id contains a hidden id (its box would quote it). Fails closed: substring tests, not equality."""
+    drop, hidden_ids = set(), set()
+    for key, rec in current.items():
+        entity = key.split("|", 1)[0]
+        if entity in SET_ENTITIES and not set_is_visible(viewer, entity, rec):
+            drop.add(key)
+            hidden_ids.add(str(rec.get("id")))
+    if not hidden_ids:
+        return drop, hidden_ids
+    for key, rec in current.items():
+        if key in drop:
+            continue
+        rid = key.split("|", 1)[1]
+        if any(h in rid for h in hidden_ids):
+            drop.add(key)
+        elif key.startswith("job|") and any(h in s for s in _strings_in(rec) for h in hidden_ids):
+            drop.add(key)
+    return drop, hidden_ids
+
+
+def graph_url(walker: "Lineage", entity: str, rid: str):
+    """The item's Data Lineage page when it has one and this viewer may open it, else None."""
+    kind = GRAPH_PAGE_KIND.get(entity)
+    if kind is None:
+        return None
+    found = walker.lookup(KIND_TO_NODE[kind], rid)
+    return lineage_href(kind, rid) if found and found[0] != "hidden" else None
+
+
+def lab_graph(records, viewer: Viewer, root, focus=None) -> dict:
+    """History's lineage graph for this viewer: {schema, cols, nodes: [{GRAPH_NODE_KEYS}], edges: [[from, to, role]],
+    focus: node index or None, error}. The registry is filtered BEFORE graph_model runs (graph_hidden), with History's
+    own read_registry / build_model, so an admin gets exactly History's graph."""
+    base, error = history_registry(root)
+    if base is None:
+        return {"schema": SCHEMA, "cols": [], "nodes": [], "edges": [], "focus": None, "error": error}
+    stamp, current, history, stats = base
+    drop, hidden_ids = graph_hidden(viewer, current)
+
+    def compute():
+        kept = {k: r for k, r in current.items() if k not in drop}
+        # sources and changes only feed History's image lookup and model pages, never the graph
+        return _history_module().build_model(kept, {k: history[k] for k in kept}, stats, [], [])["graph"]
+    graph = cached(_graph_cache, ("graph", str(root), stamp, frozenset(drop)), compute, REGISTRY_TTL_S)
+    walker = Lineage(records, viewer, root)
+    nodes, focus_index = [], None
+    for i, (key, col, hist, part, sub) in enumerate(graph["nodes"]):
+        entity, rid = key.split("|", 1)
+        if any(h in sub for h in hidden_ids):           # a subtitle (an export's note) never quotes a hidden id
+            sub = ""
+        status = current[key].get("status")
+        nodes.append({"title": rid, "kind": GRAPH_SHORT.get(entity, entity), "col": col, "hist": hist, "part": part,
+                      "sub": sub, "status": None if status is None else str(status),
+                      "url": graph_url(walker, entity, rid)})
+        if key == focus:
+            focus_index = i
+    return {"schema": SCHEMA, "cols": list(graph["cols"]), "nodes": nodes,
+            "edges": [list(e) for e in graph["edges"]], "focus": focus_index, "error": error}
+
+
+def graph_focus_key(records, kind, entity_id):
+    """The Lab graph key (History's '<entity>|<id>') of a catalog item, for the "Lab graph" link on its Lineage."""
+    if kind == "images":
+        entity, _ = find_set(records, entity_id)
+    else:
+        entity = {"labels": "label_version", "dataset": "dataset", "model": "model"}.get(kind)
+    return f"{entity}|{entity_id}" if entity else None
+
+
+def lab_graph_href(focus=None) -> str:
+    return f"{PREFIX}/lineage/graph/" + (f"?focus={quote(focus, safe='')}" if focus else "")
+
+
 # ---------------------------------------------------------------- HTML
 def chip(text, tone="") -> str:
     cls = {"prod": " cj-data-t-prod", "warn": " cj-data-t-warn", "acc": " cj-data-t-acc"}.get(tone, "")
@@ -1681,7 +1822,8 @@ def render_overview(ov, error) -> str:
     grids = ov["counts"].get("grids", 0)
     return ('<h1>Data</h1><p class="cj-mut cj-data-sub">What data exists: imaging sessions, image sets, labels, '
             f'datasets and models. <a href="{PREFIX}/list/grids">{plural(grids, "grid")}</a> are listed under '
-            'their sessions.</p>' + banner(error) + search_form()
+            f'their sessions. <a href="{lab_graph_href()}">Lab graph</a>: how label sets, datasets, models and '
+            'reviews connect.</p>' + banner(error) + search_form()
             + '<div class="cj-data-cards">' + "".join(cards) + "</div>"
             + '<p class="cj-mut cj-data-foot">Read only: nothing here changes any data.</p>')
 
@@ -1854,7 +1996,7 @@ def render_lineage_node(node) -> str:
     return f'<li class="cj-data-ln">{card}{kids}</li>'
 
 
-def render_lineage(tree, error) -> str:
+def render_lineage(tree, error, focus=None) -> str:
     kind, root = tree["kind"], tree["root"]
     s = tree["summary"]
     cut = f", {s['cut']} not followed" if s["cut"] else ""
@@ -1867,9 +2009,30 @@ def render_lineage(tree, error) -> str:
                        (tree["title"], entity_href(kind, tree["id"])))
             + f'<h1 class="cj-wrap">Lineage of {esc(tree["title"])}</h1>'
             + '<p class="cj-mut cj-data-sub">The chain back to the raw imaging sessions, read from the registry. '
-              'A step the registry does not record is shown as unknown, never guessed.</p>'
+              'A step the registry does not record is shown as unknown, never guessed. '
+              f'<a href="{esc(lab_graph_href(focus))}">Lab graph</a> shows it among everything else.</p>'
             + banner(error) + f'<p class="cj-data-lsum">{esc(summary)}</p>'
             + '<ol class="cj-data-lroot">' + render_lineage_node(root) + "</ol>")
+
+
+def render_lab_graph(error) -> str:
+    """The Lab graph page: a frame only. /data/data.js reads /data/api/lineage/graph (with this page's ?focus) and
+    draws it, so no record text is in this HTML."""
+    return (breadcrumb(("Data", PREFIX + "/")) + '<h1>Lab graph</h1>'
+            '<p class="cj-mut cj-data-sub">How label sets, datasets, models and reviews connect, read from the '
+            'registry. Open a box for its lineage.</p>' + banner(error)
+            + '<div class="cj-data-graph-bar">'
+              '<label><input type="checkbox" id="cj-data-graph-hist"> <span id="cj-data-graph-histl">Show history'
+              '</span></label>'
+              '<label><input type="checkbox" id="cj-data-graph-an"> <span id="cj-data-graph-anl">Show analyses'
+              '</span></label>'
+              '<span class="cj-mut cj-data-graph-note">Arrows: parent → child (inputs). Dashed: model predictions → '
+              'review / revise → label version. ★ = production.</span></div>'
+            + '<p class="cj-mut cj-data-graph-status" id="cj-data-graph-status" role="status">Loading the graph…</p>'
+            + '<div class="cj-data-graph-wrap" id="cj-data-graph-wrap"><div class="cj-data-graph-canvas" '
+              'id="cj-data-graph-canvas"><svg id="cj-data-graph-svg" aria-hidden="true"></svg></div></div>'
+            + '<noscript><p class="cj-mut">The Lab graph needs JavaScript.</p></noscript>'
+            + f'<script src="{PREFIX}/data.js" defer></script>')
 
 
 def page_body(content: str) -> str:
@@ -1975,7 +2138,8 @@ def routes(ctx) -> list:
                             getattr(ctx.cfg, "registry", None))
         if tree is None:
             return missing(request)
-        return html_page(request, "Lineage of " + tree["title"], render_lineage(tree, error))
+        focus = graph_focus_key(records, tree["kind"], tree["id"])
+        return html_page(request, "Lineage of " + tree["title"], render_lineage(tree, error, focus))
 
     def api_lineage(request: Request):
         records, _, viewer = state(request)
@@ -1983,7 +2147,27 @@ def routes(ctx) -> list:
                             getattr(ctx.cfg, "registry", None))
         return ctx.json(tree) if tree is not None else ctx.json({"error": "not found"}, 404)
 
-    found = [Route(PREFIX + "/", index, methods=["GET"]),
+    def graph_page(request: Request):
+        _, error = history_registry(getattr(ctx.cfg, "registry", None))
+        return html_page(request, "Lab graph", render_lab_graph(error))
+
+    def api_graph(request: Request):
+        records, _, viewer = state(request)
+        focus = request.query_params.get("focus")
+        return ctx.json(lab_graph(records, viewer, getattr(ctx.cfg, "registry", None),
+                                  focus if focus and len(focus) <= 300 else None))
+
+    def script(request: Request):
+        r = Response(SCRIPT.read_bytes(), media_type="text/javascript; charset=utf-8")
+        r.headers["Cache-Control"] = "no-cache"
+        r.headers["X-Content-Type-Options"] = "nosniff"
+        return r
+
+    found = [Route(PREFIX + "/lineage/graph/", graph_page, methods=["GET"]),     # before /lineage/{kind}/{eid}
+             Route(PREFIX + "/lineage/graph", graph_page, methods=["GET"]),
+             Route(PREFIX + "/api/lineage/graph", api_graph, methods=["GET"]),   # before /api/{kind}/{eid}
+             Route(PREFIX + "/data.js", script, methods=["GET"])]
+    found += [Route(PREFIX + "/", index, methods=["GET"]),
              Route(PREFIX + "/search", find, methods=["GET"]),
              Route(PREFIX + "/list/{kind}", listing, methods=["GET"])]
     found += [Route(PREFIX + f"/{k}/{{eid}}", item(k), methods=["GET"]) for k in DETAIL_KINDS]
