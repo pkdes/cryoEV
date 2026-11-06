@@ -213,8 +213,8 @@ body.sandbox #list,body.sandbox #side{top:var(--sbh,0px)}
     <li>Click a polygon to select (innermost wins)</li>
     <li>Drag a white handle to move a vertex</li>
     <li>Click the outline to add a point; right-click a point (phone: double-tap) to delete it</li>
-    <li>Selected prediction: <kbd>A</kbd> accept (as its predicted class) · <kbd>X</kbd> reject (not an object). Moving, adding or deleting one of its vertices accepts it too (Undo in the message, or <kbd>Z</kbd>)</li>
-    <li><kbd>Del</kbd> delete label</li>
+    <li>Selected <span class="hSel">prediction</span>: <kbd>A</kbd> accept (as its predicted class) · <kbd>X</kbd> reject (not an object). Moving, adding or deleting one of its vertices accepts it too (Undo in the message, or <kbd>Z</kbd>)</li>
+    <li><kbd>Del</kbd> delete <span class="hDel">label</span></li>
     <li><kbd>D</kbd> freehand: drag around the object · <kbd>V</kbd> vertex: tap points, tap the first point or <kbd>Enter</kbd> to close · <kbd>Esc</kbd> cancel. In both, right/middle-drag or two fingers pan</li>
     <li><kbd>E</kbd> redraw the selected outline (keeps class and id)</li>
     <li><kbd>1</kbd>–<kbd>8</kbd> or a class chip: reclass the selection; also the class for new shapes</li>
@@ -316,7 +316,8 @@ if (typeof D.cand_conf === "number" && isFinite(D.cand_conf)) {
 // Words for them live in PW (the labeling package keeps the old ones); applyPredictionWording() sets the static text once.
 const isPredPkg = D.kind === "prediction";
 const pctOf = (v, d) => Math.round((typeof v === "number" && isFinite(v) ? v : d) * 100) + "%";
-const PW = isPredPkg ? {lab: "counted", pr: "unsure", prFlag: "unsure outline", run: "Model"} : {lab: "labels", pr: "predictions", prFlag: "prediction", run: "Predictions"};
+const PW = isPredPkg ? {lab: "counted", pr: "unsure", prFlag: "unsure outline", run: "Model", fg: "counted outlines with no unsure match", fp: "unsure outlines with no counted outline", fx: "class disagreements with the model", flc: "Low conf EV outlines with no match", noMatch: "no counted outline matches it", sel: "unsure outline", dropLab: "counted outline"}
+  : {lab: "labels", pr: "predictions", prFlag: "prediction", run: "Predictions", fg: "labels with no prediction", fp: "predictions with no label", fx: "class disagreements with the model", flc: "Low conf EV labels with no match", noMatch: "no label matches it", sel: "prediction", dropLab: "label"};
 function applyPredictionWording() {
   if (!isPredPkg) return;
   const lo = pctOf(D.cand_conf, 0.25), hi = pctOf(D.label_conf, 0.5);
@@ -325,6 +326,9 @@ function applyPredictionWording() {
   $("lblPr").textContent = "Unsure, not counted ≥";
   $("lblPrWrap").title = `Model outlines between ${lo} and ${hi}. Not counted unless you accept them.`;
   $("helpT").textContent = "unsure";
+  document.querySelector(".hSel").textContent = PW.sel; document.querySelector(".hDel").textContent = PW.dropLab;
+  $("triConf").title = "Only show unsure outlines at or above this confidence";
+  $("showSept").closest("label").style.display = "none";  // prediction packages carry no September decisions
   $("toTri").title = "Go through unsure outlines one at a time: accept or reject";
   $("toTri").classList.add("quick");
 }
@@ -687,8 +691,7 @@ const statusOf = im => {
   const e = edits[im.file];
   return e && e.reviewed ? "reviewed" : e && (e.modified || Object.values(e.dec || {}).some(d => d.v)) ? "edited" : "unreviewed";
 };
-const FLAG_COUNTS = [["fg", FLAG.gu, "labels with no prediction"], ["fp", FLAG.pu, "predictions with no label"],
-  ["fx", FLAG.x, "class disagreements with the model"], ["flc", FLAG.lc, "Low conf EV labels with no match"]];
+const FLAG_COUNTS = [["fg", FLAG.gu, PW.fg], ["fp", FLAG.pu, PW.fp], ["fx", FLAG.x, PW.fx], ["flc", FLAG.lc, PW.flc]];
 const flagRank = im => (im.fg || 0) + (im.fp || 0) + (im.fx || 0);  // flc is shown, but doesn't rank (spec)
 const meName = () => me() || "anonymous";
 const claimedBy = file => [...new Set(Object.entries(claims).filter(([k]) => k.startsWith(file + "|")).map(([, w]) => w))];
@@ -721,7 +724,7 @@ function renderList() {
 }
 function flagText(o, pred) {
   const t = [];
-  if (o.u) t.push(`<span style="color:${pred ? FLAG.pu : "#f0f"}">${pred ? "no matching label" : "no matching prediction"}</span>`);
+  if (o.u) t.push(`<span style="color:${pred ? FLAG.pu : "#f0f"}">${pred ? (isPredPkg ? "no counted outline matches it" : "no matching label") : "no matching prediction"}</span>`);
   if (o.x) t.push(`<span style="color:${FLAG.x}">class disagrees with ${pred ? "label" : "model"}</span>`);
   if (o.lc) t.push(`<span style="color:var(--mute)">Low conf EV: confirm the class</span>`);
   return t.length ? " (" + t.join(", ") + ")" : "";
@@ -752,8 +755,8 @@ function renderSide() {
     const by = d && d.who ? ` · ${esc(dispName(d.who))}` : "";
     const st = v === "no" ? `<div class="decst no">Rejected: not an object${by}</div>`
       : v.startsWith("add:") ? `<div class="decst add">Accepted as ${esc(v.slice(4))}${by}</div>`
-      : `<div class="decst">Not decided${p.u ? ": no label matches it" : ""}</div>`;
-    box.innerHTML = `<div>Prediction${p.c ? ` <b style="color:${catColor(p.c)}">${esc(p.c)}</b>` : ""}, confidence ${p.s.toFixed(2)}${flagText(p, true)}</div>` + st;
+      : `<div class="decst">Not decided${p.u ? ": " + PW.noMatch : ""}</div>`;
+    box.innerHTML = `<div>${isPredPkg ? "Unsure outline" : "Prediction"}${p.c ? ` <b style="color:${catColor(p.c)}">${esc(p.c)}</b>` : ""}, confidence ${p.s.toFixed(2)}${flagText(p, true)}</div>` + st;
     const big = (id, html, title, fn) => { const b = document.createElement("button"); b.id = id; b.className = "bigAct"; b.innerHTML = html; b.title = title; b.onclick = fn; return b; };
     const acc = big("accBtn", `✓ Accept as ${esc(pc)}<kbd>A</kbd>`, `Add it as a ${pc} label (A)`, () => acceptPred(pc));
     const rej = big("rejBtn", `✕ Reject<kbd>X</kbd>`, "Not an object (X)", rejectPred); rej.disabled = v === "no";
@@ -768,12 +771,14 @@ function legend() {
   $("flagLegend").innerHTML = [
     [sw("1.5px dashed #22d3ee"), PW.prFlag],
     [`<span class="sw"><i style="border-top:0;height:3px;background:repeating-linear-gradient(90deg,${FLAG.pu} 0 8px,transparent 8px 11px,${FLAG.pu} 11px 13px,transparent 13px 16px)"></i></span>`,
-      `dash-dot: ${PW.prFlag} with no label, undecided (possible miss). Select it: Accept (A) or Reject (X); editing its outline accepts it`],
+      isPredPkg ? "unsure outline, undecided: not counted until you accept it. Select it: Accept (A) or Reject (X); editing its outline accepts it"
+                : `dash-dot: prediction with no label, undecided (possible miss). Select it: Accept (A) or Reject (X); editing its outline accepts it`],
+    ...(isPredPkg ? [] : [
     [sw(`6px solid ${FLAG.gu}`), "label with no prediction (check it)"],
     [sw(`5px dotted ${FLAG.x}`), "class disagrees with the matched object (label halo, dotted prediction)"],
     [sw(`4px dashed ${FLAG.lc}`), "Low conf EV label: confirm the class"],
-    [`<span class="sept" style="margin-right:6px">Sept</span>`, "decision carried from the September review (gone once someone re-decides)"],
-  ].map(([s, t]) => `<div>${s}${t}</div>`).join("") + `<div style="color:var(--mute);margin-top:3px">Flags disappear once the object has a decision. Older packages have only the first three.</div>`;
+    [`<span class="sept" style="margin-right:6px">Sept</span>`, "decision carried from the September review (gone once someone re-decides)"]]),
+  ].map(([s, t]) => `<div>${s}${t}</div>`).join("") + `<div style="color:var(--mute);margin-top:3px">Flags disappear once the object has a decision.${isPredPkg ? "" : " Older packages have only the first three."}</div>`;
 }
 function renderChips() {
   const bar = $("chipBar"), selG = selObj();
@@ -1304,7 +1309,7 @@ function setTriMode(m) {
   openTri();
 }
 function triKeysText(cm) {
-  return cm ? "1–9 pick class · → / A keep · ← / ↑ / S next · Z undo · Esc close"
+  return cm ? `1–${Math.min(9, CATS.length)} pick class · → / A keep · ← / ↑ / S next · Z undo · Esc close`
             : "→ / A accept · ← / X reject · ↑ / S skip · Z undo · Esc close";
 }
 function openTri() {
