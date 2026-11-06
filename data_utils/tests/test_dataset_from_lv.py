@@ -68,7 +68,8 @@ def make_export(root):
                                      "bbox": [0, 0, 1, 1], "area": 1, "segmentation": [poly], "iscrowd": 0})
         (d / split).mkdir(parents=True, exist_ok=True)
         (d / split / fn).write_bytes(b"\xff\xd8 fake jpeg " + stem.encode() * 50)
-        rows.append(f"{stem},batch,,{split},{split}")
+        batch = "20261012 lipo+VLDL" if stem in EXPORT_ONLY else "batch"      # export-only = an excluded session
+        rows.append(f"{stem},{batch},,{split},{split}")
     rows.append("a2dup_png,batch,,DROPPED-duplicate,train")
     for s, c in per.items():
         (d / s / "_annotations.coco.json").write_text(json.dumps(c), encoding="utf-8")
@@ -112,9 +113,10 @@ def run_prepare(cryoai_root, out_dir, scheme, source_name=EXPORT):
     return out_dir
 
 
-def build(lv, export, name, out_root, scheme="ev", **kw):
+def build(lv, export, name, out_root, scheme="ev", export_only="drop", **kw):
     buf = io.StringIO()
-    prov = D.build(str(lv), str(export), name, out_root, scheme, log=lambda *a: print(*a, file=buf), **kw)
+    prov = D.build(str(lv), str(export), name, out_root, scheme, export_only=export_only,
+                   log=lambda *a: print(*a, file=buf), **kw)
     return prov, buf.getvalue()
 
 
@@ -136,7 +138,8 @@ def compare(prep_dir, lv_dir):
         img_diff = [n for n in li if n not in pi or
                     (prep_dir / "images" / s / n).read_bytes() != (lv_dir / "images" / s / n).read_bytes()]
         out[s] = {"byte": byte, "poly_diff": poly_diff, "files": len(ll), "images": len(li), "img_diff": img_diff,
-                  "export_only": len(pi - li),
+                  "export_only": len(pi - li), "prep_images": len(pi),
+                  "prep_files": len(list((prep_dir / "labels" / s).glob("*.txt"))),
                   "lines": sum(len((lv_dir / "labels" / s / n).read_text().splitlines()) for n in ll)}
     return out
 
@@ -161,11 +164,12 @@ class Fixture(unittest.TestCase):
 
 
 class TestKnownAnswer(Fixture):
-    """The control: unedited base -> prepare's output, byte for byte."""
+    """The control: unedited base -> prepare's output, byte for byte (drop: on the images both have;
+    export-labels: the whole dataset)."""
 
-    def check_control(self, scheme):
+    def check_control(self, scheme, export_only="drop"):
         prep_dir = run_prepare(self.root, self.root / f"prep_{scheme}", scheme)
-        prov, _ = build(self.base_lv, self.export, f"lv_{scheme}", self.root / "out", scheme)
+        prov, _ = build(self.base_lv, self.export, f"lv_{scheme}", self.root / "out", scheme, export_only)
         lv_dir = self.root / "out" / f"lv_{scheme}"
         cmp = compare(prep_dir, lv_dir)
         files = sum(c["files"] for c in cmp.values())
@@ -174,7 +178,11 @@ class TestKnownAnswer(Fixture):
             self.assertEqual(c["poly_diff"], [], (scheme, s))
             self.assertEqual(c["byte"], c["files"], (scheme, s))                 # byte-identical label files
             self.assertEqual(c["img_diff"], [], (scheme, s))
-        self.assertEqual({s: c["export_only"] for s, c in cmp.items()}, {"train": 1, "val": 0, "test": 0})
+        n_eo = 1 if export_only == "drop" else 0
+        self.assertEqual({s: c["export_only"] for s, c in cmp.items()}, {"train": n_eo, "val": 0, "test": 0})
+        if export_only == "export-labels":                                       # full identity with prepare
+            self.assertEqual({s: (c["images"], c["files"]) for s, c in cmp.items()},
+                             {s: (c["prep_images"], c["prep_files"]) for s, c in cmp.items()})
         self.assertEqual(yaml_body(prep_dir), yaml_body(lv_dir))
         return prov, cmp
 
@@ -188,6 +196,23 @@ class TestKnownAnswer(Fixture):
     def test_control_ev_nonev(self):
         prov, _ = self.check_control("ev_nonev")
         self.assertEqual(prov["dataset_record"]["class_counts"]["train"], {"EV": 4, "non-EV": 1})
+
+    def test_control_export_labels_is_full_identity(self):
+        prov, cmp = self.check_control("ev_nonev", "export-labels")
+        rec = prov["dataset_record"]
+        self.assertEqual(rec["class_counts"]["train"], {"EV": 4, "non-EV": 2})          # + x9's VLDL -> non-EV
+        self.assertEqual(rec["labels"]["labels_from"]["train"], {"lv": 3, "export": 1})
+        self.assertEqual(rec["export_only"], {"choice": "export-labels", "n": {"train": 1}})
+        self.assertIn("--export-only export-labels", rec["note"])
+        self.assertEqual(rec["counts_trained"], {"train": 4, "valid": 1, "test": 1})
+        # images_sha256 leaves the excluded-session image out (importer definition); the list keeps it
+        self.assertEqual(rec["images_sha256"], hashlib.sha256("".join(sorted(
+            f"{s}\t{k}\n" for k, s in [("a1_png", "train"), ("a2_png", "train"), ("a3_jpg", "train"),
+                                       ("b1_png", "valid"), ("c1_png", "test")])).encode()).hexdigest())
+        self.assertIn("x9_png\ttrain\n", (self.root / "out" / "lv_ev_nonev" / D.IMAGE_LIST).read_text(encoding="utf-8"))
+
+    def test_control_single_class_export_labels(self):
+        self.check_control("ev", "export-labels")
 
     def test_split_from_export_not_from_pull(self):
         build(self.base_lv, self.export, "ds", self.root / "out")
@@ -232,6 +257,10 @@ class TestEdits(Fixture):
         self.assertEqual(rec["counts"]["train"]["instances"], 4)              # 5 in the base build
 
 
+def on_disk_choice(ds):
+    return json.loads((ds / D.PROVENANCE).read_text(encoding="utf-8"))["details"]["export_only_choice"]
+
+
 class TestReporting(Fixture):
     def test_images_missing_from_split_source_are_reported(self):
         prov, log = build(self.base_lv, self.export, "ds", self.root / "out")
@@ -239,7 +268,9 @@ class TestReporting(Fixture):
         self.assertEqual(sorted((m["image"], m["reason"]) for m in det["not_in_export"]),
                          [("a2dup_png", "split file: DROPPED-duplicate"), ("orphan_png", "not in the export")])
         self.assertEqual(rec["not_in_export"], 2)
-        self.assertEqual(rec["export_only"], {"train": 1})
+        self.assertEqual(rec["export_only"], {"choice": "drop", "n": {"train": 1}})
+        self.assertIn("--export-only drop", rec["note"])
+        self.assertEqual(on_disk_choice(self.root / "out" / "ds"), "drop")
         self.assertIn("orphan_png", log)
         self.assertIn("a2dup_png", log)
         self.assertIn("2 lv image(s) not in the export", rec["note"])
@@ -271,7 +302,52 @@ class TestReporting(Fixture):
         self.assertEqual(D.list_text(pairs), importers.list_text(pairs))
 
 
+class TestReporting2(Fixture):
+    def test_dropped_image_with_review_edits_is_flagged(self):
+        rows = [{"image": "orphan_png", "op": "reclass", "status": "applied"},
+                {"image": "a2dup_png", "op": "keep", "status": "applied"},              # no label change
+                {"image": "a1_png", "op": "delete", "status": "applied"}]               # in the dataset: fine
+        (self.base_lv / "changes.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        prov, log = build(self.base_lv, self.export, "ds", self.root / "out")
+        self.assertEqual(prov["details"]["edited_but_not_in_export"], {"orphan_png": 1})
+        self.assertIn("review edits in changes.jsonl", prov["dataset_record"]["note"])
+        self.assertIn("orphan_png", log)
+
+    def test_resized_export_copy_warns(self):
+        stretched = copy.deepcopy(self.base)
+        im = next(i for i in stretched["images"] if i["extra"]["name"] == "a3_jpg")
+        im["width"], im["height"] = 5760 * 2, 4092 * 2                                 # same aspect ratio
+        lv = write_lv(self.lvs, "lv_20990101_0300", stretched)
+        prov, _ = build(lv, self.export, "ds", self.root / "out")
+        self.assertEqual(prov["details"]["size_stretched"], ["a3_jpg"])
+
+
 class TestRefusals(Fixture):
+    def test_export_only_needs_an_explicit_choice(self):
+        with self.assertRaisesRegex(D.BuildError, "--export-only drop.*--export-only export-labels"):
+            build(self.base_lv, self.export, "ds", self.root / "out", export_only=None)
+        self.assertFalse((self.root / "out" / "ds").exists())
+        r = subprocess.run([sys.executable, str(REPO / "data_utils" / "dataset_from_lv.py"), "--lv", str(self.base_lv),
+                            "--split-from", str(self.export), "--output-name", "ds", "--output-root",
+                            str(self.root / "out")], capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("Choose --export-only", r.stderr)
+        self.assertFalse((self.root / "out" / "ds").exists())
+
+    def test_image_missing_from_export_folder_is_never_claimed(self):
+        (self.export / "train" / f"a2_png.rf.{hexname('a2_png')}.jpg").unlink()
+        with self.assertRaisesRegex(D.BuildError, "1 image\\(s\\) not copied"):
+            build(self.base_lv, self.export, "ds", self.root / "out")
+        self.assertFalse((self.root / "out" / "ds").exists())
+
+    def test_other_aspect_ratio_is_refused(self):
+        boxed = copy.deepcopy(self.base)
+        im = next(i for i in boxed["images"] if i["extra"]["name"] == "a1_png")
+        im["height"] = 1440                                                             # square vs 1440x1024
+        lv = write_lv(self.lvs, "lv_20990101_0400", boxed)
+        with self.assertRaisesRegex(D.BuildError, "aspect ratio"):
+            build(lv, self.export, "ds", self.root / "out")
+
     def test_existing_output_is_never_overwritten(self):
         (self.root / "out" / "ds").mkdir(parents=True)
         with self.assertRaisesRegex(D.BuildError, "never overwritten"):
@@ -325,12 +401,56 @@ class TestRegistry(Fixture):
             D.register(prov, self.root / "out" / "lv_ds_fixture", reg_root)
         self.assertEqual(len((reg_root / "dataset.jsonl").read_text(encoding="utf-8").splitlines()), 1)
 
+    def test_register_refuses_a_bare_coco(self):
+        bare = self.root / "bare"
+        bare.mkdir()
+        (bare / "labels.coco.json").write_bytes((self.base_lv / "labels.coco.json").read_bytes())
+        prov, _ = build(bare, self.export, "ds", self.root / "out")
+        with self.assertRaisesRegex(D.BuildError, "only a dataset built from a label version"):
+            D.register(prov, self.root / "out" / "ds", self.root / "registry")
+        with self.assertRaisesRegex(D.BuildError, "a bare COCO or a pull is never registered"):
+            D.check_registrable_lv(*D.read_lv(str(bare))[:3])
+        self.assertFalse((self.root / "registry").exists())
+
+    def test_registry_refusal_is_a_clean_error(self):
+        prov, _ = build(self.base_lv, self.export, "20261012_x", self.root / "out")     # excluded-session id
+        with self.assertRaisesRegex(D.BuildError, "registry refused"):
+            D.register(prov, self.root / "out" / "20261012_x", self.root / "registry")
+        self.assertFalse((self.root / "registry" / "lists" / "20261012_x.tsv").exists())
+
+    def test_register_existing_folder(self):
+        reg_root = self.root / "registry"
+        build(self.base_lv, self.export, "later", self.root / "out")
+        line = D.register_existing(self.root / "out" / "later", reg_root)
+        self.assertEqual(line["id"], "later")
+        self.assertEqual((reg_root / "lists" / "later.tsv").read_bytes(),
+                         (self.root / "out" / "later" / D.IMAGE_LIST).read_bytes())
+        build(self.base_lv, self.export, "touched", self.root / "out")
+        lab = next((self.root / "out" / "touched" / "labels" / "train").glob("*.txt"))
+        lab.write_bytes(lab.read_bytes() + b"0 0 0 1 0 1 1\n")
+        with self.assertRaisesRegex(D.BuildError, "changed since it was built"):
+            D.register_existing(self.root / "out" / "touched", reg_root)
+
+    def test_cli_register_checks_the_id_before_building(self):
+        reg_root = self.root / "registry"
+        build(self.base_lv, self.export, "taken", self.root / "elsewhere")
+        D.register_existing(self.root / "elsewhere" / "taken", reg_root)
+        env = dict(os.environ, CRYOEV_REGISTRY=str(reg_root))
+        r = subprocess.run([sys.executable, str(REPO / "data_utils" / "dataset_from_lv.py"), "--lv", str(self.base_lv),
+                            "--split-from", str(self.export), "--output-name", "taken", "--output-root",
+                            str(self.root / "out"), "--export-only", "drop", "--register"],
+                           env=env, capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("already has id taken", r.stderr)
+        self.assertFalse((self.root / "out" / "taken").exists())                      # nothing was built
+
     def test_cli_without_register_writes_no_registry(self):
         reg_root = self.root / "registry"
         env = dict(os.environ, CRYOEV_REGISTRY=str(reg_root), CRYOEV_LAPTOP_ROOT=str(self.root))
         r = subprocess.run([sys.executable, str(REPO / "data_utils" / "dataset_from_lv.py"), "--lv", "lv_20990101_0000",
                             "--split-from", str(self.export), "--output-name", "ds", "--output-root",
-                            str(self.root / "out")], env=env, capture_output=True, text=True, cwd=REPO)
+                            str(self.root / "out"), "--export-only", "drop"], env=env, capture_output=True, text=True,
+                           cwd=REPO)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("--register would append", r.stdout)
         rec = json.loads(r.stdout.strip().splitlines()[-1])
@@ -338,7 +458,8 @@ class TestRegistry(Fixture):
         self.assertFalse(reg_root.exists())
         r = subprocess.run([sys.executable, str(REPO / "data_utils" / "dataset_from_lv.py"), "--lv", "lv_20990101_0000",
                             "--split-from", str(self.export), "--output-name", "ds2", "--output-root",
-                            str(self.root / "out"), "--register"], env=env, capture_output=True, text=True, cwd=REPO)
+                            str(self.root / "out"), "--export-only", "drop", "--register"], env=env,
+                           capture_output=True, text=True, cwd=REPO)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertTrue((reg_root / "dataset.jsonl").is_file())
 
@@ -386,18 +507,29 @@ class TestKnownAnswerRealData(unittest.TestCase):
             lv.mkdir()
             (lv / "labels.coco.json").write_bytes(pull.read_bytes())
             prep_dir = run_prepare(cai, t / "prep", "ev_nonev", REAL_EXPORT_NAME)
-            prov, _ = build(lv, exp, "fromlv", t, "ev_nonev")
-            cmp = compare(prep_dir, t / "fromlv")
-            for s, c in cmp.items():
-                self.assertEqual(c["poly_diff"], [], s)
-                self.assertEqual(c["byte"], c["files"], s)
-                self.assertEqual(c["img_diff"], [], s)
-            self.assertEqual({s: c["images"] for s, c in cmp.items()}, {"train": 103, "val": 23, "test": 34})
-            self.assertEqual(sum(c["files"] for c in cmp.values()), 149)
-            self.assertEqual(sum(c["lines"] for c in cmp.values()), 3528)
-            self.assertEqual(prov["dataset_record"]["not_in_export"], 10)
-            self.assertTrue(all(m["reason"] == "split file: DROPPED-duplicate" for m in prov["details"]["not_in_export"]))
-            self.assertEqual(yaml_body(prep_dir), yaml_body(t / "fromlv"))
+            for choice, images, files, lines in (("drop", {"train": 103, "val": 23, "test": 34}, 149, 3528),
+                                                 ("export-labels", {"train": 114, "val": 26, "test": 39}, 168, None)):
+                out = t / choice
+                prov, _ = build(lv, exp, "fromlv", out, "ev_nonev", choice)
+                cmp = compare(prep_dir, out / "fromlv")
+                print(f"\n[real control] --export-only {choice}: " + "; ".join(
+                    f"{s}: images {c['images']}/{c['prep_images']}, label files byte-identical {c['byte']}/"
+                    f"{c['files']} (prepare {c['prep_files']}), polygons {c['lines']}" for s, c in cmp.items()))
+                for s, c in cmp.items():
+                    self.assertEqual(c["poly_diff"], [], (choice, s))
+                    self.assertEqual(c["byte"], c["files"], (choice, s))
+                    self.assertEqual(c["img_diff"], [], (choice, s))
+                self.assertEqual({s: c["images"] for s, c in cmp.items()}, images)
+                self.assertEqual(sum(c["files"] for c in cmp.values()), files)
+                if lines:
+                    self.assertEqual(sum(c["lines"] for c in cmp.values()), lines)
+                if choice == "export-labels":                                   # the whole of prepare's dataset
+                    self.assertEqual({s: (c["images"], c["files"]) for s, c in cmp.items()},
+                                     {s: (c["prep_images"], c["prep_files"]) for s, c in cmp.items()})
+                self.assertEqual(prov["dataset_record"]["not_in_export"], 10)
+                self.assertTrue(all(m["reason"] == "split file: DROPPED-duplicate"
+                                    for m in prov["details"]["not_in_export"]))
+                self.assertEqual(yaml_body(prep_dir), yaml_body(out / "fromlv"))
 
 
 if __name__ == "__main__":
