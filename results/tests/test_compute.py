@@ -50,6 +50,7 @@ REVIEWER_S1 = {"reviewed_images": 1, "ev_reviewed_geometry": 2, "reviewer_ev": 2
                "reviewer_inner": 0, "reviewer_nonev": 0, "pct_multilayer_reviewer": 50.0,
                "reviewer_geometry_disagree": 1}
 NM_RANGE_GOLDEN = {"nm_per_px_min": 1.4724, "nm_per_px_max": 1.4724}
+NEW_FIELDS = {"n_checked", "n_unsure_open", "diam_hist"}   # round 6 (P2), results.json only / not per_sample.csv
 GEOMETRY = ["n_images", "ev_total", "ev_per_image_mean", "diam_nm_median", "diam_nm_q1", "diam_nm_q3",
             "pct_multilayer_geometry", "inner_layers_excluded", "nonev_total"]
 
@@ -81,7 +82,9 @@ def assert_matches(tc, got, exp):
     tc.assertEqual(set(got["samples"]), set(exp["samples"]))
     for s, e in exp["samples"].items():
         g = got["samples"][s]
-        tc.assertEqual(set(g), set(e), s)
+        tc.assertEqual(NEW_FIELDS - set(g), set(), s)           # additive round-6 fields: present, tested in test_p2
+        tc.assertEqual(sum(g["diam_hist"]["counts"]), g["ev_total"], s)
+        tc.assertEqual(set(g) - NEW_FIELDS, set(e), s)
         for f, v in e.items():
             if f.startswith("diam_nm_"):
                 tc.assertLess(abs(g[f] / v - 1), tol, f"{s} {f}: {g[f]} vs {v}")

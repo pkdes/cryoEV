@@ -217,6 +217,7 @@ def _build_into(out, final, ps_dir, req, ps_id, model, rows, pred_dir, owner, wi
     pid = final.name
     data = {"id": pid, "kind": "prediction", "prediction_set": ps_id, "model": model, "owner": owner,
             "source": f"prediction_set:{ps_id}", "run": model, "created": built, "cand_conf": CAND_CONF,
+            "label_conf": LABEL_CONF,
             "categories": PRED_CLASSES + EXTRA_CLASSES, "images": images}
     brp.write_packages(out, data, part_size=0, zip_it=False)
     _write_json(out / "labels.coco.json", coco, indent=None)
@@ -255,6 +256,13 @@ def _ring_px(rings, w, h):
     return [[round(r[i] * w, 3), round(r[i + 1] * h, 3)] for i in range(0, len(r), 2)]
 
 
+def candidates_open(n_candidates: int, edit) -> int:
+    """Candidates (data.js pr items, decision keys "p<k>") with neither an accept ("add:<cls>") nor a reject
+    ("no") decision in this edit record. A decision with an empty v was undone: the candidate is open again."""
+    dec = rs._migrate(edit)["dec"] if edit else {}
+    return sum(1 for k in range(n_candidates) if not (dec.get(f"p{k}") or {}).get("v"))
+
+
 def reviewed_polygons(pkg_dir, write=True) -> dict:
     """reviewed/1 for one prediction package (BUILD_CONTRACTS.md section 3 + amendment), also written to
     <pkg>/reviewed.json.
@@ -270,7 +278,9 @@ def reviewed_polygons(pkg_dir, write=True) -> dict:
         conf            the model's confidence for a label or accepted candidate (reshaped too); null when drawn
     reviewed_by = authors of decisions: the who of the image's decisions. The tool does not record who pressed
     Reviewed, so an image marked Reviewed with no decisions has [].
-    neither: the model predictions at conf >= 0.50, source "model", reviewer_label / reviewer_class null."""
+    neither: the model predictions at conf >= 0.50, source "model", reviewer_label / reviewer_class null.
+    Every image also has n_candidates_open (additive to reviewed/1): its candidates (cand_conf <= conf < label_conf,
+    data.js pr items with u = 1) with no accept and no reject decision; all of them for an untouched image."""
     pkg = Path(pkg_dir)
     meta, data = _read_json(pkg / META), read_datajs(pkg)
     by_file = {i["file"]: i for i in data["images"]}
@@ -284,7 +294,8 @@ def reviewed_polygons(pkg_dir, write=True) -> dict:
         edit = _read_json(rec_path).get("edit") if rec_path.is_file() else None
         reviewed, edited = bool(edit and edit.get("reviewed")), is_edited(edit)
         if not (reviewed or edited):
-            out["images"][image] = {"reviewed": False, "edited": False, "reviewed_by": [], "objects": [
+            out["images"][image] = {"reviewed": False, "edited": False, "reviewed_by": [],
+                                    "n_candidates_open": len(im["pr"]), "objects": [
                 {"cls": m["cls"], "poly": _ring_px(lab[m["id"]]["p"], w, h), "conf": m["conf"], "source": "model",
                  "reviewer_label": None, "reviewer_class": None} for m in info["labels"]]}
             continue
@@ -304,7 +315,8 @@ def reviewed_polygons(pkg_dir, write=True) -> dict:
                          "source": "model" if orig is not None and g["p"] == orig else "human",
                          "reviewer_label": g["c"], "reviewer_class": rc})
         who = sorted({d.get("who") for d in rs._migrate(edit)["dec"].values() if d.get("who")})
-        out["images"][image] = {"reviewed": reviewed, "edited": edited, "reviewed_by": who, "objects": objs}
+        out["images"][image] = {"reviewed": reviewed, "edited": edited, "reviewed_by": who,
+                                "n_candidates_open": candidates_open(len(im["pr"]), edit), "objects": objs}
     if write:
         _write_json(pkg / "reviewed.json", out)
     return out

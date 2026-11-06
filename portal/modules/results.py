@@ -38,6 +38,17 @@ Rules:
     the package is never written), else the model predictions. Writes only <ps>/results/ (compute_and_write).
   - Roots: cfg.predict_root / cfg.review_root when the portal Config has them, else
     data_utils.config.laptop_root() / "predict" and / "review".
+  - What is counted (round 6): a header line says EVs = outlines at conf >= the rule's conf plus everything kept or
+    drawn in review; per sample the table shows the unsure outlines still open (results.json n_unsure_open: candidates
+    nobody accepted or rejected; untouched image = all, edited = open ones, Reviewed = 0) and "checked N of M
+    images" (n_checked). A nudge links to the review when any are open. A results.json written before those fields
+    shows "Update to see unsure counts" and an Update button.
+  - Update: the out-of-date banner has an "Update results now" form (POST /results/<ps>/compute, plain form, Origin
+    checked); an index card is a title link + meta + an "Update" form when out of date (no form inside a link). Nothing
+    recomputes by itself.
+  - EV size: next to the median/Q1-Q3 chart, one server-drawn histogram per sample with EVs (results.json diam_hist:
+    10 nm bins, 0-500 nm + a >= 500 nm bin; hover titles; a table under <details>).
+  - The analysis is shown by its display name (portal/names.py), the ps id as small text.
   - Every text goes through html.escape; the page loads nothing from another origin.
 """
 from __future__ import annotations
@@ -56,6 +67,8 @@ from pathlib import Path
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
+
+from portal import names as NM
 
 PREFIX = "/results"
 ROLES = ("admin", "advanced", "basic")
@@ -423,6 +436,108 @@ def diam_chart(samples: dict) -> str:
     return "".join(parts)
 
 
+def hist_ok(s: dict) -> bool:
+    h = s.get("diam_hist")
+    return (isinstance(h, dict) and isinstance(h.get("counts"), list) and len(h["counts"]) >= 2
+            and isinstance(h.get("bin_nm"), (int, float)) and h["bin_nm"] > 0
+            and all(isinstance(c, int) and not isinstance(c, bool) and c >= 0 for c in h["counts"])
+            and sum(h["counts"]) >= 1)
+
+
+def bin_label(h: dict, k: int) -> str:
+    """'40–50 nm' for bin k; the last bin is '500 nm or more' (max_nm and above)."""
+    step, n = h["bin_nm"], len(h["counts"])
+    return f"{k * step:g} nm or more" if k == n - 1 else f"{k * step:g}–{(k + 1) * step:g} nm"
+
+
+def shared_xmax(samples: dict):
+    """The one x-axis end (nm) for every histogram on the page: the upper edge of the bin holding the 99th
+    percentile of all samples' EVs together, rounded up to 50 nm, at least 100 nm. None = draw the whole range."""
+    hs = [s["diam_hist"] for s in samples.values() if hist_ok(s)]
+    if not hs:
+        return None
+    step, n = hs[0]["bin_nm"], len(hs[0]["counts"])
+    if any(h["bin_nm"] != step or len(h["counts"]) != n for h in hs):
+        return None
+    pooled = [sum(h["counts"][k] for h in hs) for k in range(n)]
+    total, cum = sum(pooled), 0
+    for k, c in enumerate(pooled):
+        cum += c
+        if cum >= 0.99 * total:
+            break
+    edge = (k + 1) * step
+    return max(100, int(math.ceil(edge / 50.0)) * 50)
+
+
+def hist_chart(idx: int, label: str, s: dict, xmax=None) -> str:
+    """Server-drawn histogram of one sample's EV diameters (results.json diam_hist). One hue, bars separated by a
+    2 px card-coloured stroke, recessive grid, a hover title per bin, no script. x in %, y in px, like diam_chart.
+    xmax (nm; the page's shared axis end): bins from there up are folded into one '>= xmax' bar; the table still
+    lists the original bins."""
+    h = s["diam_hist"]
+    full, step0 = h["counts"], h["bin_nm"]
+    if xmax is not None and xmax < (len(full) - 1) * step0:
+        k0 = int(xmax // step0)
+        counts = full[:k0] + [sum(full[k0:])]
+    else:
+        counts = full
+    n = len(counts)
+    h2 = {"bin_nm": step0, "counts": counts}
+    peak = max(counts)
+    yt = nice_ticks(0, peak, 4)
+    ymax = yt[-1]
+    H, top, bot = 150, 8, 22
+    ph = H - top - bot
+    L, R = 7.0, 99.0
+    bw = (R - L) / n
+    step = h["bin_nm"]
+
+    def y(v):
+        return top + ph - v / ymax * ph
+
+    tid = f"cj-results-hist-t{idx}"
+    best = counts.index(peak)
+    summary = (f"{label}: {plural(sum(counts), 'EV')} by diameter; most in {bin_label(h2, best)} "
+               f"({plural(peak, 'EV')})")
+    parts = [f'<svg class="cj-results-svg cj-results-hist" width="100%" height="{H}" role="img" '
+             f'aria-labelledby="{tid}"><title id="{tid}">{esc(summary)}</title>']
+    for t in yt:
+        parts.append(f'<line class="cj-results-grid" x1="{L}%" x2="{R}%" y1="{y(t):.1f}" y2="{y(t):.1f}"/>'
+                     f'<text class="cj-results-axis" x="{L - 1}%" y="{y(t) + 4:.1f}" text-anchor="end">'
+                     f'{esc(fnum(t, 0))}</text>')
+    last = (n - 1) * step
+    for t in nice_ticks(0, last, 5):
+        if t >= last:
+            continue                      # the overflow bin has its own label
+        parts.append(f'<text class="cj-results-axis" x="{L + t / step * bw:.2f}%" y="{H - 6}" '
+                     f'text-anchor="middle">{esc(fnum(t, 0))}</text>')
+    parts.append(f'<text class="cj-results-axis" x="{R}%" y="{H - 6}" text-anchor="end">'
+                 f'{esc("≥" + fnum(last, 0))}</text>')
+    for k, c in enumerate(counts):
+        x0 = L + k * bw
+        tip = f"{bin_label(h2, k)}: {plural(c, 'EV')}"
+        bar = (f'<rect class="cj-results-bar" x="{x0:.3f}%" y="{y(c):.1f}" width="{bw:.3f}%" '
+               f'height="{top + ph - y(c):.1f}"/>') if c else ""
+        parts.append(f'<g class="cj-results-binx"><title>{esc(tip)}</title>'
+                     f'<rect class="cj-results-hit" x="{x0:.3f}%" y="{top}" width="{bw:.3f}%" height="{ph}"/>{bar}</g>')
+    parts.append("</svg>")
+    rows = "".join(f'<tr><td class="cj-results-l">{esc(bin_label(h, k))}</td><td>{c}</td></tr>'
+                   for k, c in enumerate(full) if c)
+    table = (f'<details class="cj-results-det cj-results-histtab"><summary>{esc("Table of the bins")}</summary>'
+             f'<div class="cj-results-wrap"><table class="cj-results-tab"><thead><tr><th scope="col">Diameter</th>'
+             f'<th scope="col">EVs</th></tr></thead><tbody>{rows}</tbody></table></div>'
+             f'<p class="cj-mut cj-results-note">{esc("Only bins with EVs are listed. A bin includes its lower edge and excludes its upper (10 ≤ d < 20 nm).")}</p></details>')
+    return (f'<figure class="cj-card cj-results-fig cj-results-histfig" data-sample="{esc(str(label))}">'
+            f'<figcaption>{esc(short(label))}: {esc(plural(sum(counts), "EV"))} by diameter'
+            f'<span class="cj-mut">{esc("Each bar is " + fnum(step, 0) + " nm wide. Hover a bar for its count.")}</span>'
+            f'</figcaption>{"".join(parts)}{table}</figure>')
+
+
+def hist_charts(samples: dict) -> str:
+    x = shared_xmax(samples)      # one x-axis for all samples; the y-axis stays per sample
+    return "".join(hist_chart(i, k, s, x) for i, (k, s) in enumerate(samples.items()) if hist_ok(s))
+
+
 def short(label, n=28) -> str:
     """A chart label that fits a phone row (SVG text does not wrap); the row's tooltip has the full label."""
     s = str(label)
@@ -478,7 +593,10 @@ def refused_notice(res: dict) -> str:
         lab = img.get("sample_label")
         if lab not in res["samples"]:
             out_of[lab] = out_of.get(lab, 0) + 1
-    items = "".join(f"<li><b>{esc(str(k))}</b> ({esc(plural(v, 'image'))})</li>" for k, v in out_of.items())
+    ru = res.get("refused_unsure") or {}
+    items = "".join(f"<li><b>{esc(str(k))}</b> ({esc(plural(v, 'image'))}"
+                    + (f", {esc(plural(ru[k], 'unsure outline'))} still open"
+                       if isinstance(ru.get(k), int) and ru[k] else "") + ")</li>" for k, v in out_of.items())
     head = ("No sample could be counted." if not res["samples"] else "Some samples were not counted.")
     if not res["samples"] and not out_of:
         head = "No results for this set."
@@ -487,12 +605,73 @@ def refused_notice(res: dict) -> str:
             + f'<p class="cj-results-why">{esc("Why: " + str(why))}</p></div>')
 
 
+def has_unsure_fields(res: dict) -> bool:
+    """False for a results.json written before n_unsure_open / n_checked existed (any sample without them)."""
+    return all("n_unsure_open" in s and "n_checked" in s for s in res["samples"].values())
+
+
+def unsure_total(res: dict) -> int:
+    """Open unsure outlines over the counted samples and the refused ones (refused_unsure: still work to do)."""
+    rows = list(res["samples"].values()) + [{"n_unsure_open": v} for v in (res.get("refused_unsure") or {}).values()]
+    return sum(int(s["n_unsure_open"]) for s in rows if isinstance(s.get("n_unsure_open"), int))
+
+
+def checked_cell(s: dict, n_img: int) -> str:
+    if "n_checked" not in s:
+        return td("Checked", "–", k="n_checked")
+    return td("Checked", f"{int(s['n_checked'])} of {n_img}", k="n_checked", sub="images edited or reviewed")
+
+
+def unsure_cell(s: dict) -> str:
+    if "n_unsure_open" not in s:
+        return td("Unsure, not counted", "–", k="n_unsure_open", sub="Update to see unsure counts")
+    if s["n_unsure_open"] is None:
+        return td("Unsure, not counted", "–", k="n_unsure_open", sub="unknown: update after the review is rebuilt")
+    return td("Unsure, not counted", fint(s["n_unsure_open"]), k="n_unsure_open", sub="open outlines, not in EVs")
+
+
+def counted_note(res: dict) -> str:
+    """The header line under the title: what the EV numbers include and exclude."""
+    conf = (res.get("rule") or {}).get("conf", 0.5)
+    try:
+        pct = f"{float(conf) * 100:g}"
+    except (TypeError, ValueError):
+        pct = "50"
+    text = (f"EV outlines the model is sure about (≥{pct}%) plus everything kept or drawn in review. "
+            "Unsure outlines are not counted until you accept them.")
+    return f'<p class="cj-results-counted" id="cj-results-counted"><b>Counted:</b> {esc(text)}</p>'
+
+
+def unsure_banner(cfg, res: dict, ps: dict, st: dict) -> str:
+    """The nudge (open unsure outlines) or, for an old results.json, the Update prompt. '' when neither applies."""
+    ps_id = ps["id"]
+    if res["samples"] and not has_unsure_fields(res):
+        busy = st["state"] in ("queued", "running")
+        return ('<div class="cj-results-banner cj-results-b-part" role="status" id="cj-results-oldfields">'
+                f'<p><b>{esc("Update to see unsure counts.")}</b> '
+                f'{esc("These results were computed before unsure outlines were counted.")}</p>'
+                + ("" if busy else compute_form(ps_id, "Update results now")) + "</div>")
+    n = unsure_total(res)
+    if n <= 0:
+        return ""
+    imgs = list(res["images"].values())
+    has_pkg = package_dir(cfg, ps_id) is not None
+    # the honesty banner already carries "Review these images" while some image is not Reviewed: no second button
+    already = bool(imgs) and not all(i.get("reviewed") for i in imgs) and has_pkg
+    link = ("" if already or not has_pkg else
+            f'<a class="cj-results-btn cj-results-btn-s" href="/review/pred_{esc(ps_id)}/">'
+            f'{esc("Review these images")}</a>')
+    return ('<div class="cj-results-banner cj-results-b-part" role="status" id="cj-results-nudge">'
+            f'<p><b>{esc(plural(n, "unsure outline") + " not checked yet.")}</b> '
+            f'{esc("They are not in the EV counts until you accept them.")}</p>{link}</div>')
+
+
 def sample_table(res: dict) -> str:
     samples = res["samples"]
     if not samples:
         return ""
     reviewer = any(int(s.get("n_reviewed") or 0) > 0 for s in samples.values())
-    head = ["Sample", "Images", "Reviewed", "EVs", "EVs per image", "Median diameter (Q1–Q3)",
+    head = ["Sample", "Images", "Reviewed", "Checked", "EVs", "Unsure, not counted", "EVs per image", "Median diameter (Q1–Q3)",
             "Multilayer (geometry)"]
     if reviewer:
         head += ["Multilayer (reviewer)", "Reviewer vs geometry"]
@@ -504,7 +683,9 @@ def sample_table(res: dict) -> str:
         cells = [f'<th scope="row" data-label="Sample" class="cj-results-sname">{esc(str(label))}</th>',
                  td("Images", fint(n_img), k="n_images"),
                  td("Reviewed", f"{n_rev} / {n_img}", k="n_reviewed"),
-                 td("EVs", fint(s.get("ev_total")), k="ev_total"),
+                 checked_cell(s, n_img),
+                 td("EVs", fint(s.get("ev_total")), k="ev_total", sub="counted"),
+                 unsure_cell(s),
                  td("EVs per image", fnum(s.get("ev_per_image_mean")), k="ev_per_image_mean"),
                  td("Median diameter (Q1–Q3)", dv, k="diam_nm_median", sub=dsub),
                  td("Multilayer (geometry)", fpct(s.get("pct_multilayer_geometry")), "cj-results-hl",
@@ -672,7 +853,8 @@ def render_set(cfg, ps: dict, user: dict) -> str:
     req = ps["request"]
     out = [f'<p class="cj-mut cj-results-crumb"><a href="/results/">Results</a> / '
            f'<span class="cj-wrap">{esc(ps_id)}</span></p>',
-           '<h1>Results</h1>',
+           f'<h1 class="cj-wrap">{esc(NM.display_name(req))}</h1>',
+           f'<p class="cj-mut cj-results-psid">{esc(ps_id)}</p>',
            f'<p class="cj-mut">{esc("Model " + str(req.get("model")))}'
            f'{esc(" · started " + when(req.get("created")) if req.get("created") else "")}</p>']
 
@@ -701,7 +883,9 @@ def render_set(cfg, ps: dict, user: dict) -> str:
         else:
             head = f"These results are older than the review package (built {hhmm(stale['at'])})."
         out.append(f'<div class="cj-results-banner cj-results-b-warn" role="alert" id="cj-results-stale">'
-                   f'<p><b>{esc(head)}</b> {esc("Compute again.")}</p></div>')
+                   f'<p><b>{esc(head)}</b> {esc("Update the results to include the latest review.")}</p>'
+                   + ("" if st["state"] in ("queued", "running") else compute_form(ps_id, "Update results now"))
+                   + "</div>")
     if problem:
         out.append(f'<div class="cj-results-banner cj-results-b-warn" role="alert"><p>{esc(problem)}</p></div>')
 
@@ -726,7 +910,9 @@ def render_set(cfg, ps: dict, user: dict) -> str:
                        + compute_form(ps_id, "Compute results") + "</div>")
         return "".join(out)
 
+    out.append(counted_note(res))
     out.append(honesty(res, ps_id, spot_count(cfg, ps_id), package_dir(cfg, ps_id) is not None))
+    out.append(unsure_banner(cfg, res, ps, st))
     out.append(refused_notice(res))
     if res["samples"]:
         out.append('<h2 class="cj-sec">Per sample</h2>')
@@ -735,6 +921,7 @@ def render_set(cfg, ps: dict, user: dict) -> str:
         out.append('<figure class="cj-card cj-results-fig"><figcaption>EV diameter by sample (nm)'
                    '<span class="cj-mut">Dot: median. Bar: the middle half of the EVs (Q1 to Q3).</span>'
                    f'</figcaption>{diam_chart(res["samples"])}</figure>')
+        out.append(hist_charts(res["samples"]))
     if res["images"]:
         out.append('<h2 class="cj-sec">Images</h2>')
         out.append(image_table(res))
@@ -746,7 +933,7 @@ def render_set(cfg, ps: dict, user: dict) -> str:
     if st["state"] not in ("queued", "running"):
         out.append('<div class="cj-results-again"><p class="cj-mut">'
                    + esc("After more review, compute again to include it.") + "</p>"
-                   + compute_form(ps_id, "Compute again", primary=False) + "</div>")
+                   + compute_form(ps_id, "Update results now", primary=False) + "</div>")
     return "".join(out)
 
 
@@ -786,9 +973,14 @@ def render_index(cfg, user: dict, can_see) -> str:
         meta = " · ".join(v for v in (when(ps["request"].get("created")) if ps["request"].get("created") else None,
                                       plural(int(n), "image") if isinstance(n, int) else None,
                                       f"model {ps['request'].get('model')}") if v)
-        items.append(f'<li><a class="cj-card cj-results-set" href="/results/{esc(ps["id"])}/">'
-                     f'<span class="cj-results-set-t"><b class="cj-wrap">{esc(ps["id"])}</b>{chip(label, tone)}</span>'
-                     f'<span class="cj-mut">{esc(meta)}</span></a></li>')
+        # a title link + meta (+ an Update form when out of date): a form is not allowed inside a link
+        update = (compute_form(ps["id"], "Update", primary=False)
+                  if st["state"] == "ready" and st["out_of_date"] else "")
+        items.append(f'<li class="cj-card cj-results-set">'
+                     f'<a class="cj-results-set-t" href="/results/{esc(ps["id"])}/">'
+                     f'<b class="cj-wrap">{esc(NM.display_name(ps["request"]))}</b>{chip(label, tone)}</a>'
+                     f'<span class="cj-mut cj-results-psid cj-wrap">{esc(ps["id"])}</span>'
+                     f'<span class="cj-mut">{esc(meta)}</span>{update}</li>')
     out.append(f'<ul class="cj-results-sets">{"".join(items)}</ul>')
     return "".join(out)
 
@@ -896,7 +1088,7 @@ def routes(ctx) -> list:
         ps = get_set(request)
         if ps is None:
             return not_found(request)
-        return ctx.page(request, f"Results {ps['id']}", page_body(render_set(ctx.cfg, ps, ctx.user(request))),
+        return ctx.page(request, f"Results · {NM.display_name(ps['request'])}", page_body(render_set(ctx.cfg, ps, ctx.user(request))),
                         active="results")
 
     def compute(request: Request):

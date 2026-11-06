@@ -278,7 +278,7 @@ class Golden(Base):
         notice = re.search(r'<div class="cj-results-banner cj-results-b-warn" role="alert" '
                            r'id="cj-results-refused">(.*?)</div>', page, re.S).group(1)
         self.assertIn("Some samples were not counted.", notice)
-        self.assertIn("<b>S1</b> (2 images)", notice)
+        self.assertIn("<b>S1</b> (2 images, 1 unsure outline still open)", notice)
         self.assertIn("mixes nm/px 1.4724, 2", notice)
         self.assertEqual(re.findall(r'<tr data-sample="([^"]+)">', page), [R.esc(XSS)])   # S2 still shown
         self.assertNotIn(XSS, page)                                                  # escaped everywhere
@@ -364,7 +364,8 @@ class Golden(Base):
         page = self.page(ps_id)
         self.assertIn(f"These results are older than the latest review edits (last edit {R.hhmm(done + 120)}).",
                       page)
-        self.assertIn("Compute again.", page)
+        self.assertIn("Update the results to include the latest review.", page)
+        self.assertIn("Update results now", page)
         self.assertTrue(self.status(ps_id)["out_of_date"])
         idx = self.get("/results/", "owner")[2].decode()
         card = re.search(r'href="/results/%s/">(.*?)</a>' % ps_id, idx, re.S).group(1)
@@ -570,7 +571,7 @@ class Compute(Base):
         page = self.page(TODO1, "owner")
         Golden.check_samples(self, page, exp)
         self.assertNotIn("data-cj-results-poll", page)
-        self.assertIn("Compute again", page)
+        self.assertIn("Update results now", page)
 
     def test_failed_compute(self):
         def boom(ps_dir, reviewed):

@@ -39,6 +39,19 @@ so a page can show "edited but not marked reviewed".
 Images neither edited nor reviewed always come from the prediction .txt at conf >= 0.5, never from
 reviewed.json, so editing one image cannot shift another.
 
+Unsure outlines (additive, results/1 unchanged). A candidate is a prediction with CAND_CONF <= conf < CONF; it is
+NOT counted until a reviewer accepts it. Per sample `n_unsure_open` = candidates nobody has decided, by image:
+  * untouched (neither edited nor reviewed)  all its candidates (reviewed.json's `n_candidates_open` when given,
+                                             else counted from the prediction .txt);
+  * edited, not Reviewed                     reviewed.json's `n_candidates_open` (no accept or reject decision);
+  * Reviewed                                 0 (marking an image Reviewed closes its remaining candidates).
+Without reviewed.json (results computed without a review package) every image is untouched, so they are counted
+from the predictions at CAND_CONF <= conf < CONF. `n_unsure_open` is null when an edited, not Reviewed image comes
+from a reviewed.json written before `n_candidates_open` existed (unknown, not zero). `n_checked` = images edited or
+reviewed. `diam_hist` = {"bin_nm": 10, "max_nm": 500, "counts": [51]}: counts of the sample's per-EV diameters
+(the same ones as the median), bin k = [10k, 10k+10) nm, the last bin = 500 nm and above; sum(counts) == ev_total.
+`diam_hist` is in results.json only, not in SAMPLE_FIELDS / per_sample.csv.
+
 Nullable fields: per sample diam_nm_median / diam_nm_q1 / diam_nm_q3 and pct_multilayer_geometry are null
 when the sample has no EV; pct_multilayer_reviewer is null with no reviewed image or no reviewer EV/MV call;
 per image nm_per_px is null when images.csv has no confirmed nm/px (that sample is then refused); `refused`
@@ -73,6 +86,9 @@ from inference.model_classes import ev_class_ids, model_classes
 
 SCHEMA = "results/1"
 CONF = 0.5
+CAND_CONF = 0.25      # = annotation.prediction_package.CAND_CONF (a test pins both equal): lowest "unsure" confidence
+HIST_BIN_NM = 10      # diam_hist: 10 nm bins from 0 to HIST_MAX_NM, then one overflow bin
+HIST_MAX_NM = 500
 MULTILAYER_RULE = "geometry: outline containing another outline"
 NM_TOLERANCE = 0.01   # nm/px spread (max - min) <= this x median = one scale; tests pin the other copies equal
 NM_EPS = 1e-12        # float slack on that comparison: exactly 1 % is accepted (pinned equal too)
@@ -175,9 +191,15 @@ def _image_size(ps_dir: Path, rel: str) -> tuple[int, int]:
         return im.size
 
 
-def _objects_from_predictions(pred_dir: Path, image: str, w: int, h: int, load) -> list[_Obj]:
+def _split_predictions(pred_dir: Path, image: str, w: int, h: int, load) -> tuple[list[_Obj], int]:
+    """(outlines at conf >= CONF, number of candidates CAND_CONF <= conf < CONF) from the prediction .txt."""
     masks, confs, classes = load(prediction_file(pred_dir, image, image), w, h)   # missing file = error
-    return [_Obj(m, k) for m, c, k in zip(masks, confs, classes) if c >= CONF]
+    objs = [_Obj(m, k) for m, c, k in zip(masks, confs, classes) if c >= CONF]
+    return objs, sum(1 for c in confs if CAND_CONF <= c < CONF)
+
+
+def _objects_from_predictions(pred_dir: Path, image: str, w: int, h: int, load) -> list[_Obj]:
+    return _split_predictions(pred_dir, image, w, h, load)[0]
 
 
 def _objects_from_reviewed(entry: dict, image: str, w: int, h: int, to_mask) -> list[_Obj]:
@@ -239,6 +261,14 @@ def _r(x, nd=4):
     return None if x is None else round(float(x), nd)
 
 
+def diam_hist(diams) -> dict:
+    """10 nm bins over 0-500 nm plus an overflow bin (500 nm and above): 51 counts."""
+    counts = [0] * (HIST_MAX_NM // HIST_BIN_NM + 1)
+    for d in diams:
+        counts[min(int(d // HIST_BIN_NM), len(counts) - 1)] += 1
+    return {"bin_nm": HIST_BIN_NM, "max_nm": HIST_MAX_NM, "counts": counts}
+
+
 def _sample(imgs: list[dict]) -> dict:
     ev_total = sum(i["ev"] for i in imgs)
     ml = sum(i["multilayer"] for i in imgs)
@@ -267,6 +297,9 @@ def _sample(imgs: list[dict]) -> dict:
         "reviewer_geometry_disagree": sum(i["_disagree"] for i in rev),
         "nm_per_px_min": min(i["nm_per_px"] for i in imgs),
         "nm_per_px_max": max(i["nm_per_px"] for i in imgs),
+        "n_checked": sum(1 for i in imgs if i["reviewed"] or i["edited"]),
+        "n_unsure_open": None if any(i["_unsure"] is None for i in imgs) else sum(i["_unsure"] for i in imgs),
+        "diam_hist": diam_hist(d),
     }
 
 
@@ -351,12 +384,22 @@ def compute(ps_dir, reviewed_json=None) -> dict:
         entry = reviewed["images"][image] if reviewed is not None else None
         is_rev = bool(entry and entry.get("reviewed"))
         is_edited = bool(entry and entry.get("edited", entry.get("reviewed")))   # no key: same as reviewed
-        objs = (_objects_from_reviewed(entry, image, w, h, to_mask) if (is_rev or is_edited)
-                else _objects_from_predictions(pred_dir, image, w, h, load))
+        if is_rev or is_edited:
+            objs, n_cand = _objects_from_reviewed(entry, image, w, h, to_mask), None
+        else:
+            objs, n_cand = _split_predictions(pred_dir, image, w, h, load)
+        # unsure candidates still open: Reviewed 0; edited = the package's own count (None = unknown, an old
+        # reviewed.json); untouched = all candidates (the package's count when it gives one, else the .txt's)
+        if is_rev:
+            unsure = 0
+        elif is_edited:
+            unsure = entry.get("n_candidates_open")
+        else:
+            unsure = entry["n_candidates_open"] if entry and entry.get("n_candidates_open") is not None else n_cand
         m = _measure(objs, nm, ev_ids, roles_for, compute_morphology)
         per_image[image] = {"sample_label": r["sample_label"], "reviewed": is_rev, "edited": is_edited,
                             "nm_per_px": nm,
-                            **m, "_size": (w, h), "_image": image}
+                            **m, "_unsure": unsure, "_size": (w, h), "_image": image}
 
     by_sample = {}
     for img in per_image.values():
@@ -366,6 +409,9 @@ def compute(ps_dir, reviewed_json=None) -> dict:
         why = _refusal(label, imgs)
         if why:
             refusals.append(why)
+            # additive: a refused sample is not counted, but its open unsure outlines still count as work to do
+            result.setdefault("refused_unsure", {})[label] = (
+                None if any(i["_unsure"] is None for i in imgs) else sum(i["_unsure"] for i in imgs))
         else:
             result["samples"][label] = _sample(imgs)
     result["images"] = {k: {f: v[f] for f in IMAGE_FIELDS} for k, v in per_image.items()}
