@@ -1,0 +1,96 @@
+<style>
+/* Results module (portal/modules/results.py). cj.css tokens only; every class is cj-results-*. Phone first. */
+.cj-results{min-width:0}
+.cj-results-crumb{margin:0 0 4px}
+.cj-main .cj-results .cj-sec{margin:22px 0 8px}
+.cj-results-banner{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 14px;
+  margin:12px 0;padding:10px 14px;border:1px solid var(--line);border-left-width:4px;border-radius:8px;
+  background:var(--card);color:var(--fg);overflow-wrap:anywhere}
+.cj-results-banner p{margin:0;flex:1 1 260px;min-width:0}
+.cj-results-banner p+p{flex-basis:100%}
+.cj-results-b-warn{border-color:var(--warn);background:var(--warnbg)}
+.cj-results-b-part{border-color:var(--acc);background:var(--accbg)}
+.cj-results-b-ok{border-color:var(--prod);background:var(--prodbg)}
+.cj-results-ul{margin:0;padding-left:20px;flex-basis:100%}
+.cj-results-why{font-size:.88rem}
+.cj-page a.cj-results-btn,.cj-results-btn{display:inline-flex;align-items:center;justify-content:center;min-height:40px;
+  padding:6px 16px;border-radius:8px;border:1px solid var(--acc);background:var(--acc);color:var(--card);
+  font:600 .92rem/1.2 var(--cj-font);text-decoration:none;cursor:pointer;flex:none}
+.cj-page a.cj-results-btn-s,.cj-results-btn-s{background:var(--card);color:var(--acc)}
+.cj-results-btn:hover,.cj-results-btn:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.cj-results-btn:disabled{opacity:var(--dim);cursor:default}
+.cj-results-form{margin:8px 0 0}
+.cj-results-empty p{margin:0}
+.cj-results-again{margin-top:20px}
+.cj-results-again p{margin:0}
+.cj-results-note{margin:6px 0 0}
+.cj-results-wrap{max-width:100%;overflow-x:auto}
+.cj-results-tab{width:100%;border-collapse:collapse;font-size:.9rem;background:var(--card);border:1px solid var(--line);
+  border-radius:var(--cj-r)}
+.cj-results-tab th,.cj-results-tab td{padding:7px 10px;border-top:1px solid var(--line);text-align:right;
+  vertical-align:top;font-variant-numeric:tabular-nums}
+.cj-results-tab thead th{border-top:0;font-size:.75rem;font-weight:600;color:var(--mut);vertical-align:bottom}
+.cj-results-tab th:first-child,.cj-results-tab td:first-child,.cj-results-tab .cj-results-l{text-align:left}
+.cj-results-sname{font-weight:600;overflow-wrap:anywhere}
+.cj-results-tab .cj-results-l{overflow-wrap:anywhere}
+.cj-results-sub{display:block;font-size:.75rem;color:var(--mut)}
+.cj-results-hl .cj-results-v{font-weight:700;font-size:1.05rem}
+.cj-results-chip{display:inline-block;font-size:.72rem;font-weight:600;line-height:1.5;padding:0 8px;border-radius:999px;
+  border:1px solid transparent;white-space:nowrap}
+.cj-results-t-ok{background:var(--prodbg);color:var(--prod)}
+.cj-results-t-edit{background:var(--accbg);color:var(--acc)}
+.cj-results-t-model{border-color:var(--line);color:var(--mut)}
+.cj-results-t-warn{background:var(--warnbg);color:var(--warn)}
+.cj-results-det{background:var(--card);border:1px solid var(--line);border-radius:var(--cj-r);padding:0 12px}
+.cj-results-det>summary{cursor:pointer;padding:10px 0;font-weight:600;min-height:40px}
+.cj-results-det .cj-results-tab{border:0;font-size:.85rem}
+.cj-results-det .cj-results-tab th,.cj-results-det .cj-results-tab td{padding:6px 6px}
+.cj-results-det .cj-results-wrap{margin-bottom:8px}
+.cj-results-fig{margin:0}
+.cj-results-fig figcaption{font-weight:600;font-size:.9rem;display:flex;flex-direction:column;gap:2px}
+.cj-results-svg{display:block;overflow:visible}
+.cj-results-grid{stroke:var(--line);stroke-width:1}
+.cj-results-axis{fill:var(--mut);font-size:11px;font-variant-numeric:tabular-nums}
+.cj-results-lab{font-size:12.5px}
+.cj-results-lab-s{fill:var(--fg);font-weight:600}
+.cj-results-lab-v{fill:var(--mut);font-variant-numeric:tabular-nums}
+.cj-results-iqr{stroke:var(--s1);stroke-width:6;stroke-linecap:round;stroke-opacity:.3}
+.cj-results-med{fill:var(--s1);stroke:var(--card);stroke-width:2}
+.cj-results-hit{fill:transparent}
+.cj-results-row:hover .cj-results-iqr{stroke-opacity:.5}
+.cj-results-dl{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:8px}
+.cj-results-dl a{display:inline-flex;align-items:center;min-height:40px;padding:6px 12px;border:1px solid var(--line);
+  border-radius:8px;background:var(--card);text-decoration:none;overflow-wrap:anywhere}
+.cj-results-dl a:hover,.cj-results-dl a:focus-visible{border-color:var(--acc)}
+.cj-results-prov{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,240px),1fr));gap:8px 16px;margin:0}
+.cj-results-prov div{min-width:0}
+.cj-results-prov dt{font-size:.72rem;color:var(--mut);text-transform:uppercase;letter-spacing:.03em}
+.cj-results-prov dd{margin:0;font-size:.88rem;overflow-wrap:anywhere}
+.cj-results-sets{list-style:none;margin:12px 0 0;padding:0;display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(min(100%,320px),1fr));gap:10px}
+.cj-page a.cj-results-set{color:var(--fg);text-decoration:none}
+a.cj-results-set:hover,a.cj-results-set:focus-visible{border-color:var(--acc)}
+.cj-results-set-t{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;min-width:0}
+@media (max-width:480px){
+  .cj-results-det{padding:0 8px}
+  .cj-results-det .cj-results-tab{font-size:.8rem}
+  .cj-results-det .cj-results-tab th,.cj-results-det .cj-results-tab td{padding:6px 3px}
+  .cj-results-det .cj-results-chip{padding:0 5px;font-size:.68rem}}
+/* phone: the per-sample table becomes one card per sample (label: value rows) */
+@media (max-width:900px){
+  .cj-results-stack{border:0;background:transparent}
+  .cj-results-stack thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  .cj-results-stack,.cj-results-stack tbody,.cj-results-stack tr,.cj-results-stack th,.cj-results-stack td{display:block}
+  .cj-results-stack tr{background:var(--card);border:1px solid var(--line);border-radius:var(--cj-r);padding:4px 14px;
+    margin-bottom:10px}
+  .cj-results-stack th[scope=row]{border-top:0;padding:8px 0 6px;font-size:1.05rem;text-align:left}
+  .cj-results-stack td{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:2px 12px;
+    padding:6px 0;text-align:right}
+  .cj-results-stack td::before{content:attr(data-label);color:var(--mut);font-size:.82rem;text-align:left;
+    flex:1 1 auto}
+  .cj-results-stack td .cj-results-sub{flex-basis:100%}}
+</style>
+<div class="cj-results" id="cj-results">
+{{content}}
+</div>
+<script src="/results/results.js" defer></script>
