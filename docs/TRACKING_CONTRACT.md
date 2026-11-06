@@ -18,7 +18,7 @@ Registry style follows `batches.jsonl` ([INFERENCE_CHECK.md](INFERENCE_CHECK.md)
 | Entity | Id format | Example | Comes from |
 |---|---|---|---|
 | image | **stem** = `image_key(name)` = `rf_key(stem_of_name(name))`: the extension is joined by `_`, and runs of spaces/hyphens become `-` | `20260126-MDA-MB-KH__2_square143_hole73_0_hm_png`, `0004_Jul30_jpg` | Already in use as the key: pull `extra.name`, `changes.jsonl.image`, tracking CSVs, and export file names before `.rf.<hash>`. Session tiles: MANIFEST `output_name`. Helpers: `registry/ids.py` |
-| session | `YYYYMMDD` or `YYYYMMDD-N` (second session that day) | `20261027`, `20260827-2` | Folder in `Cryo-image-processing`. Pre-manifest sessions use the tracker "Session date" and record `date_basis` |
+| session | `YYYYMMDD` or `YYYYMMDD-N` (second session that day) | `20261027`, `20260827-2` | Folder in `Cryo-image-processing`. Pre-manifest sessions use the tracker "Session date" and record `date_basis`. The master CSV keys rows by date: a `-N` session owns the rows whose `key_source` names its folder (`validate.master_folder`), and only it gets those slots |
 | grid | inventory **Grid#** (≥ 4 digits) | `2602` | Tracker "Cryo Grids" `Grid#` = master `inventory_id`. The scope cassette slot is not an id: it is `session_grid` on image/session |
 | roboflow_image | Roboflow id (20 alphanumeric) | `rLVhwdZNhLMotG5BPhpj` | Pull `extra.roboflow_id`, upload MANIFEST `roboflow_id` |
 | pull | `roboflow_pull_<YYYYMMDD_HHMM>` | `roboflow_pull_20261029_1811` | Folder name (`CryoAI-laptop/`) |
@@ -35,14 +35,14 @@ Registry style follows `batches.jsonl` ([INFERENCE_CHECK.md](INFERENCE_CHECK.md)
 ## Records: required fields (beyond `schema`, `id`, `logged`)
 | Record | Required | Notable optional |
 |---|---|---|
-| `image/1` | `session`, `grid`, `rf_id` (each may be null) | `rf_name`, `output_name`, `session_date_basis`, `session_grid`, `montage`, `position`, `nm_per_px`, `md5`, `duplicate_of` |
-| `session/1` | `date`, `date_basis` (folder/tracker/inferred), `status` | `instrument`, `grids`, `session_grids` (slot → Grid#), `box_folder`, `tracker_status` |
-| `grid/1` | `sample` | `legacy_ids`, `replaced_by`, `prep_date`, `project`, `grid_type`, `replicate`, `storage`, `discarded`, `imaged` |
+| `image/1` | `session`, `grid`, `rf_id` (each may be null) | `rf_name`, `output_name`, `session_date_basis`, `session_grid`, `montage`, `source_file` (MANIFEST: the montage tile it was made from), `position`, `nm_per_px`, `md5`, `duplicate_of`, `copy_of` (upload copies) |
+| `session/1` | `date`, `date_basis` (folder/tracker/inferred), `status` | `session_grids` (slot → Grid#), `local_folder`, `sample_labels` (slot → label), acquisition summary (see Raw imaging: `instrument` = scope model name, `magnification`, `pixel_size_a`, `defocus_um`, `target_defocus_um`, `dose`, `voltage_kv`, `binning`, `acq_dates`, `n_mdoc`, `n_imaging`, `n_other`, `other_magnification`, `acquisition_gap`), `box_folder`, `tracker_status` |
+| `grid/1` | `sample` | `replaced_by`, master CSV fields (see Raw imaging: `sample_label`, `project`, `prep_date`, `grid_type`, `replicate`, `glow_discharge`, `storage`, `n_montages`, `notes`, `flags`), `discarded`, `imaged` |
 | `roboflow_image/1` | `stem`, `project` | `split`, `tags`, `uploaded`, `upload_batch`, `first_seen_pull`, `deleted` |
 | `pull/1` | `path`, `project`, `created`, `n_images`, `coco_sha256` | `image_set` |
 | `roboflow_export/1` | `path`, `counts` | `rf_version`, `derived_from`, `split_method`, `split_file`, `classes` |
 | `label_version/1` | the version.json fields from LABEL_CHANGES.md, plus `status` | `labels_sha256`, `supersedes`, `superseded_by`, `pushed_to` |
-| `review_package/1` | `path`, `kind` (review/sandbox/control/part), `base`, `base_kind` (pull/export), `n_images`, `built`, `status` | `parent`, `parts`, `model`, `run`, `predictions_dir`, `flag_conf`, `reviewers`, `n_edit_records` |
+| `review_package/1` | `path`, `kind` (review/sandbox/control/part), `base`, `base_kind` (pull/export/prediction_set), `n_images`, `built`, `status` | `parent`, `parts`, `model`, `run`, `predictions_dir`, `flag_conf`, `reviewers`, `n_edit_records` |
 | `inference_check/1` | a `batches.jsonl` line (`batch_id`, `created`, `session`, `model`, `n`, `status`) with `id` = `batch_id` | everything else in batches.jsonl |
 | `dataset/1` | `created`, `source` {kind: label_version or roboflow_export, id}, `split` {method, file, sha256}, `counts`, `classes`, `images_sha256`, `status` | `label_version`, `export`, `class_map`, `excluded_sessions` |
 | `job_bundle/1` | `dataset`, `created`, `cryoEV_commit`, `run_experiments_args`, `zip_path`, `status` | `weights_init`, `ultralytics_bundled_on`, `zip_sha256` |
@@ -90,7 +90,7 @@ Registry style follows `batches.jsonl` ([INFERENCE_CHECK.md](INFERENCE_CHECK.md)
 | Artifact | Maps to | Found / linked | What's missing |
 |---|---|---|---|
 | `roboflow_pull_20261029_1811` | pull + 170 roboflow_image | 1/1, 170/170 | Project name isn't stored in the folder |
-| `tracking/v2/*.csv` + pull + session MANIFESTs + upload MANIFESTs | image | 846 / 338 | 504 no inventory Grid#; 58 no session date; 44 session year inferred; `blind_NN` upload copies not linked to their source tile |
+| `tracking/v2/*.csv` + pull + session MANIFESTs + upload MANIFESTs | image | 846 / 338 (2026-11-05: 554) | 504 no inventory Grid# (2026-11-05: 288, after 20260827-2's 216 tiles resolved); 58 no session date; 44 session year inferred; `blind_NN` upload copies not linked to their source tile |
 | master CSV + tracker "Imaging Sessions" + folders | session | 37 / 6 | 28 pre-manifest sessions are not in the master CSV; 20261021 and 20261027 are not in the tracker sheet yet |
 | tracker "Cryo Grids" + master | grid | 161 / 142 | 19 renumbered (need `replaced_by`); 8 master rows have no inventory id |
 | `CryoAI/training images/*` | roboflow_export | 8 / 3 | 5 are empty local placeholders (the COCO is on Box/desktop) |
@@ -131,10 +131,24 @@ Registry style follows `batches.jsonl` ([INFERENCE_CHECK.md](INFERENCE_CHECK.md)
 - **Model ids** may contain uppercase (`^[A-Za-z0-9][A-Za-z0-9_]*$`). This applies to `model.id`, `init_from`, `review_package.model` and `inference_check.model`.
   Legacy ids become `aliases` of a canonical `v0_…` id: `allLayer_run14_20260713` → `v0_alllayer_y8n_20260713`, `yifei_202512` → `v0_yifei_y8n_20251201` (the day is unknown). `models.yaml` keys are unchanged.
 - **Child → parent links only.** Removed: `model.scores`, `review_package.parts`, `label_version.superseded_by` (the new version keeps `supersedes`), `session.grids`, `grid.legacy_ids`, `image.rf_id`/`roboflow_project` (now `roboflow_image.stem` → image).
-  Grid and session records hold only an id and links.
+  Grid and session records link to nothing but their parents (`session_grids`); their other fields describe the grid or session (master CSV, raw metadata).
 - Datasets may link straight to a local `lv_*` (`source.kind: label_version`), with no Roboflow push needed. `roboflow_export` has an optional `label_version`.
 - Dataset `images_sha256` / `split.sha256` may be null, with an `images_sha256_gap` / `split.sha256_gap` reason. Never use fake all-zero hashes.
 - `SANDBOX*` review packages are left out of the registry. `label_change/1` status also allows `duplicate-dropped`, which `apply_review_edits.py` writes.
+
+## Raw imaging (2026-11-05, `registry/importers.py`)
+- **Grid** fields come from `imaged_grids_master.csv` (rows of the excluded session left out). A grid imaged in several sessions merges its rows:
+  - prep fields (`sample_label`, `project`, `prep_date`, `grid_type`, `replicate`, `glow_discharge`): the earliest session's non-empty value;
+  - `storage`: the latest session's (where the grid is now);
+  - `n_montages`: the sum; `notes` / `flags`: `<session>: <text>` per row, joined by `; ` (as written when the grid has one row).
+- **Session** acquisition summary: the session's raw `.mdoc` / `.idoc` sidecars, read with the canonical `cryoem_core/metadata.py` `parse_metadata` (loaded by path, read only).
+  - Raw folder: `2. Raw images/`; the five older sessions use `importers.RAW_LAYOUT` (their processing configs' setting; a test greps the configs).
+  - `instrument` is the scope **model name only** (e.g. `Glacios`): the header's serial number and ` at <site>` are never stored.
+  - Per-image stats (`magnification`, `pixel_size_a`, `defocus_um`, `target_defocus_um`, `binning`, `dose`) use imaging images only: magnification ≥ 5,000x, atlas files (name contains `atlas`) left out. Low-mag and search maps are counted as `n_other` with `other_magnification`. `dose` uses ExposureDose > 0 only (0 = not calibrated: 20260804 has none).
+  - `n_mdoc` counts `.mdoc` and `.idoc` files, atlas included. `acq_dates` is the scope clock and may fall on the next day (20260827-2 ran on 2026-08-28).
+  - No raw folder, no files or no parser: `acquisition_gap` says why.
+- **Cache:** `<registry>/cache/mdoc_summaries.json` holds the parsed per-file summaries, keyed by path + mtime + size and the parser's sha256. It is derived: safe to delete (the next import re-parses) and not backed up.
+- **Prediction review packages** (`base_kind: prediction_set`, data.js `source: prediction_set:<ps_id>`): validate checks `<CryoAI-laptop>/predict/<ps_id>/`; the importer leaves their registry lines to their builder.
 
 ## Open questions (user)
 Answered on 2026-10-30, see the Registry section: 1 (per-entity files), 2 (session-prefixed ids + `copy_of`), 3 (SANDBOX excluded), 4 (local lv allowed), 5 (pujan sets production; v5 F5 = production), 6 (aliases).

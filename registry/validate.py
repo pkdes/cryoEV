@@ -151,7 +151,6 @@ class Scan:
         self.key_sessions = defaultdict(set)   # image key -> session folders whose MANIFESTs list it
         self.pulls, self.exports, self.packages, self.models, self.runs, self.datasets = {}, {}, {}, {}, {}, {}
         self.bundles, self.sessions, self.grids, self.slot_grid = {}, {}, {}, {}
-        self.slot_folder = {}                  # (date id, slot) -> session folder named by the master row's key_source
         self.grid_master = defaultdict(list)   # inventory Grid# -> [(session folder, master row)]
 
     def ok(self, root):
@@ -261,22 +260,16 @@ class Scan:
                 sid = (r.get("session_date") or "").replace("-", "")
                 if sid[:8] in EXCLUDED_SESSIONS:
                     continue
-                sess[sid]["master"] = True
                 inv = (r.get("inventory_id") or "").strip()
                 slot = (r.get("session_grid") or "").strip()
-                folder = master_folder(sid, r.get("key_source"))
-                self.slot_folder[(sid, slot)] = folder
+                sid = master_folder(sid, r.get("key_source"))   # a second session that day (20260827-2): its folder
+                sess[sid]["master"] = True
                 if inv:
                     sess[sid]["grids"].add(inv)
                     grids[inv]["master"] = True
                     grids[inv]["sessions"].add(sid)
                     self.slot_grid[(sid, slot)] = inv
-                    self.grid_master[inv].append((folder, r))
-                    if folder != sid:                   # second session that day (e.g. 20260827-2): key by folder too
-                        sess[folder]["master"] = True
-                        sess[folder]["grids"].add(inv)
-                        grids[inv]["sessions"].add(folder)
-                        self.slot_grid[(folder, slot)] = inv
+                    self.grid_master[inv].append((sid, r))
                 else:
                     no_inv[sid] += 1
         else:

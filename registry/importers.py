@@ -22,13 +22,15 @@ v2 (jobs and inputs, TRACKING_CONTRACT.md addendum):
 Raw imaging (2026-11-05, additive; nothing in Cryo-image-processing is written):
 - grid: imaged_grids_master.csv fields (sample_label, project, prep_date, grid_type, replicate, glow_discharge,
   storage, n_montages = sum over the grid's rows, notes / flags prefixed by session when a grid has several rows).
-- session: acquisition summary of the .mdoc/.idoc files in `<session>/2. Raw images/`, parsed by the canonical
-  `processing scripts/cryoem_core/metadata.py` parse_metadata (loaded by path, no bytecode written). Atlas files
-  count in n_mdoc, instrument, voltage and dates, not in the per-image stats. Parsed summaries are cached per file
-  (mtime + size) in `<registry>/cache/mdoc_summaries.json`. Plus local_folder and sample_labels (sample_key.csv).
-  No raw folder / no parser -> `acquisition_gap` says why.
-- image: montage and source_file from the session MANIFEST row. A `YYYYMMDD-N` session's tiles get their grid
-  from the master rows whose key_source names that folder (validate.master_folder).
+- session: acquisition summary of the session's raw .mdoc/.idoc files (`2. Raw images/`, or RAW_LAYOUT for the
+  five older sessions), parsed by the canonical `processing scripts/cryoem_core/metadata.py` parse_metadata (loaded
+  by path, no bytecode written). instrument = scope model name only (no serial, no site). Atlas files count in
+  n_mdoc, voltage and dates, not in the per-image stats; images below IMAGING_MIN_MAG (low-mag / search maps)
+  are left out too and shown as n_other / other_magnification. Parsed summaries are cached per file (mtime + size, and the
+  parser's sha256) in `<registry>/cache/mdoc_summaries.json`: derived, safe to delete. Plus local_folder and
+  sample_labels (sample_key.csv). No raw folder / no parser -> `acquisition_gap` says why.
+- image: montage and source_file from the session MANIFEST row. A `YYYYMMDD-N` session's master rows are the ones
+  whose key_source names that folder (validate.master_folder); they belong to that session only.
 """
 import hashlib
 import importlib.util
@@ -62,8 +64,21 @@ RAW_DIR = "2. Raw images"                # <session>/2. Raw images/**/*.mdoc|*.i
 NOTES_DIR = "1. Notes + reports"
 PARSER_REL = Path("processing scripts") / "cryoem_core" / "metadata.py"
 MDOC_CACHE = Path("cache") / "mdoc_summaries.json"
-MDOC_CACHE_SCHEMA = "mdoc_cache/1"       # bump when file_summary() changes: older entries are then re-parsed
+MDOC_CACHE_SCHEMA = "mdoc_cache/2"       # bump when file_summary() changes: older entries are then re-parsed
 ATLAS = re.compile(r"atlas", re.IGNORECASE)
+IMAGING_MIN_MAG = 5000                   # below: low-mag (62-210x) / search (2,600x) maps, not imaging
+# Older sessions keep their raw .mdoc/.idoc elsewhere; each entry matches the session's processing config
+# (processing scripts/datasets/process_<id>.py; test_import_raw greps them so this can't drift):
+#   dir: folder under the session ("" = session root), recursive: search below it, subdirs: also these
+#   direct subfolders (non-recursive), skip: folder names left out.
+RAW_LAYOUT = {
+    "20260727": {"dir": "raw", "recursive": True},
+    "20260804": {"dir": "1. Raw-mrc", "recursive": True, "skip": ("_excluded",)},   # local copy (SOURCE.md)
+    "20260812": {"dir": "", "recursive": False},                                     # FlatGridRegionLayout
+    "20260817": {"dir": "", "recursive": False, "subdirs": "grid*"},                 # GridSubfolderLayout
+    "20260827": {"dir": "raw images", "recursive": True},                            # raw_subdir='raw images'
+}
+DEFAULT_LAYOUT = {"dir": RAW_DIR, "recursive": True}
 GRID_FIELDS = ("sample_label", "project", "prep_date", "grid_type", "replicate", "glow_discharge", "storage")
 HEADER_TIME = re.compile(r"\s+\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}(:\d{2})?\s*$")
 
@@ -162,12 +177,16 @@ def _date_id(d):
 
 
 # ---------------------------------------------------------------- raw imaging metadata
+def parser_path(proc=None):
+    """`<Cryo-image-processing>/processing scripts/cryoem_core/metadata.py` (proc first, then the default root)."""
+    return next((p for p in (Path(r) / PARSER_REL for r in (proc, PROCESSING) if r) if p.is_file()), None)
+
+
 def load_metadata_parser(proc=None):
     """parse_metadata from `<Cryo-image-processing>/processing scripts/cryoem_core/metadata.py`, the canonical
     SerialEM parser, loaded by file path (importing the cryoem_core package would pull in numpy/torch) with
     bytecode writing off, so nothing is written next to it. None when the file is not found."""
-    cands = [Path(p) / PARSER_REL for p in (proc, PROCESSING) if p]
-    path = next((p for p in cands if p.is_file()), None)
+    path = parser_path(proc)
     if path is None:
         return None
     spec = importlib.util.spec_from_file_location("_cryoem_core_metadata_readonly", path)
@@ -184,6 +203,18 @@ def scope_name(header):
     """`[T = SerialEM: <scope>   27-Oct-26  16:27:16 ]` header value -> `<scope>` (None if empty)."""
     h = re.sub(r"^SerialEM:\s*", "", str(header or "").strip().rstrip("]").strip())
     return HEADER_TIME.sub("", h).strip() or None
+
+
+def scope_model(header):
+    """Header value -> the scope model only (`Glacios <serial> at <site>` -> `Glacios`): cut at ` at ` and at the
+    first all-digit word (the serial). Serial and site are never stored."""
+    name = re.split(r"\s+at\s+", scope_name(header) or "", maxsplit=1)[0]
+    words = []
+    for wd in name.split():
+        if wd.isdigit():
+            break
+        words.append(wd)
+    return " ".join(words) or None
 
 
 def acq_time(text):
@@ -204,19 +235,20 @@ def _int_if_whole(v):
 def file_summary(global_params, pieces):
     """parse_metadata() output -> the per-file values a session summary needs. Image sections only ([ZValue] in an
     .mdoc, [Image] in an .idoc); [MontSection] repeats the montage's values and would count them twice.
-    The per-image values (mag, px, defocus, target, dose, binning) come from imaging images only: those with a
-    calibrated dose (ExposureDose > 0). Low-mag and search maps record dose 0 and defocus 0 or -100; a file
-    with no ExposureDose at all keeps every image."""
+    The per-image values (mag, px, defocus, target, dose, binning) come from imaging images only: magnification
+    >= IMAGING_MIN_MAG (or none recorded). Low-mag (62-210x) and search maps (2,600x, defocus -100) are `other`.
+    Not ExposureDose > 0: 20260804 and part of 20260817 record dose 0 at 45,000x / 73,000x (uncalibrated)."""
     ims = [p for p in pieces if p.get("_section") in ("ZValue", "Image")]
-    dosed = [p for p in ims if (_num(p.get("ExposureDose")) or 0) > 0]
-    img = dosed if any("ExposureDose" in p for p in ims) else ims
+    img = [p for p in ims if (_num(p.get("Magnification")) or IMAGING_MIN_MAG) >= IMAGING_MIN_MAG]
 
     def nums(key, src=img):
         return [v for v in (_num(p.get(key)) for p in src) if v is not None]
     px = nums("PixelSpacing") or ([v for v in [_num(global_params.get("PixelSpacing"))] if v is not None] if img else [])
     kv = [v for v in [_num(global_params.get("Voltage")), *nums("Voltage", ims)] if v is not None]
     times = sorted(t for t in (acq_time(p.get("DateTime")) for p in ims) if t)
-    return {"scope": scope_name(global_params.get("[T")), "n_images": len(ims), "n_imaging": len(img),
+    other = [p for p in ims if not any(p is q for q in img)]                   # low-mag / search images
+    return {"scope": scope_model(global_params.get("[T")), "n_images": len(ims), "n_imaging": len(img),
+            "other_mag": sorted({int(v) for v in nums("Magnification", other)}),
             "mag": sorted({int(v) for v in nums("Magnification")}), "px": sorted({round(v, 4) for v in px}),
             "defocus": [round(v, 4) for v in nums("Defocus")],
             "target": sorted({round(v, 3) for v in nums("TargetDefocus")}),
@@ -233,7 +265,9 @@ def spread(values, nd=3):
 def session_acquisition(summaries):
     """[(file name, file_summary)] -> session fields. Atlas files (name contains `atlas`: grid overview maps)
     count in n_mdoc, instrument, voltage and the acquisition dates, not in the per-image stats (which also leave
-    out dose-0 low-mag / search images, see file_summary)."""
+    out low-mag / search images, see file_summary). Non-atlas files: n_imaging have imaging images, n_other have
+    none; other_magnification = the left-out images' magnifications (e.g. 2,600x search maps). Dose stats use
+    ExposureDose > 0 only (0 = not calibrated), so a session with no calibrated dose has dose null."""
     acq = [s for name, s in summaries if not ATLAS.search(name)]
     scopes = sorted({s["scope"] for _, s in summaries if s.get("scope")})
     times = sorted(t for _, s in summaries for t in (s.get("first"), s.get("last")) if t)
@@ -247,21 +281,45 @@ def session_acquisition(summaries):
             "voltage_kv": union("kv", [s for _, s in summaries]) or None,
             "binning": union("binning", acq) or None,
             "acq_dates": {"first": times[0], "last": times[-1]} if times else None,
-            "n_mdoc": len(summaries)}
+            "n_mdoc": len(summaries),
+            "n_imaging": sum(1 for s in acq if s.get("n_imaging")),
+            "n_other": sum(1 for s in acq if not s.get("n_imaging")),
+            "other_magnification": union("other_mag", acq) or None}
+
+
+def raw_files(session_dir, layout):
+    """The session's raw .mdoc/.idoc per its layout (RAW_LAYOUT / DEFAULT_LAYOUT); None when the raw folder is
+    missing. Backups (`.mdoc~`) are not matched."""
+    base = Path(session_dir) / layout["dir"] if layout["dir"] else Path(session_dir)
+    if not base.is_dir():
+        return None
+    dirs = [base] + (sorted(d for d in base.glob(layout["subdirs"]) if d.is_dir()) if layout.get("subdirs") else [])
+    skip = set(layout.get("skip") or ())
+    out = set()
+    for d in dirs:
+        for ext in ("*.mdoc", "*.idoc"):
+            for f in (d.rglob(ext) if layout.get("recursive") else d.glob(ext)):
+                if f.is_file() and not skip & set(f.relative_to(base).parts[:-1]):
+                    out.add(f)
+    return sorted(out)
 
 
 class MdocCache:
     """Parsed per-file summaries keyed by path (relative to the processing root) + [mtime_ns, size]: a file is
-    parsed again only when it changed. Lives next to the registry; written by Importer.write (not on dry runs)."""
+    parsed again only when it changed; every file when the parser (metadata.py sha256) or MDOC_CACHE_SCHEMA did.
+    Lives next to the registry (derived, safe to delete); written by Importer.write (not on dry runs)."""
 
-    def __init__(self, path):
+    def __init__(self, path, parser_sha256=None):
         self.path, self.files, self.seen = Path(path), {}, set()
+        self.parser_sha256 = parser_sha256
         self.parsed = self.hits = 0
         self.dirty = False
         try:
             d = read_json(self.path)
-            if d.get("schema") == MDOC_CACHE_SCHEMA:
+            if d.get("schema") == MDOC_CACHE_SCHEMA and d.get("parser_sha256") == parser_sha256:
                 self.files = d.get("files") or {}
+            else:
+                self.dirty = True
         except (OSError, ValueError, AttributeError):
             pass
 
@@ -280,7 +338,8 @@ class MdocCache:
 
     def text(self):
         files = {k: self.files[k] for k in sorted(self.seen) if k in self.files}   # files gone since: dropped
-        return json.dumps({"schema": MDOC_CACHE_SCHEMA, "files": files}, separators=(",", ":")) + "\n"
+        return json.dumps({"schema": MDOC_CACHE_SCHEMA, "parser_sha256": self.parser_sha256, "files": files},
+                          separators=(",", ":")) + "\n"
 
 
 def sample_labels(session_dir):
@@ -308,15 +367,17 @@ def sample_labels(session_dir):
 
 
 def grid_fields(rows):
-    """[(session folder, imaged_grids_master.csv row)] of one grid -> grid record fields. Single-valued fields: the
-    earliest session's non-empty value. n_montages: the sum over rows. notes / flags: as written for a grid with one
+    """[(session folder, imaged_grids_master.csv row)] of one grid -> grid record fields. Prep fields (label,
+    project, prep_date, type, replicate, glow discharge): the earliest session's non-empty value; storage: the latest
+    session's (where the grid is now). n_montages: the sum over rows. notes / flags: as written for a grid with one
     row, else `<session>: <text>` per row joined by `; `."""
     def slot(r):
         s = (r.get("session_grid") or "").strip()
         return int(s) if s.isdigit() else 0
     rows = sorted(rows, key=lambda x: (x[0], slot(x[1])))
     val = lambda r, k: str(r.get(k) or "").strip()          # noqa: E731
-    out = {k: next((val(r, k) for _, r in rows if val(r, k)), None) for k in GRID_FIELDS}
+    out = {k: next((val(r, k) for _, r in (rows[::-1] if k == "storage" else rows) if val(r, k)), None)
+           for k in GRID_FIELDS}
     if out["prep_date"] and not re.match(r"^\d{4}-\d{2}-\d{2}$", out["prep_date"]):
         out["prep_date"] = None
     if out["replicate"] and out["replicate"].isdigit():
@@ -337,7 +398,8 @@ class Importer:
         self.cache = Path(cache) if cache else config.cryoai_root(required=False)
         self.proc = Path(processing) if processing else None
         self._parser = parser
-        self.mdoc_cache = MdocCache(self.root / MDOC_CACHE)
+        pp = parser_path(self.proc)
+        self.mdoc_cache = MdocCache(self.root / MDOC_CACHE, sha256_file(pp) if pp else None)
         self.tag = f"backfill:importers {git_sha()}"
         self.out = []                       # (entity, record)
         self.refused = Counter()
@@ -495,17 +557,19 @@ class Importer:
         return self._parser or None
 
     def acquisition(self, sid, sdir):
-        """Session acquisition summary from `<session>/2. Raw images/**/*.mdoc|*.idoc` (read only), or a gap."""
+        """Session acquisition summary from its raw .mdoc/.idoc (`2. Raw images/**`, or RAW_LAYOUT; read only),
+        or a gap."""
         if sid[:8] in EXCLUDED_SESSIONS:
             return {}
         if sdir is None:
             return {"acquisition_gap": "no local session folder: raw metadata not read"}
-        raw = sdir / RAW_DIR
-        if not raw.is_dir():
-            return {"acquisition_gap": f"no `{RAW_DIR}/` folder (older layout): raw metadata not read"}
-        files = sorted({*raw.rglob("*.mdoc"), *raw.rglob("*.idoc")})
+        lay = RAW_LAYOUT.get(sid, DEFAULT_LAYOUT)
+        where = f"`{lay['dir']}/`" if lay["dir"] else "the session root" + (f" + `{lay['subdirs']}/`" if lay.get("subdirs") else "")
+        files = raw_files(sdir, lay)
+        if files is None:
+            return {"acquisition_gap": f"no {where} folder: raw metadata not read"}
         if not files:
-            return {"acquisition_gap": f"no .mdoc/.idoc in `{RAW_DIR}/`"}
+            return {"acquisition_gap": f"no .mdoc/.idoc in {where}"}
         if self.parser is None:
             return {"n_mdoc": len(files), "acquisition_gap": "canonical parser cryoem_core/metadata.py not found"}
         out, bad = [], 0

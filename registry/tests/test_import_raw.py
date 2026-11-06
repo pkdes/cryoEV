@@ -1,7 +1,7 @@
 """Raw imaging import (2026-11-05): grid fields from imaged_grids_master.csv, session acquisition summary from the
 raw .mdoc/.idoc (canonical cryoem_core parse_metadata), image montage / source_file, the `YYYYMMDD-N` grid fix.
 
-- Synthetic tree with known answers: a MontSection, an atlas and a dose-0 search map that would change the
+- Synthetic tree with known answers: a MontSection, an atlas and a 2,600x search map that would change the
   defocus / mag answers if counted (controls); the excluded session's mdoc is never parsed; the processing tree
   and the parser folder are unchanged afterwards; the per-file cache re-parses only a changed file.
 - A temp copy of the real registry (skipped when not present): 20260827-2 tiles all get their grid; grids match
@@ -71,7 +71,7 @@ def build_proc(proc):
       "20990101/1. Notes + reports/sample_key.csv,,first look\n"
       "2099-01-01,5,9905,Sample E,,bad date,Type Y,1,,box 2,4,20990101-2/1. Notes + reports/sample_key.csv,"
       "check id,second session\n"
-      "2099-01-05,2,9901,Sample A (renamed later),PRJ,2098-12-30,Type X,2,,box 1 / slot 1,10,20990105/sample_key.csv,,re-image\n"
+      "2099-01-05,2,9901,Sample A (renamed later),PRJ,2098-12-30,Type X,2,,box 3 / slot 2,10,20990105/sample_key.csv,,re-image\n"
       "2026-10-12,3,9912,Excluded,,,,,,,1,20261012/x.csv,,\n")
     w(proc / "20990101/1. Notes + reports/sample_key.csv", "#,Label\n1,Sample A\n")
     w(proc / "20990101/5. Model + labeling/model_input_MANIFEST.csv",
@@ -143,8 +143,12 @@ class SyntheticRaw(unittest.TestCase):
 
     def test_session_acquisition_known_answers(self):
         s = self.cur["20990101-2"]
-        self.assertEqual(s["instrument"], SCOPE)
-        self.assertEqual(s["magnification"], [11000, 45000])            # 210 (atlas) and 2600 (dose 0) left out
+        self.assertEqual(s["instrument"], "Scope")                      # model only: no serial, no site
+        for t in ("0000", "Example Lab"):
+            self.assertNotIn(t, json.dumps(s))
+            self.assertNotIn(t, (self.root / importers.MDOC_CACHE).read_text(encoding="utf-8"))
+        self.assertEqual((s["n_imaging"], s["n_other"], s["other_magnification"]), (2, 1, [2600]))
+        self.assertEqual(s["magnification"], [11000, 45000])            # 210 (atlas) and 2600 (search) left out
         self.assertEqual(s["pixel_size_a"], [6.674, 7.362])
         # defocus of the 5 imaging images: -8 -5 -4 -3 -2; MontSection -50 and search -100 would change min
         self.assertEqual(s["defocus_um"], {"min": -8.0, "median": -4.0, "max": -2.0})
@@ -157,6 +161,7 @@ class SyntheticRaw(unittest.TestCase):
         self.assertEqual(s["sample_labels"], {"5": "Sample E"})
         self.assertEqual(s["local_folder"], "proc/20990101-2")
         self.assertEqual(s["session_grids"], {"5": "9905"})
+        self.assertEqual(self.cur["20990101"]["session_grids"], {"1": "9901"})   # -2's slot belongs to -2 only
 
     def test_session_gaps(self):
         self.assertIn("no `2. Raw images/` folder", self.cur["20990101"]["acquisition_gap"])
@@ -167,8 +172,9 @@ class SyntheticRaw(unittest.TestCase):
     def test_grid_fields(self):
         g = self.cur["9901"]
         self.assertEqual((g["sample_label"], g["project"], g["prep_date"], g["grid_type"], g["replicate"]),
-                         ("Sample A", "PRJ", "2098-12-30", "Type X", 2))   # earliest session's value
-        self.assertEqual((g["glow_discharge"], g["storage"], g["n_montages"]), ("25 mA, 45 s", "box 1 / slot 1", 13))
+                         ("Sample A", "PRJ", "2098-12-30", "Type X", 2))   # prep fields: earliest session's
+        self.assertEqual((g["glow_discharge"], g["storage"], g["n_montages"]), ("25 mA, 45 s", "box 3 / slot 2", 13))
+        # storage: the latest session's (where the grid is now)
         self.assertEqual(g["notes"], "20990101: first look; 20990105: re-image")
         self.assertNotIn("flags", g)
         e = self.cur["9905"]
@@ -202,6 +208,11 @@ class SyntheticRaw(unittest.TestCase):
             self.assertEqual([Path(x).name for x in p3.paths], ["grid5-search.mrc.mdoc"])
         finally:
             f.write_text(f.read_text(encoding="utf-8")[:-1], encoding="utf-8")
+        cache_file = self.root / importers.MDOC_CACHE
+        self.assertEqual(json.loads(cache_file.read_text(encoding="utf-8"))["parser_sha256"],
+                         importers.sha256_file(importers.parser_path(self.proc)))
+        other = importers.MdocCache(cache_file, "0" * 64)                 # parser changed: everything re-parsed
+        self.assertEqual((other.files, other.dirty), ({}, True))
 
     def test_reimport_adds_nothing(self):
         res = importers.run(self.root, laptop=self.lap, cache=self.cache, processing=self.proc, parser=CountingParser())
@@ -219,10 +230,57 @@ class Helpers(unittest.TestCase):
         self.assertEqual(importers.acq_time("27-Oct-26 16:27:27"), "2026-10-27T16:27:27")
         self.assertIsNone(importers.acq_time("yesterday"))
         self.assertEqual(importers.scope_name(f"SerialEM: {SCOPE}        27-Oct-26  16:27:16    ]"), SCOPE)
+        for hdr, model in ((f"SerialEM: {SCOPE}   27-Oct-26  16:27:16 ]", "Scope"),
+                           ("SerialEM: Titan Krios G4 1234 at Somewhere   1-Jan-26  1:00:00 ]", "Titan Krios G4"),
+                           ("SerialEM: Glacios   1-Jan-26  1:00:00 ]", "Glacios"), ("", None)):
+            self.assertEqual(importers.scope_model(hdr), model)
+
+    def test_raw_files_layouts(self):
+        with tempfile.TemporaryDirectory() as t:
+            s = Path(t)
+            for rel in ("a.mdoc", "a.mdoc~", "grid1/b.idoc", "grid1/deep/c.mdoc", "montages/d.mdoc",
+                        "raw/x/e.mdoc", "raw/_excluded/f.mdoc"):
+                w(s / rel, "x")
+            names = lambda fs: sorted(f.relative_to(s).as_posix() for f in fs)   # noqa: E731
+            self.assertEqual(names(importers.raw_files(s, importers.RAW_LAYOUT["20260817"])), ["a.mdoc", "grid1/b.idoc"])
+            self.assertEqual(names(importers.raw_files(s, importers.RAW_LAYOUT["20260812"])), ["a.mdoc"])
+            self.assertEqual(names(importers.raw_files(s, {"dir": "raw", "recursive": True, "skip": ("_excluded",)})),
+                             ["raw/x/e.mdoc"])
+            self.assertIsNone(importers.raw_files(s, importers.DEFAULT_LAYOUT))
+
+    @unittest.skipUnless(PROC and (PROC / "processing scripts" / "datasets").is_dir(), "processing scripts not found")
+    def test_raw_layout_matches_processing_configs(self):
+        """RAW_LAYOUT can't drift from the dataset configs (grepped, never imported)."""
+        ds = PROC / "processing scripts" / "datasets"
+        src = lambda s: (ds / f"process_{s.replace('-', '_')}.py").read_text(encoding="utf-8")   # noqa: E731
+        L = importers.RAW_LAYOUT
+        self.assertIn("DATASET_DIR / 'raw'", src("20260727"))
+        self.assertEqual(L["20260727"]["dir"], "raw")
+        # 20260804's config reads Box; the local copy it names in SOURCE.md is `1. Raw-mrc/`
+        self.assertRegex(src("20260804"), r"RAW_DIR\s*=\s*Path\(r\"[^\"]*\\20260804\"\)")
+        self.assertIn("`1. Raw-mrc/`", (PROC / "20260804" / "SOURCE.md").read_text(encoding="utf-8"))
+        self.assertEqual((L["20260804"]["dir"], L["20260804"]["skip"]), ("1. Raw-mrc", ("_excluded",)))
+        for s, layout in (("20260812", "FlatGridRegionLayout"), ("20260817", "GridSubfolderLayout")):
+            self.assertIn(f"layout={layout}()", src(s))
+            self.assertNotIn("raw_subdir", src(s))                        # dataset root
+            self.assertEqual(L[s]["dir"], "")
+        self.assertEqual(L["20260817"]["subdirs"], "grid*")
+        for s in ("20260827", "20260827-2", "20261007", "20261021", "20261027"):
+            m = re.search(r"raw_subdir\s*=\s*'([^']+)'", src(s))
+            self.assertEqual(m.group(1), importers.RAW_LAYOUT.get(s, importers.DEFAULT_LAYOUT)["dir"], s)
 
     def test_file_summary_without_dose_keeps_all_images(self):
         s = importers.file_summary({"Voltage": "300"}, [{"_section": "ZValue", "Magnification": "5000", "Defocus": "-1"}])
         self.assertEqual((s["mag"], s["defocus"], s["kv"], s["n_imaging"]), ([5000], [-1.0], [300.0], 1))
+
+    def test_uncalibrated_dose_is_still_imaging(self):
+        """20260804: every 45,000x / 73,000x image records ExposureDose 0. Mag decides imaging; dose stays null."""
+        ims = [{"_section": "ZValue", "Magnification": m, "Defocus": d, "ExposureDose": "0"}
+               for m, d in (("45000", "-6"), ("73000", "-4"), ("210", "0"))]
+        s = importers.file_summary({}, ims)
+        self.assertEqual((s["mag"], s["other_mag"], s["defocus"], s["n_imaging"]), ([45000, 73000], [210], [-6.0, -4.0], 2))
+        a = importers.session_acquisition([("grid1-1.mrc.mdoc", s)])
+        self.assertEqual((a["magnification"], a["dose"], a["defocus_um"]["median"]), ([45000, 73000], None, -5.0))
 
     @unittest.skipUnless(PARSER and PROC, "canonical parser not found")
     def test_parser_load_writes_no_bytecode(self):
@@ -305,26 +363,50 @@ class RealRegistryCopy(unittest.TestCase):
         s = self.cur["20261027"]
         raw = PROC / "20261027" / RAW
         scope, secs = regex_mdoc(raw / "grid2-pos1.mrc.mdoc")
-        self.assertEqual(s["instrument"], scope)
+        self.assertEqual(s["instrument"], scope.split()[0])                # model name only
         self.assertIn(int(secs[0]["Magnification"]), s["magnification"])
         self.assertIn(float(secs[0]["PixelSpacing"]), s["pixel_size_a"])
         d = float(secs[0]["Defocus"])
         self.assertTrue(s["defocus_um"]["min"] <= d <= s["defocus_um"]["max"])
-        # control: session median recomputed here from every non-atlas .mdoc, dose > 0, by regex
+        # control: session median recomputed here from every non-atlas .mdoc, mag >= 5000, by regex
         vals, mags = [], set()
         for f in sorted(raw.glob("*.mdoc")):
             if "atlas" in f.name.lower():
                 continue
             for z in regex_mdoc(f)[1]:
-                if float(z.get("ExposureDose", 0)) > 0:
+                if int(z["Magnification"]) >= 5000:
                     vals.append(float(z["Defocus"]))
                     mags.add(int(z["Magnification"]))
         self.assertEqual(s["defocus_um"]["median"], round(statistics.median(vals), 3))
         self.assertEqual(s["magnification"], sorted(mags))
         self.assertEqual(s["n_mdoc"], len(list(raw.glob("*.mdoc"))))
 
+    def test_coverage_all_local_sessions(self):
+        """Every local session folder (excluded one aside) gets an acquisition summary (9/9 on 2026-11-05)."""
+        local = [d.name for d in PROC.iterdir() if d.is_dir() and validate.ids.is_id("session", d.name)
+                 and d.name[:8] not in validate.EXCLUDED_SESSIONS]
+        self.assertGreaterEqual(len(local), 9)
+        for sid in local:
+            s = self.cur[sid]
+            self.assertNotIn("acquisition_gap", s, sid)
+            self.assertTrue(s["instrument"] and s["magnification"] and s["n_mdoc"], sid)
+
+    def test_no_scope_serial_or_site_anywhere(self):
+        """The raw header names a serial and a site: neither may reach a record or the cache (read here, not
+        written in this file)."""
+        hdr = re.search(r"^\[T = SerialEM:\s*(.*?)\s+\d{1,2}-[A-Za-z]{3}-\d", (PROC / "20261027" / RAW / "grid2-pos1.mrc.mdoc")
+                        .read_text(encoding="utf-8", errors="replace"), re.M).group(1)
+        serial = [x for x in hdr.split() if x.isdigit()]
+        site = hdr.split(" at ", 1)[1] if " at " in hdr else None
+        self.assertTrue(serial and site)                                    # control: the header does carry them
+        text = json.dumps([r for r in self.cur.values() if r["schema"] == "session/1"]) + \
+            (self.root / importers.MDOC_CACHE).read_text(encoding="utf-8")
+        for t in serial + [site]:
+            self.assertNotIn(t, text)
+
     def test_additive_only(self):
-        """Every existing field keeps its value; the one allowed change is grid null -> Grid# (20260827-2)."""
+        """Every existing field keeps its value. Allowed: image grid null -> Grid# (20260827-2), and 20260827
+        losing the slots its master rows give to 20260827-2 (a correction)."""
         changed = []
         for i, old in self.old.items():
             new = self.cur[i]
@@ -334,7 +416,12 @@ class RealRegistryCopy(unittest.TestCase):
                 self.assertIn(k, new, f"{i}: field {k} removed")
                 if new[k] != v:
                     changed.append((i, k, v, new[k]))
+        second = self.cur["20260827-2"]["session_grids"]
         for i, k, v, nv in changed:
+            if (i, k) == ("20260827", "session_grids"):
+                self.assertEqual({**nv, **second}, v)                       # moved, not lost
+                self.assertFalse(set(nv) & set(second))
+                continue
             self.assertEqual((k, v, self.cur[i]["session"]), ("grid", None, "20260827-2"), i)
             self.assertRegex(nv, r"^\d{4,}$")
 

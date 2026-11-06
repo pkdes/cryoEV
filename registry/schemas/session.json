@@ -28,7 +28,7 @@
     "string",
     "null"
    ],
-   "description": "Scope name from the SerialEM `[T = SerialEM: <scope> <date>]` header of the session's raw .mdoc/.idoc files (several scopes: joined by '; '). Older lines may hold a kind (glacios_serialem / smartscope / unknown)."
+   "description": "Scope model name from the SerialEM `[T = SerialEM: <scope> <date>]` header of the session's raw .mdoc/.idoc files, cut before the serial number and ` at <site>` (e.g. `Glacios`; several: joined by '; '). Never the serial or site. Older lines may hold a kind (glacios_serialem / smartscope / unknown)."
   },
   "magnification": {
    "type": [
@@ -39,7 +39,7 @@
     "type": "integer"
    },
    "uniqueItems": true,
-   "description": "Distinct nominal magnifications (x) of the imaging images (ExposureDose > 0; atlas files and dose-0 low-mag / search maps left out)"
+   "description": "Distinct nominal magnifications (x) of the imaging images (magnification >= 5,000x; atlas files and low-mag / search maps left out)"
   },
   "pixel_size_a": {
    "type": [
@@ -50,7 +50,7 @@
     "type": "number"
    },
    "uniqueItems": true,
-   "description": "Distinct PixelSpacing values (Å/px as recorded, binning included) of the imaging images (ExposureDose > 0; atlas files and dose-0 low-mag / search maps left out)"
+   "description": "Distinct PixelSpacing values (Å/px as recorded, binning included) of the imaging images (magnification >= 5,000x; atlas files and low-mag / search maps left out)"
   },
   "defocus_um": {
    "type": [
@@ -74,7 +74,7 @@
     "max"
    ],
    "additionalProperties": false,
-   "description": "Measured Defocus (µm, SerialEM sign: negative = underfocus) of the imaging images (ExposureDose > 0; atlas files and dose-0 low-mag / search maps left out): min / median / max"
+   "description": "Measured Defocus (µm, SerialEM sign: negative = underfocus) of the imaging images (magnification >= 5,000x; atlas files and low-mag / search maps left out): min / median / max"
   },
   "target_defocus_um": {
    "type": [
@@ -85,7 +85,7 @@
     "type": "number"
    },
    "uniqueItems": true,
-   "description": "Distinct TargetDefocus values (µm) of the imaging images (ExposureDose > 0; atlas files and dose-0 low-mag / search maps left out)"
+   "description": "Distinct TargetDefocus values (µm) of the imaging images (magnification >= 5,000x; atlas files and low-mag / search maps left out)"
   },
   "dose": {
    "type": [
@@ -109,7 +109,7 @@
     "max"
    ],
    "additionalProperties": false,
-   "description": "ExposureDose per image (e/Å²) of the imaging images (ExposureDose > 0; atlas files and dose-0 low-mag / search maps left out): min / median / max"
+   "description": "ExposureDose per image (e/Å²) of the imaging images (magnification >= 5,000x; atlas files and low-mag / search maps left out), 0 (not calibrated) left out: min / median / max"
   },
   "voltage_kv": {
    "type": [
@@ -131,7 +131,7 @@
     "type": "number"
    },
    "uniqueItems": true,
-   "description": "Distinct camera Binning values of the imaging images (ExposureDose > 0; atlas files and dose-0 low-mag / search maps left out)"
+   "description": "Distinct camera Binning values of the imaging images (magnification >= 5,000x; atlas files and low-mag / search maps left out)"
   },
   "acq_dates": {
    "type": [
@@ -153,7 +153,7 @@
     "last"
    ],
    "additionalProperties": false,
-   "description": "First and last image DateTime over all the session's raw .mdoc/.idoc files (scope clock)"
+   "description": "First and last image DateTime over all the session's raw .mdoc/.idoc files (scope clock). May fall on the next day (20260827-2 was acquired on 2026-08-28; the session id is the folder's date)"
   },
   "n_mdoc": {
    "type": [
@@ -161,7 +161,34 @@
     "null"
    ],
    "minimum": 0,
-   "description": ".mdoc + .idoc files in `<session>/2. Raw images/` (atlas files included)"
+   "description": "Raw metadata sidecar files read for the session: .mdoc AND .idoc (atlas files included). Raw folder: `2. Raw images/`, or the session's older layout (importers.RAW_LAYOUT)"
+  },
+  "n_imaging": {
+   "type": [
+    "integer",
+    "null"
+   ],
+   "minimum": 0,
+   "description": "Non-atlas sidecar files with imaging images (magnification >= 5,000x): the files behind the per-image stats"
+  },
+  "n_other": {
+   "type": [
+    "integer",
+    "null"
+   ],
+   "minimum": 0,
+   "description": "Non-atlas sidecar files with no imaging image (only low-mag / search captures)"
+  },
+  "other_magnification": {
+   "type": [
+    "array",
+    "null"
+   ],
+   "items": {
+    "type": "integer"
+   },
+   "uniqueItems": true,
+   "description": "Distinct magnifications (x) of non-atlas images below 5,000x (low-mag, e.g. 2,600x search maps), left out of the stats"
   },
   "acquisition_gap": {
    "type": [
