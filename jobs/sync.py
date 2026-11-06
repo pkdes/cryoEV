@@ -23,6 +23,9 @@ pull: for each d/<job>/ with DONE.json not pulled yet, copies runs/<run>/ to <Cr
   ~209 MB each) stay on the share unless --all-weights; best.pt and last.pt always come; the ledger line's
   not_pulled = {files, bytes, paths} lists what was left.
 retry: moves d/<job>/ to d/.retired/<job>_<time>/ so the runner picks the job again (nothing is deleted).
+push-predict --ps <ps id> --share ...: a prediction set as a predict job (images-only dataset pack + thin zip); pull
+  lands its p/ in <CryoAI-laptop>/predict/<ps>/ and updates the set's status.json and registry record. Off unless
+  $CRYOEV_PREDICT_JOBS=1 (docs/JOBS.md, "Predict jobs").
 local: push to a folder on this machine (default C:\\cj_local), run jobs/run_job.py on it, then pull.
 Copies use robocopy /E /Z /R:2 /W:5 when the share is a UNC path (never /MIR, /PURGE or /MOV*; exit >= 8 =
 failure), shutil for a local folder. The registry is written only through registry.py, and only by pull.
@@ -87,7 +90,10 @@ def commit_on_origin(commit):
     return None
 
 
-def push(job_id, bundle, share, copier="auto", check_registry=True, check_origin=True, max_hours=None, hold=False):
+def push(job_id, bundle, share, copier="auto", check_registry=True, check_origin=True, max_hours=None, hold=False,
+         job_type="train", extra=None):
+    """Queue a bundle. job_type / extra are for push_predict (a predict job's job.json gets type predict and
+    extra = {ps, model, n_images}); a train job's job.json is the same as ever."""
     import ids
     bundle, share = Path(bundle), Path(share)
     if not share.is_dir():                         # never create a queue root: a typo would make a stray folder
@@ -97,9 +103,9 @@ def push(job_id, bundle, share, copier="auto", check_registry=True, check_origin
         raise SyncError(f"{job_id!r} is not a job id of <= {C.MAX_JOB_ID} characters (job_<YYYYMMDD>_<slug>)")
     if check_registry:
         rec = registry_job(job_id)
-        if rec is None or rec.get("type") != "train":
-            raise SyncError(f"{job_id} is not a train job in the registry; create it with "
-                            f"`registry.py job new --type train --where desktop ...`")
+        if rec is None or rec.get("type") != job_type:
+            raise SyncError(f"{job_id} is not a {job_type} job in the registry; create it with "
+                            f"`registry.py job new --type {job_type} --where desktop ...`")
     if not bundle.is_file():
         raise SyncError(f"no bundle {bundle}")
     md5 = C.md5_file(bundle)
@@ -126,11 +132,11 @@ def push(job_id, bundle, share, copier="auto", check_registry=True, check_origin
     C.copy_files(bundle.parent, inc, files, copier)
     if C.md5_file(inc / bundle.name) != md5:
         raise SyncError(f"md5 of the copy in {inc} differs; left there, push again")
-    C.write_json(inc / C.JOB_FILE, {"schema": "queue_job/1", "job": job_id, "type": "train",
+    C.write_json(inc / C.JOB_FILE, {"schema": "queue_job/1", "job": job_id, "type": job_type,
                                     "bundle_id": job.get("bundle_id") or bundle.stem, "zip": bundle.name,
                                     "zip_md5": md5, "dataset": job.get("dataset_name"),
                                     "pushed": C.now(), "pushed_from": platform.node(), "max_hours": max_hours,
-                                    **pack})
+                                    **pack, **(extra or {})})
     inc.rename(q / job_id)
     if not hold:
         (q / job_id / C.READY).write_text(C.now() + "\n", encoding="utf-8")  # last
@@ -201,6 +207,87 @@ def push_pack(job, bundle, share, copier="auto") -> dict:
     inc.rename(dest)
     (dest / C.READY).write_text(C.now() + "\n", encoding="utf-8")   # last
     return fields
+
+
+PREDICT_HOURS = 2.0                              # push-predict's default --max-hours (200 tiles take minutes)
+
+
+def push_predict(ps, share, job_id=None, copier="auto", check_origin=True, max_hours=PREDICT_HOURS, hold=False):
+    """Queue a prediction set for the desktop (docs/JOBS.md, "Predict jobs"; needs $CRYOEV_PREDICT_JOBS=1).
+    - the registry job: `job_id`, else job_<today>_<ps id> (type predict, where desktop), made if new;
+    - an images-only dataset pack (dataset_cache: images/ + MANIFEST, no labels/) and a thin zip
+      <ps>__job_<stamp>.zip = <ps>/JOB.json (job_type predict, model, conf, max_det, imgsz, the pack), request.json,
+      images.csv; both go up like a train job's (push, push_pack);
+    - the set's status.json and registry record: queued, where desktop, job.
+    -> q/<job>. Refused: the flag off, a done or running set, a set already queued as a job, a missing image."""
+    import tempfile
+    import ids
+    import predict_set as PS
+    import registry
+    if not C.predict_enabled():
+        raise SyncError(f"predict jobs are off: set {C.PREDICT_ENV}=1 (on this machine, and on the desktop runner "
+                        f"before it can run them)")
+    share = Path(share)
+    if not share.is_dir():
+        raise SyncError(f"share {share} not found: a desktop share is \\\\host\\cj (two leading backslashes)")
+    reg = config.registry_root()
+    try:
+        ps_dir = PS.find(ps, registry_root=reg)
+        req, st, rows = PS.read_request(ps_dir), PS.read_status(ps_dir), PS.read_images(ps_dir)
+    except (PS.PredictSetError, OSError, ValueError) as e:
+        raise SyncError(str(e))
+    ps_id = req["ps"]
+    state = st.get("state")
+    if state == "done" or (ps_dir / C.PS_PRED).exists():
+        raise SyncError(f"{ps_id} is already done")
+    if state == "running" or (st.get("job") and state == "queued"):
+        raise SyncError(f"{ps_id} is {state}" + (f" as {st['job']}" if st.get("job") else " on the laptop"))
+    files = [ps_dir / r["file"] for r in rows]
+    missing = [r["file"] for r in rows if not (ps_dir / r["file"]).is_file()]
+    if not rows or missing:
+        raise SyncError(f"{ps_id}: images missing from the set: {missing[:3] or 'none listed'}")
+    commit = git("rev-parse", "HEAD").stdout.strip() or None
+    if check_origin:                                   # before any registry line: a refused push leaves none
+        why = commit_on_origin(commit)
+        if why:
+            raise SyncError(why)
+    jid = job_id or ids.job_id(time.strftime("%Y%m%d"), ps_id)
+    cur = registry_job(jid)
+    if cur is None and job_id:
+        raise SyncError(f"{job_id} is not in the registry (leave --job out to make job_<today>_{ps_id})")
+    if cur is None:
+        with tempfile.TemporaryDirectory(prefix="cj_pl_") as td:
+            lst = Path(td) / "images.txt"
+            lst.write_text("".join(r["image"] + "\n" for r in rows), encoding="utf-8")
+            try:
+                jid = registry.new_job("predict", "desktop", ps_id, images=lst, root=reg,
+                                       date=jid[4:12], note=f"prediction set {ps_id}")["id"]
+            except registry.RegistryError as e:
+                raise SyncError(str(e))
+    elif cur.get("type") != "predict":
+        raise SyncError(f"{jid} is a {cur.get('type')} job in the registry, not predict; pass another --job")
+    with tempfile.TemporaryDirectory(prefix="cj_pp_") as td:
+        td = Path(td)
+        pack, sha, pack_md5, md5s, _ = dataset_cache.write_pack(td, ps_dir, sorted(files))
+        zp = td / f"{ps_id}__job_{time.strftime('%Y%m%d-%H%M%S')}.zip"
+        job = {"bundle_id": zp.stem, "dataset_name": ps_id, "job_type": "predict", "ps": ps_id,
+               "model": req["model"], "conf": req.get("conf", 0.25), "max_det": req.get("max_det", 1000),
+               "imgsz": req.get("imgsz"), "n_images": len(rows), "cryoEV_commit": commit, "run_experiments_args": [],
+               "md5": md5s, "dataset_sha256": sha, "dataset_pack": pack.name, "dataset_pack_md5": pack_md5}
+        with zipfile.ZipFile(zp, "w") as z:
+            z.writestr(f"{ps_id}/JOB.json", json.dumps(job, indent=1))
+            for name in (PS.REQUEST, PS.IMAGES_CSV):
+                z.write(ps_dir / name, f"{ps_id}/{name}")
+        Path(str(zp) + ".md5").write_text(f"{C.md5_file(zp)}  {zp.name}\n", encoding="utf-8")
+        q = push(jid, zp, share, copier, check_registry=True, check_origin=False, max_hours=max_hours, hold=hold,
+                 job_type="predict", extra={"ps": ps_id, "model": req["model"], "n_images": len(rows)})
+    PS.write_status(ps_dir, state="queued", n_done=0, n_total=len(rows), where="desktop", job=jid, error=None)
+    try:
+        PS.update_record(ps_id, reg, recorded_by="jobs/sync.py push-predict", status="queued", where="desktop",
+                         job=jid)
+    except (PS.PredictSetError, registry.RegistryError) as e:
+        print(f"[push-predict] registry record of {ps_id} not updated: {e}", file=sys.stderr)
+    return q
 
 
 def release(job_id, share):
@@ -341,6 +428,52 @@ def copy_runs(jd, dataset, copier, all_weights=False):
     return copied, skipped, not_pulled
 
 
+PULL_TMP_PRED = ".pull_tmp_p"                    # <ps>/.pull_tmp_p while a predict job's p/ is copied
+
+
+def pull_predict(jd, done, copier="auto"):
+    """A done predict job's results -> its prediction set (<CryoAI-laptop>/predict/<ps>/): d/<job>/p/ to <ps>/p/
+    (staged in <ps>/.pull_tmp_p, then renamed; an existing p/ is kept, never overwritten), and d/<job>/predict.log
+    appended to <ps>/predict.log. A blocked or cancelled job copies nothing (its partial p/ stays on the share).
+    -> (copied, skipped, not_pulled) like copy_runs."""
+    import predict_set as PS
+    none = {"files": 0, "bytes": 0, "paths": []}
+    try:
+        ps_dir = PS.find(str(done.get("ps")), registry_root=config.registry_root())
+    except PS.PredictSetError as e:
+        raise SyncError(str(e))
+    if done.get("status") != "done":
+        return [], [], none
+    dest, part = ps_dir / C.PS_PRED, ps_dir / PULL_TMP_PRED
+    if dest.exists():
+        return [], [C.PS_PRED], none
+    guard(part)
+    guard(dest)
+    C.copy_tree(jd / C.PS_PRED, part, copier)          # raises on failure; the partial copy stays in .pull_tmp_p
+    part.rename(dest)
+    if (jd / C.PREDICT_LOG).is_file():
+        with open(ps_dir / C.PREDICT_LOG, "ab") as f:
+            f.write(f"\n=== {C.now()} pulled from {jd} ({done.get('machine')})\n".encode("utf-8")
+                    + C.read_shared(jd / C.PREDICT_LOG))
+    return [C.PS_PRED], [], none
+
+
+def predict_pulled(job_id, done, target, reason):
+    """After a predict job's pull: its set's status.json (done, or failed with the reason) and registry record
+    (done | cancelled | failed). Raises SyncError."""
+    import predict_set as PS
+    reg = config.registry_root()
+    try:
+        ps_dir = PS.find(str(done.get("ps")), registry_root=reg)
+        fields = {"n_total": done["n_total"]} if done.get("n_total") is not None else {}
+        PS.write_status(ps_dir, state="done" if target == "done" else "failed", n_done=done.get("n_done") or 0,
+                        where="desktop", job=job_id, error=None if target == "done" else (reason or target), **fields)
+        PS.update_record(done["ps"], reg, recorded_by="jobs/sync.py pull", where="desktop", job=job_id,
+                         status={"done": "done", "cancelled": "cancelled"}.get(target, "failed"))
+    except (PS.PredictSetError, OSError, ValueError) as e:
+        raise SyncError(f"prediction set {done.get('ps')} not updated: {e}")
+
+
 def registry_cmd(*args):
     r = subprocess.run([sys.executable, str(REGISTRY_PY), *args], cwd=REPO, capture_output=True, text=True)
     print((r.stdout + r.stderr).strip())
@@ -371,8 +504,11 @@ def pull(share, who="pujan", copier="auto", all_weights=False):
     pulled, errors = [], []
     for jd, done, sha in todo:
         try:
-            copied, skipped, left = (copy_runs(jd, done["dataset"], copier, all_weights) if done.get("dataset")
-                                     else ([], [], {"files": 0, "bytes": 0, "paths": []}))
+            if done.get("job_type") == "predict":      # results go to the prediction set, not training outputs
+                copied, skipped, left = pull_predict(jd, done, copier)
+            else:
+                copied, skipped, left = (copy_runs(jd, done["dataset"], copier, all_weights) if done.get("dataset")
+                                         else ([], [], {"files": 0, "bytes": 0, "paths": []}))
             pulled.append((jd.name, done, sha, copied, skipped, left))
             print(f"[pull] {jd.name}: {done['status']}; copied {copied or 'no runs'}"
                   + (f"; kept existing {skipped}" if skipped else "")
@@ -380,12 +516,13 @@ def pull(share, who="pujan", copier="auto", all_weights=False):
                      f"(--all-weights copies them)" if left["files"] else ""))
         except (OSError, SyncError) as e:
             errors.append(f"{jd.name}: copy failed: {e}")
-    if pulled:
+    if any(p[1].get("job_type") != "predict" for p in pulled):   # the importer reads run folders: train jobs only
         registry_cmd("import")
     out = []
     for job_id, done, sha, copied, skipped, left in pulled:
         target = done["status"] if done["status"] in ("done", "cancelled") else "blocked"
         reason = done.get("reason") or ("blocked on the runner" if target == "blocked" else None)
+        predict = done.get("job_type") == "predict"
         cur = registry_job(job_id)
         if cur is None:
             errors.append(f"{job_id}: not in the registry; status not set")
@@ -395,11 +532,20 @@ def pull(share, who="pujan", copier="auto", all_weights=False):
                 args += ["--reason", reason[:300]]
             elif target == "cancelled":
                 args += ["--note", (reason or "cancelled")[:300]]
+            elif predict:
+                args += ["--note", f"{done.get('ps')}: {done.get('n_done')}/{done.get('n_total')} images "
+                                   f"predicted ({done.get('machine')})"]
             else:
                 args += ["--note", f"run {done.get('run')} ({done.get('machine')}"
                                    + (", --allow-big" if done.get("allow_big") else "") + ")"]
             try:
                 registry_cmd(*args)
+            except SyncError as e:
+                errors.append(f"{job_id}: {e}")
+                continue
+        if predict:
+            try:
+                predict_pulled(job_id, done, target, reason)
             except SyncError as e:
                 errors.append(f"{job_id}: {e}")
                 continue
@@ -538,6 +684,13 @@ def main(argv=None):
     lp.add_argument("--max-hours", type=float, help="the runner stops the trainer after this many hours")
     lp.add_argument("--who", default="pujan", help="people.json id for the set-status lines")
     lp.add_argument("--all-weights", action="store_true", help="also copy weights/epoch*.pt when pulling")
+    pp = sub.add_parser("push-predict", help=f"queue a prediction set for the desktop (needs {C.PREDICT_ENV}=1)")
+    pp.add_argument("--ps", required=True, help="prediction set id or folder")
+    pp.add_argument("--share", required=True, type=Path)
+    pp.add_argument("--job", help="an existing registry predict job (default: job_<today>_<ps id>, made if new)")
+    pp.add_argument("--copier", choices=["auto", "robocopy", "shutil"], default="auto")
+    pp.add_argument("--max-hours", type=float, default=PREDICT_HOURS)
+    pp.add_argument("--hold", action="store_true")
     for name in ("push", "push-pack", "pull", "status", "retry", "release", "stop", "start", "cancel"):
         p = sub.add_parser(name)
         if name in ("push", "retry", "release", "cancel"):
@@ -568,6 +721,9 @@ def main(argv=None):
         elif a.cmd == "push":
             q = push(a.job_id, a.bundle, a.share, a.copier, max_hours=a.max_hours, hold=a.hold)
             print(f"[push] {'held (run `release` to start it)' if a.hold else 'queued'}: {q}")
+        elif a.cmd == "push-predict":
+            q = push_predict(a.ps, a.share, a.job, a.copier, max_hours=a.max_hours, hold=a.hold)
+            print(f"[push-predict] {'held' if a.hold else 'queued'}: {q}")
         elif a.cmd == "push-pack":
             print(f"[push-pack] {push_bundle_pack(a.bundle, a.share, a.copier)}")
         elif a.cmd == "cancel":

@@ -8,7 +8,10 @@ Every --every seconds it reads each queue (in a thread, given up after 20 s) and
 <registry>/live/live.json (the history page fetches live/live.json when served over http):
   - reach: ok | offline (path not found or no answer) | access denied;
   - the watcher (watch.json + heartbeat age; stale after 5 min without a heartbeat);
-  - every job in q/ (sync.queue_rows), and the 10 most recent finished ones with their final metrics;
+  - every job in q/ (sync.queue_rows, plus ready_at = READY's mtime), and the 10 most recent finished ones with
+    their final metrics;
+  - a running predict job (job.json type predict): {"kind": "predict", "n_done", "n_total", "eta_s", "hung", ...}
+    from the prediction files in work/<job>/p/ (listed, never opened);
   - the running job: phase, epoch / epochs, elapsed, ETA, batch used vs asked, GPU memory, the latest val mask mAP
     and the per-epoch series, from work/<job>/.../runs/<run>/ (progress.json, else results.csv + args.yaml);
   - servers: this laptop's review / sandbox / history servers (--servers), each probed with GET /api/ping on
@@ -258,6 +261,52 @@ def running_job(share: Path, job: str, now=None) -> dict:
     return out
 
 
+def job_spec(share: Path, job: str) -> dict:
+    """q/<job>/job.json, or {} when unreadable."""
+    try:
+        spec = C.read_json_shared(share / C.Q / job / C.JOB_FILE)
+        return spec if isinstance(spec, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def running_predict(share: Path, job: str, spec: dict, now=None) -> dict:
+    """A running predict job: n_done = prediction files in work/<job>/p/<model>/predictions/ so far (listed and
+    stat'ed only, never opened); n_total from job.json. eta_s = images left x the mean time per image since
+    work/<job>/predict.log was created; hung = no new prediction file for max(10 x that time, 10 min)."""
+    now = time.time() if now is None else now
+    model = spec.get("model")
+    out = {"job": job, "kind": "predict", "ps": spec.get("ps"), "model": model, "n_done": 0,
+           "n_total": spec.get("n_images"), "elapsed_s": None, "eta_s": None, "hung": False}
+    pred = share / C.WORK / job / C.PS_PRED / str(model) / "predictions"
+    try:
+        mtimes = [e.stat().st_mtime for e in os.scandir(pred) if e.name.endswith(".txt")]
+    except OSError:
+        mtimes = []
+    out["n_done"] = len(mtimes)
+    try:
+        t0 = os.stat(share / C.WORK / job / C.PREDICT_LOG).st_ctime
+    except OSError:
+        return out
+    out["elapsed_s"] = round(max(0.0, now - t0))
+    if mtimes:
+        per = max(1e-3, max(mtimes) - t0) / len(mtimes)
+        if out["n_total"]:
+            out["eta_s"] = round(max(0, out["n_total"] - len(mtimes)) * per, 1)
+        out["hung"] = now - max(mtimes) > max(10 * per, HUNG_MIN_S)
+    else:
+        out["hung"] = now - t0 > HUNG_MIN_S * 3       # model load + first image: generous
+    return out
+
+
+def ready_at(share: Path, job: str):
+    """When q/<job>/READY was written (ISO, local time; its mtime, which `retry` refreshes), or None."""
+    try:
+        return datetime.fromtimestamp(os.stat(share / C.Q / job / C.READY).st_mtime).isoformat(timespec="seconds")
+    except (OSError, ValueError):
+        return None
+
+
 # ---------------------------------------------------------------- one queue
 def finished_jobs(share: Path, rows) -> list:
     """The most recent finished jobs (DONE.json), newest first, with run.json's final metrics."""
@@ -325,11 +374,13 @@ def read_queue(share: Path, now=None) -> dict:
     rows = sync.queue_rows(share)
     out["watcher"] = w
     out["jobs"] = [{"job": r["job"], "state": r["state"], "reason": r["reason"], "pulled": r["pulled"],
-                    "cancel_requested": r["cancel_requested"]} for r in rows]
+                    "cancel_requested": r["cancel_requested"], "ready_at": ready_at(share, r["job"])} for r in rows]
     running = [r for r in rows if r["state"] == "running"]
     if running:
         r = next((x for x in running if x["job"] == w.get("job")), running[0])
-        out["running"] = running_job(share, r["job"], now)
+        spec = job_spec(share, r["job"])
+        out["running"] = (running_predict(share, r["job"], spec, now) if spec.get("type") == "predict"
+                          else running_job(share, r["job"], now))
         out["running"]["cancel_requested"] = r["cancel_requested"]
         out["running"]["watcher_on_it"] = w.get("job") == r["job"] and w.get("state") == "running" and not w["stale"]
     out["finished"] = finished_jobs(share, rows)
