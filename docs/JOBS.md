@@ -125,6 +125,37 @@ Rules on a GPU under 8 GB (the laptop: RTX 3050 Ti, 4 GB, 15 GB RAM):
 - Not tried yet: batch 1–2 at 960; 640 tiles cut from the native images (keeps the 1440 pixel scale; needs a tiler that cuts labels too); `mask_ratio` 8; a frozen backbone when fine-tuning.
 - Set `--max-hours` ~1.5× the table (early stopping often ends sooner). The desktop's 1440 runs can't be done here.
 
+## Predict jobs
+A **prediction set** is one batch of a user's tiles run through one registry model (`BUILD_CONTRACTS.md` section 2). It lives in `<CryoAI-laptop>\predict\<ps id>\`; review packages and results read it there.
+```powershell
+# 1. Make the set (status queued; a prediction_set record in the registry). --only <list> picks files from a big folder
+python -m jobs.predict_set create --from-dir "<3d dir>" --manifest "<3d dir>\MANIFEST.csv" --session 20261027 `
+    --model v5_evnonev_y8m_20261029 --owner pujan --sample-label-from manifest:sample_label --nm-from-manifest --nm-confirmed-by pujan
+# 2a. Laptop: predict here (GPU), status.json updated as it goes
+python -m jobs.predict_local --ps ps_20261105_abc123
+# 2b. Desktop (only with CRYOEV_PREDICT_JOBS=1 on both machines): queue it, then pull as usual
+python jobs/sync.py push-predict --ps ps_20261105_abc123 --share \\<desktop>\cj
+python jobs/sync.py pull --share \\<desktop>\cj
+```
+- **Set folder:** `images\<nnnn>.png|.jpg` (never the client's file name; `images.csv` keeps it as `orig_name`), `images.csv`, `request.json`, `status.json` (`state` queued / running / done / failed, `n_done`, `n_total`, `where`, `job`, `error`), `p\<model>\predictions\<nnnn>.txt` + `p\<model>\summary.csv`, and `predict.log`.
+  - `p\` appears only when the set is complete: the laptop writes into `.p_tmp\` and renames it; pull stages in `.pull_tmp_p\`.
+  - Tiles are hard-linked when on the same drive, else copied; never linked from a protected folder (Cryo-image-processing, Box).
+- **Create refuses** (nothing written, every problem listed): no images or more than 200; a file that isn't an 8-bit PNG/JPEG by content; nm/px missing for any image; no `--nm-confirmed-by`; mixed tile sizes or nm/px within one sample label; an unknown model. `MANIFEST.csv` and OS files (`desktop.ini`) in the folder are skipped.
+- **`predict_local`** runs `inference/predict_models.py --no-overlays` at the request's `conf` / `max_det` / `imgsz` (null = the model's registered size). One run at a time (`<root>\predict.lock`, exit 3).
+  - The GPU must be free (the runner's rule: any python process, ≥ 256 MB, or > 2 GB in total), else failed, exit 4. `--allow-cpu` runs on the CPU instead.
+  - A failed set can run again; a done one is refused (exit 2). It prints the time and peak GPU memory.
+- **Desktop path.**
+  - `push-predict` makes the registry job `job_<today>_<ps id>` (`--type predict --where desktop`).
+  - It sends an images-only dataset pack (`ds\<sha>\`, the same cache; no `labels\`) and a thin zip `<ps>\JOB.json` (`job_type: predict`) + `request.json` + `images.csv`.
+  - `run_job.py` keeps the md5, pack, commit, Ultralytics, path, disk and GPU-busy checks and skips the training size and worker rules. It runs `predict_models` into `work\<job>\p\`.
+  - The job is done only with exit 0, a prediction file per image and `summary.csv`. `d\<job>\` gets `p\`, `predict.log`, `status.json`, `DONE.json` (+ `job_type`, `ps`, `model`, `n_done`, `n_total`). Default `--max-hours` 2.
+  - `pull` copies a done job's `p\` into the set (never over an existing `p\`) and sets the set's `status.json` and record. Blocked → failed with the reason, cancelled → cancelled; nothing is copied for those. The registry importer runs only when a train job was pulled.
+- **Flag.** With `CRYOEV_PREDICT_JOBS` unset, `push-predict` refuses and `run_job.py` / the watcher leave predict jobs queued, untouched. Train jobs behave the same either way.
+- **Live tab.** A running predict job shows as `{"kind": "predict", "n_done", "n_total", "eta_s", "hung"}`.
+  - `n_done` counts the prediction files in `work\<job>\p\`, which are listed, never opened.
+  - `hung` means no new file for max(10 × the time per image, 10 min).
+  - Every `jobs[]` entry has `ready_at` (READY's time; `retry` refreshes it).
+
 ## Queue folder
 ```
 C:\cj\q\.incoming\<job>\   push in progress (the runner never looks here)
