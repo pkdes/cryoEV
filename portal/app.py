@@ -15,7 +15,9 @@ Routes (everything except OPEN needs a session; see Gate):
   /review/               the review shell: the bar + a full-height same-origin iframe of /review/app/ (its query,
                          minus any k, goes into the iframe's src; review.js mirrors the frame's URL back)
   /review/app/*          proxy to the real review server (portal/proxy.py), upstream path = the part after /review/app
-  /review/<other>        404: kept free for the multi-package route /review/<pkg_id>/ (wave 2; see review_mount)
+  /review/<pkg_id>/      a prediction review package (pred_ps_<8 digits>_<6 hex>) in the same shell; its tool at
+                         /review/<pkg_id>/app/... -> <pred upstream>/<pkg_id>/... with the package's own key; owner or
+                         admin only (pred_mount). Anything else under /review/ -> 404
 The sandbox is NOT proxied (it shares the real package's localStorage key); modules.json links out to :8443.
 Roles: plug-in modules declare ROLES (portal/modules); the core pages start from CORE_ROLES (review, history: admin)
 and a valid modules.json entry may replace one (manifest_rules; fail closed). The rules are read once at start (an
@@ -55,6 +57,7 @@ from data_utils import config as repo_config  # noqa: E402
 from portal import auth as A  # noqa: E402
 from portal import modules as M  # noqa: E402
 from portal import proxy as P  # noqa: E402
+from annotation import multi_review_server as MRS  # noqa: E402
 
 OPEN = frozenset({"/login", "/cj/cj.css", "/cj/brand.json", "/healthz"})   # the ONLY routes without a session
 UNSAFE = frozenset({"POST", "PUT", "DELETE", "PATCH"})                      # need Origin == this portal
@@ -69,6 +72,9 @@ MANIFEST = HERE / "modules.json"
 CORE_ROLES = {"/review": ("admin",), "/history": ("admin",)}   # built-in defaults; modules.json may only replace
                                                                 # one with a valid entry (manifest_rules)
 CORE_IDS = {"/review": "review", "/history": "history"}       # the only entry that may set each core prefix
+PRED_PORT = 8767                                              # annotation/multi_review_server.py
+PRED_ID_RE = re.compile(r"^pred_ps_\d{8}_[0-9a-f]{6}$")         # prediction review package ids (never "app")
+OWNER_PATH_RE = re.compile(r"^/review/(?!app(?:/|$))[^/]+(?:/|$)")   # /review/<pkg id>...: owner-checked routes
 TPL_RE = re.compile(r"\{\{(\w+)\}\}")
 # module icons (24 x 24, stroked; design direction A)
 ICONS = {
@@ -107,6 +113,8 @@ class Config:
     review_timeout: float = P.TIMEOUT_S
     max_body: int = P.MAX_BODY
     manifest: Path = MANIFEST
+    pred_upstream: str = f"http://127.0.0.1:{PRED_PORT}"
+    review_root: Path | None = None              # <CryoAI-laptop>/review: the prediction packages
 
 
 # ---------------------------------------------------------------- helpers
@@ -280,7 +288,8 @@ class Gate:
                 elif state != "ok":
                     deny = page(403, "Not signed in", "This sign-in is unknown, expired or revoked. Open a current "
                                                       "key link.")
-            if deny is None and user is not None and not M.allowed(self.rules, path, user.get("role")):
+            if (deny is None and user is not None and not owner_checked(path)     # pred packages: owner check
+                    and not M.allowed(self.rules, path, user.get("role"))):
                 deny = page(403, "Not allowed", "Your role can't open this part of the portal.")
             if deny is None and method in UNSAFE and not origin_ok(scope, self.origins):
                 deny = page(403, "Refused", "Cross-origin request refused.")
@@ -489,47 +498,58 @@ def render_home(request: Request, cfg: Config, user: dict, rules=None) -> str:
                       "footer": footer})
 
 
+def shell_response(request: Request, base: str, title: str = "Review") -> HTMLResponse:
+    """The review shell page for the tool at base/app/: the bar + an iframe (the shell's query, minus k, goes along)."""
+    app_prefix = base + "/app"
+    q = P.strip_k(request.scope.get("query_string", b"").decode("latin-1"))
+    src = app_prefix + "/" + (f"?{q}" if q else "")
+    body = (f'<iframe id="cj-review-frame" class="cj-review-frame" title="{html.escape(title)} tool" '
+            f'src="{html.escape(src)}" data-base="{html.escape(base)}/" data-app="{html.escape(app_prefix)}/" '
+            f'allow="clipboard-write; fullscreen"></iframe>\n<script src="/cj/review.js" defer></script>')
+    return M.Ctx.page(request, title, body, active="review")
+
+
+def wants_shell(request: Request, base: str) -> bool:
+    """A browser opening the tool's page (base/app/) as the whole window, not in the shell's frame."""
+    app_prefix = base + "/app"
+    if request.method != "GET" or request.url.path not in (app_prefix + "/", app_prefix + "/index.html"):
+        return False
+    dest = request.headers.get("sec-fetch-dest")
+    if dest is not None:
+        return dest == "document"                       # the frame's loads say "iframe"
+    if "text/html" not in request.headers.get("accept", ""):
+        return False
+    ref = request.headers.get("referer")                # older browsers: framed loads come from the shell page
+    if not ref:
+        return False                                    # unknown: serve the tool (a redirect could loop)
+    u = urlsplit(ref)
+    return not (u.netloc.lower() == (request.headers.get("host") or "").lower() and u.path.startswith(base + "/"))
+
+
+def shell_redirect(request: Request, base: str) -> Response:
+    q = P.strip_k(request.scope.get("query_string", b"").decode("latin-1"))
+    r = RedirectResponse(base + "/" + (f"?{q}" if q else ""), status_code=302)
+    r.headers["Cache-Control"] = "no-store"
+    return r
+
+
 def review_mount(base: str, proxy: P.ReviewProxy, title: str = "Review") -> list:
     """The routes for one review under `base` (no trailing slash):
          base/          the shell page: the bar + an iframe of base/app/ (the shell's query, minus k, goes along)
          base/app       -> base/app/
          base/app/...   the tool, through `proxy` (whose prefix must be base + "/app"). A top-level document GET of
                         the tool's page (a copied link) is sent to the shell instead: 302 base/?<query minus k>
-    The real review is review_mount("/review", ...). Wave 2's multi-package route can mount each package the same
-    way (/review/<pkg_id>/, ids never "app"), in front of the /review/{rest} catch-all."""
+    The real review is review_mount("/review", ...); prediction packages are pred_mount (/review/<pkg_id>/)."""
     app_prefix = base + "/app"
     if proxy.prefix != app_prefix:
         raise ValueError(f"review proxy prefix {proxy.prefix!r} != {app_prefix!r}")
 
     async def shell(request: Request):
-        q = P.strip_k(request.scope.get("query_string", b"").decode("latin-1"))
-        src = app_prefix + "/" + (f"?{q}" if q else "")
-        body = (f'<iframe id="cj-review-frame" class="cj-review-frame" title="{html.escape(title)} tool" '
-                f'src="{html.escape(src)}" data-base="{html.escape(base)}/" data-app="{html.escape(app_prefix)}/" '
-                f'allow="clipboard-write; fullscreen"></iframe>\n<script src="/cj/review.js" defer></script>')
-        return M.Ctx.page(request, title, body, active="review")
-
-    def to_shell(request: Request) -> bool:
-        """A browser opening the tool's page as the whole window (not in the shell's frame)."""
-        if request.method != "GET" or request.url.path not in (app_prefix + "/", app_prefix + "/index.html"):
-            return False
-        dest = request.headers.get("sec-fetch-dest")
-        if dest is not None:
-            return dest == "document"                       # the frame's loads say "iframe"
-        if "text/html" not in request.headers.get("accept", ""):
-            return False
-        ref = request.headers.get("referer")                # older browsers: framed loads come from the shell page
-        if not ref:
-            return False                                    # unknown: serve the tool (a redirect could loop)
-        u = urlsplit(ref)
-        return not (u.netloc.lower() == (request.headers.get("host") or "").lower() and u.path.startswith(base + "/"))
+        return shell_response(request, base, title)
 
     async def tool(request: Request):
-        if to_shell(request):
-            q = P.strip_k(request.scope.get("query_string", b"").decode("latin-1"))
-            r = RedirectResponse(base + "/" + (f"?{q}" if q else ""), status_code=302)
-            r.headers["Cache-Control"] = "no-store"
-            return r
+        if wants_shell(request, base):
+            return shell_redirect(request, base)
         return await proxy.handle(request, request.scope["cj_user"]["id"])
 
     async def to_app(request: Request):
@@ -540,12 +560,81 @@ def review_mount(base: str, proxy: P.ReviewProxy, title: str = "Review") -> list
             Route(app_prefix + "/{path:path}", tool, methods=["GET", "HEAD", "PUT", "POST", "DELETE"])]
 
 
+def pred_package(root: Path | None, pkg_id: str):
+    """(package folder, owner id) for a prediction review package id, else None. The id must match PRED_ID_RE; the
+    folder is found with the multi server's own check (well-formed id, complete package, reached under exactly that
+    name: annotation/multi_review_server.package_dir); the owner comes from its review_package.json."""
+    if root is None or not isinstance(pkg_id, str) or not PRED_ID_RE.match(pkg_id):
+        return None
+    try:
+        pkg = MRS.package_dir(Path(root), pkg_id)
+    except OSError:
+        return None
+    if pkg is None:
+        return None
+    rec = read_json(pkg / MRS.COMPLETE)
+    owner = rec.get("owner") if isinstance(rec, dict) else None
+    return (pkg, owner) if isinstance(owner, str) and owner else None
+
+
+def owner_checked(path: str) -> bool:
+    """/review/<pkg id>/... (any segment but app): the Gate's role rule for /review (the real package) doesn't
+    apply; pred_mount checks the id and the owner, and anything else under /review/ is the 404 catch-all, so every
+    role gets the same 404 for an id that isn't theirs or isn't an id. Never for a path with dot segments."""
+    return bool(OWNER_PATH_RE.match(path)) and not any(s in (".", "..") for s in path.split("/"))
+
+
+def pred_mount(proxy: P.ReviewProxy, root: Path | None, title: str = "Review") -> list:
+    """Prediction review packages in the shell, one URL space per package:
+         /review/<pkg_id>/          the shell page (as /review/)
+         /review/<pkg_id>/app       -> /review/<pkg_id>/app/
+         /review/<pkg_id>/app/...   the multi-package review server at <upstream>/<pkg_id>/..., with that package's
+                                    own .review_key as X-Review-Key; every proxy rule applies (portal/proxy.py)
+    Who: ctx.can_see(user, owner) (admins all, others their own). Unknown, malformed or not yours: one 404 page."""
+
+    def lookup(request: Request):
+        pid = request.path_params.get("pkg_id", "")
+        hit = pred_package(root, pid)
+        if hit is None or not M.Ctx.can_see(request.scope.get("cj_user"), hit[1]) or not MRS.package_key(hit[0]):
+            return None, None                           # unknown, not yours, or no key (not served): one answer
+        return pid, hit[0]
+
+    def missing():
+        return page(404, "Not found", "No such review package, or it isn't yours.")
+
+    async def shell(request: Request):
+        pid, _ = lookup(request)
+        return missing() if pid is None else shell_response(request, f"{REVIEW_BASE}/{pid}", title)
+
+    async def to_app(request: Request):
+        pid, _ = lookup(request)
+        return missing() if pid is None else RedirectResponse(f"{REVIEW_BASE}/{pid}/app/", status_code=307)
+
+    async def tool(request: Request):
+        pid, pkg = lookup(request)
+        if pid is None:
+            return missing()
+        base = f"{REVIEW_BASE}/{pid}"
+        if wants_shell(request, base):
+            return shell_redirect(request, base)
+        key = MRS.package_key(pkg)
+        if not key:                                     # the key went away since lookup
+            return missing()
+        return await proxy.handle(request, request.scope["cj_user"]["id"], key=key, prefix=base + "/app",
+                                  up_path="/" + pid)
+
+    return [Route(REVIEW_BASE + "/{pkg_id}/", shell, methods=["GET"]),
+            Route(REVIEW_BASE + "/{pkg_id}/app", to_app, methods=["GET"]),
+            Route(REVIEW_BASE + "/{pkg_id}/app/{path:path}", tool, methods=["GET", "HEAD", "PUT", "POST", "DELETE"])]
+
+
 def create_app(cfg: Config) -> Gate:
     """Raises ValueError when modules.json can't be read (the Gate's rules come from it): refuse to start."""
     auth = A.Auth(cfg.roster, cfg.state_dir)
     rules_box: list = []                            # the Gate's rules, filled below; home asks them, not the file
     proxy = P.ReviewProxy(cfg.review_upstream, cfg.review_key, cfg.review_timeout, cfg.max_body,
                           prefix=REVIEW_BASE + "/app")
+    pred_proxy = P.ReviewProxy(cfg.pred_upstream, None, cfg.review_timeout, cfg.max_body)   # key + prefix per call
 
     def no_store(r: Response) -> Response:
         r.headers["Cache-Control"] = "no-store"
@@ -639,7 +728,8 @@ def create_app(cfg: Config) -> Gate:
         Route("/history/{rest:path}", history_other, methods=["GET"]),
         Route(REVIEW_BASE, redirect(REVIEW_BASE + "/"), methods=["GET"]),
         *review_mount(REVIEW_BASE, proxy),
-        # kept free for /review/<pkg_id>/ (wave 2: mount those before this catch-all)
+        *pred_mount(pred_proxy, cfg.review_root),
+        # anything else under /review/: 404 (the same answer as an unknown or not-yours package)
         Route(REVIEW_BASE + "/{rest:path}", review_free, methods=["GET", "HEAD", "PUT", "POST", "DELETE"]),
     ]
     mod_routes, rules = M.load(M.Ctx(cfg))          # portal/modules/<id>.py plug-ins (BUILD_CONTRACTS.md section 1)
@@ -653,17 +743,25 @@ def create_app(cfg: Config) -> Gate:
     @contextlib.asynccontextmanager
     async def lifespan(app):
         await proxy.start()
+        await pred_proxy.start()
         try:
             yield
         finally:
             await proxy.close()
+            await pred_proxy.close()
 
     star = Starlette(routes=routes, lifespan=lifespan)
     star.router.redirect_slashes = False
     gate = Gate(star, auth, cfg.origins, rules)
     gate.proxy = proxy
+    gate.pred_proxy = pred_proxy
     gate.auth = auth
     return gate
+
+
+def default_review_root() -> Path | None:
+    root = repo_config.laptop_root(required=False)
+    return Path(root) / "review" if root else None
 
 
 def build_config(args) -> Config:
@@ -673,7 +771,9 @@ def build_config(args) -> Config:
     return Config(registry=Path(registry) if registry else None, roster=args.roster or A.default_roster(),
                   state_dir=args.state_dir or A.default_state_dir(), review_upstream=args.review_upstream,
                   review_key=key, review_package=pkg, origins=tuple(args.origin or ()),
-                  manifest=getattr(args, "modules", None) or MANIFEST)
+                  manifest=getattr(args, "modules", None) or MANIFEST,
+                  pred_upstream=getattr(args, "pred_upstream", None) or f"http://127.0.0.1:{PRED_PORT}",
+                  review_root=getattr(args, "review_root", None) or default_review_root())
 
 
 def startup_lines(cfg: Config, host: str, port: int) -> list:
@@ -692,6 +792,8 @@ def startup_lines(cfg: Config, host: str, port: int) -> list:
         "[cj] roles (read once, from built-in defaults + modules.json): "
         + "; ".join(f"{p} {'/'.join(r)}" for p, r in manifest_rules(manifest(cfg.manifest)))
         + "; plug-in modules: their own ROLES. Restart the portal after changing roles in modules.json",
+        f"[cj] prediction packages: /review/<pred_ps_...>/ = shell, /review/<id>/app/ -> {cfg.pred_upstream}/<id>/; "
+        f"keys from {cfg.review_root or 'NOWHERE (no review root): every package answers 404'}; owner or admin only",
         "[cj] sandbox: not proxied (link out to :8443)",
         "[cj] logs: uvicorn access log off, proxy headers off; own access log with k= redacted",
     ]
@@ -707,6 +809,10 @@ def main(argv=None):
                     help="the real review package (its .review_key is sent upstream); default: from the registry")
     ap.add_argument("--roster", type=Path, default=None, help=f"default {A.default_roster()}")
     ap.add_argument("--state-dir", type=Path, default=None, help=f"default {A.default_state_dir()}")
+    ap.add_argument("--pred-upstream", default=f"http://127.0.0.1:{PRED_PORT}",
+                    help="the multi-package review server (prediction packages)")
+    ap.add_argument("--review-root", type=Path, default=None,
+                    help="folder of the prediction review packages (default <CryoAI-laptop>/review)")
     ap.add_argument("--modules", type=Path, default=None,
                     help="the module manifest (default portal/modules.json); read once for the roles; unreadable = no start")
     ap.add_argument("--origin", action="append", default=None,

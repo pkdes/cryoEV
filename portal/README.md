@@ -11,6 +11,7 @@ phone/laptop ── tailnet ── tailscale serve :8446 ──> 127.0.0.1:8770 
                                                       │                 modules.json (filtered by role), me.json
                                                       ├─ /review/       the review shell: the bar + a same-origin iframe
                                                       ├─ /review/app/*  proxy -> 127.0.0.1:8766 (the real review tool)
+                                                      ├─ /review/<pred pkg>/(app/*)  shell + proxy -> :8767/<pkg>/ (owner)
                                                       ├─ /history/*     history.html + live/live.json (classic page)
                                                       ├─ /<module>/*    plug-in modules (portal/modules/<id>.py)
                                                       └─ /login?k=…     key link -> session cookie
@@ -115,8 +116,14 @@ Nothing else is touched: the review servers, the history server, the monitor and
   `/review/app/?...` link: `Sec-Fetch-Dest: document`, or HTML asked with a Referer that isn't the shell) answers 302
   `/review/?<query minus k>`; the frame's own loads, requests without a Referer and every other request reach the
   tool. If the frame ever shows `/review/` itself, the window is left alone (no loop).
-- `/review/<anything else>` answers 404: kept free for the multi-package route `/review/<pkg_id>/` (wave 2:
-  `app.review_mount(base, proxy)` mounts a shell + app pair; package ids are never `app`).
+- **Prediction review packages** (`pred_ps_<8 digits>_<6 hex>`): `/review/<pkg_id>/` is the same shell, and
+  `/review/<pkg_id>/app/<path>` is proxied to the multi-package review server (`--pred-upstream`, default
+  `http://127.0.0.1:8767`) at `/<pkg_id>/<path>`, with that package's own `.review_key` (from `--review-root`,
+  default `<CryoAI-laptop>/review`; the folder is found with `annotation/multi_review_server.package_dir`: exact
+  name, complete package). Every proxy rule applies; a Location inside the package stays under its prefix, anything
+  else goes to its root. **Who:** the package's owner (`review_package.json`) or an admin (`ctx.can_see`), so basic
+  and advanced users open their own; the admin-only `/review` rule covers only the real package. An unknown id, a
+  package without a key, or one that isn't yours all get the same 404; so does anything else under `/review/`.
 - `X-Frame-Options`: `SAMEORIGIN` for `/review/*`, `DENY` everywhere else.
 
 ## Live charts (`/cj/live.js`)

@@ -94,11 +94,18 @@ def request_headers(raw_headers, key: str | None, user: str) -> list:
     return out
 
 
-def rewrite_location(value: str, upstream: str, prefix: str = PREFIX) -> str:
-    """An upstream Location, kept under `prefix`. A path that starts with // (another host) or whose path has dot
-    segments, empty segments or odd characters (it could climb out of `prefix`) becomes `prefix`/ instead."""
+def rewrite_location(value: str, upstream: str, prefix: str = PREFIX, up_path: str = "") -> str:
+    """An upstream Location, kept under `prefix`. Any other absolute URL (a scheme that isn't the upstream), a path
+    that starts with // (another host), or a path with dot segments, empty segments or odd characters (it could climb
+    out of `prefix`) becomes `prefix`/ instead. `up_path` (e.g. /<pkg id> on the multi-package server) is the
+    upstream's own path prefix: a path inside it loses it, a path outside it becomes `prefix`/."""
     if value.startswith(upstream):
         value = value[len(upstream):] or "/"
+    if up_path and value.startswith("/") and not value.startswith("//"):
+        if value == up_path or value[len(up_path):len(up_path) + 1] in ("/", "?", "#") and value.startswith(up_path):
+            value = "/" + value[len(up_path):].lstrip("/")
+        else:
+            return prefix + "/"
     if SCHEME_RE.match(value):                      # any other absolute URL (http:evil, HTTP://x, javascript:...)
         return prefix + "/"
     if value.startswith("//") or value.startswith("\\") or value.startswith("/\\"):
@@ -114,7 +121,7 @@ def rewrite_location(value: str, upstream: str, prefix: str = PREFIX) -> str:
     return value
 
 
-def response_headers(headers: httpx.Headers, upstream: str, prefix: str = PREFIX) -> list:
+def response_headers(headers: httpx.Headers, upstream: str, prefix: str = PREFIX, up_path: str = "") -> list:
     named = {t.strip().lower() for v in headers.get_list("connection") for t in v.split(",") if t.strip()}
     out = []
     for k, v in headers.multi_items():
@@ -122,7 +129,7 @@ def response_headers(headers: httpx.Headers, upstream: str, prefix: str = PREFIX
         if lk in DROP_RESPONSE or lk in named:
             continue
         if lk == "location":
-            v = rewrite_location(v, upstream, prefix)
+            v = rewrite_location(v, upstream, prefix, up_path)
         out.append((lk.encode("latin-1"), v.encode("latin-1")))
     return out
 
@@ -181,21 +188,26 @@ class ReviewProxy:
             return bytes(buf), None
         return None, None
 
-    async def handle(self, request: Request, user: str) -> Response:
+    async def handle(self, request: Request, user: str, key=None, prefix: str | None = None,
+                     up_path: str = "") -> Response:
+        """Proxy one request. Per call (the multi-package server): `key` (else the proxy's own), `prefix` (the URL
+        space it answers under, else the proxy's own) and `up_path` (the upstream's path prefix, e.g. /<pkg id>)."""
+        key = self.key if key is None else key
+        prefix = self.prefix if prefix is None else prefix.rstrip("/")
         scope = request.scope
         raw = (scope.get("raw_path") or scope["path"].encode("utf-8")).decode("latin-1")
-        if not raw.startswith(self.prefix + "/"):
+        if not raw.startswith(prefix + "/"):
             return error_page(400, "Bad request", "Bad path.")
         try:
-            sub = clean_subpath(raw[len(self.prefix):])
+            sub = clean_subpath(raw[len(prefix):])
         except (BadPath, UnicodeDecodeError):
             return error_page(400, "Bad request", "That path is not allowed.")
         query = strip_k(scope.get("query_string", b"").decode("latin-1"))
-        url = self.upstream + sub + (f"?{query}" if query else "")
+        url = self.upstream + up_path + sub + (f"?{query}" if query else "")
         content, err = await self._body(request)
         if err is not None:
             return err
-        headers = request_headers(scope["headers"], self.key, user)
+        headers = request_headers(scope["headers"], key, user)
         if isinstance(content, bytes) and content and not any(n == "content-length" for n, _ in headers):
             headers.append(("content-length", str(len(content))))
         if self.client is None:
@@ -209,7 +221,7 @@ class ReviewProxy:
         except httpx.HTTPError:
             return error_page(502, "Review is down",
                               "The review server is not running. Start it on the laptop, then reload this page.")
-        out_headers = response_headers(resp.headers, self.upstream, self.prefix)
+        out_headers = response_headers(resp.headers, self.upstream, prefix, up_path)
         if request.method == "HEAD":
             await resp.aclose()
             r = Response(b"", status_code=resp.status_code)
