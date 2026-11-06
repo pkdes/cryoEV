@@ -139,10 +139,10 @@ The full contract is the module docstring in `modules/predict.py`. In short:
 - **Where the images come from.** (1) A processed session: the session folders under the scan roots
   (`CJ_PREDICT_SCAN_ROOTS`, default the processing root) that have `3. Processed images/3d. Tiles no scalebar*`, plus
   the admin's hand list (`CJ_PREDICT_SOURCES`), with **Admin > Predict sessions** (hide, rename). Sessions are named by
-  their full registry id (`20261027`, `20260827-2`). (2) Uploaded tiles (8-bit PNG/JPEG, up to 200 files of 100 MB).
+  their full registry id (`20261027`, `20260827-2`). (2) Uploaded tiles (8-bit PNG/JPEG, up to 1000 files of 100 MB).
   (3) Raw montages converted on the laptop (below).
 - **Every analysis:** pick samples, see each sample's nm/px and tick "I confirm the pixel size" (never defaulted), at
-  most 200 tiles. Basic users get the production model only and at most 3 analyses waiting or running.
+  most 1000 tiles. Basic users get the production model only and at most 3 analyses waiting or running.
 - **Uploads go one file per request** (a big file in pieces of at most 32 MB): a Cloudflare free tunnel caps a request
   at about 100 MB. The page's script opens an upload session (`POST /predict/api/upload` with the file list: fields,
   caps and free disk checked before a byte is sent, the declared size held on the disk), sends each file, then asks
@@ -248,7 +248,7 @@ python -m portal.app --auth access --port 8448 [--access-config <path>] [--state
   access log adds `cf=<ip>`.
 
 ## Uptime
-- **Portal process down:** the laptop's job monitor can watch it. Add `--portal http://127.0.0.1:<port>/healthz` to the `monitor` service's argv and set env `CRYOEV_NTFY_TOPIC` for it. After 2 failed checks it sends one ntfy, and one more on recovery (docs/JOBS.md, Portal uptime probes).
+- **Portal process down:** the laptop's job monitor can watch it. Add `--portal http://127.0.0.1:8770/healthz` (key mode) and `--portal http://127.0.0.1:8448/healthz` (Cloudflare access mode) to the `monitor` service's argv (the example config has both) and set env `CRYOEV_NTFY_TOPIC` for it. After 2 failed checks it sends one ntfy, and one more on recovery (docs/JOBS.md, Portal uptime probes).
 - **Laptop asleep, off or offline:** the monitor runs on that laptop, so it cannot report this. Turn on the **Cloudflare Tunnel Health Alert** (Cloudflare dashboard -> Zero Trust -> Notifications, email destination: `<your email>`) for the tunnel that serves `<portal hostname>`.
 - **Power:** Windows Settings -> System -> Power -> set "When plugged in, put my device to sleep after" to **Never**, so the tunnel stays up.
 - **Service entry** (private `services.json`): give the portal service `"health": "/healthz"` so `services.py status` shows `ok` only for a 200 with `{"ok": true}`.

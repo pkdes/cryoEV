@@ -547,8 +547,9 @@ class PortalWatch:
         ths = [threading.Thread(target=work, args=(i, u), daemon=True) for i, u in enumerate(self.urls)]
         for th in ths:
             th.start()
+        end = time.monotonic() + PORTAL_TIMEOUT_S + 1                  # one overall deadline, not 4 s per thread
         for th in ths:
-            th.join(PORTAL_TIMEOUT_S + 1)
+            th.join(max(0.0, end - time.monotonic()))
         out = []
         for u, r in zip(self.urls, res):
             up, ms = r if r is not None else (False, None)
@@ -595,7 +596,11 @@ def main(argv=None):
                          "JSON ok:true; ntfy once when down (2 failed checks), once on recovery ($CRYOEV_NTFY_TOPIC)")
     a = ap.parse_args(argv)
     for u in a.portal:
-        if not u.startswith("http://") or not urlsplit(u).hostname:
+        try:
+            ok = u.startswith("http://") and bool(urlsplit(u).hostname) and (urlsplit(u).port or 80) > 0
+        except ValueError:                                           # urlsplit(...).port raises on a bad port
+            ok = False
+        if not ok:
             ap.error(f"bad --portal {u!r}: expected http://host:port/healthz")
     try:
         servers = parse_servers(a.servers)

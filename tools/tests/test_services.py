@@ -270,7 +270,7 @@ class HealthTests(unittest.TestCase):
 
     def test_config_health_validated(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
-            for h, ok in (("/healthz", True), ("healthz", False), (5, False)):
+            for h, ok in (("/healthz", True), ("healthz", False), (5, False), ("/a b", False), ("/a\nb", False)):
                 f = Path(d) / "c.json"
                 f.write_text(json.dumps({"run_dir": str(Path(d) / "run"), "services": [
                     {"name": "p", "port": 1234, "argv": ["x"], "health": h}]}), encoding="utf-8")

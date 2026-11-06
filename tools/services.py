@@ -64,7 +64,8 @@ EXAMPLE_CONFIG = {
                   "--directory", "<CryoAI-laptop>/registry"],
          "log": "~/.cryoev/logs/history.log"},
         {"name": "monitor", "enabled": True, "port": None, "cwd": "{repo}",
-         "argv": ["{python}", "jobs/monitor.py", "--share", "\\\\gpu-desktop\\cj", "--every", "30"],
+         "argv": ["{python}", "jobs/monitor.py", "--share", "\\\\gpu-desktop\\cj", "--every", "30",
+                  "--portal", "http://127.0.0.1:8770/healthz", "--portal", "http://127.0.0.1:8448/healthz"],
          "log": "~/.cryoev/logs/monitor.log"},
         {"name": "portal", "enabled": False, "port": 8770, "cwd": "{repo}",
          "health": "/healthz",
@@ -144,7 +145,8 @@ def load_config(path: Path, run_dir: Path = None) -> Config:
         if port is not None and (not isinstance(port, int) or not 0 < port < 65536):
             raise ConfigError(f"service {name}: port must be an integer 1-65535 or null")
         health_path = s.get("health")
-        if health_path is not None and not (isinstance(health_path, str) and health_path.startswith("/")):
+        if health_path is not None and not (isinstance(health_path, str) and health_path.startswith("/")
+                                         and not re.search(r"[\s\x00-\x1f\x7f]", health_path)):
             raise ConfigError(f"service {name}: health must be a path starting with /, e.g. \"/healthz\"")
         enabled = bool(s.get("enabled", True))
         if port and enabled:

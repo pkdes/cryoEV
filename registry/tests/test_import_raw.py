@@ -100,11 +100,18 @@ def build_proc(proc):
 SERIAL = "0000"              # the synthetic scope's serial (SCOPE above)
 
 
+def cache_text_without_sigs(text):
+    """The mdoc cache as text with every files[*].sig removed. A sig is [st_mtime_ns, st_size]: an mtime_ns ending
+    0000 is ~1% per file, which made a plain substring test for the serial fail in a few percent of runs
+    (2026-11-06). Everything else (summaries, paths, hashes) is still checked as a plain substring."""
+    d = json.loads(text)
+    for e in (d.get("files") or {}).values():
+        e.pop("sig", None)
+    return json.dumps(d)
+
+
 def leaks(token, text):
-    """True when `token` is in `text` as a word. The serial is digits, so a bare substring test also fires on a
-    cache signature `[st_mtime_ns, st_size]` whose digits happen to contain it (an mtime_ns ending 0000 is ~1% per
-    file, which made this test fail in a few percent of runs, 2026-11-06)."""
-    return re.search(r"(?<![\w.])" + re.escape(token) + r"(?![\w.])", text) is not None
+    return token in text
 
 
 class CountingParser:
@@ -157,7 +164,7 @@ class SyntheticRaw(unittest.TestCase):
         cache = (self.root / importers.MDOC_CACHE).read_text(encoding="utf-8")
         for t in (SERIAL, "Example Lab"):
             self.assertFalse(leaks(t, json.dumps(s)), t)
-            self.assertFalse(leaks(t, cache), t)
+            self.assertFalse(leaks(t, cache_text_without_sigs(cache)), t)
         self.assertEqual((s["n_imaging"], s["n_other"], s["other_magnification"]), (2, 1, [2600]))
         self.assertEqual(s["magnification"], [11000, 45000])            # 210 (atlas) and 2600 (search) left out
         self.assertEqual(s["pixel_size_a"], [6.674, 7.362])
@@ -178,10 +185,14 @@ class SyntheticRaw(unittest.TestCase):
         """Control for the leak test above: it still sees the serial where it is a word (the raw header, a record
         field) and ignores the same digits inside a longer number such as a cache mtime_ns."""
         self.assertTrue(leaks(SERIAL, SCOPE))
+        for bad in ("SN0000", "Scope0000", "0000.mdoc", "Glacios 0000.0"):     # must-catch, record side
+            self.assertTrue(leaks(SERIAL, json.dumps({"instrument": bad})), bad)
+            self.assertTrue(leaks(SERIAL, cache_text_without_sigs(json.dumps({"files": {"a": {"sig": [1, 2], "s": bad}}}))), bad)
+        sig_only = json.dumps({"files": {"a": {"sig": [1793999666509720000, 10000], "s": {"instrument": "Scope"}}}})
+        self.assertTrue(leaks(SERIAL, sig_only))                                 # raw text would flake ...
+        self.assertFalse(leaks(SERIAL, cache_text_without_sigs(sig_only)))       # ... the stripped cache does not
         self.assertTrue(leaks(SERIAL, json.dumps({"instrument": "Scope 0000"})))
         self.assertTrue(leaks("Example Lab", SCOPE))
-        self.assertFalse(leaks(SERIAL, '{"sig":[1793999666509720000,894],"s":{}}'))
-        self.assertFalse(leaks(SERIAL, '{"sig":[1793999678424160000,10000],"s":{}}'))
 
     def test_session_gaps(self):
         self.assertIn("no `2. Raw images/` folder", self.cur["20990101"]["acquisition_gap"])
@@ -415,9 +426,10 @@ class RealRegistryCopy(unittest.TestCase):
                    if importers.raw_files(PROC / sid, importers.RAW_LAYOUT.get(sid, importers.DEFAULT_LAYOUT))]
         gaps = sorted(set(local) - set(has_raw))
         self.assertGreaterEqual(len(has_raw), self.RAW_SESSIONS_FLOOR,
-                                f"sessions with raw metadata fell below the floor; without raw now: {gaps}")
+                                f"sessions with raw metadata fell below the floor {self.RAW_SESSIONS_FLOOR}; without raw now: {gaps}. "
+                                "If raw data was moved off on purpose, lower RAW_SESSIONS_FLOOR and note the session")
         for sid in gaps:
-            self.assertIn("acquisition_gap", self.cur[sid], f"{sid} has no raw .mdoc/.idoc and no acquisition_gap")
+            self.assertIn("acquisition_gap", self.cur[sid], f"{sid} has no raw .mdoc/.idoc and no acquisition_gap (gap sessions: {gaps})")
         for sid in has_raw:
             s = self.cur[sid]
             self.assertNotIn("acquisition_gap", s, sid)
