@@ -648,7 +648,7 @@ class Browser(Base):
                         self.assertEqual(page.locator("#cj-jobs-s-finished li").count(), 5)
                         self.assertEqual(page.locator("body img").count(), 0)          # the XSS name stayed text
                         bg = page.evaluate("getComputedStyle(document.body).backgroundColor")
-                        self.assertEqual(bg, "rgb(20, 19, 18)" if scheme == "dark" else "rgb(250, 250, 249)")
+                        self.assertEqual(bg, "rgb(15, 21, 27)" if scheme == "dark" else "rgb(243, 245, 247)")   # cj.css design A --bg
                         page.screenshot(path=str(self.shots / f"jobs_{width}_{scheme}.png"), full_page=True)
                         self.check_clean(rec)
                     finally:
