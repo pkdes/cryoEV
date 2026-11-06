@@ -571,7 +571,7 @@ class Compute(Base):
         page = self.page(TODO1, "owner")
         Golden.check_samples(self, page, exp)
         self.assertNotIn("data-cj-results-poll", page)
-        self.assertIn("Compute again", page)
+        self.assertIn("Update results now", page)
 
     def test_failed_compute(self):
         def boom(ps_dir, reviewed):

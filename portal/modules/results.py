@@ -450,11 +450,39 @@ def bin_label(h: dict, k: int) -> str:
     return f"{k * step:g} nm or more" if k == n - 1 else f"{k * step:g}–{(k + 1) * step:g} nm"
 
 
-def hist_chart(idx: int, label: str, s: dict) -> str:
+def shared_xmax(samples: dict):
+    """The one x-axis end (nm) for every histogram on the page: the upper edge of the bin holding the 99th
+    percentile of all samples' EVs together, rounded up to 50 nm, at least 100 nm. None = draw the whole range."""
+    hs = [s["diam_hist"] for s in samples.values() if hist_ok(s)]
+    if not hs:
+        return None
+    step, n = hs[0]["bin_nm"], len(hs[0]["counts"])
+    if any(h["bin_nm"] != step or len(h["counts"]) != n for h in hs):
+        return None
+    pooled = [sum(h["counts"][k] for h in hs) for k in range(n)]
+    total, cum = sum(pooled), 0
+    for k, c in enumerate(pooled):
+        cum += c
+        if cum >= 0.99 * total:
+            break
+    edge = (k + 1) * step
+    return max(100, int(math.ceil(edge / 50.0)) * 50)
+
+
+def hist_chart(idx: int, label: str, s: dict, xmax=None) -> str:
     """Server-drawn histogram of one sample's EV diameters (results.json diam_hist). One hue, bars separated by a
-    2 px card-coloured stroke, recessive grid, a hover title per bin, no script. x in %, y in px, like diam_chart."""
+    2 px card-coloured stroke, recessive grid, a hover title per bin, no script. x in %, y in px, like diam_chart.
+    xmax (nm; the page's shared axis end): bins from there up are folded into one '>= xmax' bar; the table still
+    lists the original bins."""
     h = s["diam_hist"]
-    counts, n = h["counts"], len(h["counts"])
+    full, step0 = h["counts"], h["bin_nm"]
+    if xmax is not None and xmax < (len(full) - 1) * step0:
+        k0 = int(xmax // step0)
+        counts = full[:k0] + [sum(full[k0:])]
+    else:
+        counts = full
+    n = len(counts)
+    h2 = {"bin_nm": step0, "counts": counts}
     peak = max(counts)
     yt = nice_ticks(0, peak, 4)
     ymax = yt[-1]
@@ -469,7 +497,7 @@ def hist_chart(idx: int, label: str, s: dict) -> str:
 
     tid = f"cj-results-hist-t{idx}"
     best = counts.index(peak)
-    summary = (f"{label}: {plural(sum(counts), 'EV')} by diameter; most in {bin_label(h, best)} "
+    summary = (f"{label}: {plural(sum(counts), 'EV')} by diameter; most in {bin_label(h2, best)} "
                f"({plural(peak, 'EV')})")
     parts = [f'<svg class="cj-results-svg cj-results-hist" width="100%" height="{H}" role="img" '
              f'aria-labelledby="{tid}"><title id="{tid}">{esc(summary)}</title>']
@@ -487,18 +515,18 @@ def hist_chart(idx: int, label: str, s: dict) -> str:
                  f'{esc("≥" + fnum(last, 0))}</text>')
     for k, c in enumerate(counts):
         x0 = L + k * bw
-        tip = f"{bin_label(h, k)}: {plural(c, 'EV')}"
+        tip = f"{bin_label(h2, k)}: {plural(c, 'EV')}"
         bar = (f'<rect class="cj-results-bar" x="{x0:.3f}%" y="{y(c):.1f}" width="{bw:.3f}%" '
                f'height="{top + ph - y(c):.1f}"/>') if c else ""
         parts.append(f'<g class="cj-results-binx"><title>{esc(tip)}</title>'
                      f'<rect class="cj-results-hit" x="{x0:.3f}%" y="{top}" width="{bw:.3f}%" height="{ph}"/>{bar}</g>')
     parts.append("</svg>")
     rows = "".join(f'<tr><td class="cj-results-l">{esc(bin_label(h, k))}</td><td>{c}</td></tr>'
-                   for k, c in enumerate(counts) if c)
+                   for k, c in enumerate(full) if c)
     table = (f'<details class="cj-results-det cj-results-histtab"><summary>{esc("Table of the bins")}</summary>'
              f'<div class="cj-results-wrap"><table class="cj-results-tab"><thead><tr><th scope="col">Diameter</th>'
              f'<th scope="col">EVs</th></tr></thead><tbody>{rows}</tbody></table></div>'
-             f'<p class="cj-mut cj-results-note">{esc("Only bins with EVs are listed.")}</p></details>')
+             f'<p class="cj-mut cj-results-note">{esc("Only bins with EVs are listed. A bin includes its lower edge and excludes its upper (10 ≤ d < 20 nm).")}</p></details>')
     return (f'<figure class="cj-card cj-results-fig cj-results-histfig" data-sample="{esc(str(label))}">'
             f'<figcaption>{esc(short(label))}: {esc(plural(sum(counts), "EV"))} by diameter'
             f'<span class="cj-mut">{esc("Each bar is " + fnum(step, 0) + " nm wide. Hover a bar for its count.")}</span>'
@@ -506,7 +534,8 @@ def hist_chart(idx: int, label: str, s: dict) -> str:
 
 
 def hist_charts(samples: dict) -> str:
-    return "".join(hist_chart(i, k, s) for i, (k, s) in enumerate(samples.items()) if hist_ok(s))
+    x = shared_xmax(samples)      # one x-axis for all samples; the y-axis stays per sample
+    return "".join(hist_chart(i, k, s, x) for i, (k, s) in enumerate(samples.items()) if hist_ok(s))
 
 
 def short(label, n=28) -> str:
@@ -564,7 +593,10 @@ def refused_notice(res: dict) -> str:
         lab = img.get("sample_label")
         if lab not in res["samples"]:
             out_of[lab] = out_of.get(lab, 0) + 1
-    items = "".join(f"<li><b>{esc(str(k))}</b> ({esc(plural(v, 'image'))})</li>" for k, v in out_of.items())
+    ru = res.get("refused_unsure") or {}
+    items = "".join(f"<li><b>{esc(str(k))}</b> ({esc(plural(v, 'image'))}"
+                    + (f", {esc(plural(ru[k], 'unsure outline'))} still open"
+                       if isinstance(ru.get(k), int) and ru[k] else "") + ")</li>" for k, v in out_of.items())
     head = ("No sample could be counted." if not res["samples"] else "Some samples were not counted.")
     if not res["samples"] and not out_of:
         head = "No results for this set."
@@ -579,7 +611,9 @@ def has_unsure_fields(res: dict) -> bool:
 
 
 def unsure_total(res: dict) -> int:
-    return sum(int(s["n_unsure_open"]) for s in res["samples"].values() if isinstance(s.get("n_unsure_open"), int))
+    """Open unsure outlines over the counted samples and the refused ones (refused_unsure: still work to do)."""
+    rows = list(res["samples"].values()) + [{"n_unsure_open": v} for v in (res.get("refused_unsure") or {}).values()]
+    return sum(int(s["n_unsure_open"]) for s in rows if isinstance(s.get("n_unsure_open"), int))
 
 
 def checked_cell(s: dict, n_img: int) -> str:
@@ -610,10 +644,8 @@ def counted_note(res: dict) -> str:
 
 def unsure_banner(cfg, res: dict, ps: dict, st: dict) -> str:
     """The nudge (open unsure outlines) or, for an old results.json, the Update prompt. '' when neither applies."""
-    if not res["samples"]:
-        return ""
     ps_id = ps["id"]
-    if not has_unsure_fields(res):
+    if res["samples"] and not has_unsure_fields(res):
         busy = st["state"] in ("queued", "running")
         return ('<div class="cj-results-banner cj-results-b-part" role="status" id="cj-results-oldfields">'
                 f'<p><b>{esc("Update to see unsure counts.")}</b> '
@@ -622,8 +654,13 @@ def unsure_banner(cfg, res: dict, ps: dict, st: dict) -> str:
     n = unsure_total(res)
     if n <= 0:
         return ""
-    link = (f'<a class="cj-results-btn cj-results-btn-s" href="/review/pred_{esc(ps_id)}/">'
-            f'{esc("Review these images")}</a>' if package_dir(cfg, ps_id) is not None else "")
+    imgs = list(res["images"].values())
+    has_pkg = package_dir(cfg, ps_id) is not None
+    # the honesty banner already carries "Review these images" while some image is not Reviewed: no second button
+    already = bool(imgs) and not all(i.get("reviewed") for i in imgs) and has_pkg
+    link = ("" if already or not has_pkg else
+            f'<a class="cj-results-btn cj-results-btn-s" href="/review/pred_{esc(ps_id)}/">'
+            f'{esc("Review these images")}</a>')
     return ('<div class="cj-results-banner cj-results-b-part" role="status" id="cj-results-nudge">'
             f'<p><b>{esc(plural(n, "unsure outline") + " not checked yet.")}</b> '
             f'{esc("They are not in the EV counts until you accept them.")}</p>{link}</div>')
@@ -896,7 +933,7 @@ def render_set(cfg, ps: dict, user: dict) -> str:
     if st["state"] not in ("queued", "running"):
         out.append('<div class="cj-results-again"><p class="cj-mut">'
                    + esc("After more review, compute again to include it.") + "</p>"
-                   + compute_form(ps_id, "Compute again", primary=False) + "</div>")
+                   + compute_form(ps_id, "Update results now", primary=False) + "</div>")
     return "".join(out)
 
 

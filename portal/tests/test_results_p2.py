@@ -14,7 +14,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_results_module as M  # noqa: E402
+from annotation import prediction_package as pp  # noqa: E402
 from portal.modules import results as R  # noqa: E402
+from results.tests import test_p2 as TP  # noqa: E402
 from results.compute import compute_and_write  # noqa: E402
 
 FRESH = "ps_20261106_a00001"        # new fields; a review package exists (review_package.json), edits older
@@ -22,6 +24,8 @@ STALE = "ps_20261106_a00002"        # new fields; an edit saved after the result
 OLD = "ps_20261106_a00003"          # results.json without the round-6 fields
 NAMED = "ps_20261106_a00004"        # request.json name with markup
 NOEV = "ps_20261106_a00005"         # no confident outline -> no EV in any sample
+NULLSET = "ps_20261106_a00006"      # results.json whose S1 n_unsure_open is null (unknown)
+REAL = "ps_20261106_b00001"         # built through prediction_package.build, one image edited, one Reviewed
 XSS = "<b onmouseover=alert(1)>Name & co</b>"
 
 
@@ -53,7 +57,7 @@ class P2(M.Base):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        for ps in (FRESH, STALE, OLD, NAMED, NOEV):
+        for ps in (FRESH, STALE, OLD, NAMED, NOEV, NULLSET):
             M.make_set(cls.root, ps, owner=M.OWNER)
         for ps in (FRESH, STALE, OLD, NAMED):
             compute_and_write(cls.root / ps)
@@ -77,6 +81,17 @@ class P2(M.Base):
             for k in ("n_unsure_open", "n_checked", "diam_hist"):
                 s.pop(k)
         rj.write_text(json.dumps(doc), encoding="utf-8")
+        # the real package path: a synthetic set -> prediction_package.build -> one saved edit -> the portal computes
+        ps = TP.make_ps(cls.root.parent, {"0001": TP.A_OBJS, "0002": TP.B_OBJS, "0003": TP.C_OBJS}, ps_id=REAL)
+        pkg = pp.build(ps, cls.review)
+        TP.save_edit(pkg, "0002.png", {"dec": {"p0": {"v": "add:EV", "t": 5, "who": "rev1", "pending": True}}})
+        TP.save_edit(pkg, "0003.png", {"reviewed": True, "dec": {}})
+        # a computed set whose S1 sample has an unknown (null) unsure count
+        compute_and_write(cls.root / NULLSET)
+        nj = cls.root / NULLSET / "results" / "results.json"
+        doc = json.loads(nj.read_text(encoding="utf-8"))
+        doc["samples"]["S1"]["n_unsure_open"] = None
+        nj.write_text(json.dumps(doc), encoding="utf-8")
         req = cls.root / NAMED / "request.json"
         doc = json.loads(req.read_text(encoding="utf-8"))
         doc["name"] = XSS
@@ -107,8 +122,9 @@ class CountedAndUnsure(P2):
         m = re.search(r'id="cj-results-nudge".*?</div>', page, re.S)
         self.assertIsNotNone(m)
         self.assertIn(f"{total} unsure outline{'s' if total != 1 else ''} not checked yet.", m.group(0))
-        self.assertIn(f'href="/review/pred_{FRESH}/"', m.group(0))
-        self.assertIn("Review these images", m.group(0))
+        self.assertNotIn("Review these images", m.group(0))     # the honesty banner already has that button
+        self.assertEqual(page.count("Review these images"), 1)
+        self.assertEqual(page.count(f'href="/review/pred_{FRESH}/"'), 1)
 
     def test_nudge_without_package_has_no_dead_link(self):
         page = self.page(M.NOEDIT, "owner")               # no review package for this set
@@ -203,15 +219,18 @@ class HistogramPage(P2):
         fig = re.search(r'<figure[^>]*data-sample="%s".*?</figure>' % re.escape(label), page, re.S).group(0)
         counts = s["diam_hist"]["counts"]
         titles = re.findall(r"<title>([^<]*)</title>", fig)
-        self.assertEqual(len(titles), 51)                   # one per bin
+        xmax = R.shared_xmax(res["samples"])
+        self.assertEqual(len(titles), xmax // 10 + 1)       # one per bin below xmax + the folded overflow bar
         k = next(i for i, c in enumerate(counts) if c)
         self.assertEqual(titles[k], f"{k * 10}–{k * 10 + 10} nm: {counts[k]} EV{'s' if counts[k] != 1 else ''}")
-        self.assertEqual(titles[-1].split(":")[0], "500 nm or more")
-        self.assertIn("≥500", fig)                          # the overflow bin's axis label
+        self.assertEqual(titles[-1], f"{xmax} nm or more: {sum(counts[xmax // 10:])} "
+                                     f"EV{'s' if sum(counts[xmax // 10:]) != 1 else ''}")
+        self.assertIn(f"≥{xmax}", fig)                      # the overflow bar's axis label
         self.assertIn("<details", fig)
         self.assertEqual(len(re.findall(r"<tr><td class=\"cj-results-l\">", fig)), sum(1 for c in counts if c))
         self.assertNotIn("<script", fig)
-        self.assertEqual(len(re.findall(r'<rect class="cj-results-bar"', fig)), sum(1 for c in counts if c))
+        folded = counts[:xmax // 10] + [sum(counts[xmax // 10:])]
+        self.assertEqual(len(re.findall(r'<rect class="cj-results-bar"', fig)), sum(1 for c in folded if c))
 
     def test_no_histogram_for_a_sample_without_evs(self):
         page = self.page(NOEV, "owner")
@@ -231,6 +250,87 @@ class HistogramPage(P2):
         for bad in (None, {}, {"counts": "x"}, {"bin_nm": 10, "counts": [0, 0]}, {"bin_nm": 0, "counts": [1, 1]},
                     {"bin_nm": 10, "counts": [1, -1]}):
             self.assertFalse(R.hist_ok({"diam_hist": bad}), bad)
+
+
+class RealPackagePath(P2):
+    def test_portal_compute_with_a_real_package_gives_unsure_two(self):
+        """prediction_package.build + saved edits -> reviewed_polygons -> compute (no fake): known answer 2 / 2 / 4
+        (A untouched 1 + B edited 1 open + C Reviewed 0; B and C checked; 3 confident + B's accepted candidate)."""
+        self.assertEqual(self.post(f"/results/{REAL}/compute", "admin")[0], 303)
+        self.wait_state(REAL, ("ready",))
+        page = self.page(REAL, "admin")
+        c = M.cells(page, "S1")
+        self.assertEqual((c["n_unsure_open"][0], c["n_checked"][0], c["ev_total"][0]), ("2", "2 of 3", "4"))
+        self.assertIn("2 unsure outlines not checked yet.", page)
+        self.assertEqual(page.count("Review these images"), 1)     # honesty banner only (B is not Reviewed)
+        self.assertNotIn('id="cj-results-stale"', page)
+
+
+class AxisAndNotes(P2):
+    @staticmethod
+    def hist(**bins):
+        counts = [0] * 51
+        for k, v in bins.items():
+            counts[int(k[1:])] = v
+        return {"diam_hist": {"bin_nm": 10, "max_nm": 500, "counts": counts}}
+
+    def test_single_480_outlier_does_not_stretch_the_axis(self):
+        samples = {"S1": self.hist(b4=150, b5=50, b48=1)}                    # 201 EVs, one at ~485 nm
+        self.assertEqual(R.shared_xmax(samples), 100)                         # 99th percentile bin 4 -> 100 nm
+        out = R.hist_charts(samples)
+        self.assertEqual(len(re.findall(r"<title>[^<]*</title>", out)), 11)    # ten 10 nm bins + the overflow bar
+        self.assertIn("100 nm or more: 1 EV", out)
+        self.assertIn("≥100", out)
+        self.assertNotIn("≥500", out)
+        self.assertIn("<td class=\"cj-results-l\">480–490 nm</td><td>1</td>", out)                                # the table still has the original bin
+
+    def test_axis_is_shared_between_samples_and_rounded_to_50(self):
+        samples = {"S1": self.hist(b4=40, b12=2), "S2": self.hist(b30=100)}  # pooled p99 bin 30 -> 310 -> 350 nm
+        self.assertEqual(R.shared_xmax(samples), 350)
+        out = R.hist_charts(samples)
+        self.assertEqual(out.count("≥350"), 2)                                # both samples: same axis
+        self.assertEqual(R.shared_xmax({"S1": self.hist(b0=3)}), 100)         # minimum 100 nm
+
+    def test_page_note_says_which_edge_a_bin_includes(self):
+        page = self.page(FRESH, "owner")
+        self.assertIn("A bin includes its lower edge and excludes its upper (10 ≤ d &lt; 20 nm).", page)
+
+    def test_footer_wording(self):
+        page = self.page(FRESH, "owner")
+        self.assertIn(">Update results now</button>", page)
+        self.assertNotIn("Compute again", page)
+
+    def test_null_unsure_count_renders_as_unknown_and_is_left_out_of_the_nudge(self):
+        page = self.page(NULLSET, "owner")
+        c = M.cells(page, "S1")
+        self.assertEqual(c["n_unsure_open"][0], "–")
+        self.assertIn("unknown", c["n_unsure_open"][1])
+        res = self.results(NULLSET)
+        rest = sum(s["n_unsure_open"] for k, s in res["samples"].items() if s["n_unsure_open"] is not None)
+        if rest:
+            self.assertIn(f"{rest} unsure outline", page)
+        else:
+            self.assertNotIn('id="cj-results-nudge"', page)
+
+    def test_refused_sample_unsure_count_is_in_the_nudge_and_the_notice(self):
+        res = self.results(M.REFUSED)                                        # S1 refused (nm/px), S2 counted
+        ru = res["refused_unsure"]
+        self.assertEqual(list(ru), ["S1"])
+        self.assertGreater(ru["S1"], 0)
+        page = self.page(M.REFUSED, "owner")
+        total = ru["S1"] + sum(s["n_unsure_open"] for s in res["samples"].values())
+        self.assertIn(f"{total} unsure outline", page)
+        self.assertIn(f"{ru['S1']} unsure outline", re.search(r'id="cj-results-refused".*?</div>', page, re.S).group(0))
+
+    def test_old_results_where_every_sample_lacks_the_fields(self):
+        page = self.page(OLD, "owner")
+        res = self.results(OLD)
+        self.assertTrue(all("n_unsure_open" not in s for s in res["samples"].values()))
+        for label in res["samples"]:
+            c = M.cells(page, label)
+            self.assertEqual(c["n_unsure_open"][1], "Update to see unsure counts")
+            self.assertEqual(c["n_checked"][0], "–")
+        self.assertNotIn('id="cj-results-nudge"', page)
 
 
 if __name__ == "__main__":

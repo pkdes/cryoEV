@@ -189,6 +189,33 @@ class PackageSide(Tmp):
         on_disk = json.loads((pkg / "reviewed.json").read_text(encoding="utf-8"))
         self.assertEqual(on_disk["images"]["0001"]["n_candidates_open"], 2)
 
+    def test_real_tool_save_format(self):
+        """Decisions exactly as annotation/review_tool/index.html setDec() saves them: {v, t, who, pending[, p]},
+        plus server_t once the server has merged them; undo = v null; Del of an accepted candidate = "no";
+        a vertex-moved candidate = "add:<cls>" carrying its new outline in p."""
+        objs = [(0, 0.9, 80, 80, 22.5)] + [(0, 0.45 - 0.02 * k, 60 + 70 * k, 300, 25) for k in range(5)]
+        ps = make_ps(self.tmp, {"0001": objs})
+        pkg = pp.build(ps, self.tmp / "review")
+        im = pp.read_datajs(pkg)["images"][0]
+        self.assertEqual(len(im["pr"]), 5)
+        moved = [[v + (0.01 if i % 2 == 0 else 0.0) for i, v in enumerate(ring)] for ring in im["pr"][0]["p"]]
+        real = {"t": 1_762_400_000_999, "reviewed": False, "dec": {
+            "p0": {"v": "add:EV", "t": 1_762_400_000_100, "who": "rev1", "p": moved, "pending": True,
+                   "server_t": 1_762_400_000_150},                                    # accepted, vertex moved
+            "p1": {"v": "no", "t": 1_762_400_000_300, "who": "rev1", "server_t": 1_762_400_000_310},  # accepted, then Del
+            "p2": {"v": None, "t": 1_762_400_000_500, "who": "rev1", "pending": True},                 # accepted, then undone
+            "p4": {"v": "no", "t": 1_762_400_000_600, "who": "rev1", "server_t": 1_762_400_000_610}}}  # rejected; p3 untouched
+        save_edit(pkg, "0001.png", real)
+        rev = pp.reviewed_polygons(pkg, write=False)
+        v = rev["images"]["0001"]
+        self.assertTrue(v["edited"])
+        self.assertEqual(v["n_candidates_open"], 2)                       # p2 (undone) and p3 (untouched)
+        cand = [o for o in v["objects"] if o["conf"] is not None and o["conf"] < 0.5]
+        self.assertEqual(len(cand), 1)                                    # only the moved one is an outline now
+        self.assertEqual(cand[0]["source"], "human")                      # its vertices differ from the model's
+        s = compute(ps, rev)["samples"]["S1"]
+        self.assertEqual((s["n_unsure_open"], s["n_checked"], s["ev_total"]), (2, 1, 2))
+
     def test_cand_conf_pinned_equal(self):
         self.assertEqual((C.CAND_CONF, C.CONF), (pp.CAND_CONF, pp.LABEL_CONF))
 

@@ -409,6 +409,9 @@ def compute(ps_dir, reviewed_json=None) -> dict:
         why = _refusal(label, imgs)
         if why:
             refusals.append(why)
+            # additive: a refused sample is not counted, but its open unsure outlines still count as work to do
+            result.setdefault("refused_unsure", {})[label] = (
+                None if any(i["_unsure"] is None for i in imgs) else sum(i["_unsure"] for i in imgs))
         else:
             result["samples"][label] = _sample(imgs)
     result["images"] = {k: {f: v[f] for f in IMAGE_FIELDS} for k, v in per_image.items()}
