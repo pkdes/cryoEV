@@ -294,7 +294,10 @@ class Gate:
         if claims is None:
             log.warning("access refused: %s (cf ip %s)", why, ip)
             return None, page(403, "Not signed in", ACCESS_SIGN_IN)
-        email = claims["email"].strip().lower()
+        email = A.access_email(claims["email"])          # ASCII + EMAIL_RE checked before lower-casing
+        if email is None:
+            log.warning("access refused: the email claim is not a plain ASCII address (cf ip %s)", ip)
+            return None, page(403, "Not on the list", ACCESS_SIGN_IN)
         person = self.auth.roster.match_email(email)
         if person is None:
             log.warning("access refused: %r is not the email of one active person (cf ip %s)", email[:254], ip)

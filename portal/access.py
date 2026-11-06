@@ -201,7 +201,10 @@ class Verifier:
             return None, "malformed token"
         if head.get("alg") != ALG:
             return None, f"alg {str(head.get('alg'))[:16]!r} refused (RS256 only)"
-        key = await self.keys.get(head.get("kid"))
+        kid = head.get("kid")
+        if not isinstance(kid, str) or not kid:
+            return None, "no kid"
+        key = await self.keys.get(kid)
         if key is None:
             return None, ("no signing keys (" + (self.keys.problem or "not fetched") + ")" if not self.keys.keys
                           else "unknown kid")

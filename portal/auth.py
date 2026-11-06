@@ -132,10 +132,10 @@ class Roster:
     def match_email(self, email: str):
         """The ONE access-usable person with this email (case-insensitive), else None (none, or a hand-edited
         roster with two: refuse rather than guess)."""
-        e = (email or "").strip().lower()
+        e = access_email(email)
         if not e:
             return None
-        hits = [p for p in self.people().values() if self.usable_access(p) and p["email"].strip().lower() == e]
+        hits = [p for p in self.people().values() if self.usable_access(p) and access_email(p["email"]) == e]
         return hits[0] if len(hits) == 1 else None
 
     def match_key(self, key: str):
@@ -254,10 +254,23 @@ def norm_email(email) -> str:
     """'' for none, else the address lower-cased. Raises ValueError for something that isn't an address."""
     if email is None:
         return ""
-    e = str(email).strip().lower()
-    if e and not EMAIL_RE.fullmatch(e):
-        raise ValueError(f"{email!r} is not an email address")
-    return e
+    e = str(email).strip()
+    if e and access_email(e) is None:
+        raise ValueError(f"{email!r} is not a plain (ASCII) email address")
+    return e.lower()
+
+
+def access_email(email) -> str | None:
+    """A plain ASCII address (EMAIL_RE), lower-cased; else None. ASCII is checked BEFORE lower-casing: str.lower()
+    maps some non-ASCII letters onto ASCII ones (U+212A KELVIN SIGN -> 'k'), which would let one address pose as
+    another."""
+    if not isinstance(email, str):
+        return None
+    e = email.strip()
+    if not e or not e.isascii():
+        return None
+    e = e.lower()
+    return e if EMAIL_RE.fullmatch(e) else None
 
 
 def email_taken(people, email: str, pid: str) -> str | None:

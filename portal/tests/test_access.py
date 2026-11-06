@@ -124,6 +124,7 @@ def roster_people(env):
     ADM.add_person(env.roster, "alice", "basic", "Alice@Example.org")
     ADM.add_person(env.roster, "adv", "advanced", "adv@example.org")
     ADM.add_person(env.roster, "boss", "admin", "boss@example.org")
+    ADM.add_person(env.roster, "kate", "basic", "kate@example.org")
     ADM.add_person(env.roster, "gone", "basic", "gone@example.org")
     ADM.revoke_person(env.roster, "gone")
     A.set_email(env.roster, "tester", "tester@example.org")
@@ -212,6 +213,16 @@ class AccessGate(unittest.TestCase):
         body = self.assert_refused(sign("stranger@example.org"))
         self.assertIn(b"stranger@example.org", body)
         self.assert_refused(sign(email=None), text=b"ask the admin")
+
+    def test_kelvin_sign_email_does_not_pose_as_kate(self):
+        st, _, body = self.me(sign("kate@example.org"))                 # control: kate herself gets in
+        self.assertEqual((st, json.loads(body)["id"]), (200, "kate"))
+        self.assertEqual("Kate@example.org".lower(), "kate@example.org")   # why: str.lower() folds it
+        for e in ("Kate@example.org", "KATE@example.org", "kate@examplе.org", "katé@example.org"):
+            st, _, body = self.me(sign(e))
+            self.assertEqual(st, 403, e)
+            self.assertNotIn(b'"id"', body)
+        self.assertIsNone(A.Roster(self.env.roster).match_email("Kate@example.org"))
 
     def test_revoked_user_with_valid_jwt(self):
         self.assert_refused(sign("gone@example.org"))
@@ -437,6 +448,15 @@ class Keys(unittest.TestCase):
         self.assertIsNotNone(self.verify(v, sign(key=KEY2, kid="k2"))[0])
         self.assertEqual(f.calls, 3)
 
+    def test_no_kid_is_logged_as_no_kid(self):
+        f = Fetcher()
+        v = AX.Verifier(ACFG, AX.KeySet(ACFG.certs_url, fetch=f, clock=Clock()))
+        no_kid = jwt.encode(claims(), KEY1, algorithm="RS256")
+        self.assertNotIn("kid", jwt.get_unverified_header(no_kid))
+        self.assertEqual(self.verify(v, no_kid), (None, "no kid"))
+        self.assertEqual(f.calls, 0)                                       # nothing fetched for it
+        self.assertIsNotNone(self.verify(v, sign())[0])                  # control
+
     def test_keys_that_cannot_be_fetched_refuse_everyone(self):
         for fetcher in (Fetcher(fail=OSError("down")), Fetcher(fail=TimeoutError()), Fetcher(doc={"keys": []}),
                         Fetcher(doc={"keys": [{"kty": "EC", "kid": "k1"}]}), Fetcher(doc=["not", "a", "dict"]),
@@ -510,6 +530,34 @@ class RosterEmails(unittest.TestCase):
         ADM.add_person(self.env.roster, "bob", "basic", "gone@example.org")    # a revoked person's email is free
         with self.assertRaises(ADM.Refused):
             ADM.add_person(self.env.roster, "eve", "basic", "not an email")
+
+    def test_non_ascii_email_refused_in_the_roster(self):
+        for e in ("Kate@example.org", "katé@example.org", "kate@examplе.org"):
+            with self.assertRaises(ADM.Refused):
+                ADM.add_person(self.env.roster, "kate2", "basic", e)
+            with self.assertRaises(ValueError):
+                A.set_email(self.env.roster, "adv", e)
+            with self.assertRaises(ValueError):
+                A.add_key(self.env.roster, "kate3", "basic", e)
+        self.assertEqual(A.norm_email(" Kate@Example.ORG "), "kate@example.org")    # control: ASCII still fine
+
+    def test_last_admin_guard_sees_email_only_admins(self):
+        doc = {"schema": "cj_roster/1", "people": [
+            {"id": "solo", "role": "admin", "email": "solo@example.org", "added": "2026-11-06T10:00:00"},
+            {"id": "pat", "role": "basic", "email": "pat@example.org", "added": "2026-11-06T10:00:00"}]}
+        self.env.roster.write_text(json.dumps(doc), encoding="utf-8")
+        self.assertFalse(A.Roster.usable(doc["people"][0]))              # no key: invisible to key mode's check
+        for fn in (lambda: ADM.revoke_person(self.env.roster, "solo"),
+                   lambda: ADM.set_role(self.env.roster, "solo", "basic")):
+            with self.assertRaises(ADM.Refused) as cm:
+                fn()
+            self.assertIn("last admin", str(cm.exception))
+        self.assertIn("last admin", ADM.revoke_check(self.env.roster, "solo"))
+        self.assertEqual(A.Roster(self.env.roster).people()["solo"]["role"], "admin")
+        self.assertEqual([r["state"] for r in ADM.people(self.env.roster) if r["id"] == "solo"], ["active"])
+        ADM.set_role(self.env.roster, "pat", "admin")                     # control: with a second admin, allowed
+        ADM.set_role(self.env.roster, "solo", "basic")
+        self.assertEqual(A.Roster(self.env.roster).people()["solo"]["role"], "basic")
 
     def test_add_key_keeps_the_email(self):
         A.add_key(self.env.roster, "alice", "advanced")                    # re-key replaces the entry

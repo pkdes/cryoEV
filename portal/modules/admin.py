@@ -261,15 +261,21 @@ def write_roster(path, doc: dict) -> None:
             pass
 
 
+def usable_any(p) -> bool:
+    """Can sign in in either mode: a key (tailnet) or an email (Cloudflare access; no key needed)."""
+    return A.Roster.usable(p) or A.Roster.usable_access(p)
+
+
 def is_admin(p) -> bool:
-    return A.Roster.usable(p) and p.get("role") == "admin"
+    """An admin who can sign in in EITHER mode: the last-admin guard must see email-only admins too."""
+    return usable_any(p) and p.get("role") == "admin"
 
 
 def public_person(p: dict, email: bool = False) -> dict:
     """The only fields that ever leave this module: never key_sha256 (or anything else in the entry). `email` adds
     the sign-in email (the People page; /admin/api/people keeps its shape)."""
     out = {"id": str(p.get("id")), "role": p.get("role") if p.get("role") in A.ROLES else None,
-           "state": "revoked" if p.get("revoked") else ("active" if A.Roster.usable(p) else "not usable"),
+           "state": "revoked" if p.get("revoked") else ("active" if usable_any(p) else "not usable"),
            "added": _s(p.get("added")), "revoked": _s(p.get("revoked")), "role_changed": _s(p.get("role_changed"))}
     if email:
         out["email"] = _s(p.get("email"))
