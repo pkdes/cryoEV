@@ -1,0 +1,55 @@
+<style>
+/* Data module (portal/modules/data.py). cj.css tokens only; every class is cj-data-*. Phone first. */
+.cj-data{min-width:0}
+.cj-data-crumb{margin:0 0 6px;font-size:.85rem}
+.cj-data-sub{margin:2px 0 10px}
+.cj-data-banner{margin:0 0 10px;padding:8px 12px;border:1px solid var(--warn);border-left-width:4px;border-radius:8px;
+  background:var(--warnbg);color:var(--fg);overflow-wrap:anywhere}
+.cj-data-search{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 4px}
+.cj-data-search input[type=search]{flex:1 1 220px;min-width:0;min-height:40px;padding:6px 12px;border:1px solid var(--line);
+  border-radius:8px;background:var(--card);color:var(--fg);font:inherit}
+.cj-data-search input[type=search]:focus-visible,.cj-data-search button:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.cj-data-search button{min-height:40px;padding:6px 16px;border:1px solid var(--acc);border-radius:8px;background:var(--acc);
+  color:var(--card);font:inherit;font-weight:600;cursor:pointer}
+.cj-data-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,340px),1fr));gap:12px}
+.cj-data-card{min-width:0}
+.cj-data-card>h2{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:1rem;color:var(--fg)}
+.cj-data-n{font-size:1.4rem;font-weight:600;font-variant-numeric:tabular-nums}
+.cj-data-rows{list-style:none;margin:0;padding:0}
+.cj-data-row{display:flex;flex-direction:column;gap:1px;padding:7px 0;border-top:1px solid var(--line);min-width:0}
+.cj-data-row:first-child{border-top:0}
+.cj-data-row a{font-weight:600;overflow-wrap:anywhere;min-height:24px}
+.cj-data-row .cj-mut{margin:0}
+.cj-data-top{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;min-width:0}
+.cj-data-chip{flex:none;font-size:.75rem;font-weight:600;line-height:1.5;padding:1px 8px;border-radius:999px;
+  border:1px solid var(--line);color:var(--mut);white-space:nowrap}
+.cj-data-chip.cj-data-t-prod{background:var(--prodbg);color:var(--prod);border-color:transparent}
+.cj-data-chip.cj-data-t-warn{background:var(--warnbg);color:var(--warn);border-color:transparent}
+.cj-data-chip.cj-data-t-acc{background:var(--accbg);color:var(--acc);border-color:transparent}
+.cj-data-hl{border-left:4px solid var(--prod)}
+.cj-data-more{margin:8px 0 0;font-size:.88rem}
+.cj-data-kv{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,230px),1fr));gap:10px 18px;margin:0}
+.cj-data-kv div{min-width:0}
+.cj-data-kv dt{font-size:.72rem;color:var(--mut);text-transform:uppercase;letter-spacing:.03em}
+.cj-data-kv dd{margin:0;font-size:.92rem;overflow-wrap:anywhere}
+.cj-main .cj-data h2.cj-sec{margin:22px 0 8px}
+.cj-data-grids{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));gap:8px}
+.cj-data-grids li{background:var(--card);border:1px solid var(--line);border-radius:var(--cj-r);padding:10px 12px;min-width:0;
+  display:flex;flex-direction:column;gap:2px}
+.cj-data-strip,.cj-data-thumbs{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.cj-data-strip{grid-template-columns:repeat(auto-fill,minmax(min(30%,120px),1fr))}
+.cj-data-thumbs{grid-template-columns:repeat(auto-fill,minmax(min(46%,160px),1fr))}
+.cj-data-strip li,.cj-data-thumbs li{min-width:0}
+.cj-data-img{display:block;width:100%;height:auto;max-width:100%;aspect-ratio:1/1;object-fit:contain;border:1px solid var(--line);border-radius:8px;
+  background:var(--line);color:var(--mut);font-size:.7rem}
+.cj-data-pager{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin:12px 0 0}
+.cj-data-pager a,.cj-data-pager span.cj-data-off{display:inline-flex;align-items:center;min-height:36px;padding:2px 12px;
+  border:1px solid var(--line);border-radius:999px;background:var(--card);text-decoration:none}
+.cj-data-pager span.cj-data-off{opacity:var(--dim);color:var(--mut)}
+.cj-data-metrics{width:100%;border-collapse:collapse;font-size:.9rem}
+.cj-data-metrics th,.cj-data-metrics td{text-align:left;padding:4px 8px 4px 0;border-top:1px solid var(--line);overflow-wrap:anywhere}
+.cj-data-metrics th{font-weight:500;color:var(--mut)}
+.cj-data-empty{margin:0}
+.cj-data-foot{margin-top:22px}
+</style>
+<div class="cj-data" id="cj-data">{{content}}</div>
