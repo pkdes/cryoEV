@@ -12,7 +12,7 @@ Predict module (CJ portal, journey J1): a person runs the production model on th
     GET  /predict/<ps>/                   the set: status (auto-refresh), Review / Results, spot-check list
     POST /predict/<ps>/review             build the prediction review package in a thread (if missing)
     POST /predict/<ps>/results            compute results/results.json in a thread (if missing or older than edits)
-    POST /predict/<ps>/start              start the laptop run again (a failed set, or one waiting for the GPU)
+    POST /predict/<ps>/start              start the laptop run again (failed, or no heartbeat for STALE_S)
     GET  /predict/api/mine                {"schema": "cj_predict_mine/1", "items": [...]}: Home's "My results"
     GET  /predict/api/set/<ps>            one set's status; ?html=1 adds the page fragments (the refresh swaps them)
 
@@ -24,7 +24,8 @@ Configuration (environment, read per request; Config attributes of the same lowe
                        sample_label, sample, grid in the manifest)}]. Only the admin sets this: people pick from
                        these folders, never type a path.
   CJ_PREDICT_ROOT      prediction sets (default <CryoAI-laptop>/predict, jobs.predict_set.default_root())
-  CJ_REVIEW_ROOT       prediction review packages (default <CryoAI-laptop>/review)
+  CJ_REVIEW_ROOT       prediction review packages, when cfg.review_root (the shell's /review/<pkg_id>/ root) is unset
+                       (default <CryoAI-laptop>/review)
   The registry is the portal's (cfg.registry).
 
 Rules:
@@ -37,10 +38,15 @@ Rules:
     loop. The predictor itself is a detached process (jobs.predict_local.start_detached); status.json says the rest.
   - Plain words for scientists: paths, ids of folders and raw errors only on admin-only lines.
   - Everything shown is escaped here.
+  - Uploads: caps while streaming; free disk re-checked at each file and every 64 MB, counting every upload in
+    flight (FREE_MARGIN_BYTES kept free); the text fields are checked when the first file part arrives.
+  - A basic user has at most MAX_ACTIVE_BASIC sets queued or running. A review package built here is appended to
+    the registry (review_package) once.
 """
 from __future__ import annotations
 
 import csv
+import errno
 import hashlib
 import html
 import json
@@ -76,15 +82,24 @@ MAX_FILES = PS.MAX_IMAGES                 # 200 tiles per analysis or upload (= 
 MAX_FILE_BYTES = 100 * 1024 * 1024        # 100 MB per file
 MAX_FIELD_BYTES = 4096                    # a text field of the upload form
 MAX_FIELDS = 20
-FREE_MARGIN_BYTES = 2 * 1024 ** 3         # an upload must leave this much disk free
+FREE_MARGIN_BYTES = 2 * 1024 ** 3         # an upload must leave this much disk free (all uploads in flight counted)
+DISK_CHECK_BYTES = 64 * 1024 ** 2         # free space re-checked at each file start and every 64 MB written
+MAX_ACTIVE_BASIC = 3                      # queued or running sets a basic user may have at once
+SCRATCH_MAX_AGE_S = 3600                  # <root>/.portal/* older than this is swept at start
+CACHE_MAX = 256                           # entries kept in the spot-check cache and the finished-task table
 NM_MIN, NM_MAX = 0.01, 100.0              # a plausible nm/px (cryo-EM tiles); outside = a typo
-STALE_RUNNING_S = 120                     # predict_local refreshes `updated` every 2 s while running
+STALE_S = 300                             # predict_local refreshes `updated` every few s while running or waiting
 REFRESH_S = 5
 SPOT_N = 10
 SCHEMA_MINE = "cj_predict_mine/1"
 SCHEMA_SET = "cj_predict_set/1"
 NAME_BAD = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]')
 WIN_RESERVED = re.compile(r"^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$", re.I)
+
+NO_MODEL = "No production model is set up yet, so analyses can't start. Ask the admin."
+NM_FROM_MANIFEST = "from the session’s MANIFEST.csv (tile pixel size after processing)"
+NM_HINT = ("Where to find it: the microscope’s .mdoc file gives PixelSpacing in Å per pixel; multiply by the "
+           "downsampling factor used in processing and divide by 10 for nm per pixel.")
 
 esc = html.escape
 
@@ -109,7 +124,8 @@ def predict_root(cfg) -> Path:
 
 
 def review_root(cfg) -> Path:
-    v = _setting(cfg, "CJ_REVIEW_ROOT")
+    """cfg.review_root (the folder the shell's /review/<pkg_id>/ serves), else CJ_REVIEW_ROOT, else the default."""
+    v = getattr(cfg, "review_root", None) or _setting(cfg, "CJ_REVIEW_ROOT")
     if v:
         return Path(v)
     from data_utils import config
@@ -405,7 +421,10 @@ def start_task(kind, ps, fn) -> bool:
         cur = _TASKS.get((kind, ps))
         if cur and cur["state"] == "running":
             return False
+        _TASKS.pop((kind, ps), None)
         _TASKS[(kind, ps)] = {"state": "running", "error": None, "started": time.time()}
+        for k in [k for k, v in _TASKS.items() if v["state"] != "running"][:max(0, len(_TASKS) - CACHE_MAX)]:
+            _TASKS.pop(k, None)                          # oldest finished entries first: the table stays bounded
 
     def run():
         try:
@@ -426,7 +445,27 @@ def build_review(cfg, d: Path):
     root.mkdir(parents=True, exist_ok=True)
     pkg = PP.build(d, root)
     PP.spot_check(pkg, n=SPOT_N, seed=0, write=True, mode="representative")
+    register_package(cfg, pkg)
     return pkg
+
+
+REVIEW_PACKAGE_LOCK = ".review_package.lock"     # in the registry folder: read + append, as predict_set's lock
+
+
+def register_package(cfg, pkg: Path):
+    """Append the package's registry line (its own review_package.json, prediction_package.registry_record) unless
+    the registry already has that id, under a registry-folder lock (check + append as one step)."""
+    reg = registry_root(cfg)
+    if reg is None:
+        return None
+    rec = _read_json(pkg / "review_package.json")
+    if not isinstance(rec, dict) or not rec.get("id"):
+        raise ValueError(f"{pkg.name}: review_package.json missing or unreadable")
+    regm = PS.registry_module()
+    with PS.locked(Path(reg) / REVIEW_PACKAGE_LOCK):
+        if rec["id"] in regm.current("review_package", reg):
+            return None
+        return regm.append(rec, reg)
 
 
 def build_results(cfg, d: Path, ps: str):
@@ -465,6 +504,8 @@ def spot_list(cfg, d: Path, ps: str, rows) -> tuple:
                 ids = []
             with _SPOT_LOCK:
                 _SPOT_CACHE[key] = ids
+                while len(_SPOT_CACHE) > CACHE_MAX:
+                    _SPOT_CACHE.pop(next(iter(_SPOT_CACHE)))
     out = []
     for i in ids:
         r = by_image.get(i) or {}
@@ -474,39 +515,54 @@ def spot_list(cfg, d: Path, ps: str, rows) -> tuple:
 
 
 # ---------------------------------------------------------------- status in plain words
+RESTART_REQUESTED = "restart requested"
+
+
+def waiting_text(waiting) -> str:
+    """predict_local's `waiting` reason in plain words (admins also get the raw reason on the tech line)."""
+    w = str(waiting or "").lower()
+    if w.startswith(RESTART_REQUESTED):
+        return "Starting again…"
+    if "gpu busy" in w:
+        return "Waiting for the GPU: another job is using it."
+    if any(k in w for k in ("lock", "another", "queue", "after")):
+        return "Waiting for the GPU: another analysis is running."
+    return "Waiting for the computer to be free."
+
+
+def age_s(st: dict, now) -> float:
+    return now - (_parse_local(st.get("updated")) or now)
+
+
 def status_view(st: dict, admin: bool, now=None) -> dict:
+    """status.json -> {state, tone, label, detail, tech (admin only), final, n_done, n_total, progress}. Queued or
+    running with `updated` older than STALE_S (predict_local keeps a heartbeat while it runs or waits) = stale."""
     now = time.time() if now is None else now
     state = st.get("state")
     n_done, n_total = st.get("n_done"), st.get("n_total")
     out = {"state": state, "tone": "wait", "label": "Unknown", "detail": None, "tech": None, "final": False,
            "n_done": n_done, "n_total": n_total, "progress": False}
-    waiting = st.get("waiting")
+    stale = state in ("queued", "running") and not st.get("job") and age_s(st, now) > STALE_S
     if state == "queued":
         out["label"] = "Waiting to start"
-        if waiting and str(waiting).startswith("gpu busy"):
-            out["detail"] = "Waiting for the graphics card: another job is using it. Use “Start again” " \
-                            "later, or ask the admin."
-        elif waiting:
-            out["detail"] = "Waiting: " + str(waiting) if admin else "Waiting for the computer to be free."
+        if st.get("waiting"):
+            out["detail"] = waiting_text(st["waiting"])
         elif st.get("job"):
             out["detail"] = "Queued on the GPU computer."
-        elif now - (_parse_local(st.get("updated")) or now) > STALE_RUNNING_S:
-            out["detail"] = "Not started yet (another analysis may have been running). Use “Start again”."
         else:
             out["detail"] = "It starts in a moment."
     elif state == "running":
         out.update(tone="run", label="Running", progress=bool(n_total))
         out["detail"] = f"{int(n_done or 0)} of {int(n_total or 0)} images done"
-        age = now - (_parse_local(st.get("updated")) or now)
-        if age > STALE_RUNNING_S:
-            out.update(tone="warn", label="No progress")
-            out["detail"] += f"; no progress for {ago(age)}: the run may have stopped. Try “Start again” " \
-                             "or ask the admin."
     elif state == "done":
         out.update(tone="ok", label="Done", final=True, detail=f"{int(n_total or 0)} images analysed")
     elif state == "failed":
         out.update(tone="warn", label="Stopped with an error", final=True,
                    detail="Try “Start again”; if it fails again, ask the admin (they can see the details).")
+    if stale:                                          # no heartbeat: the run (or the wait) may have stopped
+        out.update(tone="warn", label="No progress")
+        out["detail"] = (out["detail"] + ". " if out["detail"] else "") + \
+            f"No news for {ago(age_s(st, now))}: it may have stopped. Try “Start again” or ask the admin."
     if admin:
         bits = [f"where {st.get('where')}"] + [f"{k} {st.get(k)}" for k in ("job", "pid", "waiting", "error")
                                                 if st.get(k)] + [f"updated {st.get('updated')}"]
@@ -515,15 +571,29 @@ def status_view(st: dict, admin: bool, now=None) -> dict:
 
 
 def can_restart(st: dict, now=None) -> bool:
+    """Failed, or queued / running with no heartbeat for STALE_S. A set waiting with a fresh heartbeat is left to
+    predict_local (it waits for the lock / GPU and chains the next set); a desktop-queue set is never started here."""
     now = time.time() if now is None else now
     state = st.get("state")
-    if st.get("job") and state in ("queued", "running"):
-        return False                                   # on the desktop queue: not ours to start here
-    if state == "failed" or (state == "queued" and st.get("waiting")):
+    if state == "failed":
         return True
-    # running without a heartbeat, or queued and never picked up (predict_local exits at once when another run
-    # holds <root>/predict.lock): offer a manual start; predict_local's own lock keeps it to one run at a time
-    return state in ("running", "queued") and now - (_parse_local(st.get("updated")) or now) > STALE_RUNNING_S
+    if st.get("job") and state in ("queued", "running"):
+        return False
+    return state in ("queued", "running") and age_s(st, now) > STALE_S
+
+
+def restart(cfg, d: Path) -> bool:
+    """"Start again": mark the set queued with waiting "restart requested" and a fresh `updated` (so a double click
+    is not a second restart), then spawn predict_local (its own lock keeps one run per root)."""
+    st = _read_json(d / PS.STATUS) or {}
+    if not can_restart(st):
+        return False
+    PS.write_status(d, state="queued", error=None, pid=None, waiting=RESTART_REQUESTED)
+    try:
+        PL.start_detached(d, root=predict_root(cfg), registry_root=registry_root(cfg))
+    except Exception as e:                       # shown to the admin; goes stale and offers Start again later
+        PS.write_status(d, waiting=f"could not start the run: {type(e).__name__}: {e}")
+    return True
 
 
 # ---------------------------------------------------------------- html (every text through esc)
@@ -591,6 +661,8 @@ def actions_html(cfg, d: Path, req: dict, st: dict, admin: bool, rows) -> str:
         rev = (f'<a class="cj-predict-btn cj-predict-primary" href="/review/{esc(pkg.name)}/">Review</a>'
                f'<p class="cj-mut">Check the model’s outlines and fix mistakes. Start with the suggested '
                f'images below.</p>')
+        if admin and t_rev and t_rev["state"] == "failed":     # e.g. built, but the registry line failed
+            rev += tech(f"review task: {t_rev['error']}")
     elif t_rev and t_rev["state"] == "running":
         rev = '<p class="cj-predict-busy" role="status">Preparing the review… this page updates by itself.</p>'
     else:
@@ -701,7 +773,7 @@ def page_mine(cfg, user, can_see) -> str:
 def model_block(cfg, user, chosen=None) -> str:
     default, choices = allowed_models(cfg, user)
     if not choices:
-        return msg_box("No production model is set up yet, so analyses can't start. Ask the admin.")
+        return msg_box(NO_MODEL)
     pick_id = chosen if any(c["id"] == chosen for c in choices) else default
     if len(choices) == 1:
         c = choices[0]
@@ -710,12 +782,13 @@ def model_block(cfg, user, chosen=None) -> str:
                 f'<input type="hidden" name="model" value="{esc(c["id"])}">'
                 f'<p><b>{esc(c["id"])}</b>{" (the lab’s production model)" if c["production"] else ""}</p>'
                 f'{q}</fieldset>')
-    opts = "".join(f'<option value="{esc(c["id"])}"{" selected" if c["id"] == pick_id else ""}>'
-                   f'{esc(c["id"])}{" (production)" if c["production"] else ""}</option>' for c in choices)
+    opts = f'<option value=""{"" if pick_id else " selected"} disabled>Choose…</option>' + "".join(
+        f'<option value="{esc(c["id"])}"{" selected" if c["id"] == pick_id else ""}>'
+        f'{esc(c["id"])}{" (production)" if c["production"] else ""}</option>' for c in choices)
     qual = "".join(f'<li><b>{esc(c["id"])}</b>: {esc(c["quality"])}</li>' for c in choices if c["quality"])
     return (f'<fieldset class="cj-card cj-predict-fs"><legend>Model</legend>'
             f'<label class="cj-predict-field"><span>Model (keep the production model unless you know why)</span>'
-            f'<select name="model">{opts}</select></label>'
+            f'<select name="model" required>{opts}</select></label>'
             + (f'<ul class="cj-mut cj-predict-qual">{qual}</ul>' if qual else "") + '</fieldset>')
 
 
@@ -734,11 +807,12 @@ def page_new(cfg, user) -> str:
                      + (tech(str(s["dir"])) if admin else "") + '</a>')
     if err and admin:
         cards.append(msg_box("The session list setting can't be read.", extra=tech(err)))
+    no_model = "" if allowed_models(cfg, user)[1] else msg_box(NO_MODEL)
     sess = ("".join(cards) or '<p class="cj-mut">No processed sessions are set up for analysis yet'
             + (' (set CJ_PREDICT_SOURCES).' if admin else '; ask the admin, or upload your own images.') + '</p>')
     return wrap(
         '<div class="cj-predict"><p class="cj-mut"><a href="/predict/">← My analyses</a></p>'
-        '<h1>New analysis</h1>'
+        f'<h1>New analysis</h1>{no_model}'
         '<div class="cj-card cj-predict-what"><h2>What images work</h2><ul>'
         '<li>Processed cryo-EM tiles: 8-bit PNG or JPEG, contrast-adjusted the way the lab’s processing does '
         'it (not raw MRC or TIFF).</li>'
@@ -770,7 +844,7 @@ def page_session_form(cfg, user, src: dict, t: dict, form=None, error=None) -> s
                         f'{esc(g["label"])}</label></td><td data-l="Tiles" class="cj-num">{len(g["names"])}</td>'
                         f'<td data-l="nm/px">{note}</td></tr>')
             continue
-        src_note = "from the session’s records" if g["nm"] else "not recorded: enter it"
+        src_note = NM_FROM_MANIFEST if g["nm"] else "not recorded: enter it"
         rows.append(
             f'<tr><td data-l="Sample"><label><input type="checkbox" name="samples" value="{gid}" '
             f'data-n="{len(g["names"])}"{" checked" if gid in picked else ""}> {esc(g["label"])}</label></td>'
@@ -823,21 +897,24 @@ def page_upload_form(cfg, user, form=None, error=None) -> str:
         f'<h1>Upload images</h1>{err}{again}'
         f'<form method="post" enctype="multipart/form-data" class="cj-predict-form" id="cj-predict-upload" '
         f'data-max-files="{MAX_FILES}" data-max-bytes="{MAX_FILE_BYTES}">'
-        f'<fieldset class="cj-card cj-predict-fs"><legend>Images</legend>'
-        f'<label class="cj-predict-field"><span>Processed 8-bit PNG or JPEG tiles of one sample (up to {MAX_FILES}, '
-        f'{MAX_FILE_BYTES // 2 ** 20} MB each)</span><input type="file" name="files" multiple required '
-        f'accept=".png,.jpg,.jpeg,image/png,image/jpeg"></label>'
-        f'<p class="cj-mut" id="cj-predict-files" role="status"></p></fieldset>'
+        # the text fields come BEFORE the files: the browser sends parts in this order, so the server checks the
+        # tick, nm/px and model as soon as the first file part arrives (fail fast, before any big file lands)
         f'<fieldset class="cj-card cj-predict-fs"><legend>Sample and pixel size</legend>'
         f'<label class="cj-predict-field"><span>Sample name (shown in the results)</span>'
         f'<input name="sample_label" maxlength="80" required value="{esc(form.get("sample_label", ""))}"></label>'
         f'<label class="cj-predict-field"><span>Pixel size (nm per pixel)</span>'
         f'<input class="cj-predict-nm" name="nm_per_px" inputmode="decimal" required '
         f'value="{esc(form.get("nm_per_px", ""))}"></label>'
+        f'<p class="cj-mut">{esc(NM_HINT)}</p>'
         f'<label class="cj-predict-confirm"><input type="checkbox" name="confirm" value="yes" required> '
         f'I confirm the pixel size</label>'
         f'<p class="cj-mut">Sizes in nm are computed from it. Your name is recorded as the person who confirmed it.'
         f'</p></fieldset>{model_block(cfg, user, form.get("model"))}'
+        f'<fieldset class="cj-card cj-predict-fs"><legend>Images</legend>'
+        f'<label class="cj-predict-field"><span>Processed 8-bit PNG or JPEG tiles of one sample (up to {MAX_FILES}, '
+        f'{MAX_FILE_BYTES // 2 ** 20} MB each)</span><input type="file" name="files" multiple required '
+        f'accept=".png,.jpg,.jpeg,image/png,image/jpeg"></label>'
+        f'<p class="cj-mut" id="cj-predict-files" role="status"></p></fieldset>'
         f'<p><button class="cj-predict-btn cj-predict-primary" type="submit" data-busy="Uploading… keep this '
         f'page open">Upload and start</button></p></form></div>')
 
@@ -848,7 +925,7 @@ def page_set(cfg, user, d: Path, req: dict) -> str:
     rows = images_rows(d)
     srcs, _ = sources_safe(cfg)
     samples = "".join(f'<tr><td data-l="Sample">{esc(s["label"])}</td><td data-l="Images" class="cj-num">{s["n"]}'
-                      f'</td><td data-l="nm/px" class="cj-num">{esc(s["nm_per_px"])}</td>'
+                      f'</td><td data-l="nm/px">{esc(s["nm_per_px"])}</td>'
                       f'<td data-l="Confirmed by">{esc(s["confirmed_by"] or "?")}</td></tr>'
                       for s in samples_of(rows))
     owner = f'<div><dt>Owner</dt><dd>{esc(req.get("owner"))}</dd></div>' if admin else ""
@@ -856,7 +933,8 @@ def page_set(cfg, user, d: Path, req: dict) -> str:
     return wrap(
         f'<div class="cj-predict" id="cj-predict-set" data-ps="{esc(d.name)}" data-live="{int(v["live"])}" '
         f'data-every="{REFRESH_S}"><p class="cj-mut"><a href="/predict/">← My analyses</a></p>'
-        f'<h1>Analysis of {esc(when(req.get("created")))}</h1><p class="cj-mut cj-wrap">{esc(d.name)}</p>'
+        f'<h1>Analysis of {esc(when(req.get("created")))}</h1>'
+        + (f'<p class="cj-mut cj-wrap">{esc(d.name)}</p>' if user.get("role") != "basic" else "") +
         f'<p id="cj-predict-err" class="cj-mut" role="status" hidden></p>'
         f'<section id="cj-predict-status">{v["html"]["status"]}</section>'
         f'<section id="cj-predict-actions">{v["html"]["actions"]}</section>'
@@ -891,7 +969,7 @@ def check_nm(text, what) -> tuple:
 def check_model(cfg, user, model) -> str | None:
     _, choices = allowed_models(cfg, user)
     if not choices:
-        return "No production model is set up yet, so analyses can't start. Ask the admin."
+        return NO_MODEL
     if model not in {c["id"] for c in choices}:
         return "Pick a model from the list."
     return None
@@ -926,10 +1004,33 @@ def create_and_start(cfg, d_from, user, model, *, names=None, manifest=None, sam
     return ps_dir
 
 
+def read_tiles(src: dict) -> dict:
+    """tiles_of(), with an unreadable folder or manifest as a plain refusal (details for the admin)."""
+    try:
+        return tiles_of(src)
+    except (OSError, csv.Error, UnicodeDecodeError) as e:
+        raise Refusal("This session’s tile list can’t be read right now. Try again later, or ask the admin.", 503,
+                      tech=f"{type(e).__name__}: {e}")
+
+
+def active_sets(cfg, user) -> int:
+    """This person's own sets that are queued or running."""
+    return sum(1 for _, req, st in list_sets(cfg, user, lambda u, owner: owner == u.get("id"))
+               if st.get("state") in ("queued", "running"))
+
+
+def check_active(cfg, user):
+    """Basic users may have at most MAX_ACTIVE_BASIC sets queued or running (failed and done sets don't count)."""
+    if user.get("role") == "basic" and active_sets(cfg, user) >= MAX_ACTIVE_BASIC:
+        raise Refusal(f"You already have {MAX_ACTIVE_BASIC} analyses waiting or running. Start a new one when one "
+                      f"of them is done.", 429)
+
+
 def session_submit(cfg, user, src: dict, form: dict) -> Path:
     if form.get("confirm") != "yes":
         raise Refusal("Tick “I confirm the pixel size”: nothing was started.")
-    t = tiles_of(src)
+    check_active(cfg, user)
+    t = read_tiles(src)
     if form.get("sig") != t["sig"]:
         raise Refusal("The session’s tiles changed since this page was opened. Check the samples again.")
     problems = []
@@ -994,13 +1095,53 @@ def safe_name(raw: str) -> str | None:
     return name
 
 
+def disk_free(path) -> int:
+    return shutil.disk_usage(path).free
+
+
+_RESERVED: dict = {}                     # upload id -> bytes it may still write (its Content-Length minus written)
+_RES_LOCK = threading.Lock()
+
+
+class Reservation:
+    """Disk space held for one upload while it streams. check() refuses (507) when the free space minus what every
+    upload in flight may still write would drop below FREE_MARGIN_BYTES. A chunked upload (no Content-Length)
+    holds nothing ahead; the checks during the upload still see the space it has used."""
+
+    def __init__(self, dest: Path, length: int):
+        self.dest, self.key = dest, secrets.token_hex(8)
+        with _RES_LOCK:
+            _RESERVED[self.key] = max(0, int(length or 0))
+
+    def written(self, n: int):
+        with _RES_LOCK:
+            if self.key in _RESERVED:
+                _RESERVED[self.key] = max(0, _RESERVED[self.key] - n)
+
+    def check(self):
+        free = disk_free(self.dest)
+        with _RES_LOCK:
+            held = sum(_RESERVED.values())
+        if free - held < FREE_MARGIN_BYTES:
+            raise Refusal("Not enough disk space on the server for this upload. Nothing was kept. Ask the admin.",
+                          507, tech=f"{free} bytes free, {held} held by uploads in flight, "
+                                    f"margin {FREE_MARGIN_BYTES}")
+
+    def release(self):
+        with _RES_LOCK:
+            _RESERVED.pop(self.key, None)
+
+
 class UploadSink:
     """Takes the parser's events (in order) and writes file parts to `dest` under their checked names; enforces
-    the caps. Runs in a worker thread (file writes)."""
+    the caps; re-checks the disk at each file start and every DISK_CHECK_BYTES; calls first_file(fields) when the
+    first file part starts (the form puts the text fields first, so a refusal comes before any big file lands).
+    Runs in a worker thread (file writes)."""
 
-    def __init__(self, dest: Path):
+    def __init__(self, dest: Path, reservation: Reservation | None = None, first_file=None):
         self.dest, self.fields, self.files, self.seen = dest, {}, [], set()
         self.cur, self.fh, self.size, self.n_fields = None, None, 0, 0
+        self.res, self.first_file, self.since_check = reservation, first_file, 0
 
     def apply(self, events):
         for ev in events:
@@ -1017,6 +1158,11 @@ class UploadSink:
                 else:
                     if name != "files":
                         raise Refusal("Unexpected file field.", 400)
+                    if not self.files and self.first_file is not None:
+                        self.first_file(self.fields)
+                    if self.res is not None:
+                        self.res.check()
+                        self.since_check = 0
                     if len(self.files) >= MAX_FILES:
                         raise Refusal(f"More than {MAX_FILES} files: an analysis takes at most {MAX_FILES}. "
                                       f"Nothing was kept.", 413)
@@ -1038,6 +1184,12 @@ class UploadSink:
                     if self.size > MAX_FILE_BYTES:
                         raise Refusal(f"{c['name']} is over {MAX_FILE_BYTES // 2 ** 20} MB. Nothing was kept.", 413)
                     self.fh.write(ev[1])
+                    if self.res is not None:
+                        self.res.written(len(ev[1]))
+                        self.since_check += len(ev[1])
+                        if self.since_check >= DISK_CHECK_BYTES:
+                            self.res.check()
+                            self.since_check = 0
                 elif c.get("kind") == "field":
                     c["buf"] += ev[1]
                     if len(c["buf"]) > MAX_FIELD_BYTES:
@@ -1057,10 +1209,10 @@ class UploadSink:
             self.fh = None
 
 
-async def receive_upload(request: Request, dest: Path) -> UploadSink:
+async def receive_upload(request: Request, dest: Path, first_file=None) -> UploadSink:
     """Stream a multipart/form-data body into `dest` (python-multipart's push parser; file writes and checks in a
-    worker thread). Raises Refusal on a bad body or a cap."""
-    from python_multipart.multipart import MultipartParser, parse_options_header
+    worker thread). Raises Refusal on a bad body, a cap, low disk space, or first_file's refusal."""
+    from python_multipart.multipart import parse_options_header
     ctype, params = parse_options_header(request.headers.get("content-type"))
     boundary = params.get(b"boundary")
     if ctype != b"multipart/form-data" or not boundary:
@@ -1072,10 +1224,17 @@ async def receive_upload(request: Request, dest: Path) -> UploadSink:
     limit = MAX_FILES * (MAX_FILE_BYTES + 4096) + MAX_FIELDS * (MAX_FIELD_BYTES + 1024)
     if length > limit:
         raise Refusal(f"The upload is too big: at most {MAX_FILES} files of {MAX_FILE_BYTES // 2 ** 20} MB.", 413)
-    free = shutil.disk_usage(dest).free
-    if length and length > free - FREE_MARGIN_BYTES:
-        raise Refusal("Not enough disk space on the server for this upload. Ask the admin.", 507,
-                      tech=f"{length} bytes asked, {free} free")
+    res = Reservation(dest, length)
+    try:
+        await run_in_threadpool(res.check)
+        return await _stream(request, boundary, dest, res, limit, first_file)
+    finally:
+        res.release()
+
+
+async def _stream(request: Request, boundary: bytes, dest: Path, res: Reservation, limit: int,
+                  first_file) -> UploadSink:
+    from python_multipart.multipart import MultipartParser, parse_options_header
     events, hdr = [], {"field": b"", "value": b"", "headers": {}}
 
     def on_part_begin():
@@ -1103,11 +1262,11 @@ async def receive_upload(request: Request, dest: Path) -> UploadSink:
     def on_part_end():
         events.append(("end",))
 
-    parser = MultipartParser(boundary, {"on_part_begin": on_part_begin, "on_header_field": on_header_field,
-                                        "on_header_value": on_header_value, "on_header_end": on_header_end,
-                                        "on_headers_finished": on_headers_finished, "on_part_data": on_part_data,
-                                        "on_part_end": on_part_end})
-    sink = UploadSink(dest)
+    callbacks = {"on_part_begin": on_part_begin, "on_header_field": on_header_field,
+                 "on_header_value": on_header_value, "on_header_end": on_header_end,
+                 "on_headers_finished": on_headers_finished, "on_part_data": on_part_data, "on_part_end": on_part_end}
+    parser = MultipartParser(boundary, callbacks)
+    sink = UploadSink(dest, res, first_file)
     total = 0
     try:
         async for chunk in request.stream():
@@ -1129,12 +1288,13 @@ async def receive_upload(request: Request, dest: Path) -> UploadSink:
     return sink
 
 
-def upload_submit(cfg, user, dest: Path, sink: UploadSink) -> Path:
-    f = sink.fields
+def upload_fields(cfg, user, f: dict, files=True) -> tuple:
+    """The upload form's text fields -> (label, nm). Raises Refusal listing every problem. Called when the first
+    file part arrives (files=True there: the files are coming) and again at the end."""
     problems = []
     if f.get("confirm") != "yes":
         raise Refusal("Tick “I confirm the pixel size”: nothing was started.")
-    if not sink.files:
+    if not files:
         problems.append("Choose at least one image.")
     label = str(f.get("sample_label") or "").strip()
     if not label or len(label) > 80:
@@ -1147,7 +1307,13 @@ def upload_submit(cfg, user, dest: Path, sink: UploadSink) -> Path:
         problems.append(m_err)
     if problems:
         raise Refusal(f"Please fix ({len(problems)}):\n" + "\n".join(problems))
-    return create_and_start(cfg, dest, user, f["model"], sample_label=label, nm=nm)
+    return label, nm
+
+
+def upload_submit(cfg, user, dest: Path, sink: UploadSink) -> Path:
+    label, nm = upload_fields(cfg, user, sink.fields, bool(sink.files))
+    check_active(cfg, user)
+    return create_and_start(cfg, dest, user, sink.fields["model"], sample_label=label, nm=nm)
 
 
 # ---------------------------------------------------------------- the page's script (served as /predict/predict.js)
@@ -1247,8 +1413,36 @@ JS = r"""// Predict module (portal/modules/predict.py). No inline script: this f
 
 
 # ---------------------------------------------------------------- routes
+def sweep_scratch(cfg, max_age_s=SCRATCH_MAX_AGE_S) -> int:
+    """Remove <root>/.portal/* left by a portal that stopped mid-upload (older than max_age_s). -> how many."""
+    try:
+        tmp = predict_root(cfg) / PORTAL_TMP
+        old = [p for p in tmp.iterdir() if p.is_dir() and p.name.startswith(("up_", "sel_"))
+               and time.time() - p.stat().st_mtime > max_age_s]
+    except Exception:                                # no root configured or not there yet: nothing to sweep
+        return 0
+    for p in old:
+        shutil.rmtree(p, ignore_errors=True)
+    return len(old)
+
+
+def os_error_text(e: OSError) -> str:
+    too_long = getattr(e, "winerror", None) == 206 or getattr(e, "errno", None) == errno.ENAMETOOLONG or \
+        "too long" in str(e).lower()
+    if too_long:
+        return "A file name is too long for the server. Shorten the file names and upload again."
+    return "The server could not store the upload. Try again, or ask the admin."
+
+
+def unreadable_page(src: dict, e: Refusal, user) -> str:
+    extra = tech(e.tech) if user.get("role") == "admin" else ""
+    return wrap(f'<div class="cj-predict"><p class="cj-mut"><a href="/predict/new/">← Back</a></p>'
+                f'<h1>{esc(src["label"])}</h1>{msg_box(e.msg, extra=extra)}</div>')
+
+
 def routes(ctx) -> list:
     cfg = ctx.cfg
+    sweep_scratch(cfg)                               # at start (routes() runs once, before the portal serves)
 
     def not_found(request):
         r = ctx.page(request, "Not found", wrap('<div class="cj-predict"><h1>Not found</h1><p>There is no analysis '
@@ -1278,7 +1472,11 @@ def routes(ctx) -> list:
         if src is None:
             return not_found(request)
         user = ctx.user(request)
-        return ctx.page(request, src["label"], page_session_form(cfg, user, src, tiles_of(src)), active="predict")
+        try:
+            t = read_tiles(src)
+        except Refusal as e:
+            return refused_page(request, src["label"], unreadable_page(src, e, user), e.status)
+        return ctx.page(request, src["label"], page_session_form(cfg, user, src, t), active="predict")
 
     async def session_post(request: Request):
         src = await run_in_threadpool(find_source, request.path_params["key"])
@@ -1294,8 +1492,11 @@ def routes(ctx) -> list:
             msg, status = e.msg + (f"\n(admin) {e.tech}" if e.tech and user.get("role") == "admin" else ""), e.status
 
             def again():
-                return refused_page(request, src["label"],
-                                    page_session_form(cfg, user, src, tiles_of(src), form, msg), status)
+                try:
+                    t = read_tiles(src)
+                except Refusal as e2:
+                    return refused_page(request, src["label"], unreadable_page(src, e2, user), e2.status)
+                return refused_page(request, src["label"], page_session_form(cfg, user, src, t, form, msg), status)
             return await run_in_threadpool(again)
         return RedirectResponse(f"/predict/{ps_dir.name}/", status_code=303)
 
@@ -1308,11 +1509,11 @@ def routes(ctx) -> list:
         sink = None
         try:
             try:
-                sink = await receive_upload(request, dest)
+                await run_in_threadpool(check_active, cfg, user)          # before a byte is stored
+                sink = await receive_upload(request, dest, lambda fields: upload_fields(cfg, user, fields, True))
                 ps_dir = await run_in_threadpool(upload_submit, cfg, user, dest, sink)
-            except OSError as e:                     # disk full, a locked file: nothing is kept
-                raise Refusal("The server could not store the upload. Try again, or ask the admin.", 500,
-                              tech=f"{type(e).__name__}: {e}")
+            except OSError as e:                     # disk full, a locked file, a path too long: nothing is kept
+                raise Refusal(os_error_text(e), 500, tech=f"{type(e).__name__}: {e}")
         except Refusal as e:
             msg, status = e.msg + (f"\n(admin) {e.tech}" if e.tech and user.get("role") == "admin" else ""), e.status
             form = dict(sink.fields) if sink else {}
@@ -1341,8 +1542,7 @@ def routes(ctx) -> list:
             st = _read_json(d / PS.STATUS) or {}
             back = RedirectResponse(f"/predict/{ps}/", status_code=303)
             if kind == "start":
-                if can_restart(st):
-                    PL.start_detached(d, root=predict_root(cfg), registry_root=registry_root(cfg))
+                restart(cfg, d)                    # only when can_restart(); marks the set before spawning
                 return back
             if st.get("state") != "done":
                 return back

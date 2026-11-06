@@ -13,7 +13,9 @@ Temp roster / registry / predict and review roots only; never the real ones.
   python -m unittest discover -s portal/tests -v
 """
 import csv
+import errno
 import html
+import http.client
 import io
 import json
 import os
@@ -22,6 +24,7 @@ import shutil
 import sys
 import tempfile
 import time
+import types
 import unittest
 import uuid
 from pathlib import Path
@@ -127,7 +130,7 @@ class Base(unittest.TestCase):
                 m.update(route="/predict/", status="on")
         cls.manifest = tmp / "modules.json"
         cls.manifest.write_text(json.dumps(man), encoding="utf-8")
-        cls.p = T.Portal(cls.env.config(manifest=cls.manifest))
+        cls.p = T.Portal(cls.env.config(manifest=cls.manifest, review_root=cls.review))
         cls.tok = {r: T.login(cls.p.port, k) for r, k in cls.keys.items()}
         cls.key_a = next(s["key"] for s in P.sources(None) if s["label"].startswith("EV prep A"))
         cls.key_b = next(s["key"] for s in P.sources(None) if s["label"] == "Plain tiles")
@@ -144,6 +147,24 @@ class Base(unittest.TestCase):
         cls.env.cleanup()
 
     # ---- helpers
+    def cfg(self):
+        """The module's view of the portal config (what routes(ctx) gets as ctx.cfg)."""
+        return types.SimpleNamespace(registry=self.env.registry, review_root=self.review)
+
+    def fake_set(self, owner, state, **st):
+        """A set copied from the golden fixture under a new id (status as given): for the page views only."""
+        ps = f"ps_20261105_{uuid.uuid4().hex[:6]}"
+        d = self.root / ps
+        shutil.copytree(GOLDEN, d)
+        req = json.loads((d / "request.json").read_text(encoding="utf-8"))
+        req.update(ps=ps, owner=owner, created=time.strftime("%Y-%m-%dT%H:%M:%S"))
+        (d / "request.json").write_text(json.dumps(req), encoding="utf-8")
+        status = {"state": state, "n_done": 0, "n_total": 3, "where": "laptop", "job": None, "error": None,
+                  "updated": time.strftime("%Y-%m-%dT%H:%M:%S"), "pid": None, "waiting": None}
+        status.update(st)
+        (d / "status.json").write_text(json.dumps(status), encoding="utf-8")
+        return ps
+
     def get(self, path, who="admin"):
         return T.request(self.p.port, "GET", path, T.cookie(self.tok[who]))
 
@@ -252,7 +273,7 @@ class Roles(Base):
         self.assertEqual(st, 400)
         self.assertIn("Pick a model from the list", body)
         adv = self.page(f"/predict/new/session/{self.key_a}/", "advanced")
-        self.assertIn("<select name=\"model\">", adv)
+        self.assertIn("<select name=\"model\" required><option value=\"\" disabled>Choose…</option>", adv)
         self.assertIn(f'<option value="{MODEL}" selected>', adv)
 
 
@@ -274,6 +295,8 @@ class SessionFlow(Base):
         self.assertIn("Check these first", page)                         # spot check from the set (no package)
         self.assertEqual(page.count("<li><span class=\"cj-predict-li-main\">"), 3)
         self.assertNotIn(str(d), page)                                    # no paths for a scientist
+        self.assertNotIn(f'<p class="cj-mut cj-wrap">{ps}</p>', page)    # nor the set id
+        self.assertIn(f'<p class="cj-mut cj-wrap">{ps}</p>', self.page(f"/predict/{ps}/", "admin"))
         # someone else: the same 404 as no set at all, for the page, the API and every action
         _, _, nobody = self.get("/predict/ps_20990101_abcdef/", "other")
         st, _, theirs = self.get(f"/predict/{ps}/", "other")
@@ -294,12 +317,21 @@ class SessionFlow(Base):
         pkg = self.review / f"pred_{ps}"
         self.wait_file(pkg / "review_package.json")
         self.wait_file(pkg / "spotcheck.json")
-        for _ in range(50):
+        for _ in range(100):
             if P.task("review", ps) is None:
                 break
             time.sleep(0.1)
+        self.assertIsNone(P.task("review", ps))                           # finished without an error
         self.assertTrue((pkg / "data.js").is_file())
         self.assertEqual(len(list((pkg / "images").glob("*.jpg"))), 3)
+        # the package is in the registry, once (a second registration adds nothing)
+        recs = [json.loads(x) for x in (self.env.registry / "review_package.jsonl").read_text(
+            encoding="utf-8").splitlines() if x.strip()]
+        self.assertEqual([(r["id"], r["kind"], r["owner"], r["prediction_set"]) for r in recs],
+                         [(f"pred_{ps}", "prediction", "bas", ps)])
+        self.assertIsNone(P.register_package(self.cfg(), pkg))
+        self.assertEqual(len((self.env.registry / "review_package.jsonl").read_text(encoding="utf-8").splitlines()),
+                         1)
         page = self.page(f"/predict/{ps}/", "basic")
         self.assertIn(f'href="/review/pred_{ps}/"', page)
         self.assertRegex(page, rf'href="/review/pred_{ps}/\?img=000[123]\.png"')
@@ -388,6 +420,140 @@ class SessionFlow(Base):
         self.wait_state(ps)
 
 
+def stamp(seconds_ago: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - seconds_ago))
+
+
+class StatusRules(unittest.TestCase):
+    """status_view / can_restart on status.json shapes (predict_local keeps `updated` fresh while it runs or waits)."""
+
+    def st(self, state, age=0, **kw):
+        return {"state": state, "n_done": 1, "n_total": 3, "where": "laptop", "job": None, "error": None,
+                "updated": stamp(age), "pid": None, "waiting": None, **kw}
+
+    def test_queued_waiting_with_a_heartbeat(self):
+        for waiting, text in (("another prediction run holds predict.lock; waiting", "another analysis is running"),
+                              ("gpu busy: pid 4242 python.exe 900 MB", "another job is using it"),
+                              ("restart requested", "Starting again")):
+            with self.subTest(waiting=waiting):
+                st = self.st("queued", 30, waiting=waiting)
+                v = P.status_view(st, admin=False)
+                self.assertEqual(v["label"], "Waiting to start")
+                self.assertIn(text, v["detail"])
+                self.assertIsNone(v["tech"])                               # the raw reason only for admins
+                self.assertIn(waiting, P.status_view(st, admin=True)["tech"])
+                self.assertFalse(P.can_restart(st))                        # predict_local is on it: no button
+
+    def test_stale_and_failed_offer_start_again(self):
+        for state in ("queued", "running"):
+            with self.subTest(state=state):
+                st = self.st(state, P.STALE_S + 60, waiting="gpu busy: pid 1" if state == "queued" else None)
+                self.assertTrue(P.can_restart(st))
+                v = P.status_view(st, admin=False)
+                self.assertEqual((v["label"], v["tone"]), ("No progress", "warn"))
+                self.assertIn("Start again", v["detail"])
+                self.assertFalse(P.can_restart(self.st(state, P.STALE_S - 60)))   # control: fresh
+        self.assertTrue(P.can_restart(self.st("failed", 0, error="boom")))
+        self.assertFalse(P.can_restart(self.st("done", 10 ** 6)))
+        self.assertFalse(P.can_restart(self.st("queued", 10 ** 6, job="job_20261105_predict_x")))  # desktop queue
+        v = P.status_view(self.st("running", 5), admin=False)
+        self.assertEqual((v["label"], v["detail"]), ("Running", "1 of 3 images done"))
+
+
+class Limits(Base):
+    def test_start_again_marks_the_set_before_spawning(self):
+        ps = self.fake_set("bas", "running", updated=stamp(P.STALE_S + 60), pid=99999)
+        seen = []
+
+        def spawn(d, root=None, registry_root=None, allow_cpu=False):
+            seen.append(json.loads((Path(d) / "status.json").read_text(encoding="utf-8")))
+            return 1
+        with mock.patch.object(P.PL, "start_detached", side_effect=spawn):
+            st, h, _ = self.post(f"/predict/{ps}/start", {}, "basic")
+            self.assertEqual((st, T.hget(h, "location")), (303, f"/predict/{ps}/"))
+            self.assertEqual(len(seen), 1)
+            self.assertEqual((seen[0]["state"], seen[0]["waiting"], seen[0]["pid"]), ("queued", "restart requested",
+                                                                                      None))
+            self.assertLess(P.age_s(seen[0], time.time()), 30)            # `updated` is fresh
+            self.post(f"/predict/{ps}/start", {}, "basic")                # a double click: no second spawn
+            self.assertEqual(len(seen), 1)
+        page = self.page(f"/predict/{ps}/", "basic")
+        self.assertIn("Starting again", page)
+        self.assertNotIn(f'action="/predict/{ps}/start"', page)
+
+    def test_basic_user_at_most_three_waiting_or_running(self):
+        made = [self.fake_set("bas2", s) for s in ("queued", "running", "queued")]
+        for ps in made:
+            self.addCleanup(shutil.rmtree, self.root / ps, True)
+        before = self.sets()
+        st, _, body = self.submit_a("other")
+        self.assertEqual(st, 429)
+        self.assertIn("already have 3 analyses", body)
+        ctype, mp = multipart({"sample_label": "S", "nm_per_px": "1.4", "confirm": "yes", "model": MODEL},
+                              [("files", "a.png", (GOLDEN / "images" / "0001.png").read_bytes())])
+        self.assertEqual(self.post("/predict/new/upload/", mp, "other", ctype=ctype)[0], 429)
+        self.assertEqual(self.sets(), before)
+        self.assertIsNone(P.check_active(self.cfg(), {"id": "bas2", "role": "advanced"}))   # advanced: no limit
+        st_path = self.root / made[0] / "status.json"                       # control: one fails -> room for one
+        st_ = json.loads(st_path.read_text(encoding="utf-8"))
+        st_.update(state="failed")
+        st_path.write_text(json.dumps(st_), encoding="utf-8")
+        st, _, body = self.submit_a("other")
+        self.assertEqual(st, 303, body[:400])
+        self.wait_state((set(self.sets()) - set(before)).pop())
+
+    def test_unreadable_session_is_a_plain_refusal(self):
+        with mock.patch.object(P, "tiles_of", side_effect=OSError("[WinError 59] An unexpected network error")):
+            st, _, body = self.get(f"/predict/new/session/{self.key_a}/", "basic")
+            self.assertEqual(st, 503)
+            self.assertIn("can’t be read right now", body.decode("utf-8"))
+            self.assertNotIn("WinError", body.decode("utf-8"))
+            self.assertIn("WinError", self.get(f"/predict/new/session/{self.key_a}/", "admin")[2].decode("utf-8"))
+            st, _, body = self.post(f"/predict/new/session/{self.key_a}/",
+                                    {"sig": "x", "samples": ["g0"], "nm_g0": "1.4", "how": "all", "confirm": "yes",
+                                     "model": MODEL}, "basic")
+            self.assertEqual(st, 503)
+        self.assertEqual(self.get(f"/predict/new/session/{self.key_a}/", "basic")[0], 200)   # control
+
+    def test_no_production_model_message(self):
+        path = self.env.registry / "model.jsonl"
+        keep = path.read_bytes()
+        self.addCleanup(path.write_bytes, keep)
+        path.write_text(json.dumps({"schema": "model/1", "id": MODEL, "status": "candidate",
+                                    "logged": "2026-11-05T01:00:00"}) + "\n", encoding="utf-8")
+        for page in (self.page("/predict/new/", "basic"), self.page(f"/predict/new/session/{self.key_a}/", "basic"),
+                     self.page("/predict/new/upload/", "basic")):
+            self.assertIn("No production model is set up yet", page)
+        st, _, body = self.submit_a("basic")
+        self.assertEqual(st, 400)
+        self.assertIn("No production model", body)
+        adv = self.page(f"/predict/new/session/{self.key_a}/", "advanced")     # advanced: must choose
+        self.assertIn('<option value="" selected disabled>Choose…</option>', adv)
+        self.assertNotIn("No production model is set up yet", self.page("/predict/new/", "advanced"))
+
+    def test_sweep_old_scratch_only(self):
+        tmp = self.root / P.PORTAL_TMP
+        old, new = tmp / "up_old000000", tmp / "up_new000000"
+        old.mkdir(parents=True)
+        new.mkdir()
+        (old / "x.png").write_bytes(b"x")
+        t = time.time() - P.SCRATCH_MAX_AGE_S - 60
+        os.utime(old, (t, t))
+        self.assertEqual(P.sweep_scratch(self.cfg()), 1)
+        self.assertFalse(old.exists())
+        self.assertTrue(new.exists())
+        shutil.rmtree(new)
+
+    def test_bounded_tables(self):
+        with mock.patch.object(P, "CACHE_MAX", 3):
+            for i in range(6):
+                P._TASKS[("results", f"ps_x{i}")] = {"state": "failed", "error": "e", "started": 0}
+            P.start_task("results", "ps_bounded", lambda: None)
+            self.assertLessEqual(len(P._TASKS), 4)
+        for k in [k for k in P._TASKS if str(k[1]).startswith(("ps_x", "ps_bounded"))]:
+            P._TASKS.pop(k, None)
+
+
 class Upload(Base):
     def up(self, fields, files, who="basic", origin=True):
         ctype, body = multipart(fields, files)
@@ -472,6 +638,101 @@ class Upload(Base):
         self.assertEqual(st, 403)
         self.assertEqual(self.sets(), before)
 
+    def up_chunked(self, fields, files, who="basic"):
+        """The same multipart body sent with Transfer-Encoding: chunked (no Content-Length), 4 KB per chunk."""
+        ctype, body = multipart(fields, files)
+        c = http.client.HTTPConnection("127.0.0.1", self.p.port, timeout=120)
+        try:
+            c.request("POST", "/predict/new/upload/", body=(body[i:i + 4096] for i in range(0, len(body), 4096)),
+                      headers={**T.cookie(self.tok[who]), "Content-Type": ctype, "Origin": self.p.origin},
+                      encode_chunked=True)
+            r = c.getresponse()
+            return r.status, r.getheader("location"), r.read().decode("utf-8")
+        finally:
+            c.close()
+
+    def test_disk_checked_up_front_and_during_the_upload(self):
+        before = self.sets()
+        margin = P.FREE_MARGIN_BYTES
+        # Content-Length known: refused before anything is stored when free - length < margin
+        with mock.patch.object(P, "disk_free", return_value=margin + 10):
+            st, _, body = self.up(self.ok_fields(), self.tiles(1))
+        self.assertEqual(st, 507)
+        self.assertIn("Not enough disk space", body)
+        # chunked (no length to hold ahead): fine at the start, refused at the first file start when space is low
+        calls = iter([margin + 10 ** 9] + [margin - 1] * 50)
+        with mock.patch.object(P, "disk_free", side_effect=lambda p: next(calls)):
+            st, _, body = self.up_chunked(self.ok_fields(), self.tiles(2))
+        self.assertEqual(st, 507)
+        self.assertIn("Not enough disk space", body)
+        self.assertEqual(self.sets(), before)
+        self.assert_scratch_empty()
+        self.assertEqual(P._RESERVED, {})                                   # every hold released
+        # control: the same chunked upload with room to spare goes through
+        st, loc, body = self.up_chunked(self.ok_fields(), self.tiles(2))
+        self.assertEqual(st, 303, body[:500])
+        ps = (set(self.sets()) - set(before)).pop()
+        self.assertEqual(len(read_rows(self.root / ps / "images.csv")), 2)
+        self.wait_state(ps)
+
+    def test_disk_check_every_64_mb(self):
+        dest = Path(tempfile.mkdtemp(prefix="cj_sink_"))
+        self.addCleanup(shutil.rmtree, dest, True)
+        res = P.Reservation(dest, 0)
+        self.addCleanup(res.release)
+        n = {"calls": 0}
+
+        def free(_):
+            n["calls"] += 1
+            return P.FREE_MARGIN_BYTES + (10 ** 12 if n["calls"] < 3 else -1)   # 3rd check: the disk filled up
+        sink = P.UploadSink(dest, res)
+        with mock.patch.object(P, "disk_free", side_effect=free), \
+                mock.patch.object(P, "DISK_CHECK_BYTES", 1000), mock.patch.object(P, "MAX_FILE_BYTES", 10 ** 6):
+            sink.apply([("part", "files", "a.png"), ("data", b"x" * 600)])       # check 1 (file start)
+            sink.apply([("data", b"x" * 600)])                                     # check 2 (1200 bytes)
+            sink.apply([("data", b"x" * 600)])
+            with self.assertRaises(P.Refusal) as cm:
+                sink.apply([("data", b"x" * 600)])                                 # check 3 (2400 bytes): refused
+        sink.close()
+        self.assertEqual(cm.exception.status, 507)
+
+    def test_reservation_counts_other_uploads(self):
+        dest = Path(tempfile.mkdtemp(prefix="cj_res_"))
+        self.addCleanup(shutil.rmtree, dest, True)
+        big = P.Reservation(dest, 10 ** 9)                                  # another upload still streaming 1 GB
+        try:
+            with mock.patch.object(P, "disk_free", return_value=P.FREE_MARGIN_BYTES + 5 * 10 ** 8):
+                with self.assertRaises(P.Refusal) as cm:
+                    P.Reservation(dest, 0).check()
+                self.assertEqual(cm.exception.status, 507)
+                big.written(6 * 10 ** 8)                                    # it has written most of it
+                P.Reservation(dest, 0).check()                              # 0.4 GB still held: room again
+        finally:
+            big.release()
+            P._RESERVED.clear()
+
+    def test_fields_checked_before_files(self):
+        """The form's text fields come first: a missing tick is refused at the first file part, before a byte of
+        a too-big file is counted (400 for the tick, not 413 for the size)."""
+        with mock.patch.object(P, "MAX_FILE_BYTES", 1000):
+            st, _, body = self.up(self.ok_fields(confirm=None), self.tiles(1))
+            self.assertEqual(st, 400)
+            self.assertIn("I confirm the pixel size", body)
+            st, _, body = self.up(self.ok_fields(nm_per_px="0"), self.tiles(1))
+            self.assertEqual(st, 400)
+            self.assertIn("enter the pixel size", body)
+            st, _, _ = self.up(self.ok_fields(), self.tiles(1))             # control: valid fields reach the cap
+            self.assertEqual(st, 413)
+        page = self.page("/predict/new/upload/", "basic")
+        self.assertLess(page.index('name="confirm"'), page.index('type="file"'))
+        self.assertLess(page.index('name="model"'), page.index('type="file"'))
+        self.assertIn("PixelSpacing", page)
+        self.assert_scratch_empty()
+
+    def test_os_error_text(self):
+        self.assertIn("too long", P.os_error_text(OSError(errno.ENAMETOOLONG, "File name too long")))
+        self.assertIn("could not store", P.os_error_text(OSError(errno.ENOSPC, "No space left on device")))
+
 
 def launch(p):
     for kw in ({"channel": "msedge"}, {"channel": "chrome"}, {}):
@@ -527,20 +788,6 @@ class Browser(Base):
         self.assertTrue(all(u.startswith(self.p.origin + "/") for u in rec["requests"]))
         self.assertEqual(rec["errors"], [])
         self.assertEqual(rec["console"], [])
-
-    def fake_set(self, owner, state, **st):
-        """A set copied from the golden fixture under a new id (status as given): for the page views only."""
-        ps = f"ps_20261105_{uuid.uuid4().hex[:6]}"
-        d = self.root / ps
-        shutil.copytree(GOLDEN, d)
-        req = json.loads((d / "request.json").read_text(encoding="utf-8"))
-        req.update(ps=ps, owner=owner, created=time.strftime("%Y-%m-%dT%H:%M:%S"))
-        (d / "request.json").write_text(json.dumps(req), encoding="utf-8")
-        status = {"state": state, "n_done": 0, "n_total": 3, "where": "laptop", "job": None, "error": None,
-                  "updated": time.strftime("%Y-%m-%dT%H:%M:%S"), "pid": None, "waiting": None}
-        status.update(st)
-        (d / "status.json").write_text(json.dumps(status), encoding="utf-8")
-        return ps
 
     def test_pages_sizes_and_schemes(self):
         ps = self.make_done_set("basic")
