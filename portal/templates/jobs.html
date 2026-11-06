@@ -1,0 +1,109 @@
+<style>
+/* Jobs module (portal/modules/jobs.py). cj.css tokens only; every class is cj-jobs-*. Phone first. */
+.cj-jobs{min-width:0}
+.cj-jobs-snap{margin:2px 0 8px}
+.cj-jobs-banner{margin:0 0 10px;padding:8px 12px;border:1px solid var(--warn);border-left-width:4px;border-radius:8px;
+  background:var(--warnbg);color:var(--fg);overflow-wrap:anywhere}
+.cj-jobs-counts{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 2px}
+.cj-page a.cj-jobs-count{display:inline-flex;align-items:center;gap:5px;min-height:36px;padding:4px 12px;
+  border:1px solid var(--line);border-radius:999px;background:var(--card);color:var(--fg);text-decoration:none;
+  font-size:.88rem}
+.cj-page a.cj-jobs-count:hover,.cj-page a.cj-jobs-count:focus-visible{border-color:var(--acc)}
+.cj-page a.cj-jobs-count.cj-jobs-t-warn{border-color:var(--warn);background:var(--warnbg);color:var(--warn)}
+.cj-jobs-err{margin:6px 0}
+.cj-jobs-sec{scroll-margin-top:12px;min-width:0}
+.cj-main .cj-jobs-sec>h2.cj-sec{margin:20px 0 8px;font-size:.8rem}
+.cj-jobs-n{display:inline-block;min-width:1.7em;padding:0 6px;border-radius:999px;background:var(--line);
+  color:var(--fg);font-size:.75rem;text-align:center;letter-spacing:0}
+.cj-jobs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,340px),1fr));gap:10px}
+.cj-jobs-item{display:flex;flex-direction:column;gap:6px}
+.cj-jobs-att{border-left:3px solid var(--warn)}
+.cj-jobs-top{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;min-width:0}
+.cj-jobs-ttl,.cj-jobs-main{display:flex;flex-direction:column;flex:1 1 auto;min-width:0}
+.cj-jobs-id{font-size:.75rem}
+.cj-jobs-tags{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:4px;flex:none;max-width:50%}
+.cj-jobs-chip{flex:none;font-size:.75rem;font-weight:600;line-height:1.5;padding:1px 8px;border-radius:999px;
+  border:1px solid transparent;white-space:nowrap}
+.cj-jobs-chip.cj-jobs-t-run{background:var(--accbg);color:var(--acc)}
+.cj-jobs-chip.cj-jobs-t-ok{background:var(--prodbg);color:var(--prod)}
+.cj-jobs-chip.cj-jobs-t-warn{background:var(--warnbg);color:var(--warn)}
+.cj-jobs-chip.cj-jobs-t-wait{border-color:var(--line);color:var(--mut)}
+.cj-jobs-chip.cj-jobs-t-off{border:1px dashed var(--line);color:var(--mut)}
+.cj-jobs-prog{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-weight:600;font-size:.92rem}
+.cj-jobs-bar{-webkit-appearance:none;appearance:none;display:block;width:100%;height:6px;border:0;border-radius:999px;
+  background:var(--line);color:var(--acc);overflow:hidden}
+.cj-jobs-bar::-webkit-progress-bar{background:var(--line);border-radius:999px}
+.cj-jobs-bar::-webkit-progress-value{background:var(--acc);border-radius:999px}
+.cj-jobs-bar::-moz-progress-bar{background:var(--acc);border-radius:999px}
+.cj-jobs-kv{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,130px),1fr));gap:4px 12px;margin:2px 0 0}
+.cj-jobs-kv div{min-width:0}
+.cj-jobs-kv dt{font-size:.72rem;color:var(--mut);text-transform:uppercase;letter-spacing:.03em}
+.cj-jobs-kv dd{margin:0;font-size:.88rem;overflow-wrap:anywhere}
+.cj-jobs-warn{margin:0;padding:6px 10px;border-radius:6px;border-left:3px solid var(--warn);background:var(--warnbg);
+  color:var(--fg);font-size:.88rem;overflow-wrap:anywhere}
+.cj-jobs-why{margin:0;display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 6px}
+.cj-jobs-reason,.cj-jobs-hint{margin:0;font-size:.88rem}
+.cj-jobs-empty{margin:0}
+.cj-jobs-watchers{margin:0 0 8px}
+.cj-jobs-rows{list-style:none;margin:0}
+.cj-card.cj-jobs-rows{padding:0 12px}
+.cj-jobs-row{display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-top:1px solid var(--line);min-width:0}
+.cj-jobs-row:first-child{border-top:0}
+.cj-jobs-pos{flex:none;display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;
+  border-radius:50%;background:var(--accbg);color:var(--acc);font-weight:700;font-size:.8rem}
+.cj-jobs-pos.cj-jobs-t-off{background:transparent;color:var(--mut)}
+.cj-jobs-foot{margin-top:20px}
+</style>
+<div class="cj-jobs" id="cj-jobs">
+<h1>Jobs</h1>
+<div id="cj-jobs-head">{{head}}</div>
+<p id="cj-jobs-err" class="cj-mut cj-jobs-err" role="status" hidden></p>
+<section class="cj-jobs-sec" id="cj-jobs-s-running" aria-labelledby="cj-jobs-h-running">{{running}}</section>
+<section class="cj-jobs-sec" id="cj-jobs-s-queue" aria-labelledby="cj-jobs-h-queue">{{queue}}</section>
+<section class="cj-jobs-sec" id="cj-jobs-s-attention" aria-labelledby="cj-jobs-h-attention">{{attention}}</section>
+<section class="cj-jobs-sec" id="cj-jobs-s-review" aria-labelledby="cj-jobs-h-review">{{review}}</section>
+<section class="cj-jobs-sec" id="cj-jobs-s-finished" aria-labelledby="cj-jobs-h-finished">{{finished}}</section>
+<p class="cj-mut cj-jobs-foot">Read only. Cancel, release and retry stay in jobs/sync.py for now. This page refreshes
+every 30 s.</p>
+</div>
+<script>
+// Jobs page refresh: every 30 s (and when the tab comes back) GET api/summary?html=1, same origin, and swap in the
+// section fragments. The fragments are rendered and escaped by the server (jobs.py render), exactly as on first load;
+// this script never builds HTML from data. Opened as a file, it does nothing.
+(function () {
+  'use strict';
+  if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
+  var IDS = {head: 'cj-jobs-head', running: 'cj-jobs-s-running', queue: 'cj-jobs-s-queue',
+             attention: 'cj-jobs-s-attention', review: 'cj-jobs-s-review', finished: 'cj-jobs-s-finished'};
+  var err = document.getElementById('cj-jobs-err');
+  var busy = false;
+  function note(text) {
+    if (!err) return;
+    err.textContent = text || '';
+    err.hidden = !text;
+  }
+  function swap(frag) {
+    Object.keys(IDS).forEach(function (k) {
+      var box = document.getElementById(IDS[k]);
+      if (!box || typeof frag[k] !== 'string') return;
+      var t = document.createElement('template');
+      t.innerHTML = frag[k];
+      box.replaceChildren(t.content);
+    });
+  }
+  function load() {
+    if (busy || document.hidden) return;
+    busy = true;
+    fetch('api/summary?html=1', {cache: 'no-store', credentials: 'same-origin'})
+      .then(function (r) {
+        if (!r.ok) throw new Error('status ' + r.status);
+        return r.json();
+      })
+      .then(function (j) { swap((j && j.html) || {}); note(''); })
+      .catch(function (e) { note('Could not refresh (' + e.message + '); showing the last loaded state.'); })
+      .then(function () { busy = false; });
+  }
+  setInterval(load, 30000);
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) load(); });
+})();
+</script>
