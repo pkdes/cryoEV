@@ -151,7 +151,12 @@ python jobs/sync.py pull --share \\<desktop>\cj
   - Any error while the predictor runs (a status write, Ctrl+C, a bug) kills the predictor and its children and marks the set failed.
   - The final `.p_tmp` → `p` rename is retried with backoff; if it never succeeds, the set is failed.
   - A failed set can run again; a done one is refused (exit 2). It prints the time and peak GPU memory.
-  - **Portal:** `predict_local.start_detached(ps_dir) -> pid` starts a run detached (no console window; its own output goes to `<root>\.logs\<ps>.out`).
+  - **Waiting** (`--wait S`; `start_detached` uses 6 h): instead of exit 3 / 4, it waits for the lock or a free GPU, checking every `--wait-poll-s` (30 s).
+    - While waiting, `status.json` stays queued with `waiting` ("another analysis is running" / "gpu busy: ...") and `pid` = the waiter, and `updated` is refreshed at every check. A stale `updated` therefore means the waiter died.
+    - At the deadline it gives up (exit 3 / 4).
+  - **One run per set:** the set is claimed under its status lock and checked again under it right before running. A second waiter ("Start again") for a set that a live process waits on or runs exits 3 at once.
+  - **Chain** (`--chain`, set by `start_detached`): after a run, with the lock released, it starts the oldest queued laptop set of the root that has no job and no live waiter. That run chains the next, so one start drains the queue.
+  - **Portal:** `predict_local.start_detached(ps_dir) -> pid` starts a run detached (no console window; waits; chains; its own output goes to `<root>\.logs\<ps>.out`).
     - Call `predict_set.create()` from a worker thread: it reads, md5s and decodes every tile.
     - Imported as `jobs.*`, neither module changes `sys.path`; the registry is loaded by path as `cj_registry` (as `portal/app.py` does).
 - **Desktop path.**

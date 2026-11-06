@@ -212,16 +212,26 @@ def status_lock_path(ps_dir) -> Path:
     return ps_dir.parent / LOCKS / f"{ps_dir.name}.status.lock"
 
 
-def write_status(ps_dir, **fields) -> dict:
-    """Merge fields into status.json, `updated` = now: read-modify-write under the set's status lock, written
-    atomically. Keys: state n_done n_total where job error updated pid waiting. -> the new status."""
+def update_status(ps_dir, change) -> dict | None:
+    """Conditional read-modify-write under the set's status lock: change(current status) -> fields to merge, or
+    None to leave the file alone. -> the new status, or None when change declined (e.g. another run owns the set)."""
     p = Path(ps_dir) / STATUS
     with locked(status_lock_path(ps_dir)):
         st = C.read_json(p) if p.is_file() else {}
+        fields = change(dict(st))
+        if fields is None:
+            return None
         st.update(fields, updated=C.now())
         out = {k: st.get(k) for k in STATUS_KEYS}
         write_json_atomic(p, out)
     return out
+
+
+def write_status(ps_dir, **fields) -> dict:
+    """Merge fields into status.json, `updated` = now: read-modify-write under the set's status lock, written
+    atomically. Keys: state n_done n_total where job error updated pid waiting. -> the new status.
+    pid: while running, the predictor's; while queued with `waiting` set, the predict_local process waiting for it."""
+    return update_status(ps_dir, lambda st: fields)
 
 
 def read_images(ps_dir) -> list:

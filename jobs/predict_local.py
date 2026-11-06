@@ -15,13 +15,21 @@ backoff; failed if it never succeeds), so p/ exists only for a complete set. The
     total): the set stays queued with waiting "gpu busy: ...", exit 4. No NVIDIA GPU at all: failed, exit 4.
     --allow-cpu runs on the CPU instead (slow); never silently.
   - One run at a time per root: <root>/predict.lock (a second run exits 3 and changes nothing).
+  - --wait S (start_detached: 6 h): instead of exit 3 / 4, wait for the lock or a free GPU, checking every
+    --wait-poll-s (30 s). While waiting, status.json has `waiting` ("another analysis is running" / "gpu busy: ...")
+    and pid = this waiter, with a fresh `updated` every check: waiting, not crashed. Given up at the deadline:
+    waiting / pid cleared (the GPU note stays), exit 3 / 4.
+  - One run per set: the set is claimed under its status lock (pid), and checked again under it right before
+    running. A second waiter for a set another live process waits on or runs (e.g. "Start again") exits 3 at once.
+  - --chain (start_detached): after a run ends and the lock is released, start the oldest queued laptop set of the
+    same root with no job and no live waiter, by start_detached: one step, and that run chains the next.
   - Runs a queued or failed set (a failed one's .p_tmp is cleared first). A done set, or one queued on the desktop
     (status.json job set), is refused, exit 2.
   - The predictor's output is appended to <ps>/predict.log; the elapsed time and peak GPU memory are printed.
-Exit: 0 done, 1 failed, 2 refused, 3 lock held, 4 GPU busy or unavailable.
+Exit: 0 done, 1 failed, 2 refused, 3 lock held / another waiter owns the set, 4 GPU busy or unavailable.
 
-Python API (the portal): start_detached(ps_dir) -> pid starts this as a detached process (no console window) and
-returns at once; status.json says the rest. run(ps, ...) runs it in this process.
+Python API (the portal): start_detached(ps_dir) -> pid starts this as a detached process (no console window; waits
+up to 6 h; chains) and returns at once; status.json says the rest. run(ps, ...) runs it in this process.
 """
 from __future__ import annotations
 
@@ -53,6 +61,9 @@ POLL_S = 2.0
 RENAME_TRIES, RENAME_BACKOFF_S = 6, 0.5  # .p_tmp -> p: antivirus / indexer / Explorer can hold a folder briefly
 EXIT_DONE, EXIT_FAILED, EXIT_REFUSED, EXIT_LOCKED, EXIT_GPU = 0, 1, 2, 3, 4
 LOG_DIR = ".logs"                       # <root>/.logs/<ps>.out: a detached run's own console output
+DETACHED_WAIT_S = 6 * 3600              # start_detached waits this long for the lock or the GPU
+WAIT_POLL_S = 30.0                      # how often a waiter checks (and refreshes status.json `updated`)
+WAIT_LOCK = "another analysis is running"
 
 
 class Refused(Exception):
@@ -70,17 +81,22 @@ def _run_job():
     return run_job
 
 
-def start_detached(ps_dir, root=None, registry_root=None, allow_cpu=False) -> int:
-    """Start `python -m jobs.predict_local --ps <ps_dir>` detached (no console window; survives the caller) and
-    return its pid at once. Its console output goes to <root>/.logs/<ps>.out; progress and errors to status.json."""
+def start_detached(ps_dir, root=None, registry_root=None, allow_cpu=False, wait=DETACHED_WAIT_S,
+                   wait_poll_s=WAIT_POLL_S, poll_s=POLL_S, chain=True) -> int:
+    """Start `python -m jobs.predict_local --ps <ps_dir> --wait <6 h> --chain` detached (no console window; survives
+    the caller) and return its pid at once. Its console output goes to <root>/.logs/<ps>.out; progress, waiting and
+    errors to status.json."""
     ps_dir = Path(ps_dir)
-    argv = [sys.executable, "-m", "jobs.predict_local", "--ps", str(ps_dir)]
+    argv = [sys.executable, "-m", "jobs.predict_local", "--ps", str(ps_dir), "--wait", str(wait),
+            "--wait-poll-s", str(wait_poll_s), "--poll-s", str(poll_s)]
     if root:
         argv += ["--root", str(root)]
     if registry_root:
         argv += ["--registry", str(registry_root)]
     if allow_cpu:
         argv.append("--allow-cpu")
+    if chain:
+        argv.append("--chain")
     out = ps_dir.parent / LOG_DIR / f"{ps_dir.name}.out"
     out.parent.mkdir(parents=True, exist_ok=True)
     kw = {}
@@ -152,25 +168,120 @@ def rename_retry(src: Path, dst: Path, tries=None, backoff=None):
             time.sleep(backoff * 2 ** i)
 
 
-def run(ps, root=None, registry_root=None, allow_cpu=False, wait=0.0, poll_s=POLL_S) -> dict:
+def pid_alive(pid) -> bool:
+    """A process with this pid is running (Windows: OpenProcess + exit code STILL_ACTIVE)."""
+    if not pid:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, int(pid))          # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        try:
+            code = wintypes.DWORD()
+            return bool(k32.GetExitCodeProcess(h, ctypes.byref(code))) and code.value == 259
+        finally:
+            k32.CloseHandle(h)
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _owner(st: dict, me: int):
+    """The live process (other than me) that owns the set: its waiter, or its running predictor; else None."""
+    pid = st.get("pid")
+    if pid and pid != me and (st.get("waiting") or st.get("state") == "running") and pid_alive(pid):
+        return pid
+    return None
+
+
+def _claim(ps_dir: Path, me: int):
+    """Take the set for this waiter (pid = me) under its status lock. -> the status, or None when another live
+    process waits on it or runs it, or it is done / on the desktop. A dead run's "running" goes back to queued."""
+    def change(st):
+        if st.get("state") not in ("queued", "failed", "running") or st.get("job") or _owner(st, me):
+            return None
+        return {"pid": me, **({"state": "queued"} if st.get("state") == "running" else {})}
+    return PS.update_status(ps_dir, change)
+
+
+def _still_mine(ps_dir: Path, me: int, waiting: str):
+    """While waiting: refresh `waiting` + `updated` if the set is still this waiter's. -> status or None."""
+    def change(st):
+        if st.get("state") not in ("queued", "failed") or st.get("job") or st.get("pid") not in (None, me):
+            return None
+        return {"pid": me, "waiting": waiting}
+    return PS.update_status(ps_dir, change)
+
+
+def next_queued(root: Path):
+    """The oldest (request created, then id) queued laptop set in root with no job, no p/ and no live waiter."""
+    cands = []
+    for d in Path(root).iterdir() if Path(root).is_dir() else []:
+        if not PS.PS_RE.match(d.name) or not (d / PS.STATUS).is_file() or (d / C.PS_PRED).exists():
+            continue
+        try:
+            st, req = PS.read_status(d), PS.read_request(d)
+        except (OSError, ValueError):
+            continue
+        if st.get("state") == "queued" and not st.get("job") and st.get("where") in (None, "laptop") \
+                and not (st.get("pid") and pid_alive(st["pid"])):
+            cands.append((str(req.get("created") or ""), d.name, d))
+    return min(cands)[2] if cands else None
+
+
+def run(ps, root=None, registry_root=None, allow_cpu=False, wait=0.0, poll_s=POLL_S, wait_poll_s=WAIT_POLL_S,
+        chain=False) -> dict:
     """Predict one set here. -> {"exit", "status", "elapsed_s", "device", "gpu_mb": (before, peak, total) or None}.
+    wait > 0: wait that long for the lock / a free GPU (status.json `waiting`, refreshed every wait_poll_s).
+    chain: after the run, start_detached the oldest queued set of the root (see next_queued).
     Raises Refused: nothing changed, except a GPU refusal (queued + waiting when busy, failed when there is none)."""
     reg = Path(registry_root) if registry_root else config.registry_root()
     try:
         ps_dir = PS.find(ps, root, reg)
     except PS.PredictSetError as e:
         raise Refused(str(e))
-    lock = acquire_lock(ps_dir.parent / LOCK_FILE, wait)
-    if lock is None:
-        raise Refused(f"another prediction run holds {ps_dir.parent / LOCK_FILE}; not starting", EXIT_LOCKED)
+    me, deadline = os.getpid(), time.time() + max(0.0, wait)
+    if wait > 0 and _claim(ps_dir, me) is None:
+        raise Refused(f"{ps_dir.name}: another analysis already waits for it or runs it (or it is not queued); "
+                      f"not starting a second one", EXIT_LOCKED)
     try:
-        return _run_locked(ps_dir, reg, allow_cpu, poll_s)
+        while True:
+            lock = acquire_lock(ps_dir.parent / LOCK_FILE, 0)
+            if lock is not None:
+                break
+            if wait <= 0 or time.time() >= deadline:
+                raise Refused(f"another prediction run holds {ps_dir.parent / LOCK_FILE}; not starting", EXIT_LOCKED)
+            if _still_mine(ps_dir, me, WAIT_LOCK) is None:
+                raise Refused(f"{ps_dir.name} was taken by another run while this one waited", EXIT_LOCKED)
+            time.sleep(max(0.05, min(wait_poll_s, deadline - time.time())))
+    except Refused:
+        if wait > 0:                                   # given up: no live waiter any more
+            PS.update_status(ps_dir, lambda st: {"pid": None, "waiting": None} if st.get("pid") == me else None)
+        raise
+    try:
+        result = _run_locked(ps_dir, reg, allow_cpu, poll_s, me, deadline if wait > 0 else None, wait_poll_s)
     finally:
         lock.close()
+    if chain:                                          # after the lock is released: one step down the queue
+        nxt = next_queued(ps_dir.parent)
+        if nxt is not None:
+            pid = start_detached(nxt, ps_dir.parent, reg, allow_cpu, wait=max(wait, DETACHED_WAIT_S),
+                                 wait_poll_s=wait_poll_s, poll_s=poll_s, chain=True)
+            print(f"[predict_local] chained: {nxt.name} started (pid {pid})", flush=True)
+    return result
 
 
-def _run_locked(ps_dir: Path, reg: Path, allow_cpu: bool, poll_s: float) -> dict:
+def _run_locked(ps_dir: Path, reg: Path, allow_cpu: bool, poll_s: float, me=None, deadline=None,
+                wait_poll_s=WAIT_POLL_S) -> dict:
     rj = _run_job()
+    me = me or os.getpid()
     try:
         req, st, rows = PS.read_request(ps_dir), PS.read_status(ps_dir), PS.read_images(ps_dir)
     except (OSError, ValueError) as e:
@@ -197,6 +308,11 @@ def _run_locked(ps_dir: Path, reg: Path, allow_cpu: bool, poll_s: float) -> dict
     except PS.PredictSetError as e:
         raise Refused(f"{ps_id}: {e}")
     device, note, refused = gpu_check(allow_cpu)
+    while refused == "busy" and deadline is not None and time.time() < deadline:   # --wait: until the GPU frees
+        if _still_mine(ps_dir, me, note) is None:
+            raise Refused(f"{ps_id} was taken by another run while this one waited for the GPU", EXIT_LOCKED)
+        time.sleep(max(0.05, min(wait_poll_s, deadline - time.time())))
+        device, note, refused = gpu_check(allow_cpu)
     if refused == "busy":                              # someone else's work: stays queued, try again later
         PS.write_status(ps_dir, state="queued", waiting=note, pid=None, error=None)
         if state != "queued":
@@ -213,8 +329,15 @@ def _run_locked(ps_dir: Path, reg: Path, allow_cpu: bool, poll_s: float) -> dict
     log = ps_dir / C.PREDICT_LOG
     argv = rj.predict_argv(req, ps_dir / PS.IMAGES, out, device)
     n_total = len(rows)
-    PS.write_status(ps_dir, state="running", n_done=0, n_total=n_total, where="laptop", job=None, error=None,
-                    pid=None, waiting=None)
+
+    def start(st):                                     # checked again under the status lock: one run per set
+        if st.get("state") not in ("queued", "failed", "running") or st.get("job") or _owner(st, me) \
+                or (ps_dir / C.PS_PRED).exists():
+            return None
+        return {"state": "running", "n_done": 0, "n_total": n_total, "where": "laptop", "job": None, "error": None,
+                "pid": None, "waiting": None}
+    if PS.update_status(ps_dir, start) is None:
+        raise Refused(f"{ps_id} was taken by another run (or finished) before this one started", EXIT_LOCKED)
     record(ps_id, reg, "running", where="laptop", job=None)
     print(f"[predict_local] {ps_id}: {n_total} image(s), model {model}, device {device} ({note})", flush=True)
     mem0 = gpu_memory_mb()
@@ -290,11 +413,15 @@ def main(argv=None):
     ap.add_argument("--root", type=Path, help="where sets live (default <CryoAI-laptop>/predict)")
     ap.add_argument("--registry", type=Path, help="registry folder (default <CryoAI-laptop>/registry)")
     ap.add_argument("--allow-cpu", action="store_true", help="run on the CPU when the GPU is busy or missing (slow)")
-    ap.add_argument("--wait", type=float, default=0, help="seconds to wait for another run's lock (default 0)")
+    ap.add_argument("--wait", type=float, default=0,
+                    help="seconds to wait for another run's lock or a busy GPU (default 0: exit 3 / 4 at once)")
+    ap.add_argument("--wait-poll-s", type=float, default=WAIT_POLL_S,
+                    help=f"while waiting, check (and refresh status.json) this often ({WAIT_POLL_S:g} s)")
     ap.add_argument("--poll-s", type=float, default=POLL_S, help=f"seconds between status.json updates ({POLL_S:g})")
+    ap.add_argument("--chain", action="store_true", help="afterwards, start the oldest queued set of the root")
     a = ap.parse_args(argv)
     try:
-        return run(a.ps, a.root, a.registry, a.allow_cpu, a.wait, a.poll_s)["exit"]
+        return run(a.ps, a.root, a.registry, a.allow_cpu, a.wait, a.poll_s, a.wait_poll_s, a.chain)["exit"]
     except Refused as e:
         print(f"[predict_local] {e}", file=sys.stderr)
         return e.code
