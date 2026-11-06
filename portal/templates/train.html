@@ -1,0 +1,93 @@
+<style>
+/* Train module (portal/modules/train.py). cj.css tokens only; every class is cj-train-*. Phone first. */
+.cj-train{min-width:0}
+.cj-train-wrap{overflow-wrap:anywhere;word-break:break-word}
+.cj-train-banner{margin:4px 0 10px;padding:8px 12px;border:1px solid var(--line);border-left:4px solid var(--mut);
+  border-radius:8px;background:var(--card);font-size:.9rem}
+.cj-train-banner.cj-train-on{border-left-color:var(--acc);background:var(--accbg)}
+.cj-train-cols{display:grid;grid-template-columns:minmax(0,1fr);gap:14px}
+@media (min-width:980px){.cj-train-cols{grid-template-columns:minmax(0,5fr) minmax(0,6fr)}}
+.cj-train-form{display:flex;flex-direction:column;gap:12px}
+.cj-train-lbl{display:flex;flex-direction:column;gap:4px;font-size:.82rem;font-weight:600;color:var(--fg);min-width:0}
+.cj-train-lbl .cj-mut{font-weight:400;font-size:.75rem}
+.cj-train-in{min-height:42px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);
+  color:var(--fg);font:inherit;font-size:1rem;width:100%;max-width:100%;box-sizing:border-box;min-width:0}
+.cj-train-in:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.cj-train-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 12px}
+@media (min-width:560px){.cj-train-grid{grid-template-columns:repeat(4,minmax(0,1fr))}}
+.cj-train-more{font-size:.85rem;min-width:0}
+.cj-train-more>summary{cursor:pointer;color:var(--acc);min-height:32px;display:flex;align-items:center}
+.cj-train-info{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.cj-train-info li{display:flex;flex-direction:column;gap:1px;min-width:0}
+.cj-train-btns{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 0}
+.cj-train-btn{min-height:42px;padding:6px 18px;border:1px solid var(--line);border-radius:8px;background:var(--card);
+  color:var(--fg);font:inherit;font-size:.95rem;font-weight:600;cursor:pointer}
+.cj-train-btn:hover,.cj-train-btn:focus-visible{border-color:var(--acc)}
+.cj-train-primary{background:var(--acc);border-color:var(--acc);color:var(--bg)}
+.cj-train-primary:hover,.cj-train-primary:focus-visible{background:var(--accbg);color:var(--acc)}
+.cj-train-errs{margin:0 0 12px;padding:10px 14px;border:1px solid var(--warn);border-left-width:4px;border-radius:8px;
+  background:var(--warnbg);color:var(--fg);overflow-wrap:anywhere}
+.cj-train-errs ul{margin:6px 0 0;padding-left:20px}
+.cj-train-sum{margin:0 0 14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.cj-main .cj-train-sum .cj-sec{margin:0}
+.cj-train-kv{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,180px),1fr));gap:6px 14px;margin:0}
+.cj-train-kv div{min-width:0}
+.cj-train-kv dt{font-size:.72rem;color:var(--mut);text-transform:uppercase;letter-spacing:.03em}
+.cj-train-kv dd{margin:0;font-size:.9rem;overflow-wrap:anywhere}
+.cj-train-pre{margin:6px 0 0;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);
+  color:var(--fg);font-family:var(--cj-mono);font-size:.75rem;line-height:1.45;white-space:pre-wrap;
+  overflow-wrap:anywhere;max-height:420px;overflow:auto}
+.cj-train-preview{margin:0;padding:8px 12px;border-radius:6px;border-left:3px solid var(--acc);background:var(--accbg);
+  color:var(--fg);font-size:.9rem}
+.cj-train-warn{margin:0;padding:6px 10px;border-radius:6px;border-left:3px solid var(--warn);background:var(--warnbg);
+  color:var(--fg);font-size:.9rem}
+.cj-train-ok{margin:0;padding:8px 12px;border-radius:6px;border-left:3px solid var(--prod);background:var(--prodbg);
+  color:var(--fg);font-size:.9rem;overflow-wrap:anywhere}
+.cj-train-chip{display:inline-block;margin:2px 0;font-size:.72rem;font-weight:600;line-height:1.5;padding:0 8px;
+  border-radius:999px;border:1px solid var(--line);color:var(--mut);white-space:nowrap;width:max-content}
+.cj-train-chip.cj-train-t-ok{background:var(--prodbg);color:var(--prod);border-color:transparent}
+.cj-train-chip.cj-train-t-prod{background:var(--prodbg);color:var(--prod);border-color:transparent}
+.cj-train-chip.cj-train-t-run{background:var(--accbg);color:var(--acc);border-color:transparent}
+.cj-train-chip.cj-train-t-warn{background:var(--warnbg);color:var(--warn);border-color:transparent}
+.cj-train-chip.cj-train-t-off{border-style:dashed}
+.cj-train-live{min-width:0}
+.cj-train-live p{margin:0 0 6px}
+.cj-train-runs{width:100%;border-collapse:collapse;font-size:.85rem}
+.cj-train-runs th{text-align:left;font-size:.72rem;color:var(--mut);text-transform:uppercase;letter-spacing:.03em;
+  font-weight:600;padding:6px 8px;border-bottom:1px solid var(--line)}
+.cj-train-runs td{vertical-align:top;padding:8px;border-bottom:1px solid var(--line);min-width:0}
+.cj-train-runs td>span,.cj-train-runs td>b{display:block}
+@media (max-width:720px){
+  .cj-train-runs thead{display:none}
+  .cj-train-runs,.cj-train-runs tbody,.cj-train-runs tr,.cj-train-runs td{display:block;width:100%;box-sizing:border-box}
+  .cj-train-runs tr{background:var(--card);border:1px solid var(--line);border-radius:var(--cj-r);padding:6px 12px;
+    margin:0 0 10px}
+  .cj-train-runs td{display:grid;grid-template-columns:96px minmax(0,1fr);gap:0 10px;border-bottom:0;padding:4px 0}
+  .cj-train-runs td::before{content:attr(data-k);font-size:.7rem;color:var(--mut);text-transform:uppercase;
+    letter-spacing:.03em;padding-top:2px}
+  .cj-train-runs td>*{grid-column:2}
+}
+.cj-train-tablecard{padding:4px 12px}
+@media (max-width:720px){.cj-train-tablecard{padding:0;background:transparent;border:0}}
+</style>
+<div class="cj-train" id="cj-train">
+<h1>Train</h1>
+{{banner}}
+<div class="cj-train-cols">
+<section aria-labelledby="cj-train-h-new">
+<h2 class="cj-sec" id="cj-train-h-new">New training job</h2>
+{{result}}
+{{form}}
+</section>
+<section aria-labelledby="cj-train-h-live">
+<h2 class="cj-sec" id="cj-train-h-live">Live training</h2>
+<div class="cj-card">{{live}}</div>
+</section>
+</div>
+<section aria-labelledby="cj-train-h-runs">
+<h2 class="cj-sec" id="cj-train-h-runs">Past runs</h2>
+<div class="cj-card cj-train-tablecard">{{runs}}</div>
+</section>
+</div>
+<script src="/cj/live.js" defer></script>
+<script src="/train/train.js" defer></script>
