@@ -13,6 +13,8 @@ v2 (jobs and inputs, TRACKING_CONTRACT.md addendum):
   `DROPPED-*` rows -> `image_list` {file, sha256}, `counts_trained` (all rows, incl. excluded sessions) and
   `counts_listed` (rows whose image is in the registry). No data -> null ("unknown"), never 0.
 - `inputs` on label_version (base, edits), dataset (source), model (train_data, init_weights).
+- a dataset built from a label version (data_utils/dataset_from_lv.py: `provenance.json` in its folder, or a
+  registered record with source.kind label_version) keeps its own record and list; only frozen -> trained is derived.
 - one revise `job/1` per top-level review package (no `_partN`, no SANDBOX): progress = edit records with
   `edit.reviewed` true / n_images; status in_progress if any record has decisions or reviewed, else ready.
   A package's `applied` status never makes its job done (only an explicit set-status line does).
@@ -45,7 +47,7 @@ from pathlib import Path
 
 import ids
 import registry
-from validate import (EXCLUDED_SESSIONS, REPO, Scan, find_sibling, read_csv, read_datajs, read_json,
+from validate import (EXCLUDED_SESSIONS, REPO, Scan, find_sibling, lv_provenance, read_csv, read_datajs, read_json,
                       read_jsonl, sha256_file)
 from validate import config  # data_utils.config (validate puts the repo on sys.path)
 
@@ -619,6 +621,10 @@ class Importer:
         for did, d in sorted(s.datasets.items()):
             if not did:
                 continue
+            lv_rec = self.lv_dataset(did, d)
+            if lv_rec is not None:
+                self.add("dataset", **lv_rec)
+                continue
             exp = d["export"]
             er = self.exp_counts.get(exp, {})
             sf = s.exports.get(exp, {}).get("split_file")
@@ -654,6 +660,32 @@ class Importer:
                              "batch": cfg["batch"], "epochs": cfg["epochs"]},
                      status="finished" if r["model"] else "running",
                      note=None if r["local"] else "run folder not in the local cache")
+
+    def lv_dataset(self, did, d):
+        """A dataset built from a label version (data_utils/dataset_from_lv.py) keeps its own record: the registered
+        one when its source.kind is label_version, else <cache>/training outputs/<did>/provenance.json
+        `dataset_record`. Only the status is derived (frozen -> trained once it has runs), so an unchanged record
+        compares equal and nothing is appended; membership() is never called for it. Its list is the folder's
+        image_list.tsv, used only when it matches the record's image_list.sha256. -> record or None."""
+        if not hasattr(self, "_cur_datasets"):
+            self._cur_datasets = registry.current("dataset", self.root)
+        old = self._cur_datasets.get(did)
+        folder = self.cache / "training outputs" / did if self.cache else None
+        if old and (old.get("source") or {}).get("kind") == "label_version":
+            rec = dict(old)
+        else:
+            rec = lv_provenance(folder)
+        if rec is None:
+            return None
+        for k in ("schema", "logged", "recorded_by"):
+            rec.pop(k, None)
+        if d["runs"] and rec.get("status") == "frozen":
+            rec["status"] = "trained"
+        lst = rec.get("image_list") or {}
+        tsv = folder / "image_list.tsv" if folder else None
+        if tsv and tsv.is_file() and lst.get("file") and lst.get("sha256") == sha256_file(tsv):
+            self.lists[lst["file"]] = tsv.read_bytes().decode("utf-8")
+        return rec
 
     def run_json(self, dataset, rid):
         """Run fields from the run folder's own run.json (written by run_experiments.py), or None.

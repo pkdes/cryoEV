@@ -57,6 +57,23 @@ def read_json(path):
         return json.load(fh)
 
 
+LV_PROVENANCE = "provenance.json"     # written by data_utils/dataset_from_lv.py in the dataset folder
+
+
+def lv_provenance(folder):
+    """The `dataset_record` of <dataset folder>/provenance.json (dataset_provenance/1, data_utils/dataset_from_lv.py),
+    or None: a dataset built from a label version, not from a Roboflow export."""
+    p = Path(folder) / LV_PROVENANCE if folder else None
+    if not p or not p.is_file():
+        return None
+    try:
+        j = read_json(p)
+    except (ValueError, OSError):
+        return None
+    rec = j.get("dataset_record") if isinstance(j, dict) and j.get("schema") == "dataset_provenance/1" else None
+    return dict(rec) if isinstance(rec, dict) and rec.get("id") == Path(folder).name else None
+
+
 def read_csv(path):
     with open(path, newline="", encoding="utf-8-sig") as fh:
         return list(csv.DictReader(fh))
@@ -443,8 +460,9 @@ class Scan:
                 if d.is_dir():
                     self.datasets.setdefault(d.name, {"runs": [], "export": None})
         for did, d in sorted(self.datasets.items()):
-            probs = ["no label_version (trained from a Roboflow export)"]
-            exp = d["export"]
+            lv_rec = lv_provenance(self.cache / "training outputs" / did) if did and self.ok(self.cache) else None
+            probs = [] if lv_rec else ["no label_version (trained from a Roboflow export)"]
+            exp = d["export"] or (lv_rec or {}).get("export")
             if not exp:
                 probs.append("source export unknown")
             elif exp not in self.exports:
