@@ -3,6 +3,14 @@ CryoEV portal, P1 shell (admin only, tailnet): one address, one sign-in, one loo
 
     python -m portal.app --host 127.0.0.1 --port 8770 [--registry <dir>] [--review-upstream http://127.0.0.1:8766]
         [--review-package <dir with .review_key>] [--roster <path>] [--state-dir <path>] [--origin <url> ...]
+    python -m portal.app --auth access --port 8448 [--access-config <path>] [same options]
+
+Two sign-in modes, one app, never mixed on one port (--auth):
+  key     (default) key links -> session cookie (portal/auth.py); tailnet. A Cf-Access-Jwt-Assertion header is ignored.
+  access  Cloudflare Access (portal/access.py): ONLY the verified Cf-Access-Jwt-Assertion JWT counts; its email must
+          be one active roster person's. Binds 127.0.0.1 and [::1] (cloudflared in front). /login answers 404, session
+          cookies are ignored, admins are refused unless CJ_ACCESS_ADMIN=on, sandbox links are hidden, the bar gets a
+          Sign out link (/cdn-cgi/access/logout), and writes need Origin = https://<configured host>.
 
 Routes (everything except OPEN needs a session; see Gate):
   /                      home: platform status from <registry>/live/live.json + module cards from modules.json
@@ -32,11 +40,14 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import html
 import importlib.util
 import json
 import logging
+import os
 import re
+import socket
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -97,6 +108,11 @@ EXT_ICON = '<svg class="cj-ext" viewBox="0 0 24 24" aria-hidden="true"><path d="
 REVIEW_PORT = 8766
 PUBLIC_PORTS = {"", "443", "8443", "8445", "8446"}   # tailscale serve's https ports (links use https there)
 HOST_RE = re.compile(r"[A-Za-z0-9.-]{1,253}|\[[0-9A-Fa-f:.]{2,45}\]")
+AUTH_MODES = ("key", "access")       # key links (tailnet) | Cloudflare Access JWT (portal/access.py); never mixed
+KEY_PORT = 8770
+ACCESS_PORT = 8448
+ACCESS_SIGN_IN = ("This address is reached through the lab's Cloudflare sign-in. If you signed in and still see this, "
+                  "ask the admin to add your email to the portal.")
 log = logging.getLogger("cj")
 access_log = logging.getLogger("cj.access")
 
@@ -115,6 +131,9 @@ class Config:
     manifest: Path = MANIFEST
     pred_upstream: str = f"http://127.0.0.1:{PRED_PORT}"
     review_root: Path | None = None              # <CryoAI-laptop>/review: the prediction packages
+    auth: str = "key"                            # AUTH_MODES
+    access: object = None                        # portal.access.AccessConfig (access mode only)
+    access_admin: bool | None = None             # admins via Cloudflare; None = env CJ_ACCESS_ADMIN ("on" only)
 
 
 # ---------------------------------------------------------------- helpers
@@ -249,12 +268,43 @@ class Gate:
     """Outermost ASGI layer: security headers on every response, deny by default (only OPEN without a session),
     Origin check on unsafe methods, and the access log with `k` redacted (never cookies or keys)."""
 
-    def __init__(self, app: Starlette, auth: A.Auth, origins=(), rules=()):
+    def __init__(self, app: Starlette, auth: A.Auth, origins=(), rules=(), mode: str = "key", verifier=None,
+                 access_admin: bool = False):
+        if mode not in AUTH_MODES or (mode == "access") != (verifier is not None):
+            raise ValueError(f"auth mode {mode!r} needs {'a' if mode == 'access' else 'no'} JWT verifier")
         self.app = app
         self.auth = auth
         self.origins = tuple(origins)
         self.rules = list(rules)            # [(module PREFIX, roles)] from portal.modules.load, longest first
         self.routes = app.routes
+        self.mode = mode                    # "key": key-link session cookie only; "access": Cloudflare JWT only
+        self.verifier = verifier            # portal.access.Verifier in access mode
+        self.access_admin = bool(access_admin)
+
+    async def access_user(self, scope):
+        """Access mode: -> (roster person, None) or (None, the 403 page). Only the verified JWT counts; cookies and
+        key links are never looked at. Refusals are logged with a reason and Cf-Connecting-IP, never the token."""
+        from portal import access as AX
+        vals = [v for k, v in scope.get("headers", []) if k.lower() == AX.HEADER]
+        ip = AX.client_ip(header(scope, b"cf-connecting-ip"))
+        if len(vals) != 1:
+            claims, why = None, ("no Cf-Access-Jwt-Assertion header" if not vals else "repeated JWT header")
+        else:
+            claims, why = await self.verifier.verify(vals[0].decode("latin-1"))
+        if claims is None:
+            log.warning("access refused: %s (cf ip %s)", why, ip)
+            return None, page(403, "Not signed in", ACCESS_SIGN_IN)
+        email = claims["email"].strip().lower()
+        person = self.auth.roster.match_email(email)
+        if person is None:
+            log.warning("access refused: %r is not the email of one active person (cf ip %s)", email[:254], ip)
+            return None, page(403, "Not on the list", f"You signed in as {email}, but that email is not on the "
+                                                      "portal's list. Ask the admin to add your email.")
+        if person.get("role") == "admin" and not self.access_admin:
+            log.warning("access refused: %s is an admin and CJ_ACCESS_ADMIN is off (cf ip %s)", person.get("id"), ip)
+            return None, page(403, "Admin is available on Tailscale only", "Admin is available on Tailscale only. "
+                                                                            "Open the portal over Tailscale.")
+        return person, None
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -279,7 +329,9 @@ class Gate:
         try:
             path, method = scope["path"], scope["method"]
             deny = None
-            if path not in OPEN:
+            if path not in OPEN and self.mode == "access":
+                user, deny = await self.access_user(scope)
+            elif path not in OPEN:
                 cookies = cookie_parser(header(scope, b"cookie") or "")
                 state, user = self.auth.check(cookies.get(A.COOKIE))
                 if state == "none":
@@ -291,18 +343,30 @@ class Gate:
             if (deny is None and user is not None and not owner_checked(path)     # pred packages: owner check
                     and not M.allowed(self.rules, path, user.get("role"))):
                 deny = page(403, "Not allowed", "Your role can't open this part of the portal.")
-            if deny is None and method in UNSAFE and not origin_ok(scope, self.origins):
+            if deny is None and method in UNSAFE and not self.origin_allowed(scope):
                 deny = page(403, "Refused", "Cross-origin request refused.")
             if deny is not None:
                 return await deny(scope, receive, send_secure)
             scope["cj_user"] = user
+            scope["cj_auth"] = self.mode
             await self.app(scope, receive, send_secure)
         finally:
             qs = redact_query(scope.get("query_string", b"").decode("latin-1"))
             client = (scope.get("client") or ("-",))[0]
+            if self.mode == "access":
+                from portal import access as AX
+                client = f"{client} cf={AX.client_ip(header(scope, b'cf-connecting-ip'))}"
             who = (user or {}).get("id") or scope.get("cj_login") or "-"
             access_log.info('%s "%s %s%s" %s %s', client, scope.get("method"), scope.get("path"),
                             f"?{qs}" if qs else "", box["status"], who)
+
+    def origin_allowed(self, scope) -> bool:
+        """Key mode: origin_ok (this portal's own scheme://Host, or an --origin). Access mode: ONLY the configured
+        public origin https://<host> (and any --origin), whatever the Host header says."""
+        if self.mode == "access":
+            o = header(scope, b"origin")
+            return bool(o) and o in self.origins
+        return origin_ok(scope, self.origins)
 
 
 # ---------------------------------------------------------------- app
@@ -468,6 +532,8 @@ def render_home(request: Request, cfg: Config, user: dict, rules=None) -> str:
     for m in mods:
         if m.get("id") == "home" or not m.get("nav") or role not in (m.get("roles") or []):
             continue
+        if m.get("external") and getattr(cfg, "auth", "key") == "access":    # host:port links don't exist through the tunnel
+            continue
         mid = str(m.get("id", ""))
         name, desc = esc(m.get("name", "?")), esc(m.get("desc", ""))
         ico = f'<span class="cj-ico">{icon(m.get("icon"))}</span>'
@@ -629,7 +695,19 @@ def pred_mount(proxy: P.ReviewProxy, root: Path | None, title: str = "Review") -
 
 
 def create_app(cfg: Config) -> Gate:
-    """Raises ValueError when modules.json can't be read (the Gate's rules come from it): refuse to start."""
+    """Raises ValueError when modules.json can't be read (the Gate's rules come from it), or for an access mode
+    without its config: refuse to start."""
+    if cfg.auth not in AUTH_MODES:
+        raise ValueError(f"unknown auth mode {cfg.auth!r}")
+    access = cfg.auth == "access"
+    verifier, origins, access_admin = None, tuple(cfg.origins), False
+    if access:
+        if cfg.access is None:
+            raise ValueError("access mode needs the Cloudflare access config (team, aud, host)")
+        from portal import access as AX                 # PyJWT: imported in access mode only
+        verifier = AX.Verifier(cfg.access)
+        origins += (cfg.access.origin,)
+        access_admin = cfg.access_admin if cfg.access_admin is not None else AX.admin_allowed()
     auth = A.Auth(cfg.roster, cfg.state_dir)
     rules_box: list = []                            # the Gate's rules, filled below; home asks them, not the file
     proxy = P.ReviewProxy(cfg.review_upstream, cfg.review_key, cfg.review_timeout, cfg.max_body,
@@ -646,6 +724,8 @@ def create_app(cfg: Config) -> Gate:
         return M.Ctx.page(request, str(brand.get("name") or "CryoEV"), body, active="home")
 
     async def login(request: Request):
+        if access:                                      # key links are off on the Cloudflare port
+            return page(404, "Not found", "Key links don't work on this address. Sign in through Cloudflare.")
         key = request.query_params.get("k")
         if not key:
             state, _ = auth.check(request.cookies.get(A.COOKIE))
@@ -673,12 +753,16 @@ def create_app(cfg: Config) -> Gate:
 
     async def modules(request: Request):
         role = request.scope["cj_user"].get("role")                 # only the modules this role can see
-        mods = [m for m in manifest(cfg.manifest) if role in (m.get("roles") or [])]
+        mods = [m for m in manifest(cfg.manifest) if role in (m.get("roles") or [])
+                and not (access and m.get("external"))]            # no host:port links through the tunnel
         return no_store(JSONResponse({"schema": "cj_modules/1", "modules": mods}))
 
     async def me(request: Request):
         u = request.scope["cj_user"]
-        return no_store(JSONResponse({"id": u["id"], "role": u["role"]}))
+        out = {"id": u["id"], "role": u["role"]}
+        if access:
+            out["signout"] = "/cdn-cgi/access/logout"                 # Cloudflare's own sign-out (header.js)
+        return no_store(JSONResponse(out))
 
     def registry_file(rel) -> Path | None:
         return (cfg.registry / rel) if cfg.registry else None
@@ -752,7 +836,7 @@ def create_app(cfg: Config) -> Gate:
 
     star = Starlette(routes=routes, lifespan=lifespan)
     star.router.redirect_slashes = False
-    gate = Gate(star, auth, cfg.origins, rules)
+    gate = Gate(star, auth, origins, rules, mode=cfg.auth, verifier=verifier, access_admin=access_admin)
     gate.proxy = proxy
     gate.pred_proxy = pred_proxy
     gate.auth = auth
@@ -765,26 +849,58 @@ def default_review_root() -> Path | None:
 
 
 def build_config(args) -> Config:
+    """Raises ValueError (access.ConfigError, or PyJWT missing) when access mode can't get its config."""
     registry = args.registry if args.registry else repo_config.registry_root(required=False)
     pkg = args.review_package or registry_review_package(registry)
     key = read_review_key(pkg)
+    mode = getattr(args, "auth", None) or "key"
+    access = None
+    if mode == "access":
+        try:
+            from portal import access as AX
+        except ImportError as e:
+            raise ValueError(f"access mode needs PyJWT + cryptography (pip install -r requirements-portal.txt): "
+                             f"{e}") from None
+        access = AX.load_config(getattr(args, "access_config", None))
     return Config(registry=Path(registry) if registry else None, roster=args.roster or A.default_roster(),
                   state_dir=args.state_dir or A.default_state_dir(), review_upstream=args.review_upstream,
                   review_key=key, review_package=pkg, origins=tuple(args.origin or ()),
                   manifest=getattr(args, "modules", None) or MANIFEST,
                   pred_upstream=getattr(args, "pred_upstream", None) or f"http://127.0.0.1:{PRED_PORT}",
-                  review_root=getattr(args, "review_root", None) or default_review_root())
+                  review_root=getattr(args, "review_root", None) or default_review_root(),
+                  auth=mode, access=access)
 
 
 def startup_lines(cfg: Config, host: str, port: int) -> list:
     """What runs, printed at start (no secrets)."""
     n = len(A.Roster(cfg.roster).people())
-    return [
-        f"[cj] CryoEV portal on http://{host}:{port} (put tailscale serve :8446 in front)",
-        f"[cj] gate: deny by default; open without a session: {', '.join(sorted(OPEN))}; "
-        f"Origin check on {', '.join(sorted(UNSAFE))}",
+    access = cfg.auth == "access"
+    if access:
+        from portal import access as AX
+        admin = cfg.access_admin if cfg.access_admin is not None else AX.admin_allowed()
+        head = [
+            f"[cj] CryoEV portal, Cloudflare ACCESS mode, on http://127.0.0.1:{port} and http://[::1]:{port} "
+            f"(cloudflared in front; public origin {cfg.access.origin})",
+            "[cj] sign-in: ONLY a verified Cf-Access-Jwt-Assertion JWT (RS256, aud, iss "
+            f"{cfg.access.issuer}, exp/nbf leeway {AX.LEEWAY_S} s); key links (/login) 404, session cookies ignored",
+            f"[cj] keys: {cfg.access.certs_url} (worker thread, {AX.FETCH_TIMEOUT_S:g} s timeout, refetch at most "
+            f"once per {AX.REFETCH_S:g} s); no keys = everyone refused",
+            "[cj] who: the JWT email must be the email of exactly one active roster person; admins "
+            + ("ALLOWED (CJ_ACCESS_ADMIN=on)" if admin else "refused (CJ_ACCESS_ADMIN off: Admin is Tailscale only)"),
+            f"[cj] gate: deny by default; open without sign-in: {', '.join(sorted(OPEN))}; Origin on "
+            f"{', '.join(sorted(UNSAFE))} must be {cfg.access.origin}"
+            + (f" or {', '.join(cfg.origins)}" if cfg.origins else ""),
+        ]
+    else:
+        head = [
+            f"[cj] CryoEV portal on http://{host}:{port} (put tailscale serve :8446 in front)",
+            f"[cj] gate: deny by default; open without a session: {', '.join(sorted(OPEN))}; "
+            f"Origin check on {', '.join(sorted(UNSAFE))}",
+        ]
+    return head + [
         f"[cj] roster: {cfg.roster} ({n} people){'' if cfg.roster.is_file() else ' MISSING: nobody can sign in'}",
-        f"[cj] sessions: {cfg.state_dir / 'sessions.json'} (sha256 of session ids only)",
+        (f"[cj] sessions: {cfg.state_dir / 'sessions.json'} (sha256 of session ids only)" if not access else
+         "[cj] sessions: none (every request carries its own JWT)"),
         f"[cj] history: {cfg.registry or 'registry NOT FOUND'} (history.html + live/live.json only)",
         f"[cj] review: /review/ = shell, /review/app/ -> {cfg.review_upstream}; key from "
         + (f"{cfg.review_package}" if cfg.review_key else
@@ -794,15 +910,61 @@ def startup_lines(cfg: Config, host: str, port: int) -> list:
         + "; plug-in modules: their own ROLES. Restart the portal after changing roles in modules.json",
         f"[cj] prediction packages: /review/<pred_ps_...>/ = shell, /review/<id>/app/ -> {cfg.pred_upstream}/<id>/; "
         f"keys from {cfg.review_root or 'NOWHERE (no review root): every package answers 404'}; owner or admin only",
-        "[cj] sandbox: not proxied (link out to :8443)",
-        "[cj] logs: uvicorn access log off, proxy headers off; own access log with k= redacted",
+        "[cj] sandbox: not proxied (link out to :8443)" if not access else
+        "[cj] sandbox: hidden (its host:port links don't exist through the tunnel)",
+        "[cj] logs: uvicorn access log off, proxy headers off; own access log with k= redacted"
+        + ("; refusals logged with reason + Cf-Connecting-IP, never the token" if access else ""),
     ]
+
+
+def loopback_sockets(port: int) -> list:
+    """Listening sockets on 127.0.0.1 AND [::1] (never a wildcard address), for access mode: cloudflared may resolve
+    localhost either way. No IPv6 loopback on this machine = a warning and 127.0.0.1 only; any other bind error
+    (e.g. the port is taken) raises OSError after closing what was opened."""
+    out = []
+    no_v6 = {errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT, 10047, 10049}       # + the Windows WSAE* numbers
+    for fam, addr in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+        s = None
+        try:
+            if fam == socket.AF_INET6 and not socket.has_ipv6:
+                raise OSError(errno.EAFNOSUPPORT, "no IPv6")
+            s = socket.socket(fam, socket.SOCK_STREAM)
+            if fam == socket.AF_INET6:
+                s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            if os.name == "nt":                     # Windows SO_REUSEADDR would let another process share the port
+                s.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_EXCLUSIVEADDRUSE", socket.SO_REUSEADDR), 1)
+            else:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((addr, port))
+            s.setblocking(False)
+        except OSError as e:
+            if s is not None:
+                s.close()
+            if fam == socket.AF_INET6 and e.errno in no_v6:
+                print(f"[WARN] no IPv6 loopback here ({e}); listening on 127.0.0.1:{port} only", flush=True)
+                continue
+            for o in out:
+                o.close()
+            raise
+        out.append(s)
+    return out
+
+
+def serve_sockets(server, sockets) -> None:
+    """Run uvicorn on sockets we bound ourselves (a seam for the tests)."""
+    server.run(sockets=sockets)
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1; tailscale serve fronts it)")
-    ap.add_argument("--port", type=int, default=8770)
+    ap.add_argument("--auth", choices=AUTH_MODES, default="key",
+                    help="key = key links (tailnet, default); access = Cloudflare Access JWT only (portal/access.py)")
+    ap.add_argument("--access-config", type=Path, default=None,
+                    help="access mode config (default ~/.cryoev/cloudflare_access.json; env CJ_ACCESS_* override it)")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="bind address in key mode (default 127.0.0.1; tailscale serve fronts it). Access mode always "
+                         "binds 127.0.0.1 and [::1]")
+    ap.add_argument("--port", type=int, default=None, help=f"default {KEY_PORT} (key) / {ACCESS_PORT} (access)")
     ap.add_argument("--registry", type=Path, default=None, help="registry folder (default: data_utils.config)")
     ap.add_argument("--review-upstream", default=f"http://127.0.0.1:{REVIEW_PORT}")
     ap.add_argument("--review-package", type=Path, default=None,
@@ -818,20 +980,38 @@ def main(argv=None):
     ap.add_argument("--origin", action="append", default=None,
                     help="extra allowed Origin for PUT/POST/DELETE, e.g. https://<name>:8446 (repeatable)")
     args = ap.parse_args(argv)
+    access = args.auth == "access"
+    port = args.port or (ACCESS_PORT if access else KEY_PORT)
     import uvicorn
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s", stream=sys.stdout)
-    cfg = build_config(args)
-    if args.host in ("0.0.0.0", "::"):
+    try:
+        cfg = build_config(args)
+    except ValueError as e:                          # access mode without its config: no start
+        print(f"[ERROR] refusing to start: {e}", flush=True)
+        return 2
+    if not access and args.host in ("0.0.0.0", "::"):
         print("[WARN] listening on every interface; P1 expects 127.0.0.1 behind tailscale serve", flush=True)
+    if access and args.host != "127.0.0.1":
+        print(f"[WARN] --host {args.host} ignored: access mode binds 127.0.0.1 and [::1] only", flush=True)
     try:
         app = create_app(cfg)
     except ValueError as e:                          # e.g. modules.json unreadable: no guessed roles, no start
         print(f"[ERROR] refusing to start: {e}", flush=True)
         return 2
-    for line in startup_lines(cfg, args.host, args.port):
+    for line in startup_lines(cfg, args.host, port):
         print(line, flush=True)
-    uvicorn.run(app, host=args.host, port=args.port, access_log=False, proxy_headers=False,
-                server_header=False, log_level="info")
+    if not access:
+        uvicorn.run(app, host=args.host, port=port, access_log=False, proxy_headers=False,
+                    server_header=False, log_level="info")
+        return 0
+    try:
+        socks = loopback_sockets(port)
+    except OSError as e:
+        print(f"[ERROR] refusing to start: can't listen on loopback port {port}: {e}", flush=True)
+        return 2
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, access_log=False, proxy_headers=False,
+                                           server_header=False, log_level="info"))
+    serve_sockets(server, socks)
     return 0
 
 

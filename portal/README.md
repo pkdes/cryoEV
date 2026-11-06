@@ -21,7 +21,8 @@ Sandbox: NOT under the shell. It stays on its own origin (:8443); the nav links 
 | File | Holds |
 |---|---|
 | `app.py` | The app: the Gate (deny by default, roles, security headers, Origin check, access log), routes, home, the review shell, History serving |
-| `auth.py` | Key links, the private roster, sessions, roles; the `add-key` / `revoke` / `list` tool |
+| `auth.py` | Key links, the private roster (+ sign-in emails), sessions, roles; the `add-key` / `set-email` / `revoke` / `list` tool |
+| `access.py` | Cloudflare access mode: config, the team's signing keys, the JWT check (`--auth access`) |
 | `proxy.py` | The review proxy (httpx streaming), mounted at `/review/app/` |
 | `modules/` | The plug-in loader (`__init__.py`) and one file per module (`jobs.py`, ...) |
 | `modules.json` | Module manifest: `id, name, route, icon, roles, health, status, nav` (+ `external`, `desc`, `label`) |
@@ -195,11 +196,48 @@ data-cj-live-src="/history/live/live.json" data-cj-live-every="30">`. History ke
   the real review would upload sandbox edits. Fix that (a distinct package id or storage key) before ever moving it
   under the shell.
 
+## Cloudflare access mode (`--auth access`, port 8448)
+For lab members on the internet: a Cloudflare Tunnel (`cloudflared`) in front, guarded by Cloudflare Access
+(one-time PIN email login). The same app; the default `--auth key` (above) is unchanged, and the two never share a port.
+```
+python -m portal.app --auth access --port 8448 [--access-config <path>] [--state-dir ...] [--roster ...]
+```
+- **Config:** `%USERPROFILE%\.cryoev\cloudflare_access.json` = `{"team": "example-team", "aud": "<Access app AUD
+  tag>", "host": "portal.example.org"}` (outside the repo; `--access-config` picks another file). Env
+  `CJ_ACCESS_TEAM`, `CJ_ACCESS_AUD`, `CJ_ACCESS_HOST` override it. Missing or malformed = the portal refuses to start.
+- **Needs** `PyJWT` + `cryptography` (pinned in `requirements-portal.txt`); key mode never imports them.
+- **Binds** `127.0.0.1` and `[::1]` on the port (never a wildcard); `--host` is ignored. Point `cloudflared` at
+  `http://localhost:8448`.
+- **People:** the roster's `email` field. Set it on **Admin > People** (the add form, or Set / Change email per person)
+  or `python -m portal.auth set-email --id <id> --email <address>` (`add-key --email` too; re-keying keeps it).
+  Emails are lower-cased and unique among active people.
+
+**Security model**
+- Only the `Cf-Access-Jwt-Assertion` **header** counts (no cookie fallback; `CF_Authorization` and the key-link
+  session cookie are ignored). PyJWT, **RS256 only** (`alg=none`, HS256 and anything else refused before any key is
+  used); `aud` = the configured AUD, `iss` = `https://<team>.cloudflareaccess.com`, `exp` required, `exp`/`nbf` with
+  60 s leeway, an `email` claim required.
+- **Keys** from `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`, fetched in a worker thread with a 5 s
+  timeout, cached, refetched on an unknown `kid` (or after an hour) at most once per 60 s. No usable keys (never
+  fetched, fetch failing for 6 h, or a certs answer without RS256 keys) = **everyone refused**.
+- **Who:** the JWT email (lower-cased) must be the email of exactly one active roster person (`Roster.usable_access`:
+  not revoked, a known role, an email; no key needed). Revoking someone shuts them out at their next request even
+  with a valid JWT. Cloudflare's own policy is a first fence; the roster is the second.
+- **Admins** get 403 "Admin is available on Tailscale only" unless `CJ_ACCESS_ADMIN=on` (default off; only the word
+  `on`). Advanced and basic users get their roles as on the tailnet.
+- `/login?k=` answers 404; sandbox links are hidden (their host:port addresses don't exist through the tunnel); the
+  bar gets **Sign out** (`/cdn-cgi/access/logout`).
+- **CSRF:** writes need `Origin` = `https://<host>` exactly (or an `--origin`), whatever the Host header says. Admin's
+  form token and one-time messages are bound to the verified user id (key mode: the session cookie).
+- The review proxies still strip every client `X-CJ-*` and `Cf-*` header (so the JWT never goes upstream) and set
+  `X-CJ-User` to the verified user.
+- **Logs:** refusals with a reason and `Cf-Connecting-IP` (IP-shaped values only); the token is never logged. The
+  access log adds `cf=<ip>`.
+
 ## Pipelines groundwork (decided; no code yet)
 Future job outputs carry `step`, `step_version`, `params` and `kind`. There is no pipeline schema until a second real
 pipeline exists.
 
 ## Later
 - The review server checks a gateway-secret header and trusts `X-CJ-User`.
-- Cloudflare `access` mode on its own port and middleware (never mixed with key links on one port).
 - `live.json` has no backup field yet, so home shows "Last backup: Unknown".
