@@ -411,6 +411,26 @@ class Access(Base):
             self.assertNotIn("http://", page.split('<main class="cj-main">', 1)[1])
             self.assertNotIn("https://", page.split('<main class="cj-main">', 1)[1])
 
+    def test_interrupted_write_not_served(self):
+        ps_id = "ps_20261105_abc444"
+        d = make_set(self.root, ps_id)
+        self.addCleanup(shutil.rmtree, d, True)
+        compute_and_write(d)
+        names = ("per_sample.csv", "per_image.csv", "results.json", f"results_{ps_id}.zip")
+        for name in names:                                                     # control: complete
+            self.assertEqual(self.get(f"/results/{ps_id}/download/{name}", "owner")[0], 200, name)
+        self.assertIn(R.CSV_NOTE.replace("'", "&#x27;"), self.page(ps_id, "owner"))
+        done = (d / "results" / "results.json").stat().st_mtime
+        os.utime(d / "results" / "per_image.csv", (done + 60, done + 60))      # a CSV newer than results.json
+        for name in names:
+            with self.subTest(name=name):
+                st, h, body = self.get(f"/results/{ps_id}/download/{name}", "owner")
+                self.assertEqual(st, 404)
+                self.assertIsNone(T.hget(h, "content-disposition"))
+                self.assertIn(b"Results are being written or were interrupted: compute again.", body)
+        self.assertEqual(self.get(f"/results/{ps_id}/download/per_image.csv", "other")[0], 404)   # not theirs
+        self.assertNotIn(b"interrupted", self.get(f"/results/{ps_id}/download/per_image.csv", "other")[2])
+
     def test_downloads_are_attachments(self):
         rdir = self.root / NOEDIT / "results"
         for name, ctype in (("per_sample.csv", "text/csv"), ("per_image.csv", "text/csv"),
@@ -531,6 +551,53 @@ class Compute(Base):
         self.assertIn("ValueError: reviewed json images differ &lt;x&gt;", admin)
         self.assertNotIn("ValueError", owner)                             # detail for admins only
         self.assertNotIn(str(self.root), owner)
+
+    def test_edit_saved_during_compute_is_stale(self):
+        """An edit saved after the worker read the review but before results.json was written: the results are
+        newer than the edit file, yet they did not count it, so they are out of date. Then a clean recompute
+        (control: current) and a removed edit (out of date again)."""
+        ps_id = "ps_20261105_abc555"
+        d = make_set(self.root, ps_id)
+        self.addCleanup(shutil.rmtree, d, True)
+        pkg = self.review / f"pred_{ps_id}"
+        (pkg / "edits").mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, pkg, True)
+        for f in ("review_package.json", "prediction_package.json", "edits/0001.png.json"):
+            (pkg / f).write_text("{}", encoding="utf-8")
+            os.utime(pkg / f, (time.time() - 600, time.time() - 600))
+        self.addCleanup(setattr, R, "REVIEWED", R.REVIEWED)
+        R.REVIEWED = lambda pkg_dir, write=True: None          # the read itself (model predictions)
+        mid = pkg / "edits" / "0002.png.json"
+
+        def edit_meanwhile(ps_dir, reviewed):
+            time.sleep(0.05)
+            mid.write_text("{}", encoding="utf-8")             # saved while the computation runs
+            time.sleep(0.05)
+            return compute_and_write(ps_dir, reviewed)
+
+        self.patch_compute(edit_meanwhile)
+        self.assertEqual(self.post(f"/results/{ps_id}/compute", "owner")[0], 303)
+        self.wait_state(ps_id, ("ready", "error"))
+        self.assertTrue(self.status(ps_id)["has_results"])
+        self.assertGreater((d / "results" / "results.json").stat().st_mtime, mid.stat().st_mtime)  # mtime rule misses
+        rr = json.loads((d / "results" / R.REVIEW_READ).read_text(encoding="utf-8"))
+        self.assertEqual(rr["edits"], ["0001.png.json"])
+        self.assertLess(rr["read_at"], mid.stat().st_mtime)
+        page = self.page(ps_id, "owner")
+        self.assertIn(f"older than the latest review edits (last edit {R.hhmm(mid.stat().st_mtime)})", page)
+        self.assertTrue(self.status(ps_id)["out_of_date"])
+
+        self.patch_compute(lambda ps_dir, reviewed: compute_and_write(ps_dir, reviewed))   # control: recompute
+        self.assertEqual(self.post(f"/results/{ps_id}/compute", "owner")[0], 303)
+        self.wait_state(ps_id, ("ready", "error"))
+        self.assertNotIn('id="cj-results-stale"', self.page(ps_id, "owner"))
+        self.assertFalse(self.status(ps_id)["out_of_date"])
+
+        (pkg / "edits" / "0001.png.json").unlink()                # an edit removed after the computation
+        self.assertIn("These results count review edits that have since been removed.", self.page(ps_id, "owner"))
+        card = re.search(r'href="/results/%s/">(.*?)</a>' % ps_id, self.get("/results/", "owner")[2].decode(),
+                         re.S).group(1)
+        self.assertIn("Out of date", card)
 
     def test_failed_recompute_keeps_earlier_results(self):
         def boom(ps_dir, reviewed):

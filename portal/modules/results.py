@@ -18,9 +18,13 @@ Rules:
     columns appear only when an image was reviewed, and each image is marked reviewed / edited / model only.
   - Geometry multilayer % is the headline; the reviewer % is shown beside it with its base (n EVs on n images),
     flagged "small sample" under SMALL_BASE reviewer EVs.
-  - Out of date: when the review package (<review root>/pred_<ps_id>/edits/*.json, or its build) is newer than
-    results.json (written last by results.write_results, so its mtime = when the results were committed), a banner
-    says so and the index chip reads "Out of date". After a failed recompute the earlier results stay, labelled.
+  - Out of date: when the review package (<review root>/pred_<ps_id>/edits/*.json, or its build) changed after the
+    worker READ it (results/.review_read.json: read time + edit file names, written after results.json for those
+    exact results), or an edit file it counted is gone; without that record (a CLI run), after results.json was
+    written (it is written last). A banner says so and the index chip reads "Out of date". After a failed
+    recompute the earlier results stay, labelled.
+  - Downloads: a CSV newer than results.json (a write in progress or interrupted) is not served: 404 "compute
+    again".
   - Images of a refused sample are listed muted, "Not counted (sample refused)".
   - Links: the spot-check subset at /predict/<ps_id>/; "Review these images" at /review/pred_<ps_id>/ when the
     package exists (the shell checks the owner there).
@@ -105,6 +109,17 @@ def package_dir(cfg, ps_id: str) -> Path | None:
     return pkg if pkg is not None and (pkg / "review_package.json").is_file() else None
 
 
+REVIEW_READ = ".review_read.json"     # <ps>/results/: when the worker read the review, and which edit files existed
+
+
+def edit_names(cfg, ps_id: str) -> list:
+    pkg = package_dir(cfg, ps_id)
+    try:
+        return sorted(p.name for p in (pkg / "edits").glob("*.json")) if pkg else []
+    except OSError:
+        return []
+
+
 def review_change(cfg, ps_id: str) -> tuple:
     """(newest mtime of the package's edits/*.json or its build, 'edit' | 'build') or (None, None)."""
     pkg = package_dir(cfg, ps_id)
@@ -124,15 +139,42 @@ def review_change(cfg, ps_id: str) -> tuple:
     return best, kind
 
 
+def review_read(ps: dict, res_computed) -> dict | None:
+    """The worker's record of the review it counted, when it belongs to these results (same `computed`)."""
+    doc = _read_json(ps["dir"] / "results" / REVIEW_READ)
+    if (isinstance(doc, dict) and doc.get("computed") == res_computed and isinstance(doc.get("read_at"), (int, float))
+            and isinstance(doc.get("edits"), list)):
+        return doc
+    return None
+
+
 def stale_info(cfg, ps: dict) -> dict | None:
-    """{"at": mtime, "kind": "edit" | "build"} when the review package changed after results.json was written
-    (results.json is written last, so its mtime is when the results were committed); else None."""
+    """{"at": time, "kind": "edit" | "build" | "removed"} when the review changed after the results counted it; else
+    None. The reference time is when the worker READ the review (results/.review_read.json, written by the portal's
+    worker for these exact results), so an edit saved while the computation ran is caught; without that record (a CLI
+    run), results.json's mtime (it is written last). With the record, an edit file that is gone = "removed"."""
+    rdir = ps["dir"] / "results"
     try:
-        done = (ps["dir"] / "results" / "results.json").stat().st_mtime
+        ref = (rdir / "results.json").stat().st_mtime
     except OSError:
         return None
+    res = _read_json(rdir / "results.json")
+    rr = review_read(ps, res.get("computed") if isinstance(res, dict) else None)
+    if rr:
+        ref = float(rr["read_at"])
     at, kind = review_change(cfg, ps["id"])
-    return {"at": at, "kind": kind} if at is not None and at > done else None
+    if at is not None and at > ref:
+        return {"at": at, "kind": kind}
+    if rr and set(rr["edits"]) - set(edit_names(cfg, ps["id"])):
+        return {"at": None, "kind": "removed"}
+    return None
+
+
+def _write_review_read(ps: dict, computed, read_at: float, edits: list) -> None:
+    p = ps["dir"] / "results" / REVIEW_READ
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps({"computed": computed, "read_at": read_at, "edits": edits}), encoding="utf-8")
+    tmp.replace(p)
 
 
 def _read_json(p: Path):
@@ -205,8 +247,11 @@ def _worker(cfg, ps: dict, key: str):
         with _slot:
             with _jobs_lock:
                 _jobs[key]["state"] = "running"
+            read_at, edits = time.time(), edit_names(cfg, ps["id"])     # taken BEFORE the read: conservative
             reviewed = reviewed_source(cfg, ps["id"])
-            _compute_fn()(ps["dir"], reviewed)
+            res, _ = _compute_fn()(ps["dir"], reviewed)
+            # results.json is committed; record which review it counted (stale_info compares edits with read_at)
+            _write_review_read(ps, res.get("computed"), read_at, edits)
         with _jobs_lock:
             _jobs.pop(key, None)
     except Exception as e:  # shown on the page: plain words for everyone, the detail for admins
@@ -535,8 +580,25 @@ def downloads(ps_id: str) -> str:
             f'{esc("Recommended: the tables, all numbers and a README of how they were made.")}</span></p>'
             '<ul class="cj-results-dl">' + "".join(
                 f'<li><a href="{base}{esc(f)}" download>{esc(t)}</a></li>' for f, t in items) + "</ul>"
-            f'<p class="cj-mut cj-results-note">{esc("Single CSV files start with # lines saying how they were made.")}'
-            "</p>")
+            f'<p class="cj-mut cj-results-note">'
+            f'{esc(CSV_NOTE)}</p>')
+
+
+CSV_NOTE = "CSV files start with # lines describing how they were made (pandas: comment='#')."
+
+
+INCOMPLETE = "Results are being written or were interrupted: compute again."
+
+
+def incomplete(ps: dict) -> bool:
+    """A CSV newer than results.json (which is written last) = a write in progress or one that stopped halfway."""
+    rdir = ps["dir"] / "results"
+    try:
+        done = (rdir / "results.json").stat().st_mtime
+        return any((rdir / f).is_file() and (rdir / f).stat().st_mtime > done
+                   for f in FILES if f.endswith(".csv"))
+    except OSError:
+        return True
 
 
 def csv_header(res: dict, ps: dict) -> bytes:
@@ -595,9 +657,12 @@ def render_set(cfg, ps: dict, user: dict) -> str:
                    + "</div>")
     stale = stale_info(cfg, ps) if res is not None else None
     if stale:
-        at = hhmm(stale["at"])
-        head = (f"These results are older than the latest review edits (last edit {at})." if stale["kind"] == "edit"
-                else f"These results are older than the review package (built {at}).")
+        if stale["kind"] == "removed":
+            head = "These results count review edits that have since been removed."
+        elif stale["kind"] == "edit":
+            head = f"These results are older than the latest review edits (last edit {hhmm(stale['at'])})."
+        else:
+            head = f"These results are older than the review package (built {hhmm(stale['at'])})."
         out.append(f'<div class="cj-results-banner cj-results-b-warn" role="alert" id="cj-results-stale">'
                    f'<p><b>{esc(head)}</b> {esc("Compute again.")}</p></div>')
     if problem:
@@ -818,6 +883,11 @@ def routes(ctx) -> list:
         res, _ = read_results(ps)               # results.json is written last: without it nothing is complete
         if res is None:
             return not_found(request)
+        if (name in FILES or name == f"results_{ps['id']}.zip") and incomplete(ps):
+            r = ctx.page(request, "Results incomplete", f'<h1>Results incomplete</h1><p>{esc(INCOMPLETE)}</p>'
+                         f'<p><a href="/results/{esc(ps["id"])}/">Back to the results</a></p>', active="results")
+            r.status_code = 404
+            return r
         if name in FILES:
             p = rdir / name
             if not p.is_file():
