@@ -28,6 +28,8 @@ from pathlib import Path
 import jwt                      # PyJWT (requirements-portal.txt); access mode only
 from jwt.algorithms import RSAAlgorithm
 
+from portal import access_config
+
 HEADER = b"cf-access-jwt-assertion"
 LOGOUT = "/cdn-cgi/access/logout"
 ALG = "RS256"
@@ -50,7 +52,7 @@ class ConfigError(ValueError):
 
 
 def default_config_path() -> Path:
-    return Path.home() / ".cryoev" / "cloudflare_access.json"
+    return access_config.default_config_path()
 
 
 @dataclass(frozen=True)
@@ -75,21 +77,8 @@ class AccessConfig:
 def load_config(path: Path | None = None, env=None) -> AccessConfig:
     """The file (default ~/.cryoev/cloudflare_access.json), then env CJ_ACCESS_TEAM / _AUD / _HOST on top.
     Raises ConfigError (with what is missing) when a value is missing or malformed."""
-    env = os.environ if env is None else env
+    vals, problem = access_config.read_config(path, env)
     path = Path(path) if path else default_config_path()
-    doc, problem = {}, None
-    try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(doc, dict):
-            doc, problem = {}, f"{path} is not a JSON object"
-    except FileNotFoundError:
-        problem = f"{path} not found"
-    except (OSError, ValueError) as e:
-        problem = f"{path} not readable ({type(e).__name__})"
-    vals = {}
-    for k in ("team", "aud", "host"):
-        v = env.get(f"CJ_ACCESS_{k.upper()}") or doc.get(k)
-        vals[k] = v.strip() if isinstance(v, str) else ""
     vals["team"] = vals["team"].lower()
     vals["host"] = vals["host"].lower()
     missing = [k for k, v in vals.items() if not v]

@@ -204,3 +204,14 @@ a.cj-mod:hover,a.cj-mod:focus-visible{border-color:var(--acc);box-shadow:0 1px 2
 .cj-lv-snap .cj-lv-ep small{font-size:.9rem;color:var(--mut);font-weight:500}
 .cj-lv-snap .s{font-size:.82rem;color:var(--mut);overflow-wrap:anywhere}
 .cj-lv-snap .s b{color:var(--fg);font-weight:600}
+
+/* My reviews (/reviews/) */
+.cj-reviews-toggle{display:flex;gap:6px;margin:8px 0}
+.cj-reviews-toggle a{padding:4px 12px;border:1px solid var(--line);border-radius:999px;text-decoration:none;color:var(--fg)}
+.cj-reviews-toggle a.cj-reviews-on{background:var(--acc);border-color:var(--acc);color:#fff}
+.cj-reviews-wrap{overflow-x:auto}
+.cj-reviews-tab{width:100%;border-collapse:collapse;font-size:.9rem}
+.cj-reviews-tab th,.cj-reviews-tab td{border-top:1px solid var(--line);padding:8px 6px;text-align:left;vertical-align:top}
+.cj-reviews-tab th{color:var(--mut);font-weight:500;border-top:0}
+.cj-reviews-open{display:inline-block;padding:4px 12px;border:1px solid var(--acc);border-radius:6px;text-decoration:none}
+.cj-reviews-empty{padding:16px}
