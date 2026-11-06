@@ -9,7 +9,7 @@ skip the user's own cards), and its drafts sit under a per-user localStorage key
 Controls with known answers: the multi server reached directly with ?k= (no portal) still shows the prompt and saves
 the page's own name; a request to it without the key is refused, header or not.
 
-Temp roster, temp review root (packages built from the CJ golden prediction set); never the live review folder.
+Temp roster, temp review root (packages built from the CryoEV golden prediction set); never the live review folder.
 
   python -m unittest discover -s portal/tests -v
 """

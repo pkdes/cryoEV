@@ -15,7 +15,7 @@ review_server.py is wrapped, not changed; the real review (review_server.py on :
 - Errors: an unknown id and a wrong key both get 403, so ids can't be enumerated; a malformed id or a path with
   .., \\ or : -> 400; / -> 404 (no listing). /<id> (with its key) redirects to /<id>/ so the page's relative URLs
   (data.js, images/, api/...) stay inside the package.
-- Portal identity (BUILD_CONTRACTS.md section 8): the CJ portal proxies /review/<id>/app/... here with the package's key
+- Portal identity (BUILD_CONTRACTS.md section 8): the CryoEV portal proxies /review/<id>/app/... here with the package's key
   as X-Review-Key and the signed-in user's id as X-CJ-User (portal/proxy.py drops any client-sent X-CJ-* first). That
   id is trusted ONLY when the same request came from loopback (the portal runs on this PC) AND brought this package's
   key in X-Review-Key (no ?k=, no cookie). Then:
@@ -295,7 +295,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", type=Path, default=None, help="Review root (default: <CryoAI-laptop>/review)")
     ap.add_argument("--host", default="127.0.0.1",
-                    help="Bind address (default 127.0.0.1). Keep it local: phones reach packages through the CJ portal, "
+                    help="Bind address (default 127.0.0.1). Keep it local: phones reach packages through the CryoEV portal, "
                          "and a portal identity is trusted only from loopback, so don't expose this port (no "
                          "Tailscale IP, no `tailscale serve`, whose requests also arrive from loopback)")
     ap.add_argument("--port", type=int, default=PORT)
@@ -313,9 +313,9 @@ def main(argv=None):
         print(f"[OK]   http://{a.host}:{srv.server_address[1]}/{i}/?k=<key in {root / i / '.review_key'}>", flush=True)
     if a.host in ("0.0.0.0", "::"):
         print("[WARN] Listening on every interface, LAN included. Keep --host 127.0.0.1: reach packages through "
-              "the CJ portal.", flush=True)
+              "the CryoEV portal.", flush=True)
     elif a.host not in LOCAL_CLIENTS and a.host != "localhost":
-        print("[WARN] Not bound to loopback. Keep --host 127.0.0.1: reach packages through the CJ portal.", flush=True)
+        print("[WARN] Not bound to loopback. Keep --host 127.0.0.1: reach packages through the CryoEV portal.", flush=True)
     srv.serve_forever()
 
 

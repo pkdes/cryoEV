@@ -4,7 +4,7 @@ multi-package review server at <pred upstream>/<pkg_id>/..., with that package's
 (ctx.can_see: admins all, others their own; unknown and not-yours give one identical 404), every proxy rule, ids
 outside ^pred_ps_<8 digits>_<6 hex>$ -> 404 with nothing upstream; the real /review stays admin only.
 
-Packages are built by annotation/prediction_package.py from the CJ golden prediction set into a temp review root.
+Packages are built by annotation/prediction_package.py from the CryoEV golden prediction set into a temp review root.
 A recording dummy upstream (cjtest.Upstream), and annotation/multi_review_server.py itself as the control.
 
   python -m unittest discover -s portal/tests -v

@@ -1,5 +1,5 @@
 """
-Auth tests for the CJ portal (portal/auth.py + the Gate in portal/app.py), against the app under a real uvicorn.
+Auth tests for the CryoEV portal (portal/auth.py + the Gate in portal/app.py), against the app under a real uvicorn.
 Temp roster and state dir only.
 
   python -m unittest discover -s portal/tests -v

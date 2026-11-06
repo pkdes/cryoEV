@@ -1,5 +1,5 @@
 """
-Results module (CJ portal): EV counts, sizes and multilayer % for one prediction set, in plain words, phone first.
+Results module (CryoEV portal): EV counts, sizes and multilayer % for one prediction set, in plain words, phone first.
 Reads the cached <CryoAI-laptop>/predict/<ps_id>/results/results.json (BUILD_CONTRACTS.md section 4, results/1);
 when it is missing, a button computes it in a worker thread (results.compute_and_write) and the page polls.
 
@@ -640,7 +640,7 @@ def csv_header(res: dict, ps: dict) -> bytes:
     """The provenance comment lines put on top of a standalone CSV download (the file on disk is unchanged)."""
     imgs = res["images"].values()
     rule = res.get("rule") or {}
-    lines = [f"# CJ results for prediction set {ps['id']}",
+    lines = [f"# CryoEV results for prediction set {ps['id']}",
              f"# model={res.get('model')}, computed={res.get('computed')}, "
              f"reviewed={sum(1 for i in imgs if i.get('reviewed'))}/{len(res['images'])} images, "
              f"edited (not reviewed)={sum(1 for i in imgs if i.get('edited') and not i.get('reviewed'))}",
@@ -801,7 +801,7 @@ def page_body(content: str) -> str:
 
 
 def readme(res: dict, ps: dict, user: dict) -> str:
-    lines = [f"CJ results for prediction set {ps['id']}", ""]
+    lines = [f"CryoEV results for prediction set {ps['id']}", ""]
     lines += [f"{k}: {v}" for k, v in provenance(res, ps).items()]
     lines += [f"Downloaded: {datetime.now().astimezone().isoformat(timespec='seconds')} by {user.get('id')}", "",
               "Files",

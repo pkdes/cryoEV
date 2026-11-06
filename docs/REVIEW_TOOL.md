@@ -244,7 +244,7 @@ Known limit: older items without a decision key or `t` still follow the whole-li
 Repeat at any time; each new lv supersedes the last. Unreviewed images keep their base labels until someone
 reviews them. Rules: [LABEL_CHANGES.md](LABEL_CHANGES.md#apply-rule).
 
-## Prediction packages (CJ portal)
+## Prediction packages (CryoEV portal)
 A user's prediction set (`<CryoAI-laptop>/predict/<ps>/`) becomes a package `review/pred_<ps>/` for this same tool. The contract is in BUILD_CONTRACTS.md, section 3.
 ```bash
 python -m annotation.prediction_package build --ps <CryoAI-laptop>/predict/<ps> [--review-root <dir>] [--owner <id>]

@@ -1,5 +1,5 @@
 """
-The review proxy: the CJ portal's only proxied module. httpx streaming both ways.
+The review proxy: the CryoEV portal's only proxied module. httpx streaming both ways.
 
     <prefix>/<path>?<query>  ->  <upstream>/<path>?<query without k>
 

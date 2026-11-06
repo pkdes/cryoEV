@@ -53,7 +53,7 @@ class Manifests(unittest.TestCase):
 
     def test_brand_json(self):
         brand = json.loads((PORTAL / "static" / "brand.json").read_text(encoding="utf-8"))
-        self.assertEqual((brand["name"], brand["wordmark"]), ("CJ", "CJ"))
+        self.assertEqual((brand["name"], brand["wordmark"]), ("CryoEV", "CryoEV"))
         self.assertIn("tagline", brand)
 
     def test_css_tokens(self):

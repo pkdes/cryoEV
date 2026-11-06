@@ -1,5 +1,5 @@
 """
-Shared helpers for the CJ portal tests: a temp roster / state dir / registry (never the real ones), the portal
+Shared helpers for the CryoEV portal tests: a temp roster / state dir / registry (never the real ones), the portal
 under a real uvicorn in a thread, a dummy upstream that records what reaches it, and raw HTTP helpers.
 """
 from __future__ import annotations

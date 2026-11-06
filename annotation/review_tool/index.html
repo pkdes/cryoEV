@@ -312,7 +312,7 @@ const clone = o => JSON.parse(JSON.stringify(o));
 const esc = v => String(v == null ? "" : v).replace(/[&<>"']/g, ch => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"})[ch]);
 // The server accepts who = [\w .-]{0,40} (review_server.valid_who); a typed name must fit, or every save would get a 400.
 const WHO_OK = v => /^[\p{L}\p{N}_ .\-]{1,40}$/u.test(v);
-// Portal sign-in: multi_review_server.py, reached through the CJ portal, puts window.REVIEW_IDENTITY = {who, locked: true}
+// Portal sign-in: multi_review_server.py, reached through the CryoEV portal, puts window.REVIEW_IDENTITY = {who, locked: true}
 // in this page. The reviewer is then that signed-in user: never asked, not changeable here, not stored (the server
 // stamps every save with it anyway). Without it (the real review, the sandbox, a file), everything is as before.
 const LOCKED_WHO = (r => r && r.locked === true && typeof r.who === "string" && WHO_OK(r.who) ? r.who : "")(window.REVIEW_IDENTITY);

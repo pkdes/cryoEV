@@ -1,5 +1,5 @@
 """
-Predict module (CJ portal, journey J1): a person runs the production model on their tiles and gets a prediction set
+Predict module (CryoEV portal, journey J1): a person runs the production model on their tiles and gets a prediction set
 (BUILD_CONTRACTS.md section 2) to review and count. Raw cryo-EM montages can be converted to tiles first.
 
     GET  /predict/                        My analyses (admin: everyone's), raw conversions, "New analysis"

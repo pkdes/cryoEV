@@ -1,5 +1,5 @@
 """
-Train module (CJ portal): a new training job, the live training run, and past runs. Roles: admin, advanced.
+Train module (CryoEV portal): a new training job, the live training run, and past runs. Roles: admin, advanced.
 
     GET  /train/                 the page: New training job (form), Live training, Past runs
     GET  /train/train.js         the form's helper (placeholders follow the preset); the page works without it

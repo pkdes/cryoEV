@@ -1,5 +1,5 @@
 """
-Jobs module (CJ portal): what is running, waiting, stuck and done, from two sources:
+Jobs module (CryoEV portal): what is running, waiting, stuck and done, from two sources:
   - the GPU computers' queues: <registry>/live/live.json, written by jobs/monitor.py (train jobs; predict jobs carry
     kind "predict" + n_done / n_total; queued jobs may carry ready_at, the time they became READY);
   - the registry's jobs: registry.current("job") (review / annotation / check jobs, and any train / predict job

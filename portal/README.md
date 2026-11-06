@@ -1,11 +1,11 @@
-# CJ portal (shell)
+# CryoEV portal (shell)
 
 One address, one sign-in, one look, for the laptop's own tools: a home page, the review inside the shell, plug-in
 modules (Jobs, and later Predict, Results, ...) and History as a hidden "classic" page. Tailnet only. Nothing about
 today's links (443 / 8443 / 8445) changes.
 
 ```
-phone/laptop ── tailnet ── tailscale serve :8446 ──> 127.0.0.1:8770  CJ app (Starlette + uvicorn)
+phone/laptop ── tailnet ── tailscale serve :8446 ──> 127.0.0.1:8770  CryoEV app (Starlette + uvicorn)
                                                       ├─ /              home: status (live.json, admin) + module cards
                                                       ├─ /cj/*          cj.css, header.js, live.js, review.js, brand.json,
                                                       │                 modules.json (filtered by role), me.json
@@ -30,7 +30,7 @@ Sandbox: NOT under the shell. It stays on its own origin (:8443); the nav links 
 | `static/live.js` | `CJLive`: the History Live-tab charts as a small library (see below) |
 | `static/review.js` | The review shell: mirrors the frame's URL into the address bar; links out of the tool open in the window |
 | `static/predict.js` | Predict's script (served by the module as `/predict/predict.js`): status refresh, form counts, one-file-per-request uploads |
-| `static/brand.json` | `{"name": "CJ", ...}`: renaming the portal = editing this one file |
+| `static/brand.json` | `{"name": "CryoEV", ...}`: renaming the portal = editing this one file |
 | `templates/base.html` | The page every shell page uses (`{{title}} {{active}} {{body}}`; the bar placeholder) |
 | `templates/home.html` | Home's body (plain `{{name}}` placeholders, filled by `app.render_home`) |
 | `tests/` | `python -m unittest discover -s portal/tests` |

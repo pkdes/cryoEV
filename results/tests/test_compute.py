@@ -1,4 +1,4 @@
-"""results.compute against the CJ golden fixtures (BUILD_CONTRACTS.md section 6) plus controls.
+"""results.compute against the CryoEV golden fixtures (BUILD_CONTRACTS.md section 6) plus controls.
 
     python -m unittest discover -s results/tests        (from the repo root)
 

@@ -1,4 +1,4 @@
-// CJ shell top bar: wordmark (grid-atlas mark + brand.json's wordmark), nav from /cj/modules.json filtered by the
+// CryoEV shell top bar: wordmark (grid-atlas mark + brand.json's wordmark), nav from /cj/modules.json filtered by the
 // user's role (/cj/me.json), user chip. On every page that includes this file: the shell's own pages (base.html has
 // an empty #cj-bar placeholder of the bar's final height) and history.html as the portal serves it (the bar is
 // inserted at the top of <body>; cj.css holds its height free until then, and hides History's own #srv bar).
@@ -51,7 +51,7 @@
   function mark(brand) {
     var a = el('a', 'cj-mark');
     a.href = '/';
-    var name = brand ? (brand.wordmark || brand.name || 'CJ') : '';   // no brand yet: the mark alone (no flash)
+    var name = brand ? (brand.wordmark || brand.name || 'CryoEV') : '';   // no brand yet: the mark alone (no flash)
     a.setAttribute('aria-label', (name ? name + ' ' : '') + 'home');
     if (brand && brand.tagline) a.title = brand.tagline;
     var s = svg('svg', {viewBox: '0 0 21 21', 'aria-hidden': 'true', focusable: 'false'});

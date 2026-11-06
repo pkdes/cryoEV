@@ -1,5 +1,5 @@
 """
-Admin module (CJ portal, admin only): people and their key links, health at a glance, and the audit log.
+Admin module (CryoEV portal, admin only): people and their key links, health at a glance, and the audit log.
 
     GET  /admin/                 People: everyone on the roster (id, role, active / revoked, added; never keys or
                                  hashes), the add form, a role form and a "Revoke..." link per person

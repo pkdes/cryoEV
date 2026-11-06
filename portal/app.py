@@ -1,5 +1,5 @@
 """
-CJ portal, P1 shell (admin only, tailnet): one address, one sign-in, one look. Spec: P1_SHELL_SPEC.md (private).
+CryoEV portal, P1 shell (admin only, tailnet): one address, one sign-in, one look. Spec: P1_SHELL_SPEC.md (private).
 
     python -m portal.app --host 127.0.0.1 --port 8770 [--registry <dir>] [--review-upstream http://127.0.0.1:8766]
         [--review-package <dir with .review_key>] [--roster <path>] [--state-dir <path>] [--origin <url> ...]
@@ -384,7 +384,7 @@ def icon(name) -> str:
 def render_home(request: Request, cfg: Config, user: dict, rules=None) -> str:
     """Home's body (goes into base.html): status cards for roles the Gate lets read the live snapshot (History's
     rules), module cards from modules.json for the user's role, and the Classic history link."""
-    brand = read_json(HERE / "static" / "brand.json") or {"name": "CJ"}
+    brand = read_json(HERE / "static" / "brand.json") or {"name": "CryoEV"}
     mods = manifest(cfg.manifest)
     role = user.get("role")
     esc = html.escape
@@ -493,7 +493,7 @@ def render_home(request: Request, cfg: Config, user: dict, rules=None) -> str:
                   f'Classic history</a><span>registry history, queue and the Live tab</span></footer>')
 
     tpl = (HERE / "templates" / "home.html").read_text(encoding="utf-8")
-    return fill(tpl, {"heading": esc(brand.get("name", "CJ")), "tagline": esc(brand.get("tagline", "")),
+    return fill(tpl, {"heading": esc(brand.get("name", "CryoEV")), "tagline": esc(brand.get("tagline", "")),
                       "user": esc(user.get("id", "")), "status": status, "module_cards": "".join(cards),
                       "footer": footer})
 
@@ -643,7 +643,7 @@ def create_app(cfg: Config) -> Gate:
     async def home(request: Request):
         brand = read_json(HERE / "static" / "brand.json") or {}
         body = render_home(request, cfg, request.scope["cj_user"], rules_box)
-        return M.Ctx.page(request, str(brand.get("name") or "CJ"), body, active="home")
+        return M.Ctx.page(request, str(brand.get("name") or "CryoEV"), body, active="home")
 
     async def login(request: Request):
         key = request.query_params.get("k")
@@ -780,7 +780,7 @@ def startup_lines(cfg: Config, host: str, port: int) -> list:
     """What runs, printed at start (no secrets)."""
     n = len(A.Roster(cfg.roster).people())
     return [
-        f"[cj] CJ portal on http://{host}:{port} (put tailscale serve :8446 in front)",
+        f"[cj] CryoEV portal on http://{host}:{port} (put tailscale serve :8446 in front)",
         f"[cj] gate: deny by default; open without a session: {', '.join(sorted(OPEN))}; "
         f"Origin check on {', '.join(sorted(UNSAFE))}",
         f"[cj] roster: {cfg.roster} ({n} people){'' if cfg.roster.is_file() else ' MISSING: nobody can sign in'}",

@@ -1,4 +1,4 @@
-# CJ portal (portal/, P1 shell). Exact pins, never auto-upgraded:
+# CryoEV portal (portal/, P1 shell). Exact pins, never auto-upgraded:
 #   python -m pip install -r requirements-portal.txt
 # Templates are plain strings (no jinja2). portal/tests/test_pages.py also uses playwright when installed.
 starlette==1.9.0

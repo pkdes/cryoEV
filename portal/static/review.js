@@ -1,4 +1,4 @@
-// The review shell (/review/): the review tool runs in a same-origin iframe at <base>app/ under the CJ bar.
+// The review shell (/review/): the review tool runs in a same-origin iframe at <base>app/ under the CryoEV bar.
 // - The server put the shell's query (?img=, ?mode=, ?who=; never k) into the iframe's src.
 // - Every URL change inside the frame (load, pushState, replaceState, popstate, hashchange) is mirrored to this
 //   window's address with history.replaceState: <base>app/?x#y -> <base>?x#y, so reload, bookmarks and Back work.

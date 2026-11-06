@@ -1,5 +1,5 @@
 """
-Tests for annotation/prediction_package.py and annotation/multi_review_server.py against the CJ golden fixtures
+Tests for annotation/prediction_package.py and annotation/multi_review_server.py against the CryoEV golden fixtures
 (tests/fixtures/cj_golden, BUILD_CONTRACTS.md sections 3 and 6). Packages are built in temp folders; the fixtures are
 only read (checked byte-identical at the end).
 

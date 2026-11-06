@@ -1,5 +1,5 @@
 """
-CJ portal sign-in, tailnet mode (P1): key links -> session cookie. Deny by default; see portal/README.md.
+CryoEV portal sign-in, tailnet mode (P1): key links -> session cookie. Deny by default; see portal/README.md.
 
     python -m portal.auth add-key --id <id> --role admin [--roster <path>] [--base <portal address>]
     python -m portal.auth revoke --id <id> [--roster <path>]

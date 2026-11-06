@@ -1,4 +1,4 @@
-/* CJ shell: design tokens, the top bar, home and the review frame. Design direction A ("Vitreous"), plus B's
+/* CryoEV shell: design tokens, the top bar, home and the review frame. Design direction A ("Vitreous"), plus B's
    --hot/--hot2 for the Review card's "eVHarmony" label only.
    - Token NAMES are frozen (BUILD_CONTRACTS.md section 1): --bg --fg --mut --card --line --acc --accbg --prod --prodbg
      --warn --warnbg --dim. New tokens may be added; none is ever renamed or removed.

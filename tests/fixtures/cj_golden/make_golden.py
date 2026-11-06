@@ -1,5 +1,5 @@
 """
-Golden fixtures for the CJ basic loop (BUILD_CONTRACTS.md section 6). Re-run to regenerate; never edit outputs by hand.
+Golden fixtures for the CryoEV basic loop (BUILD_CONTRACTS.md section 6). Re-run to regenerate; never edit outputs by hand.
 
     python tests/fixtures/cj_golden/make_golden.py
 

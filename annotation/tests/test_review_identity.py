@@ -6,7 +6,7 @@ window.REVIEW_IDENTITY (no name picker) and every saved decision / claim carries
 Controls with known answers: the same server without the header, and the classic review_server.py (the real review
 and the sandbox) with the header, serve index.html byte for byte as on disk and save the page's own who, as before.
 
-Temp folders only (packages built from the CJ golden prediction set).
+Temp folders only (packages built from the CryoEV golden prediction set).
 
   python -m unittest discover -s annotation/tests -v
 """

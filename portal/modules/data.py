@@ -1,5 +1,5 @@
 """
-Data module (CJ portal, read only): a plain catalog of WHAT DATA EXISTS, from the registry (sessions, grids, image
+Data module (CryoEV portal, read only): a plain catalog of WHAT DATA EXISTS, from the registry (sessions, grids, image
 sets, label versions, datasets, models) and the processed images on disk.
 
     GET /data/                          overview: counts and short lists, search box

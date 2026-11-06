@@ -1,5 +1,5 @@
 """
-Predict's session list (CJ portal): every processed imaging session that has model-ready tiles, found by a scan,
+Predict's session list (CryoEV portal): every processed imaging session that has model-ready tiles, found by a scan,
 plus the admin's hand list (CJ_PREDICT_SOURCES, back-compat), with the admin's per-source overrides (hide, rename).
 
 Discovery (read only; nothing under a scan root is ever written):
