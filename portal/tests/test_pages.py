@@ -38,7 +38,9 @@ def launch(p):
 
 
 PAGES = (("home", "/", "#cj-bar .cj-nav a"), ("history", "/history/history.html", "#cj-bar .cj-nav a"),
-         ("review", "/review/", None))
+         ("review", "/review/", "#cj-bar .cj-nav a"))
+NAV_LINKS = ["Home", "Jobs", "Review", "Sandbox"]                       # admin: the modules that are on
+NAV_ALL = ["Home", "Data", "Jobs", "Review", "Predict", "Results", "Train", "Admin", "Sandbox"]   # + greyed "coming"
 
 
 class Pages(unittest.TestCase):
@@ -104,20 +106,27 @@ class Pages(unittest.TestCase):
                             page.screenshot(path=str(self.shots / f"{name}_{width}_{scheme}.png"), full_page=False)
                             if name == "home":
                                 nav = page.eval_on_selector_all("#cj-bar .cj-nav a", "a => a.map(x => x.textContent)")
-                                self.assertEqual(nav, ["Home", "History", "Review", "Sandbox"])
+                                self.assertEqual(nav, NAV_LINKS)
+                                nav = page.eval_on_selector_all("#cj-bar .cj-nav > *", "a => a.map(x => x.textContent)")
+                                self.assertEqual(nav, NAV_ALL)
                                 self.assertEqual(page.get_attribute('#cj-bar a[data-id="review"] .cj-dot', "class"),
                                                  "cj-dot up")
                                 self.assertEqual(page.get_attribute('#cj-bar a[data-id="sandbox"] .cj-dot', "class"),
                                                  "cj-dot down")
-                                self.assertEqual(page.text_content("#cj-bar .cj-user"), T.USER)
-                                self.assertEqual(page.locator(".cj-mod.off").count(), 4)
+                                self.assertEqual(page.text_content("#cj-bar .cj-user .cj-nm > span"), T.USER)
+                                self.assertEqual(page.locator(".cj-mod.off").count(), 5)
+                                page.wait_for_selector("#cj-train .cj-lv-snap")     # CJLive drew the snapshot
                             if name == "history":
                                 self.assertTrue(page.locator("#srv").is_hidden())   # the shell nav replaces it
                                 self.assertTrue(page.locator("#cj-bar").is_visible())
                                 page.wait_for_selector("#tree .rec")                # the page itself still works
-                            if name == "review":
-                                self.assertEqual(page.locator("#cj-bar").count(), 0)  # Review keeps its own look
-                                self.assertTrue(any(u.endswith("/review/api/edits") for u in rec["requests"]))
+                            if name == "review":                                # the tool, framed under the bar
+                                self.assertTrue(page.locator("#cj-bar").is_visible())
+                                self.assertEqual(page.get_attribute("#cj-bar .cj-nav a[aria-current=page]", "data-id"),
+                                                 "review")
+                                self.assertTrue(any(u.endswith("/review/app/api/edits") for u in rec["requests"]))
+                                frame = page.frame_locator("#cj-review-frame")
+                                self.assertEqual(frame.locator("#cj-bar").count(), 0)   # the tool keeps its own look
                     self.assertEqual(rec["foreign"], [])
                     self.assertTrue(rec["requests"])
                     self.assertTrue(all(u.startswith(self.p.origin + "/") for u in rec["requests"]),

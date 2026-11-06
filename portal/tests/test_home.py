@@ -6,6 +6,7 @@ jobs/tests/jobtest.py, as registry/tests does), module cards from modules.json, 
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import unittest
@@ -14,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cjtest as T  # noqa: E402
 from portal import app as APP  # noqa: E402
+from portal import auth as A  # noqa: E402
 
 PORTAL = T.REPO / "portal"
 
@@ -28,27 +30,49 @@ class Manifests(unittest.TestCase):
             for f in ("id", "name", "route", "icon", "roles", "health"):
                 self.assertIn(f, m, (m["id"], f))
         by = {m["id"]: m for m in mods}
-        self.assertEqual([i for i in ids if by[i]["status"] == "on"], ["home", "history", "review", "sandbox"])
+        self.assertEqual([i for i in ids if by[i]["status"] == "on"], ["home", "jobs", "review", "sandbox", "history"])
+        self.assertEqual([by[i]["name"] for i in ids if by[i].get("nav")],     # the nav, in order
+                         ["Home", "Data", "Jobs", "Review", "Predict", "Results", "Train", "Admin", "Sandbox"])
+        self.assertFalse(by["history"]["nav"])                               # History: hidden "classic" page
         self.assertEqual((by["home"]["route"], by["history"]["route"], by["review"]["route"]), ("/", "/history/", "/review/"))
+        for m in mods:
+            self.assertTrue(set(m["roles"]) <= {"admin", "advanced", "basic"}, m["id"])
+            self.assertIn("admin", m["roles"], m["id"])
+            self.assertIn(m["status"], ("on", "coming"), m["id"])
+        self.assertEqual(by["review"]["roles"], ["admin"])                   # the real review stays admin only
+        self.assertEqual(by["history"]["roles"], ["admin"])
+        self.assertEqual(by["admin"]["roles"], ["admin"])
         self.assertIsNone(by["sandbox"]["route"])                            # sandbox is NOT under the shell
         self.assertEqual(by["sandbox"]["external"]["public_port"], 8443)
         self.assertFalse(any(str(m.get("route") or "").startswith("/sandbox") for m in mods))
-        self.assertTrue({"predict", "results", "train", "admin"} <= {i for i in ids if by[i]["status"] == "coming"})
+        self.assertEqual({i for i in ids if by[i]["status"] == "coming"},
+                         {"data", "predict", "results", "train", "admin"})
 
     def test_brand_json(self):
         brand = json.loads((PORTAL / "static" / "brand.json").read_text(encoding="utf-8"))
         self.assertEqual((brand["name"], brand["wordmark"]), ("CJ", "CJ"))
         self.assertIn("tagline", brand)
 
-    def test_css_reuses_history_tokens(self):
-        sys.path.insert(0, str(T.REPO / "registry"))
-        import history_page as hp
+    def test_css_tokens(self):
+        """Direction A's values under the frozen names, scoped to the shell's own pages and the bar, never :root
+        (History includes cj.css as the portal serves it and keeps its own look). Was test_css_reuses_history_tokens:
+        the values changed on purpose (design A), so the test now checks A's values and the scoping instead."""
         css = (PORTAL / "static" / "cj.css").read_text(encoding="utf-8")
-        for decl in ("--bg:#fafaf9", "--fg:#1c1917", "--mut:#6b6560", "--card:#fff", "--line:#e3e0dc", "--acc:#2456c7",
-                     "--bg:#141312", "--acc:#8fb0ff"):
-            self.assertIn(decl, hp.CSS)                                       # the history page's own values ...
-            self.assertIn(decl, css)                                          # ... repeated, so injection is a no-op
+        light = ("--bg:#f3f5f7", "--fg:#16202a", "--mut:#58636f", "--card:#ffffff", "--line:#dde3e9", "--acc:#1d5f99",
+                 "--accbg:#e3eef8", "--prod:#12703f", "--prodbg:#ddf2e5", "--warn:#8a5300", "--warnbg:#fbefd9")
+        dark = ("--bg:#0f151b", "--fg:#e6ecf1", "--mut:#9aa8b5", "--card:#172029", "--line:#2a3642", "--acc:#7db8ec",
+                "--accbg:#16304a", "--prod:#6fd49a", "--prodbg:#133326", "--warn:#f0c06a", "--warnbg:#3a2b10")
+        for decl in light + dark + ("--dim:.5", "--hot:#c0135a", "--hot2:#b8431a", "--hot:#ff5c9b", "--hot2:#ff8f63"):
+            self.assertIn(decl, css)
         self.assertIn("prefers-color-scheme:dark", css)
+        roots = re.findall(r":root\{([^}]*)\}", css)
+        self.assertTrue(roots)                                                # control: the pattern finds :root blocks
+        for name in ("bg", "fg", "mut", "card", "line", "acc", "accbg", "prod", "prodbg", "warn", "warnbg", "dim"):
+            for block in roots:                                               # frozen tokens are never set on :root
+                self.assertNotIn(f"--{name}:", block)
+        self.assertNotIn("@import", css)
+        self.assertNotIn("url(", css)                                         # no web fonts: nothing is fetched
+        self.assertNotRegex(css, r"(?m)^\s*header\s*[,{]")                    # the bar is not a <header>
 
     def test_external_href(self):
         m = {"external": {"public_port": 8443, "local_port": 8765, "path": "/"}}
@@ -102,25 +126,61 @@ class Home(unittest.TestCase):
         page = self.home()
         run = self.live["queues"][0]["running"]
         self.assertEqual((run["epoch"], run["epochs"]), (4, 300))           # control: the snapshot says so
-        self.assertIn("Live snapshot", page)
+        self.assertIn("From live.json", page)
         self.assertIn('<span class="cj-dot up" aria-hidden="true"></span><b>Review</b>', page)
         self.assertIn('<span class="cj-dot down" aria-hidden="true"></span><b>Sandbox</b>', page)
+        self.assertIn("1 <small>of 2 up</small>", page)
         self.assertIn("alive · heartbeat", page)
         self.assertIn("job_20261104_live", page)
         self.assertIn("epoch 4/300", page)
         self.assertIn(f"ETA {APP.dur(run['eta_s'])}", page)
         self.assertIn("Last backup", page)
-        self.assertIn("<b>unknown</b>", page)
+        self.assertIn(">Unknown<", page)
+        # the training snapshot: the embedded slim snapshot for CJLive (live.js), refreshed from History's live.json
+        m = re.search(r'<script type="application/json" id="cj-live-data">(.*?)</script>', page)
+        slim = json.loads(m.group(1))
+        self.assertEqual(slim["queues"][0]["running"]["epoch"], 4)
+        self.assertEqual(set(slim), {"generated_utc", "interval_s", "queues"})
+        self.assertIn('data-cj-live="compact"', page)
+        self.assertIn('data-cj-live-src="/history/live/live.json"', page)
+        self.assertIn('<script src="/cj/live.js" defer></script>', page)
+        self.assertIn('<body class="cj-page" data-active="home">', page)     # rendered through base.html
+        self.assertIn('<div id="cj-bar" class="cj-bar" role="banner"></div>', page)
 
     def test_module_cards(self):
         page = self.home()
+        self.assertIn('id="cj-classic"', page)                               # History: only the footer link
         self.assertIn('href="/history/"', page)
+        self.assertNotIn('data-id="history"', page)
         self.assertIn('href="/review/"', page)
+        self.assertIn('<span class="cj-evh">eVHarmony</span>', page)
+        self.assertEqual(page.count("cj-evh"), 1)                            # the gradient label: Review card only
         self.assertIn('href="http://127.0.0.1:8765/"', page)                 # sandbox: its own (local) address
-        self.assertEqual(page.count('class="cj-mod off"'), 4)
-        self.assertEqual(page.count(">coming<"), 4)
+        self.assertEqual(page.count('class="cj-mod off"'), 5)
+        self.assertEqual(page.count(">coming<"), 5)
+        order = re.findall(r'class="cj-mod[^"]*" data-id="([a-z]+)"', page)
+        self.assertEqual(order, ["data", "jobs", "review", "predict", "results", "train", "admin", "sandbox"])
         page = self.home("box.example.ts.net:8446")
         self.assertIn('href="https://box.example.ts.net:8443/"', page)
+
+    def test_roles_see_their_modules_only(self):
+        keys = {r: A.add_key(self.env.roster, f"user-{r}", r) for r in ("advanced", "basic")}
+        try:
+            want = {"advanced": ["data", "jobs", "predict", "results", "train"], "basic": ["predict", "results"]}
+            for role, key in keys.items():
+                tok = T.login(self.p.port, key)
+                st, _, body = T.request(self.p.port, "GET", "/", T.cookie(tok))
+                page = body.decode("utf-8")
+                self.assertEqual(st, 200)
+                self.assertEqual(re.findall(r'class="cj-mod[^"]*" data-id="([a-z]+)"', page), want[role], role)
+                self.assertNotIn('id="cj-status"', page, role)               # status = History's data: admin only
+                self.assertNotIn("cj-live-data", page, role)
+                self.assertNotIn("cj-classic", page, role)
+                self.assertNotIn("job_20261104_live", page, role)
+                self.assertIn(f"signed in as user-{role}", page)
+        finally:
+            for r in keys:
+                A.revoke(self.env.roster, f"user-{r}")
 
     def test_stale_and_missing_snapshot(self):
         path = self.env.registry / "live" / "live.json"
