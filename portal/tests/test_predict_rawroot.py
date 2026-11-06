@@ -271,6 +271,100 @@ class RawRoot(RawBase):
                          {"Predict sets": False, "Raw images": True})
         self.assertIn("under 20 GB", html_)
 
+    # ---- QC fix round
+    def test_upload_staged_before_the_raw_root_was_set_is_moved_not_lost(self):
+        raw = os.environ.pop("CJ_RAW_ROOT")
+        try:
+            st, _ = self.upload("advanced", "raw", {"session": "20261101"}, self.raw_files(), create=False)
+        finally:
+            os.environ["CJ_RAW_ROOT"] = raw
+        uid = st["upload"]
+        staged = self.w.root / P.PORTAL_TMP / uid
+        self.assertTrue(staged.is_dir())
+        # a forced OSError during create: a clear error, the upload stays, a retry works
+        with mock.patch.object(P, "move_tree", side_effect=OSError(errno.ENOSPC, "boom")):
+            r = self.jpost(f"/predict/api/upload/{uid}/create", {}, "advanced")
+        self.assertEqual(r.status_code, 500, r.text)
+        self.assertFalse(r.json()["dropped"])
+        self.assertTrue((staged / "files" / "grid1-pos1.mrc").is_file())
+        self.assertEqual(self.get(f"/predict/api/upload/{uid}", "advanced").status_code, 200)
+        # the retry crosses roots (real os.replace on one drive here; EXDEV forced: copy, verify, delete)
+        real = os.replace
+
+        def exdev(src, dst, *a, **k):
+            if os.path.basename(str(src)) == "files":
+                raise OSError(errno.EXDEV, "cross-device", str(src))
+            return real(src, dst, *a, **k)
+        with mock.patch.object(os, "replace", side_effect=exdev):
+            r = self.jpost(f"/predict/api/upload/{uid}/create", {}, "advanced")
+        self.assertEqual(r.status_code, 200, r.text)
+        cid = TC.CID_RE.match(r.json()["href"]).group(1)
+        self.assertEqual(self.wait_conv(cid)["state"], "done")
+        self.assertTrue((self.w.rawtiles / cid / "input" / "grid1-pos1.mrc").is_file())
+        self.assertFalse(staged.exists())
+
+    def test_move_tree_copies_across_drives_and_keeps_the_source_on_failure(self):
+        base = Path(tempfile.mkdtemp(prefix="cj_mv_"))
+        self.addCleanup(shutil.rmtree, base, True)
+        src = base / "src"
+        (src / "sub").mkdir(parents=True)
+        (src / "a.bin").write_bytes(b"x" * 1000)
+        (src / "sub" / "b.bin").write_bytes(b"y" * 10)
+        boom = OSError(errno.EXDEV, "cross-device")
+        with mock.patch.object(os, "replace", side_effect=boom):
+            P.move_tree(src, base / "dst")
+        self.assertFalse(src.exists())
+        self.assertEqual((base / "dst" / "a.bin").stat().st_size, 1000)
+        self.assertEqual((base / "dst" / "sub" / "b.bin").read_bytes(), b"y" * 10)
+        # a copy that fails: the source is whole, no partial destination
+        src2 = base / "src2"
+        src2.mkdir()
+        (src2 / "a.bin").write_bytes(b"z" * 5)
+        with mock.patch.object(os, "replace", side_effect=boom),                 mock.patch.object(shutil, "copytree", side_effect=OSError(errno.ENOSPC, "full")):
+            with self.assertRaises(OSError):
+                P.move_tree(src2, base / "dst2")
+        self.assertTrue((src2 / "a.bin").is_file())
+        self.assertFalse((base / "dst2").exists())
+
+    def test_conversion_id_is_free_in_both_roots(self):
+        legacy = self.w.root / P.RAW_TILES
+        (legacy / "20261101_aaaaaa").mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, legacy, True)
+        real = P.secrets.token_hex
+        picks = iter(["aaaaaa", "bbbbbb"])
+
+        def tok(n=None):
+            return next(picks) if n == 3 else real(n)
+        with mock.patch.object(P.secrets, "token_hex", side_effect=tok):
+            cid = self.started(self.pick_session())
+        self.assertEqual(cid, "20261101_bbbbbb")
+        self.wait_conv(cid)
+
+    def test_upload_holds_are_per_drive(self):
+        dev = lambda p: 1 if "drive_a" in str(p) else 2  # noqa: E731
+        with mock.patch.object(P, "_dev", side_effect=dev):
+            a, b = P.Reservation(Path("drive_a/x"), 1000), P.Reservation(Path("drive_b/x"), 70)
+            with P._RES_LOCK:
+                self.assertEqual((P._held(1), P._held(2)), (1000, 70))
+            a.release()
+            with P._RES_LOCK:
+                self.assertEqual((P._held(1), P._held(2)), (0, 70))
+            b.release()
+        self.assertEqual(P._RESERVED, {})
+        self.assertNotIn(a.key, P._RES_DEV)
+        self.assertNotIn(b.key, P._RES_DEV)
+
+    def test_health_disks_cannot_stall_the_page(self):
+        def hang(cfg):
+            time.sleep(3)
+            return {"rows": []}
+        with mock.patch.object(ADM, "disks", side_effect=hang), mock.patch.object(ADM, "DISK_TIMEOUT_S", 0.3):
+            t0 = time.time()
+            out = ADM.disks_bounded(self.w.cfg)
+        self.assertLess(time.time() - t0, 2.0)
+        self.assertEqual(out["rows"], [])
+        self.assertNotIn("same", ADM.disks(self.w.cfg))
+
 
 def free_letter():
     for L in "ZYXWVUTSRQPONM":

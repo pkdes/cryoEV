@@ -166,7 +166,9 @@ The full contract is the module docstring in `modules/predict.py`. In short:
     external drive: the raw-upload staging (`<raw root>/.portal`) and `<raw root>/raw_tiles/`. The 2x-free check runs on
     that drive. Unset = the predict root, as before. Conversions already under `<predict root>/raw_tiles` stay listed
     and swept (retention, stale scratch). A prediction set made from a conversion copies its tiles (no hard link across
-    drives). **Admin > Health** shows free GB for both drives and warns under 20 GB.
+    drives). Changing or unsetting `CJ_RAW_ROOT` stops listing and sweeping the old raw root's conversions and
+    `.portal`: move them first, or set it back. On Windows keep `CJ_RAW_ROOT` short (long paths can fail) or enable
+    LongPathsEnabled. **Admin > Health** shows free GB for both drives and warns under 20 GB.
 - Basic users get 403 on everything raw. Everything shown is escaped; paths and raw errors are on admin-only lines.
 
 ## Live charts (`/cj/live.js`)

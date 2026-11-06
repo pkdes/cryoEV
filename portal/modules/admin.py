@@ -686,7 +686,20 @@ def disks(cfg) -> dict:
         except OSError:
             pass
         rows.append(row)
-    return {"rows": rows, "warn_gb": DISK_WARN_GB, "same": rows[0]["path"] == rows[1]["path"]}
+    return {"rows": rows, "warn_gb": DISK_WARN_GB}
+
+
+DISK_TIMEOUT_S = 5.0
+
+
+def disks_bounded(cfg) -> dict:
+    """disks() in a daemon thread with a short timeout: an unreachable UNC/NAS path can't stall the Health page."""
+    box = []
+    t = threading.Thread(target=lambda: box.append(_safe_call(disks, cfg, default=None)), daemon=True)
+    t.start()
+    t.join(DISK_TIMEOUT_S)
+    return box[0] if box and box[0] else {"rows": [], "warn_gb": DISK_WARN_GB,
+                                           "problem": "The disks did not answer in time."}
 
 
 def _check_health(cfg) -> dict:
@@ -700,7 +713,7 @@ def _check_health(cfg) -> dict:
                "watchers": _safe_call(watchers, getattr(cfg, "registry", None), now,
                                       default={"ok": False, "queues": [], "age_s": None, "stale": True,
                                                "problem": "The status snapshot could not be read."}),
-               "disks": _safe_call(disks, cfg, default={"rows": [], "warn_gb": DISK_WARN_GB, "same": False}),
+               "disks": disks_bounded(cfg),
                "backup": {"commit": _safe(fc, {"configured": None, "problem": "Unknown: the check failed."}),
                           "task": _safe(ft, {"found": False, "problem": "The backup task check failed."})}}
     return out

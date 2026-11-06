@@ -1354,7 +1354,21 @@ def disk_free(path) -> int:
 
 
 _RESERVED: dict = {}                     # upload id -> bytes it may still write (its Content-Length minus written)
+_RES_DEV: dict = {}                      # upload id -> the drive (st_dev) its hold is on
 _RES_LOCK = threading.Lock()
+
+
+def _dev(path):
+    """The volume a path is (or would be) on; None when it can't be told."""
+    try:
+        return os.stat(_existing(path)).st_dev
+    except OSError:
+        return None
+
+
+def _held(dev) -> int:
+    """Bytes the uploads in flight may still write on this drive. Callers hold _RES_LOCK."""
+    return sum(n for k, n in _RESERVED.items() if _RES_DEV.get(k) == dev)
 
 
 class Reservation:
@@ -1364,8 +1378,10 @@ class Reservation:
 
     def __init__(self, dest: Path, length: int):
         self.dest, self.key = dest, secrets.token_hex(8)
+        self.dev = _dev(dest)
         with _RES_LOCK:
             _RESERVED[self.key] = max(0, int(length or 0))
+            _RES_DEV[self.key] = self.dev
 
     def written(self, n: int):
         with _RES_LOCK:
@@ -1375,7 +1391,7 @@ class Reservation:
     def check(self):
         free = disk_free(self.dest)
         with _RES_LOCK:
-            held = sum(_RESERVED.values())
+            held = _held(self.dev)
         if free - held < FREE_MARGIN_BYTES:
             raise Refusal("Not enough disk space on the server for this upload. Nothing was kept. Ask the admin.",
                           507, tech=f"{free} bytes free, {held} held by uploads in flight, "
@@ -1384,6 +1400,7 @@ class Reservation:
     def release(self):
         with _RES_LOCK:
             _RESERVED.pop(self.key, None)
+            _RES_DEV.pop(self.key, None)
 
 
 class UploadSink:
@@ -1840,8 +1857,9 @@ def check_disk_for(where: Path, nbytes: int):
     """A conversion writes its work copies and tiles next to the predict root: refuse (507) unless about
     DISK_FACTOR x its raw input is free on top of FREE_MARGIN_BYTES and the uploads in flight."""
     free = disk_free(_existing(where))
+    dev = _dev(where)
     with _RES_LOCK:
-        held = sum(_RESERVED.values())
+        held = _held(dev)
     need = DISK_FACTOR * int(nbytes or 0) + FREE_MARGIN_BYTES
     if free - held < need:
         raise Refusal(f"Not enough disk space on the server to convert these (about "
@@ -1858,6 +1876,28 @@ def check_conv_cap(cfg, user):
                       f"one of them is done.", 429)
 
 
+def move_tree(src: Path, dst: Path):
+    """Move a folder: os.replace on one drive; across drives (EXDEV, e.g. an upload staged before CJ_RAW_ROOT was set)
+    copy, verify every file's size, then remove the source. A failure leaves the source whole and no dst."""
+    try:
+        os.replace(src, dst)
+        return
+    except OSError as e:
+        if e.errno != errno.EXDEV and not (os.name == "nt" and getattr(e, "winerror", None) in (17, 5)):
+            raise
+        if Path(dst).exists() and any(Path(dst).iterdir()):
+            raise
+    try:
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+        for a in Path(src).rglob("*"):
+            if a.is_file() and (Path(dst) / a.relative_to(src)).stat().st_size != a.stat().st_size:
+                raise OSError(f"copy of {a.name} has a different size")
+    except BaseException:
+        shutil.rmtree(dst, ignore_errors=True)
+        raise
+    shutil.rmtree(src, ignore_errors=True)
+
+
 def new_conversion(cfg, user, fields: dict, *, source: dict, inputs=None, upload_files: Path | None = None,
                    sample_key=None, nbytes=None) -> Path:
     """Make <root>/raw_tiles/<session>_<6 hex>/ with convert.json + status queued (uploaded files moved into
@@ -1865,7 +1905,10 @@ def new_conversion(cfg, user, fields: dict, *, source: dict, inputs=None, upload
     root = raw_root(cfg)
     root.mkdir(parents=True, exist_ok=True)
     for _ in range(50):
-        d = root / f"{fields['session']}_{secrets.token_hex(3)}"
+        name = f"{fields['session']}_{secrets.token_hex(3)}"
+        if any((r / name).exists() for r in raw_roots(cfg)):      # free in BOTH roots
+            continue
+        d = root / name
         try:
             d.mkdir()
             break
@@ -1876,7 +1919,9 @@ def new_conversion(cfg, user, fields: dict, *, source: dict, inputs=None, upload
     try:
         if upload_files is not None:
             inp = d / CONVERT_INPUT
-            os.replace(upload_files, inp)                 # same drive: staging (.portal) and raw_tiles/ are both under the raw root
+            # same drive: staging (.portal) and raw_tiles/ are both under the raw root; an upload staged under the
+            # predict root before CJ_RAW_ROOT was set is copied across (move_tree), never lost
+            move_tree(upload_files, inp)
             names = sorted(p.name for p in inp.iterdir() if p.is_file())
             inputs = [str(inp / n) for n in names if n.lower().endswith((".mrc.mdoc", ".idoc"))]
             keys = [n for n in names if n.lower().endswith(".csv")]
@@ -3365,9 +3410,8 @@ def routes(ctx) -> list:
                 if not keep:
                     await run_in_threadpool(drop_upload, d, uid)
                 return refusal_json(e, user, not keep)
-            except OSError as e:
-                await run_in_threadpool(drop_upload, d, uid)
-                return refusal_json(Refusal(os_error_text(e), 500, tech=f"{type(e).__name__}: {e}"), user, True)
+            except OSError as e:                         # the files stay staged: pressing the button again retries
+                return refusal_json(Refusal(os_error_text(e), 500, tech=f"{type(e).__name__}: {e}"), user, False)
             await run_in_threadpool(drop_upload, d, uid)
         return ctx.json({"href": href})
 
