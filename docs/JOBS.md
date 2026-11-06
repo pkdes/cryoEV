@@ -149,11 +149,27 @@ sync.queue_train(job_id, dataset_dir, exp_args, share, max_hours, hold=False, ch
   | `ds\<sha>\` on the share holds another pack ("same dataset hash, different pack") | `push_pack` |
 - Control (`jobs/tests/test_queue_train.py`): `make_job_bundle.py` + `sync.py push` (the CLI path) and `queue_train` on two temp shares, clock frozen, give byte-identical share trees with exactly one `q\<job>\`.
 - **Portal (Train).** Only with `CJ_TRAIN_QUEUE=on` (default off: Queue writes nothing). For a **desktop** job, when a queue share is known, Queue does all three steps:
-  - The share comes from the Config attribute `train_share`, else `$CJ_TRAIN_SHARE`, else the one share `live.json` names. That share must be a UNC path or be listed in `$CJ_JOBS_LOCAL_SHARES`, the Jobs page's rule.
-  - Before anything is written, it checks that the share can be reached, that the dataset folder is on the laptop (the registry's `dataset_dir`, else `<CryoAI>\training outputs\<dataset>`) and that the job id isn't on the share yet. A failed check: 409, nothing written.
+  - The share comes from the Config attribute `train_share`, else `$CJ_TRAIN_SHARE` (both taken as given), else the one share `live.json` names. Only that live.json share must be a UNC path (`\\host\share`; never `\\?\` or `\\.\`) or be listed in `$CJ_JOBS_LOCAL_SHARES`, the Jobs page's rule.
+  - **Admins only** by default. Another role may send only if it is listed in `CJ_TRAIN_SEND_ROLES` (comma separated, e.g. `admin,advanced`; Config `train_send_roles`). Everyone else gets the preview without a Queue button, and Queue answers 409 "an admin must send this one", with nothing written.
+  - Before anything is written, it checks that:
+    - the share can be reached;
+    - the dataset folder is on the laptop (the registry's `dataset_dir`, else `<CryoAI>\training outputs\<dataset>`);
+    - the job id isn't on the share yet;
+    - no code under `training/`, `jobs/` or `data_utils/` is uncommitted;
+    - HEAD is on origin/main (a git fetch).
+
+    A failed check: 409, nothing written. The dataset sha is checked only in the send, because it needs an md5 of every image.
   - Then three audit lines: `requested` (write-ahead, `send: gpu_queue`), then `registry.new_job` and `result`, then `queue_train` in a worker thread (one send at a time) and `send` (`ok` / `failed: <error>`).
-  - A failed send marks the job **blocked** with `not sent to the GPU queue (portal Train): <why>` through `registry.set_status`; the job schema has no `failed`. The page then tells the requester in plain words; admins see the error.
+  - A failed send marks the job **blocked** with the plain reason `not sent to the GPU queue (portal Train); details in the audit log`, through `registry.set_status`; the job schema has no `failed`. The error itself is never written to the registry, because the Jobs page shows `blocked_reason` to non-admins. It goes only into the audit's `send` line and the admin's Train page.
+  - The send's state is kept in the portal process. The Train page shows it (sending / on the queue / failed) until the portal restarts. After a restart, a send with `requested` + `result ok` and no `send` line shows as "outcome unknown". The Jobs page (registry status) is the durable view.
   - A laptop job, or no share known, works as before: the registry job, then the commands (admin).
+- **Recovery after a failed send** (admin; the Train page lists these commands under "Send it by hand"). Fix the cause from the audit's `send` line, then:
+  ```powershell
+  python training/make_job_bundle.py --dataset-dir "<dataset folder>" -- <the job's run_experiments args>
+  python jobs/sync.py push <job> --bundle <zip from the line above> --share \\<desktop>\cj --max-hours <H>
+  python registry/registry.py set-status <job> ready --who <your id>      # blocked -> ready; pull sets done later
+  ```
+  If the job should not run at all, leave it blocked or `set-status <job> cancelled`.
 
 ## Predict jobs
 A **prediction set** is one batch of a user's tiles run through one registry model (`BUILD_CONTRACTS.md` section 2). It lives in `<CryoAI-laptop>\predict\<ps id>\`; review packages and results read it there.

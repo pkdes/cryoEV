@@ -208,7 +208,7 @@ class Base(unittest.TestCase):
         env = mock.patch.dict(os.environ)                   # no share setting leaks in from the machine or a test
         env.start()
         self.addCleanup(env.stop)
-        for k in (TR.SHARE_SETTING, TR.LOCAL_SHARES_ENV):
+        for k in (TR.SHARE_SETTING, TR.LOCAL_SHARES_ENV, TR.SEND_ROLES_SETTING):
             os.environ.pop(k, None)
         TR._reg_cache.clear()
 
@@ -600,9 +600,11 @@ class QueueSend(Base):
                            "CRYOEV_LAPTOP_ROOT": str(self.lap),
                            "CRYOEV_PROCESSING_ROOT": str(self.env.tmp / "no_processing")})
         os.environ.pop("CRYOEV_REGISTRY", None)
-        self.origin = None                                          # None = the commit is on origin/main
-        for p in (mock.patch.object(self.S, "commit_on_origin", lambda commit: self.origin),
-                  mock.patch.object(self.mjb, "uncommitted_code", lambda: [])):
+        self.origin = []                                            # answers in turn; then None = on origin/main
+        self.dirty = []
+        for p in (mock.patch.object(self.S, "commit_on_origin",
+                                    lambda commit: self.origin.pop(0) if self.origin else None),
+                  mock.patch.object(self.mjb, "uncommitted_code", lambda: self.dirty)):
             p.start()
             self.addCleanup(p.stop)
 
@@ -649,30 +651,112 @@ class QueueSend(Base):
         _, _, page = self.get("/train/")
         self.assertIn(f"Job <b>{jid}</b> is on the GPU computer", page.decode())
 
-    def test_push_failure_marks_the_job_failed(self):
+    def test_push_failure_marks_the_job_failed_without_the_error(self):
+        """Sending allowed for advanced (CJ_TRAIN_SEND_ROLES); the send fails after the job exists with an error that
+        names a UNC share, a host and a path: the registry gets the plain reason only, so the requester's Jobs page
+        shows none of them; the error is in the admin-only audit line and the admin's Train page."""
+        os.environ[TR.SEND_ROLES_SETTING] = "admin, advanced"
         name, jid = "send_fail", f"job_{TODAY}_send_fail"
-        self.origin = "bundle commit abc is not on origin/main: push the repo first"   # fails after the job exists
-        st, _, body = self.post("/train/queue", self.good(name=name), "advanced")
-        self.assertEqual(st, 200, body[:600])
-        self.assertTrue(TR.wait_sends(60))
+        secret = "bundle commit abc is not on origin/main (\\\\gpu-secret-host\\cj, C:\\secret_dir\\cj_repo)"
+        self.origin = [None, secret]                    # the pre-check passes; the push's own check fails
+        R = TR.registry_module()
+        roster = R.roster()
+        with mock.patch.object(R, "roster", lambda path=None: set(roster) | {"adv"}):   # adv owns the job
+            st, _, body = self.post("/train/queue", self.good(name=name), "advanced")
+            self.assertEqual(st, 200, body[:600])
+            self.assertTrue(TR.wait_sends(60))
         rec = self.job(jid)
-        self.assertEqual(rec["status"], "blocked")
-        self.assertIn("not sent to the GPU queue", rec["blocked_reason"])
-        self.assertIn("not on origin/main", rec["blocked_reason"])
-        self.assertEqual(rec["status_by"], TR.registry_module().PRODUCTION_WHO)   # "adv" is not a people.json id
+        self.assertEqual((rec["status"], rec["who"], rec["status_by"]), ("blocked", "adv", "adv"))
+        self.assertEqual(rec["blocked_reason"], TR.FAILED_REASON)
         self.assertFalse((self.share / "q" / jid).exists())
         au = self.audits(jid)
         self.assertEqual([x["detail"]["phase"] for x in au], ["requested", "result", "send"])
         self.assertTrue(au[-1]["detail"]["result"].startswith("failed: SyncError"))
-        # plain words for the requester, the error for admins
+        self.assertIn("gpu-secret-host", au[-1]["detail"]["result"])          # the full error: admin-only audit
+        # the requester's Jobs page (HTML and JSON): the plain reason, no UNC, host or path
+        for path in ("/jobs/", "/jobs/api/summary"):
+            with self.subTest(path=path):
+                st, _, page = self.get(path, "advanced")
+                self.assertEqual(st, 200)
+                text = html.unescape(page.decode())
+                self.assertIn("not sent to the GPU queue (portal Train)", text)   # the job is shown (control)
+                for bad in ("gpu-secret-host", "secret_dir", "\\\\", str(self.share), str(self.env.tmp),
+                            str(self.share).replace("\\", "\\\\")):
+                    self.assertNotIn(bad, text)
+        # plain words for the requester on Train; the error and the hand commands for admins
         _, _, page = self.get("/train/", "advanced")
         text = page.decode()
         self.assertIn(f"Job <b>{jid}</b> could not be sent to the GPU computer", text)
         self.assertIn("marked failed (blocked) in the registry", text)
         self.assertIn("Ask an admin", text)
-        self.assertNotIn("origin/main", text)
+        self.assertNotIn("gpu-secret-host", text)
+        self.assertNotIn("set-status", text)
         _, _, page = self.get("/train/")
-        self.assertIn("not on origin/main", page.decode())
+        text = html.unescape(page.decode())
+        self.assertIn("gpu-secret-host", text)
+        self.assertIn("Send it by hand (admin)", text)
+        self.assertIn(f"python jobs/sync.py push {jid} --bundle", text)
+        self.assertIn(f"python registry/registry.py set-status {jid} ready", text)
+
+    def test_sending_is_admin_only_by_default(self):
+        before = snap(self.env.registry, self.share, self.lap)
+        n_audit = len(self.audit_lines())
+        st, _, body = self.post("/train/check", self.good(name="adv_send"), "advanced")
+        self.assertEqual(st, 200)
+        text = html.unescape(body.decode())
+        self.assertIn("Preview only: this is exactly what would be queued.", text)
+        self.assertIn("an admin must send this one", text)
+        self.assertNotIn('action="/train/queue"', text)                  # no Queue button
+        st, _, body = self.post("/train/queue", self.good(name="adv_send"), "advanced")
+        self.assertEqual(st, 409)
+        self.assertIn("an admin must send this one", html.unescape(body.decode()))
+        self.assertEqual(snap(self.env.registry, self.share, self.lap), before)
+        self.assertEqual(len(self.audit_lines()), n_audit)
+        # the setting lets advanced users send (the other half: test_push_failure... sends as advanced)
+        os.environ[TR.SEND_ROLES_SETTING] = "admin,advanced"
+        st, _, body = self.post("/train/check", self.good(name="adv_send"), "advanced")
+        self.assertIn('action="/train/queue"', body.decode())
+        self.assertTrue(TR.may_send(self.env.config(), {"role": "advanced"}))
+        os.environ.pop(TR.SEND_ROLES_SETTING)
+        self.assertFalse(TR.may_send(self.env.config(), {"role": "advanced"}))
+        self.assertTrue(TR.may_send(self.env.config(), {"role": "admin"}))
+
+    def test_foreseeable_failures_refused_before_the_job(self):
+        """Uncommitted code and a commit not on origin/main: 409 before new_job, nothing written."""
+        for name, setup, want in (("dirty", lambda: setattr(self, "dirty", ["jobs/sync.py"]), "not committed"),
+                                  ("noorigin", lambda: setattr(self, "origin", ["bundle commit x is not on origin"]),
+                                   "not on GitHub yet")):
+            with self.subTest(name=name):
+                self.dirty, self.origin = [], []
+                setup()
+                before = snap(self.env.registry, self.share, self.lap)
+                n_audit = len(self.audit_lines())
+                st, _, body = self.post("/train/queue", self.good(name=name))
+                self.assertEqual(st, 409)
+                self.assertIn(want, html.unescape(body.decode()))
+                self.assertEqual(snap(self.env.registry, self.share, self.lap), before)
+                self.assertEqual(len(self.audit_lines()), n_audit)
+                self.assertIsNone(self.job(f"job_{TODAY}_{name}"))
+        self.dirty = []
+
+    def test_outcome_unknown_after_a_restart(self):
+        """requested + result ok with send gpu_queue and no send line, and not a send of this process."""
+        _, p = TR.plan(self.env.config(), self.good(name="lost_send"), {"id": "tester", "role": "admin"})
+        TR.audit(self.env.config(), "tester", p["job"], p, "requested", None, "gpu_queue")
+        TR.audit(self.env.config(), "tester", p["job"], p, "result", "ok", "gpu_queue")
+        _, _, page = self.get("/train/")
+        self.assertIn(f"Job <b>{p['job']}</b> was being sent to the GPU computer when the portal restarted",
+                      page.decode())
+        _, _, page = self.get("/train/", "advanced")                   # someone else's: not shown
+        self.assertNotIn(p["job"], page.decode())
+        TR.audit(self.env.config(), "tester", p["job"], p, "send", "ok", "gpu_queue")
+        _, _, page = self.get("/train/")
+        self.assertNotIn("when the portal restarted", page.decode())
+
+    def test_unc_rule(self):
+        for s, ok in (("\\\\host\\cj", True), ("\\\\gpu-desktop\\cj\\q", True), ("\\\\?\\C:\\cj", False),
+                      ("\\\\.\\pipe\\x", False), ("C:\\cj", False), ("\\\\host", False)):
+            self.assertIs(bool(TR.UNC.match(s)), ok, s)
 
     def test_refusals_write_nothing(self):
         (self.share / "q" / f"job_{TODAY}_on_share").mkdir()
