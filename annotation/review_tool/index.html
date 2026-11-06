@@ -14,7 +14,11 @@ header{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:6px;align-items:center;p
 header .sep{width:1px;height:22px;background:var(--line);margin:0 4px}
 button,select,input[type=file]::file-selector-button{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 9px;cursor:pointer}
 button:hover{border-color:var(--acc)}
-button.on{background:var(--acc);border-color:var(--acc);color:#fff}
+button.on,button.quick{background:var(--acc);border-color:var(--acc);color:#fff}
+button.quick{font-weight:600;line-height:1.1;text-align:center}
+button.quick small{display:block;font-size:10px;font-weight:400;opacity:.85}
+#triKeys{padding:4px 10px;text-align:center;font-size:11px;color:var(--mute)}
+@media (hover:none) and (pointer:coarse){#triKeys{display:none !important}}
 button:disabled{opacity:.45;cursor:default}
 select{padding:3px 6px}
 label.tg{display:inline-flex;gap:4px;align-items:center;cursor:pointer;user-select:none}
@@ -172,8 +176,8 @@ body.sandbox #list,body.sandbox #side{top:var(--sbh,0px)}
   <button id="bClose" title="Close the polygon (Enter)" hidden>Close shape</button>
   <button id="undo" title="Undo (Z)">Undo</button>
   <span class="sep"></span>
-  <label class="tg"><input type="checkbox" id="showGt" checked> Labels</label>
-  <label class="tg"><input type="checkbox" id="showPr" checked> Predictions ≥ <output id="confOut">0.45</output></label>
+  <label class="tg" id="lblGtWrap"><input type="checkbox" id="showGt" checked> <span id="lblGt">Labels</span></label>
+  <label class="tg" id="lblPrWrap"><input type="checkbox" id="showPr" checked> <span id="lblPr">Predictions ≥</span> <output id="confOut">0.45</output></label>
   <input type="range" id="conf" min="0.25" max="0.95" step="0.05" value="0.45" style="width:90px">
   <label class="tg"><input type="checkbox" id="showFlags" checked> Flags</label>
   <label class="tg" title="Tag labels whose decision was carried from the September review"><input type="checkbox" id="showSept" checked> Sept</label>
@@ -214,7 +218,7 @@ body.sandbox #list,body.sandbox #side{top:var(--sbh,0px)}
     <li><kbd>D</kbd> freehand: drag around the object · <kbd>V</kbd> vertex: tap points, tap the first point or <kbd>Enter</kbd> to close · <kbd>Esc</kbd> cancel. In both, right/middle-drag or two fingers pan</li>
     <li><kbd>E</kbd> redraw the selected outline (keeps class and id)</li>
     <li><kbd>1</kbd>–<kbd>8</kbd> or a class chip: reclass the selection; also the class for new shapes</li>
-    <li><kbd>N</kbd>/<kbd>P</kbd> next/prev · <kbd>R</kbd> reviewed · <kbd>Z</kbd> undo · <kbd>T</kbd> toggle predictions · <kbd>H</kbd> hide/show all outlines</li>
+    <li><kbd>N</kbd>/<kbd>P</kbd> next/prev · <kbd>R</kbd> reviewed · <kbd>Z</kbd> undo · <kbd>T</kbd> toggle <span id="helpT">predictions</span> · <kbd>H</kbd> hide/show all outlines</li>
   </ul>
   <h3>Saving</h3>
   <div style="color:var(--mute)">Edits save in this browser automatically. Opened from the lab server, they also upload to the PC (badge at top right); offline edits upload when the connection returns. Opened from a zip, <b>Export</b> regularly and <b>Import</b> the JSON into the online page later.</div>
@@ -268,6 +272,7 @@ body.sandbox #list,body.sandbox #side{top:var(--sbh,0px)}
     <button id="aYes" class="round" title="Match">♥</button>
     <button id="aNext" title="Next card (N, or swipe)" hidden>Next →</button>
   </div>
+  <div id="triKeys" hidden></div>
 </section>
 <div id="whoDlg" role="dialog" aria-modal="true" aria-labelledby="whoTitle" hidden>
   <div class="box">
@@ -306,6 +311,22 @@ if (typeof D.cand_conf === "number" && isFinite(D.cand_conf)) {
   sl.value = cc; $("confOut").textContent = parseFloat(sl.value).toFixed(2);
   if (![...tc.options].some(o => o.value === cc)) tc.add(new Option("conf ≥ " + cc, cc), 0);
   tc.value = cc;
+}
+// Prediction packages: the Labels layer is what Results counts and the Predictions layer is the unsure candidates.
+// Words for them live in PW (the labeling package keeps the old ones); applyPredictionWording() sets the static text once.
+const isPredPkg = D.kind === "prediction";
+const pctOf = (v, d) => Math.round((typeof v === "number" && isFinite(v) ? v : d) * 100) + "%";
+const PW = isPredPkg ? {lab: "counted", pr: "unsure", prFlag: "unsure outline", run: "Model"} : {lab: "labels", pr: "predictions", prFlag: "prediction", run: "Predictions"};
+function applyPredictionWording() {
+  if (!isPredPkg) return;
+  const lo = pctOf(D.cand_conf, 0.25), hi = pctOf(D.label_conf, 0.5);
+  $("lblGt").textContent = "Counted";
+  $("lblGtWrap").title = `Model outlines ≥${hi} plus what you accepted or drew. This is what Results counts: EVs counted, non-EVs counted separately, inner layers excluded.`;
+  $("lblPr").textContent = "Unsure, not counted ≥";
+  $("lblPrWrap").title = `Model outlines between ${lo} and ${hi}. Not counted unless you accept them.`;
+  $("helpT").textContent = "unsure";
+  $("toTri").title = "Go through unsure outlines one at a time: accept or reject";
+  $("toTri").classList.add("quick");
 }
 const clone = o => JSON.parse(JSON.stringify(o));
 // Anything from an edit record or a claim (who, seed, a decision's class) is escaped before it goes into HTML.
@@ -696,7 +717,7 @@ function renderList() {
   box.appendChild(frag);
   const n = {unreviewed: 0, edited: 0, reviewed: 0}; D.images.forEach(im => n[statusOf(im)]++);
   $("qSum").textContent = `${order.length} shown · ${n.unreviewed} unreviewed · ${n.edited} edited · ${n.reviewed} reviewed`;
-  $("progress").innerHTML = `<b>${n.reviewed}</b> / ${D.images.length} reviewed · ${n.edited} edited<br><span style="color:var(--mute)">Predictions: ${esc(D.run)}</span>`;
+  $("progress").innerHTML = `<b>${n.reviewed}</b> / ${D.images.length} reviewed · ${n.edited} edited<br><span style="color:var(--mute)">${PW.run}: ${esc(D.run)}</span>`;
 }
 function flagText(o, pred) {
   const t = [];
@@ -709,12 +730,12 @@ function renderSide() {
   const im = curImg(), box = $("selBox");
   const g = gtOf(im);
   $("title").textContent = `${im.file.replace(/_(jpg|png)\.rf\..*$/, "")}  (${im.split})`;
-  $("title").title = `${im.file} · ${g.length} labels · ${im.pr.length} predictions · flags: ` + FLAG_COUNTS.map(([k, , t]) => `${im[k] || 0} ${t}`).join(", ");
+  $("title").title = `${im.file} · ${g.length} ${PW.lab} · ${im.pr.length} ${PW.pr} · flags: ` + FLAG_COUNTS.map(([k, , t]) => `${im[k] || 0} ${t}`).join(", ");
   const e = edits[im.file]; $("reviewed").classList.toggle("on", !!(e && e.reviewed));
   $("undo").disabled = !(undoStacks[im.file] && undoStacks[im.file].length);
   $("bClose").hidden = !(mode === "tap" && draft && draft.length >= 6);
   renderChips();
-  if (!sel) { box.innerHTML = `${g.length} labels, ${im.pr.filter(p => p.s >= conf()).length} predictions shown.<br>Click a polygon to select it.`; return; }
+  if (!sel) { box.innerHTML = `${g.length} ${PW.lab}, ${im.pr.filter(p => p.s >= conf()).length} ${PW.pr} shown.<br>Click a polygon to select it.`; return; }
   if (sel.kind === "gt") {
     const a = selObj(); if (!a) { sel = null; return renderSide(); }
     const sd = seedOf(im.file, keyOf(a));
@@ -745,9 +766,9 @@ function legend() {
   $("legend").innerHTML = CATS.map((c, k) => `<div${isNewCls(c) ? ` class="newcls" title="${NEW_TIP}"` : ""}><span style="background:${catColor(c)}"></span>${k < 9 ? k + 1 + ". " : ""}${esc(c)}${isNewCls(c) ? " (new class)" : ""}</div>`).join("");
   const sw = st => `<span class="sw"><i style="border-top:${st}"></i></span>`;
   $("flagLegend").innerHTML = [
-    [sw("1.5px dashed #22d3ee"), "prediction"],
+    [sw("1.5px dashed #22d3ee"), PW.prFlag],
     [`<span class="sw"><i style="border-top:0;height:3px;background:repeating-linear-gradient(90deg,${FLAG.pu} 0 8px,transparent 8px 11px,${FLAG.pu} 11px 13px,transparent 13px 16px)"></i></span>`,
-      "dash-dot: prediction with no label, undecided (possible miss). Select it: Accept (A) or Reject (X); editing its outline accepts it"],
+      `dash-dot: ${PW.prFlag} with no label, undecided (possible miss). Select it: Accept (A) or Reject (X); editing its outline accepts it`],
     [sw(`6px solid ${FLAG.gu}`), "label with no prediction (check it)"],
     [sw(`5px dotted ${FLAG.x}`), "class disagrees with the matched object (label halo, dotted prediction)"],
     [sw(`4px dashed ${FLAG.lc}`), "Low conf EV label: confirm the class"],
@@ -1172,7 +1193,8 @@ function applyBrand() {
   const b = brand(); $("logoName").textContent = b.name; $("logoTag").textContent = b.tag;
   const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   $("tri").style.setProperty("--hot", dark ? b.hotD : b.hot); $("tri").style.setProperty("--hot2", dark ? b.hotD2 : b.hot2);
-  $("toTri").textContent = b.name; document.title = $("tri").hidden ? "EV Label Review" : b.name;
+  if (isPredPkg) { const t = $("toTri"); t.textContent = "Quick check"; const sm = document.createElement("small"); sm.textContent = b.name; t.append(sm); } else $("toTri").textContent = b.name;
+  document.title = $("tri").hidden ? "EV Label Review" : b.name;
 }
 $("logo").onclick = () => { brandI = (brandI + 1) % BRANDS.length; try { localStorage.setItem("cryoev-review:brand", brandI); } catch (e) {} applyBrand(); triRender(); };
 function resolved(c) {  // decided, unless the decision is September's (seed): a reviewer still has to confirm it
@@ -1281,8 +1303,13 @@ function setTriMode(m) {
   if (tri.adj) { tri.adj = null; updAdjBar(); }
   openTri();
 }
+function triKeysText(cm) {
+  return cm ? "1–9 pick class · → / A keep · ← / ↑ / S next · Z undo · Esc close"
+            : "→ / A accept · ← / X reject · ↑ / S skip · Z undo · Esc close";
+}
 function openTri() {
   const cm = clsMode();
+  if (isPredPkg) { const k = $("triKeys"); k.textContent = triKeysText(cm); k.hidden = false; }
   $("triMode").value = tri.mode; $("clsScope").hidden = !cm; $("triConf").hidden = cm;
   $("triChips").hidden = cm; $("triCls").hidden = !cm; $("triAdj").hidden = cm; $("aNope").hidden = cm;
   $("aYes").textContent = cm ? "✓" : "♥"; $("aSkip").title = cm ? "Next: decide later (swipe left or up)" : "Maybe later";
@@ -1817,7 +1844,7 @@ window.addEventListener("online", () => scheduleSync(100));
 
 window.addEventListener("resize", resize);
 const deep = parseDeep();
-legend(); renderList(); resize(); if (deep) openDeep(deep); else go(order.length ? order[0] : 0); hint(); connect();
+applyPredictionWording(); legend(); renderList(); resize(); if (deep) openDeep(deep); else go(order.length ? order[0] : 0); hint(); connect();
 peopleP = loadPeople(); peopleP.then(() => { if (!me()) openWho(); });  // asked once; the name is then remembered
 let startMode = null; try { startMode = localStorage.getItem("cryoev-review:mode"); } catch (e) {}
 { const m = new URLSearchParams(location.search).get("mode");  // a link with &mode=classes|cards|editor picks the view
