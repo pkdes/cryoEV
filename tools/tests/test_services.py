@@ -226,7 +226,59 @@ class ServicesTests(unittest.TestCase):
         self.assertEqual(quiet(S.main, ["example-config", "--out", str(dest)])[0], 0)
         cfg = S.load_config(dest)
         self.assertFalse({s.name: s for s in cfg.services}["portal"].enabled)
+        self.assertEqual({s.name: s for s in cfg.services}["portal"].health, "/healthz")
+        self.assertIsNone({s.name: s for s in cfg.services}["review"].health)   # unset = today's behaviour
         self.assertEqual(quiet(S.main, ["example-config", "--out", str(dest)])[0], 2)  # never overwrites
+
+
+class HealthTests(unittest.TestCase):
+    """health(): with a path, up = 200 + JSON ok:true; without one, any HTTP answer is up (the control)."""
+
+    def serve(self, status, body):
+        import http.server
+        import threading
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return srv.server_address[1]
+
+    def test_healthz_ok_is_up(self):
+        self.assertEqual(S.health("127.0.0.1", self.serve(200, b'{"ok": true}'), path="/healthz"), "ok")
+
+    def test_healthz_not_ok_is_not_up(self):
+        for status, body in ((401, b'{"ok": true}'), (404, b"nope"), (200, b'{"ok": false}'), (200, b"<html>"),
+                             (200, b"[]"), (200, b'{"ok": "yes"}')):
+            self.assertNotEqual(S.health("127.0.0.1", self.serve(status, body), path="/healthz"), "ok", (status, body))
+
+    def test_no_health_option_any_answer_is_up(self):             # control: today's behaviour for review servers
+        for status in (200, 403, 404):
+            self.assertEqual(S.health("127.0.0.1", self.serve(status, b"x")), f"http {status}")
+
+    def test_dead_port_down(self):
+        self.assertEqual(S.health("127.0.0.1", free_port(), path="/healthz"), "down")
+
+    def test_config_health_validated(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            for h, ok in (("/healthz", True), ("healthz", False), (5, False)):
+                f = Path(d) / "c.json"
+                f.write_text(json.dumps({"run_dir": str(Path(d) / "run"), "services": [
+                    {"name": "p", "port": 1234, "argv": ["x"], "health": h}]}), encoding="utf-8")
+                if ok:
+                    self.assertEqual(S.load_config(f).services[0].health, "/healthz")
+                else:
+                    with self.assertRaises(S.ConfigError):
+                        S.load_config(f)
 
 
 if __name__ == "__main__":

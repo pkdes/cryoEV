@@ -59,12 +59,12 @@ Here `backup_state.bat` contains `"<python.exe>" "<repo>\tools\backup_state.py" 
 The review server, review sandbox, history server and job monitor (and later the portal) used to run as children of a shell session and died with it. `services.py` starts them detached, keeps pid files and logs, and a logon task starts them after a reboot.
 
 - **Config:** JSON **outside the repo**, because it holds real paths: `%USERPROFILE%\.cryoev\services.json` (override `--config` or env `CRYOEV_SERVICES_CONFIG`).
-  - One entry per service: `name`, `argv`, `cwd`, `port` (null for the monitor), `enabled`, `log`; optional `host` (health check, default 127.0.0.1) and `env`.
+  - One entry per service: `name`, `argv`, `cwd`, `port` (null for the monitor), `enabled`, `log`; optional `host` (health check, default 127.0.0.1), `health` (a path starting with `/`, see `status` below) and `env`.
   - `{python}` = the python running `services.py`, `{repo}` = this checkout; `%VARS%` and `~` are expanded.
   - `python tools/services.py example-config --out %USERPROFILE%\.cryoev\services.json` writes a template with placeholders (`<CryoAI-laptop>`, `<pkg>`) and never overwrites. The portal entry is there, `enabled: false`.
   - The config can be written with PowerShell's `>` (UTF-16) or as UTF-8; both load.
 - **Commands:**
-  - `status` (`--json`): name, enabled, state, pid, port, listening, health, uptime, log. Health is `GET /api/ping`: any HTTP answer is up (`http 403` for a review server without its key, `http 404` for the history server); `tcp` if the port accepts but doesn't speak HTTP.
+  - `status` (`--json`): name, enabled, state, pid, port, listening, health, uptime, log. Health is `GET /api/ping` unless the service has a `health` path (the portal entry uses `"health": "/healthz"`): then up = HTTP 200 and a JSON body with `"ok": true` (shown as `ok`; anything else is `http <status>` or `bad body`). Without `health`, any HTTP answer is up (`http 403` for a review server without its key, `http 404` for the history server); `tcp` if the port accepts but doesn't speak HTTP.
   - `start [name ...|all]` (default all): enabled entries only. It skips a service whose pid file names a live process of ours, and one whose port something else already holds: **"port busy (not ours)"**, left alone, exit 1. The service starts detached with no console window, out of the caller's job object when Windows allows it. It waits up to `--wait` (15 s) for the port and reports a quick exit with the log's last lines.
   - `stop [name ...|all]`: kills only a process whose pid, command line **and** creation time match its pid file, plus that process's children (e.g. the real python behind a venv launcher). A hand-started server, a reused pid or any other python is never touched; a stale pid file is just removed.
   - `restart [name ...|all]`.

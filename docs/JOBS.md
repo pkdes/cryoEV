@@ -69,6 +69,11 @@ python jobs/monitor.py --share \\gpu-desktop\cj                       # writes <
 - **Server probes.** Each cycle the monitor also probes the laptop's servers on 127.0.0.1 with `GET /api/ping`: `review` 8766, `sandbox` 8765, `history` 8768 (`--servers review=8766,sandbox=8765,history=8768` is the default; `--servers ""` turns it off).
   - Any HTTP answer is **up**, 403 and 404 included. Refused, or no answer in 1 s, is **down**.
   - All the probes run at once in their own threads, apart from the queue readers, and are given up after 3 s. live.json gets `servers: [{name, port, up, ms}]`.
+- **Portal uptime probes** (`--portal URL`, repeatable; default none, so the desktop's monitor is unchanged). Example: `--portal http://127.0.0.1:8770/healthz`.
+  - Each cycle the monitor GETs the URL. **Up** = HTTP 200 and a JSON body with `"ok": true` (what the portal's `/healthz` returns); a 401/404, another body, a refusal or no answer in 3 s is a failed check.
+  - **Down** after 2 failed checks in a row: ONE ntfy, and ONE more when it answers again. No repeats while it stays down. State is kept in memory, so a monitor restart while the portal is down sends one more down alert.
+  - The sender is `training/notify.py`'s, with the topic from env `CRYOEV_NTFY_TOPIC` (never printed, logged or put in a message). Unset: `ntfy not configured` is logged once and nothing is sent. The message names the port (`portal :8770`), not the host.
+  - live.json gets `portals: [{name, port, up, fails, ms}]`, only when `--portal` is given.
 - **Servers bar** (history page header, under the title): Review, Sandbox and History links, each with a dot from the snapshot: green up, amber down, grey unknown (stale or no snapshot).
   - The links are built from the page's own address. On a `tailscale serve` port (443, 8443, 8445) they use the same scheme and host: Review `/`, Sandbox `:8443/`, History `:8445/history.html`. Opened on another port (e.g. 127.0.0.1:8768) they use `http:` and the local ports.
   - Opened as a file, it shows the names only, with no links.

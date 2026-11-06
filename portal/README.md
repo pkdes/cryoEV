@@ -247,6 +247,12 @@ python -m portal.app --auth access --port 8448 [--access-config <path>] [--state
 - **Logs:** refusals with a reason and `Cf-Connecting-IP` (IP-shaped values only); the token is never logged. The
   access log adds `cf=<ip>`.
 
+## Uptime
+- **Portal process down:** the laptop's job monitor can watch it. Add `--portal http://127.0.0.1:<port>/healthz` to the `monitor` service's argv and set env `CRYOEV_NTFY_TOPIC` for it. After 2 failed checks it sends one ntfy, and one more on recovery (docs/JOBS.md, Portal uptime probes).
+- **Laptop asleep, off or offline:** the monitor runs on that laptop, so it cannot report this. Turn on the **Cloudflare Tunnel Health Alert** (Cloudflare dashboard -> Zero Trust -> Notifications, email destination: `<your email>`) for the tunnel that serves `<portal hostname>`.
+- **Power:** Windows Settings -> System -> Power -> set "When plugged in, put my device to sleep after" to **Never**, so the tunnel stays up.
+- **Service entry** (private `services.json`): give the portal service `"health": "/healthz"` so `services.py status` shows `ok` only for a 200 with `{"ok": true}`.
+
 ## Pipelines groundwork (decided; no code yet)
 Future job outputs carry `step`, `step_version`, `params` and `kind`. There is no pipeline schema until a second real
 pipeline exists.
