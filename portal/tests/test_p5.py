@@ -151,11 +151,99 @@ class AddByEmail(AdminBase):
         _, _, body = self.get("/admin/")
         self.assertIn("Make key link", body.decode())
 
-    def test_last_admin_email_only_cannot_lose_email_and_is_counted(self):
-        # an email-only admin counts as an admin: the key admin may be demoted
+    def test_without_csrf_token_refused(self):
+        ADM.add_person(self.env.roster, "nocsrf", "basic", "nc@example.org", with_key=False)
+        h = T.cookie(self.tok)
+        h["Content-Type"] = FORM
+        h["Origin"] = self.p.origin
+        st, _, body = T.request(self.p.port, "POST", "/admin/people/key", h, b"id=nocsrf")
+        self.assertIn(st, (403, 400))
+        self.assertNotIn("key_sha256", entry(self.env, "nocsrf"))
+
+    def test_also_key_only_accepts_1_or_on(self):
+        self.post("/admin/people/add", {"id": "ak", "role": "basic", "email": "ak@example.org", "also_key": "yes"})
+        self.assertNotIn("key_sha256", entry(self.env, "ak"))
+
+    def test_malformed_services_config_tolerated(self):
+        old = os.environ["CRYOEV_SERVICES_CONFIG"]
+        try:
+            for text in ('{"services": 5}', '{"services": [1, null, "x"]}', "[1,2]", "not json"):
+                self.svc.write_text(text, encoding="utf-8")
+                self.assertEqual(ADM._health_paths(), set())
+        finally:
+            self.svc.write_text(json.dumps({"run_dir": str(self.cfg_dir / "run"), "services": []}), encoding="utf-8")
+            os.environ["CRYOEV_SERVICES_CONFIG"] = old
+
+
+class KeyedAdminGuard(unittest.TestCase):
+    """The tailnet is the break-glass door: at least one active admin with a key must always remain."""
+
+    def setUp(self):
+        self.env = T.Env()                                   # tester: the keyed admin
         ADM.add_person(self.env.roster, "boss2", "admin", "boss2@example.org", with_key=False)
+
+    def tearDown(self):
+        self.env.cleanup()
+
+    def test_sole_keyed_admin_cannot_demote_or_revoke(self):
+        with self.assertRaises(ADM.Refused) as c:
+            ADM.set_role(self.env.roster, "tester", "basic")
+        self.assertIn("key link", str(c.exception))
         with self.assertRaises(ADM.Refused):
-            ADM.set_email(self.env.roster, "boss2", "")      # would leave them no way in
+            ADM.revoke_person(self.env.roster, "tester")
+        self.assertIn("key link", ADM.revoke_check(self.env.roster, "tester"))
+        self.assertEqual(entry(self.env, "tester")["role"], "admin")
+        self.assertNotIn("revoked", entry(self.env, "tester"))
+
+    def test_email_only_admin_cannot_lose_email(self):
+        with self.assertRaises(ADM.Refused):
+            ADM.set_email(self.env.roster, "boss2", "")
+
+    def test_allowed_once_another_admin_has_a_key(self):
+        ADM.make_key(self.env.roster, "boss2")
+        self.assertEqual(ADM.set_role(self.env.roster, "tester", "basic"), "admin")
+        with self.assertRaises(ADM.Refused):                  # boss2 is now the sole keyed admin
+            ADM.revoke_person(self.env.roster, "boss2")
+
+    def test_email_only_admin_can_be_revoked_freely(self):
+        self.assertEqual(ADM.revoke_person(self.env.roster, "boss2"), "admin")
+
+
+class KeysTailnetOnly(unittest.TestCase):
+    def test_access_mode_hides_and_refuses_key_minting(self):
+        env = T.Env()
+        try:
+            TA.roster_people(env)
+            p = TA.access_portal(env, TA.Fetcher(), admin=True)
+            try:
+                st, _, page = TA.get(p.port, "/admin/", TA.sign("boss@example.org"))
+                self.assertEqual(st, 200)
+                self.assertNotIn(b"Make key link", page)
+                self.assertNotIn(b"Make a new key link", page)
+                self.assertNotIn(b"also_key", page)
+                tok = TOKEN_RE.search(page.decode()).group(1)
+                body = urlencode({"t": tok, "id": "adv"}).encode()
+                st, _, out = TA.get(p.port, "/admin/people/key", TA.sign("boss@example.org"),
+                                    {"Origin": TA.ORIGIN, "Content-Type": FORM}, method="POST", body=body)
+                self.assertEqual(st, 403)
+                self.assertIn(b"Use the Tailscale admin page to make key links.", out)
+            finally:
+                p.stop()
+        finally:
+            env.cleanup()
+
+    def test_key_mode_shows_them(self):
+        env = T.Env()
+        try:
+            p = T.Portal(env.config())
+            try:
+                tok = T.login(p.port, env.key)
+                _, _, page = T.request(p.port, "GET", "/admin/", T.cookie(tok))
+                self.assertIn(b"also_key", page)
+            finally:
+                p.stop()
+        finally:
+            env.cleanup()
 
 
 class AccessSignIn(unittest.TestCase):
@@ -218,6 +306,12 @@ class HealthDisplay(unittest.TestCase):
         self.assertNotIn("problem", out)
         self.assertNotIn("unhealthy", out)
 
+    def test_any_non_ok_with_health_path_is_unhealthy(self):
+        for hs in ("bad body", "tcp", "http 500"):
+            out = self.render([self.row("portal", hs, True)])
+            self.assertIn(f"problem: {hs}", out, hs)
+            self.assertIn("unhealthy", out)
+
     def test_ok_stays_ok(self):
         out = self.render([self.row("portal", "ok", True)])
         self.assertIn("ok", out)
@@ -239,12 +333,16 @@ class HealthDisplay(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
 
 
-def make_pkg(root: Path, ps: str, owner: str, n_images: int, checked: int, edited: int = 0, unchecked_files: int = 0):
+def make_pkg(root: Path, ps: str, owner: str, n_images: int, checked: int, edited: int = 0, unchecked_files: int = 0,
+             keyed: bool = True):
     """review/pred_<ps>/ with review_package.json and edits: `checked` Reviewed images, `edited` images with a
     decision, `unchecked_files` edit files holding nothing."""
     d = root / f"pred_{ps}"
     (d / "edits").mkdir(parents=True)
     (d / "review_package.json").write_text(json.dumps({"owner": owner, "n_images": n_images, "prediction_set": ps}))
+    if keyed:
+        (d / "data.js").write_text("window.DATA={}")
+        (d / ".review_key").write_text("k" * 20)
     i = 0
     for _ in range(checked):
         (d / "edits" / f"img{i}.json").write_text(json.dumps({"edit": {"reviewed": True, "dec": {}}}))
@@ -269,13 +367,14 @@ class MyReviews(unittest.TestCase):
         cls.keys = {"admin": cls.env.key, "bas": A.add_key(cls.env.roster, "bas", "basic"),
                     "other": A.add_key(cls.env.roster, "other", "basic"),
                     "adv": A.add_key(cls.env.roster, "adv", "advanced")}
-        make_pkg(cls.review, "ps_mine_1", "bas", n_images=10, checked=2, edited=1, unchecked_files=3)
-        make_pkg(cls.review, "ps_theirs_9", "other", n_images=5, checked=5)
-        make_pkg(cls.review, "ps_admin_7", "tester", n_images=4, checked=0)
-        (cls.predict / "ps_mine_1").mkdir()
-        (cls.predict / "ps_mine_1" / "request.json").write_text(json.dumps({"name": "My <b>EV</b> run"}))
-        (cls.predict / "ps_theirs_9").mkdir()
-        (cls.predict / "ps_theirs_9" / "request.json").write_text(json.dumps({"name": "SecretOtherName"}))
+        make_pkg(cls.review, "ps_20261101_aaaaa1", "bas", n_images=10, checked=2, edited=1, unchecked_files=3)
+        make_pkg(cls.review, "ps_20261102_bbbbb2", "other", n_images=5, checked=5)
+        make_pkg(cls.review, "ps_20261103_ccccc3", "tester", n_images=4, checked=0)
+        make_pkg(cls.review, "ps_20261104_ddddd4", "bas", n_images=3, checked=1, keyed=False)    # no key: broken
+        (cls.predict / "ps_20261101_aaaaa1").mkdir()
+        (cls.predict / "ps_20261101_aaaaa1" / "request.json").write_text(json.dumps({"name": "My <b>EV</b> run"}))
+        (cls.predict / "ps_20261102_bbbbb2").mkdir()
+        (cls.predict / "ps_20261102_bbbbb2" / "request.json").write_text(json.dumps({"name": "SecretOtherName"}))
         cfg = cls.env.config()
         cfg.review_root, cfg.predict_root = cls.review, cls.predict
         cls.p = T.Portal(cfg)
@@ -296,30 +395,34 @@ class MyReviews(unittest.TestCase):
         self.assertEqual(st, 200)
         self.assertIn("checked 3 of 10 images", text)                 # 2 reviewed + 1 edited; empty files not counted
         self.assertIn("My &lt;b&gt;EV&lt;/b&gt; run", text)
-        self.assertIn("/review/pred_ps_mine_1/", text)
-        for hidden in ("ps_theirs_9", "SecretOtherName", "other", "ps_admin_7", "tester"):
+        self.assertIn("/review/pred_ps_20261101_aaaaa1/", text)
+        for hidden in ("ps_20261102_bbbbb2", "SecretOtherName", "other", "ps_20261103_ccccc3", "tester"):
             self.assertNotIn(hidden, text.split("<main")[-1] if "<main" in text else text)
         # the other user sees theirs, not bas's
         st, text = self.get("/reviews/", "other")
-        self.assertIn("ps_theirs_9", text)
-        self.assertNotIn("ps_mine_1", text)
+        self.assertIn("ps_20261102_bbbbb2", text)
+        self.assertNotIn("ps_20261101_aaaaa1", text)
+
+    def test_broken_package_not_listed(self):
+        for who, path in (("bas", "/reviews/"), ("admin", "/reviews/?show=all")):
+            self.assertNotIn("ddddd4", self.get(path, who)[1], who)
 
     def test_basic_cannot_widen_with_show_all(self):
         st, text = self.get("/reviews/?show=all", "bas")
         self.assertEqual(st, 200)
-        self.assertNotIn("ps_theirs_9", text)
+        self.assertNotIn("ps_20261102_bbbbb2", text)
         self.assertNotIn("Owner", text)
 
     def test_admin_mine_and_all(self):
         st, mine = self.get("/reviews/", "admin")
         self.assertEqual(st, 200)
-        self.assertIn("pred_ps_admin_7", mine.replace("/review/", " "))
-        self.assertNotIn("ps_mine_1", mine)
-        self.assertNotIn("ps_theirs_9", mine)
+        self.assertIn("pred_ps_20261103_ccccc3", mine.replace("/review/", " "))
+        self.assertNotIn("ps_20261101_aaaaa1", mine)
+        self.assertNotIn("ps_20261102_bbbbb2", mine)
         self.assertNotIn("<th>Owner</th>", mine)
         self.assertIn("Mine", mine)
         st, every = self.get("/reviews/?show=all", "admin")
-        for want in ("ps_mine_1", "ps_theirs_9", "ps_admin_7", "<th>Owner</th>", "SecretOtherName"):
+        for want in ("ps_20261101_aaaaa1", "ps_20261102_bbbbb2", "ps_20261103_ccccc3", "<th>Owner</th>", "SecretOtherName"):
             self.assertIn(want, every)
         self.assertIn(">other<", every)
         self.assertIn(">bas<", every)
@@ -345,7 +448,7 @@ class MyReviews(unittest.TestCase):
         self.assertIn("My reviews", home)
 
     def test_cache_follows_edits_folder_mtime(self):
-        d = self.review / "pred_ps_mine_1"
+        d = self.review / "pred_ps_20261101_aaaaa1"
         before = REV.edit_stats(d)[0]
         (d / "edits" / "new.json").write_text(json.dumps({"edit": {"reviewed": True}}))
         os.utime(d / "edits", (time.time() + 5, time.time() + 5))

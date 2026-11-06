@@ -99,13 +99,18 @@ def list_packages(cfg, user: dict, can_see, only_mine: bool) -> list:
         dirs = sorted(d for d in Path(root).iterdir() if PKG_RE.fullmatch(d.name) and d.is_dir())
     except OSError:
         return []
+    from annotation import multi_review_server as MRS
+    from portal.app import PRED_ID_RE
     rows = []
     for d in dirs:
+        # only what the Open link can open: the same checks as app.pred_package and the review server
+        if not PRED_ID_RE.match(d.name) or MRS.package_dir(Path(root), d.name) is None or not MRS.package_key(d):
+            continue
         meta = _read_json(d / "review_package.json")
         if not isinstance(meta, dict):
             continue
         owner = meta.get("owner")
-        if not isinstance(owner, str) or not can_see(user, owner):
+        if not isinstance(owner, str) or not owner or not can_see(user, owner):
             continue
         if only_mine and owner != user.get("id"):
             continue

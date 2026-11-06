@@ -307,6 +307,20 @@ def _check_id(pid) -> None:
         raise Refused(BAD_ID, 400)
 
 
+def keyed_admin(p) -> bool:
+    """An active admin with a key link: the tailnet door, the break-glass way in (works in every mode)."""
+    return A.Roster.usable(p) and p.get("role") == "admin"
+
+
+def _keyed_admins_left(doc, pid) -> int:
+    return sum(1 for p in doc["people"] if isinstance(p, dict) and keyed_admin(p) and p.get("id") != pid)
+
+
+KEYS_TAILNET_ONLY = "Use the Tailscale admin page to make key links."
+LAST_KEYED = ("{pid} is the last admin with a key link. Make a key link for another admin first (the Tailscale "
+              "page is the way in if Cloudflare sign-in fails).")
+
+
 def _admins_left(doc, pid) -> int:
     return sum(1 for p in doc["people"] if isinstance(p, dict) and is_admin(p) and p.get("id") != pid)
 
@@ -420,6 +434,8 @@ def set_role(path, pid: str, role: str) -> str:
             raise Refused(f"{pid} is already {ROLE_WORD[role]}.")
         if is_admin(p) and role != "admin" and _admins_left(doc, pid) == 0:
             raise Refused(f"{pid} is the last admin. Make someone else an admin first.")
+        if keyed_admin(p) and role != "admin" and _keyed_admins_left(doc, pid) == 0:
+            raise Refused(LAST_KEYED.format(pid=pid))
         p["role"] = role
         p["role_changed"] = datetime.now().isoformat(timespec="seconds")
         write_roster(path, doc)
@@ -436,6 +452,8 @@ def revoke_person(path, pid: str) -> str:
             raise Refused(f"{pid} is not on the list, or already revoked.", 404)
         if any(is_admin(p) for p in hits) and _admins_left(doc, pid) == 0:
             raise Refused(f"{pid} is the last admin. Make someone else an admin first.")
+        if any(keyed_admin(p) for p in hits) and _keyed_admins_left(doc, pid) == 0:
+            raise Refused(LAST_KEYED.format(pid=pid))
         stamp = datetime.now().isoformat(timespec="seconds")
         for p in hits:
             p["revoked"] = stamp
@@ -456,6 +474,8 @@ def revoke_check(path, pid: str) -> str | None:
         return f"{pid} is not on the list, or already revoked."
     if any(is_admin(p) for p in hits) and _admins_left(doc, pid) == 0:
         return f"{pid} is the last admin. Make someone else an admin first."
+    if any(keyed_admin(p) for p in hits) and _keyed_admins_left(doc, pid) == 0:
+        return LAST_KEYED.format(pid=pid)
     return None
 
 
@@ -576,8 +596,10 @@ def _health_paths() -> set:
     p = os.environ.get("CRYOEV_SERVICES_CONFIG") or str(Path.home() / ".cryoev" / "services.json")
     try:
         doc = json.loads(Path(p).read_text(encoding="utf-8-sig"))
-        return {str(x.get("name")) for x in doc.get("services", []) if isinstance(x, dict) and x.get("health")}
-    except (OSError, ValueError, AttributeError):
+        svcs = doc.get("services", [])
+        return {str(x.get("name")) for x in (svcs if isinstance(svcs, list) else [])
+                if isinstance(x, dict) and x.get("health")}
+    except (OSError, ValueError, AttributeError, TypeError):
         return set()
 
 
@@ -809,7 +831,7 @@ def hidden_token(tok) -> str:
     return f'<input type="hidden" name="t" value="{esc(tok)}">'
 
 
-def render_people(rows, me, tok, msg_html="") -> str:
+def render_people(rows, me, tok, msg_html="", keys_ok=True) -> str:
     active = [r for r in rows if r["state"] != "revoked"]
     gone = [r for r in rows if r["state"] == "revoked"]
     n_admin = sum(1 for r in active if r["role"] == "admin" and r["state"] == "active")
@@ -859,7 +881,7 @@ def render_people(rows, me, tok, msg_html="") -> str:
                 f'{chip(ROLE_WORD.get(role, role), tone)}</div>'
                 f'<p class="cj-mut cj-admin-meta">{meta}.</p>{mail}{bad}{lastnote}'
                 + ("" if last else f'<div class="cj-admin-acts">{role_form}{rev}</div>')
-                + f'<div class="cj-admin-acts">{mail_form}{key_form}</div></li>')
+                + f'<div class="cj-admin-acts">{mail_form}{key_form if keys_ok else ""}</div></li>')
 
     roles = "".join(f"<li><b>{ROLE_WORD[r]}</b>: {esc(ROLE_DESC[r])}</li>" for r in A.ROLES)
     add = (f'<section class="cj-card cj-admin-add" aria-labelledby="cj-admin-h-add">'
@@ -874,8 +896,9 @@ def render_people(rows, me, tok, msg_html="") -> str:
            f'<input class="cj-admin-in" id="cj-admin-email" name="email" type="email" maxlength="254" '
            f'autocomplete="off" autocapitalize="none" spellcheck="false">'
            f'<label class="cj-admin-lbl" for="cj-admin-role">Role</label>{role_select("role", "basic", "cj-admin-role")}'
-           f'<label class="cj-admin-lbl"><input type="checkbox" name="also_key" value="1"> Also make a Tailscale key '
-           f'link <span class="cj-mut">(only matters when an email is entered)</span></label>'
+           + (f'<label class="cj-admin-lbl"><input type="checkbox" name="also_key" value="1"> Also make a '
+              f'Tailscale key link <span class="cj-mut">(only matters when an email is entered)</span></label>'
+              if keys_ok else "") +
            f'<button class="cj-admin-btn cj-admin-primary" type="submit">Add person</button></form>'
            f'<ul class="cj-mut cj-admin-roles">{roles}</ul>'
            f'<p class="cj-mut cj-admin-meta">Without an email, a key link is made and shown once, on the next '
@@ -1067,13 +1090,15 @@ def render_health(h: dict) -> str:
                 bits.append(f"port {r['port']}")
             if r.get("health") and r.get("health") not in ("-", "down"):
                 hs = str(r["health"])
-                if hs.startswith("http") and not r.get("health_path"):
-                    bits.append("answers")          # no health path: any HTTP answer is up
+                if r.get("health_path"):
+                    if hs == "ok":
+                        bits.append("ok")
+                    else:                           # a health path was asked and it did not say ok
+                        bits.append(f"problem: {hs}")
+                        if tone == "ok":
+                            tone, word = "warn", "Running, unhealthy"
                 elif hs.startswith("http"):
-                    bits.append(f"problem: {hs}")   # a health path was asked and it did not say ok
-                    if tone == "ok":
-                        tone = "warn"
-                        word = "Running, unhealthy"
+                    bits.append("answers")          # no health path: any HTTP answer is up
                 else:
                     bits.append(hs)
             if isinstance(r.get("uptime_s"), (int, float)):
@@ -1271,13 +1296,17 @@ def routes(ctx) -> list:
                               403)
         return f, None
 
+    def access_mode() -> bool:
+        return getattr(ctx.cfg, "auth", "key") == "access"
+
     def people_page(request, msg_html="", status=200):
         try:
             rows = people(ctx.cfg.roster, email=True)
         except ValueError as e:
             return show(request, "People", "people", "<h1>People</h1>" + note(
                 f"The roster can't be read ({e}). Nothing was changed.", "warn"), 500)
-        return show(request, "People", "people", render_people(rows, me(request), token(request), msg_html), status)
+        return show(request, "People", "people", render_people(rows, me(request), token(request), msg_html,
+                                                       keys_ok=not access_mode()), status)
 
     def try_audit(actor, action, target, detail) -> str:
         try:
@@ -1315,7 +1344,9 @@ def routes(ctx) -> list:
             return err
         pid, role, actor = f.get("id", "").lower(), f.get("role", ""), me(request)
         email = f.get("email", "")
-        with_key = not email.strip() or bool(f.get("also_key"))
+        with_key = not email.strip() or (f.get("also_key") in ("1", "on") and not access_mode())
+        if not email.strip() and access_mode():
+            return show(request, "Add person", "people", note(KEYS_TAILNET_ONLY, "warn"), 403)
         key, err = await change(request, add_person, pid, role, email, with_key)
         if err:
             return err
@@ -1338,6 +1369,8 @@ def routes(ctx) -> list:
         return r
 
     async def makekey(request: Request):
+        if access_mode():
+            return show(request, "Key link", "people", note(KEYS_TAILNET_ONLY, "warn"), 403)
         f, err = await form(request)
         if err:
             return err
