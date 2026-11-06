@@ -1,9 +1,11 @@
 """
 Jobs module (portal/modules/jobs.py): roles through the Gate, every section from a fixture live.json + registry,
-the API matching the page, stale / missing snapshots, another person's prediction job hidden, escaping, the
-registry cache, a real jobs/monitor.py --once snapshot as a known-answer control, and the page in a browser
-(Playwright, Edge channel: 390 and 1280 px, light and dark, no horizontal scroll, same-origin requests only, no
-console errors, the 30 s refresh). Screenshots go to $CJ_SHOT_DIR when set (else a temp folder, removed afterwards).
+the API matching the page, queue order (ready_at, else bullets), stale / missing snapshots, privacy failing closed
+(someone else's predict job, a queue job the registry doesn't know, an unreadable registry), plain words for
+non-admins (no commands, paths or raw errors), escaping, the registry cache, a real jobs/monitor.py --once
+snapshot as a known-answer control, and the page in a browser (Playwright, Edge channel: 390 and 1280 px, light and
+dark, no horizontal scroll, same-origin requests only, no console errors, the 30 s refresh). Screenshots go to
+$CJ_SHOT_DIR when set (else a temp folder, removed afterwards).
 
 Temp roster / registry / live.json only (cjtest.Env); never the real ones.
 
@@ -17,7 +19,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -34,33 +35,37 @@ except ImportError:  # pragma: no cover
 
 XSS = '<img src=x onerror=alert(1)> tiles'
 REASON_XSS = 'run failed: <script>alert("r")</script>'
+HIDDEN = J.PRIVATE_NAME
+TECH_WORDS = ("watcher", "heartbeat", "registry", "jobs/sync", "jobs/monitor", "jobs/watch", "live.json",
+              "\\\\", "home-laptop", "train.log", "ready_at", "&lt;script", "run failed")
 
 
 def local(hours_ago: float) -> str:
     return (datetime.now() - timedelta(hours=hours_ago)).isoformat(timespec="seconds")
 
 
+def qjob(job, state, pulled=False, cancel=False, reason=None, ready_at=None):
+    d = {"job": job, "state": state, "reason": reason, "pulled": pulled, "cancel_requested": cancel}
+    if ready_at:
+        d["ready_at"] = ready_at
+    return d
+
+
 def queues_fixture() -> list:
-    """Three queues as jobs/monitor.py writes them: a busy one, one whose running job is hung, one offline."""
+    """Three queues as jobs/monitor.py writes them: a busy one, one whose running job is hung, one offline.
+    ready_at puts train_next first although its name sorts last."""
     a = {"share": "\\\\gpu-desktop\\cj", "reach": "ok", "detail": None,
          "watcher": {"display": "alive", "state": "running", "detail": None, "job": "job_20261104_train_live",
                      "age_s": 40, "stale": False, "machine": "gpu-desktop"},
-         "jobs": [{"job": "job_20261101_train_old", "state": "done", "reason": None, "pulled": True,
-                   "cancel_requested": False},
-                  {"job": "job_20261102_train_blocked", "state": "blocked", "reason": REASON_XSS, "pulled": False,
-                   "cancel_requested": False},
-                  {"job": "job_20261104_train_live", "state": "running", "reason": None, "pulled": False,
-                   "cancel_requested": False},
-                  {"job": "job_20261105_predict_mine", "state": "queued", "reason": None, "pulled": False,
-                   "cancel_requested": False},
-                  {"job": "job_20261105_predict_theirs", "state": "queued", "reason": None, "pulled": False,
-                   "cancel_requested": False},
-                  {"job": "job_20261105_train_after", "state": "queued", "reason": None, "pulled": False,
-                   "cancel_requested": True},
-                  {"job": "job_20261105_train_hold", "state": "held", "reason": None, "pulled": False,
-                   "cancel_requested": False},
-                  {"job": "job_20261105_train_next", "state": "queued", "reason": None, "pulled": False,
-                   "cancel_requested": False}],
+         "jobs": [qjob("job_20261030_train_oldblock", "blocked", pulled=True, reason="old failure"),
+                  qjob("job_20261101_train_old", "done", pulled=True),
+                  qjob("job_20261102_train_blocked", "blocked", reason=REASON_XSS),
+                  qjob("job_20261104_train_live", "running"),
+                  qjob("job_20261105_predict_mine", "queued", ready_at=local(4)),
+                  qjob("job_20261105_predict_theirs", "queued", ready_at=local(3)),
+                  qjob("job_20261105_train_after", "queued", cancel=True, ready_at=local(2)),
+                  qjob("job_20261105_train_hold", "held"),
+                  qjob("job_20261105_train_next", "queued", ready_at=local(5))],
          "running": {"job": "job_20261104_train_live", "run": "2026-11-04_120000_y8m_1440_16b_300ep_Run_1",
                      "phase": "training", "epoch": 12, "epochs": 300, "elapsed_s": 900, "batch": 16,
                      "batch_asked": 16, "map50": 0.5, "map50_95": 0.25, "best_epoch": 12, "patience": 100,
@@ -76,12 +81,14 @@ def queues_fixture() -> list:
                        "metrics": {"mask_map50": 0.61, "mask_map50_95": 0.321}, "best_epoch": 140},
                       {"job": "job_20261102_train_blocked", "status": "blocked", "reason": REASON_XSS,
                        "ended": local(30), "run": None, "run_status": None, "pulled": False, "metrics": None,
+                       "best_epoch": None},
+                      {"job": "job_20261030_train_oldblock", "status": "blocked", "reason": "old failure",
+                       "ended": local(100), "run": None, "run_status": None, "pulled": True, "metrics": None,
                        "best_epoch": None}]}
     b = {"share": "\\\\queue-share\\cj", "reach": "ok", "detail": None,
          "watcher": {"display": "alive", "state": "running", "detail": None, "job": "job_20261103_train_stuck",
                      "age_s": 25, "stale": False, "machine": "lab-login"},
-         "jobs": [{"job": "job_20261103_train_stuck", "state": "running", "reason": None, "pulled": False,
-                   "cancel_requested": False}],
+         "jobs": [qjob("job_20261103_train_stuck", "running")],
          "running": {"job": "job_20261103_train_stuck", "phase": "training", "epoch": 40, "epochs": 100,
                      "elapsed_s": 20000, "epoch_median_s": 60, "last_epoch_age_s": 7200, "hung": True,
                      "hung_after_s": 600, "eta_s": 3600, "eta_patience_bound_s": None, "eta_capped": False,
@@ -95,25 +102,38 @@ def registry_fixture() -> list:
     def rec(id, name, type, where, status, logged, **kw):
         return {"schema": "job/1", "id": id, "logged": logged, "name": name, "type": type, "where": where,
                 "status": status, **kw}
+
+    def train(id, name, status="ready"):
+        return rec(id, name, "train", "desktop", status, local(6), who="tester")
     return [
         rec("job_20261102_prelipo_review_v2", "Pre-lipo review (v2)", "revise", "app", "in_progress", local(50),
             progress={"done": 3, "total": 170, "unit": "images reviewed"}, n_images=170, who="tester",
             package="prelipo_review_v2"),
-        rec("job_20261102_annotate_blind", "Annotate blind tiles", "annotate", "roboflow", "blocked", local(49),
+        rec("job_20261025_annotate_oldblock", "Old blocked labeling", "annotate", "roboflow", "blocked", local(100),
+            blocked_reason="waiting on a decision"),
+        rec("job_20261102_annotate_blind", "Annotate blind tiles", "annotate", "roboflow", "blocked", local(20),
             blocked_reason="tiles not uploaded yet", progress={"done": 0, "total": 12, "unit": "images labeled"}),
         rec("job_20261103_annotate_ready", XSS, "annotate", "app", "ready", local(40)),
         rec("job_20261101_check_done", "Check v5 on 20261027", "check", "laptop", "done", local(4)),
         rec("job_20261101_annotate_cancelled", "Old labeling", "annotate", "roboflow", "cancelled", local(3)),
-        rec("job_20261104_train_live", "Train v6 on lv_20261103", "train", "desktop", "ready", local(30)),
+        train("job_20261104_train_live", "Train v6 on lv_20261103"),
+        train("job_20261103_train_stuck", "Train v6b"),
+        train("job_20261101_train_old", "Train v5", "done"),
+        train("job_20261102_train_blocked", "Train v5b", "blocked"),
+        train("job_20261030_train_oldblock", "Train v4", "blocked"),
+        train("job_20261105_train_after", "Train after"),
+        train("job_20261105_train_hold", "Train hold"),
+        train("job_20261105_train_next", "Train next"),
         rec("job_20261105_train_notpushed", "Train v7 (not pushed)", "train", "desktop", "ready", local(1)),
         rec("job_20261105_predict_mine", "Predict my tiles", "predict", "desktop", "ready", local(1), who="adv"),
         rec("job_20261105_predict_theirs", "Predict client-x tiles", "predict", "desktop", "ready", local(1),
-            who="someone"),
+            who="otherperson"),
     ]
 
 
 def write_registry(root: Path, recs):
     (root / "job.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
+    J._reg_cache.clear()                                # the module caches registry reads for 10 s
 
 
 def section(page: str, key: str) -> str:
@@ -125,6 +145,12 @@ def section(page: str, key: str) -> str:
 
 def badge(frag: str) -> int:
     return int(re.search(r'<span class="cj-jobs-n">(\d+)</span>', frag).group(1))
+
+
+def main_html(page: str) -> str:
+    """The module's own HTML (between <main> tags), for word checks."""
+    body = page.split('<main class="cj-main">', 1)[1].split("</main>", 1)[0]
+    return re.sub(r"<style>.*?</style>", "", body, flags=re.S)
 
 
 class Base(unittest.TestCase):
@@ -160,6 +186,26 @@ class Base(unittest.TestCase):
         self.assertTrue(T.hget(h, "content-type").startswith("application/json"))
         return json.loads(body)
 
+    def swap_live(self, doc):
+        path = self.env.registry / "live" / "live.json"
+        keep = path.read_bytes()
+        if doc is None:
+            path.unlink()
+        else:
+            self.env.write_live(doc)
+        self.addCleanup(path.write_bytes, keep)
+
+    def swap_registry(self, recs=None, text=None):
+        path = self.env.registry / "job.jsonl"
+        keep = path.read_bytes()
+        if text is not None:
+            path.write_text(text, encoding="utf-8")
+            J._reg_cache.clear()
+        else:
+            write_registry(self.env.registry, recs)
+        self.addCleanup(J._reg_cache.clear)
+        self.addCleanup(path.write_bytes, keep)
+
 
 class Roles(Base):
     def test_module_declaration(self):
@@ -172,7 +218,8 @@ class Roles(Base):
             with self.subTest(role=role):
                 self.assertEqual(self.get("/jobs/", role)[0], 200)
                 self.assertEqual(self.get("/jobs/api/summary", role)[0], 200)
-        for path in ("/jobs/", "/jobs", "/jobs/api/summary"):
+                self.assertEqual(self.get("/jobs/jobs.js", role)[0], 200)
+        for path in ("/jobs/", "/jobs", "/jobs/api/summary", "/jobs/jobs.js"):
             with self.subTest(path=path):
                 st, _, body = self.get(path, "basic")
                 self.assertEqual(st, 403)
@@ -180,6 +227,15 @@ class Roles(Base):
         self.assertEqual(self.get("/", "basic")[0], 200)              # control: basic is signed in, just not here
         st, _, _ = T.request(self.p.port, "GET", "/jobs/api/summary")  # no session at all
         self.assertEqual(st, 401)
+
+    def test_script_is_a_file(self):
+        st, h, body = self.get("/jobs/jobs.js")
+        self.assertEqual(st, 200)
+        self.assertTrue(T.hget(h, "content-type").startswith("text/javascript"))
+        self.assertIn(b"api/summary?html=1", body)
+        page = self.page()
+        self.assertIn('<script src="/jobs/jobs.js" defer></script>', page)
+        self.assertEqual(re.findall(r"<script(?![^>]*\ssrc=)[^>]*>", page), [])   # no inline script left
 
 
 class Sections(Base):
@@ -190,60 +246,84 @@ class Sections(Base):
         self.assertIn("job_20261104_train_live", frag)
         self.assertIn("Epoch 12 / 300", frag)
         self.assertIn('<progress class="cj-jobs-bar" max="300" value="12"', frag)
-        self.assertIn("2 h 3 min", frag)                                # ETA 7380 s
-        self.assertIn("alive, heartbeat 40 s", frag)                    # watcher heartbeat age
+        self.assertIn("2 h 3 min", frag)                                # time left: 7380 s
+        self.assertIn("working normally · last update 40 s ago", frag)
+        self.assertIn("<dd>40 s ago</dd>", frag)
         self.assertIn("0.250", frag)                                    # latest val mAP50-95
         self.assertIn("job_20261103_train_stuck", frag)
-        self.assertIn("hung?", frag)
-        self.assertIn("No new epoch for 2 h (expected every 1 min)", frag)
+        self.assertIn("may be stuck", frag)
+        self.assertIn("No progress for 2 h (normally a new epoch every 1 min).", frag)
+        self.assertIn("watcher alive", frag)                            # admin: the technical line
         self.assertIn("gpu-desktop", frag)
         self.assertIn("lab-login", frag)
-        self.assertNotIn("Stale snapshot", self.page())
+        self.assertNotIn("as of", self.page())
 
-    def test_queue_in_order(self):
+    def test_queue_in_ready_order(self):
         frag = section(self.page(), "queue")
-        order = ["job_20261105_predict_mine", "job_20261105_predict_theirs", "job_20261105_train_after",
-                 "job_20261105_train_next", "job_20261105_train_hold"]
+        order = ["job_20261105_train_next", "job_20261105_predict_mine", "job_20261105_predict_theirs",
+                 "job_20261105_train_after", "job_20261105_train_hold"]
         pos = [frag.find(j) for j in order]
         self.assertTrue(all(p >= 0 for p in pos), pos)
-        self.assertEqual(pos, sorted(pos))                              # queued in queue order, then held
-        self.assertIn("cancel requested", frag)
-        self.assertIn("held: starts after release", frag)
+        self.assertEqual(pos, sorted(pos))                              # oldest READY first, then held
+        self.assertEqual(re.findall(r'<span class="cj-jobs-pos">(\d)</span>', frag), ["1", "2", "3", "4"])
+        self.assertIn("Cancel requested.", frag)
+        self.assertIn("On hold on gpu-desktop: starts when someone releases it.", frag)
         self.assertNotIn("job_20261104_train_live", frag)               # running is not "waiting"
         self.assertNotIn("job_20261101_train_old", frag)                # done is not "waiting"
         self.assertEqual(badge(frag), 5)
 
+    def test_queue_without_ready_at_has_bullets(self):
+        q = queues_fixture()
+        for j in q[0]["jobs"]:
+            j.pop("ready_at", None)
+        self.swap_live(T.live_doc(queues=q))
+        frag = section(self.page(), "queue")
+        self.assertEqual(re.findall(r'<span class="cj-jobs-pos">(\d)</span>', frag), [])
+        self.assertEqual(frag.count("cj-jobs-t-off\" aria-hidden=\"true\">•</span>"), 5)
+        order = ["job_20261105_predict_mine", "job_20261105_predict_theirs", "job_20261105_train_after",
+                 "job_20261105_train_next", "job_20261105_train_hold"]
+        pos = [frag.find(j) for j in order]
+        self.assertEqual(pos, sorted(pos))                              # live.json order, not claimed as run order
+        self.assertEqual([x["position"] for x in self.api()["queue"]], [None] * 5)
+
     def test_needs_attention(self):
         frag = section(self.page(), "attention")
         self.assertEqual(badge(frag), 4)
-        for text in ("Queue on \\\\home-laptop\\cj", "Can&#x27;t reach this queue", "job_20261103_train_stuck",
-                     "job_20261102_train_blocked", "not pulled yet", "Annotate blind tiles", "tiles not uploaded yet"):
+        for text in ("Can&#x27;t reach \\\\home-laptop\\cj", "May be stuck", "job_20261103_train_stuck",
+                     "job_20261102_train_blocked", "Stopped with an error", "not been copied back",
+                     "Annotate blind tiles", "tiles not uploaded yet"):
             self.assertIn(text, frag)
-        self.assertIn(html.escape(REASON_XSS), frag)
-        kinds = re.findall(r'cj-jobs-chip cj-jobs-t-warn">(\w+)</span>', frag)
-        self.assertEqual(kinds, ["offline", "hung", "blocked", "blocked"])
+        self.assertIn(html.escape(REASON_XSS), frag)                   # admin: the raw error, escaped
+        for old in ("job_20261030_train_oldblock", "Old blocked labeling"):
+            self.assertNotIn(old, frag)                                 # older than 48 h and pulled / registry
+        chips = re.findall(r'cj-jobs-chip cj-jobs-t-warn">([^<]+)</span>', frag)
+        self.assertEqual(chips, ["not reachable", "may be stuck", "error", "blocked"])
 
-    def test_review_and_annotation(self):
+    def test_other_open_jobs(self):
         frag = section(self.page(), "review")
-        names = ["Pre-lipo review (v2)", "Annotate blind tiles", html.escape(XSS), "Train v7 (not pushed)"]
+        self.assertIn("Other open jobs", frag)
+        names = ["Pre-lipo review (v2)", "Old blocked labeling", "Annotate blind tiles", html.escape(XSS),
+                 "Train v7 (not pushed)"]
         pos = [frag.find(n) for n in names]
         self.assertTrue(all(p >= 0 for p in pos), pos)
         self.assertEqual(pos, sorted(pos))                              # in progress, blocked, ready
         self.assertIn("3 / 170 images reviewed", frag)
-        self.assertIn("Review in the review app (port 8766)", frag)
-        self.assertIn("Not on a desktop queue yet", frag)
+        self.assertIn("Being reviewed in the review app.", frag)
+        self.assertIn("Not sent to the GPU computer yet.", frag)
         for on_queue in ("job_20261104_train_live", "Predict my tiles", "job_20261105_predict_theirs"):
-            self.assertNotIn(on_queue, frag)                            # on a desktop queue: shown from live.json
+            self.assertNotIn(on_queue, frag)                            # on a queue: shown from live.json
         self.assertNotIn("Check v5", frag)                              # done: under Recently finished
-        self.assertEqual(badge(frag), 4)
+        self.assertEqual(badge(frag), 5)
 
     def test_recently_finished(self):
         frag = section(self.page(), "finished")
-        order = ["job_20261101_train_old", "Old labeling", "Check v5 on 20261027", "job_20261102_train_blocked"]
+        order = ["job_20261101_train_old", "Old labeling", "Check v5 on 20261027", "job_20261102_train_blocked",
+                 "job_20261030_train_oldblock"]
         pos = [frag.find(n) for n in order]
         self.assertTrue(all(p >= 0 for p in pos), pos)
         self.assertEqual(pos, sorted(pos))                              # newest first, both sources
         self.assertIn("mask mAP50-95 0.321", frag)
+        self.assertIn("results not copied back yet", frag)
         self.assertRegex(frag, r"2 h( \d+ min)? ago")
 
     def test_api_matches_page(self):
@@ -251,8 +331,8 @@ class Sections(Base):
         page = self.page()
         self.assertEqual(s["schema"], "cj_jobs/1")
         self.assertNotIn("html", s)
-        self.assertEqual(s["counts"], {"running": 2, "queued": 4, "held": 1, "attention": 4, "review_open": 4,
-                                       "finished": 4})
+        self.assertEqual(s["counts"], {"running": 2, "queued": 4, "held": 1, "attention": 4, "review_open": 5,
+                                       "finished": 5})
         r = {x["id"]: x for x in s["running"]}
         live = r["job_20261104_train_live"]
         self.assertEqual((live["kind"], live["done"], live["total"], live["unit"], live["pct"], live["hung"]),
@@ -260,17 +340,19 @@ class Sections(Base):
         self.assertEqual((live["eta_s"], live["watcher"]["age_s"], live["queue"]), (7380, 40, "gpu-desktop"))
         self.assertTrue(r["job_20261103_train_stuck"]["hung"])
         self.assertEqual([(x["id"], x["state"], x["position"]) for x in s["queue"]],
-                         [("job_20261105_predict_mine", "queued", 1), ("job_20261105_predict_theirs", "queued", 2),
-                          ("job_20261105_train_after", "queued", 3), ("job_20261105_train_next", "queued", 4),
+                         [("job_20261105_train_next", "queued", 1), ("job_20261105_predict_mine", "queued", 2),
+                          ("job_20261105_predict_theirs", "queued", 3), ("job_20261105_train_after", "queued", 4),
                           ("job_20261105_train_hold", "held", None)])
         self.assertEqual([(x["kind"], x["source"]) for x in s["attention"]],
                          [("offline", "desktop"), ("hung", "desktop"), ("blocked", "desktop"), ("blocked", "registry")])
-        self.assertEqual([x["status"] for x in s["review"]], ["in_progress", "blocked", "ready", "ready"])
+        self.assertEqual([x["status"] for x in s["review"]], ["in_progress", "blocked", "blocked", "ready", "ready"])
         self.assertEqual([x["id"] for x in s["finished"]],
                          ["job_20261101_train_old", "job_20261101_annotate_cancelled", "job_20261101_check_done",
-                          "job_20261102_train_blocked"])
+                          "job_20261102_train_blocked", "job_20261030_train_oldblock"])
         self.assertEqual([q["reach"] for q in s["queues"]], ["ok", "ok", "offline"])
+        self.assertEqual(s["queues"][0]["share"], "\\\\gpu-desktop\\cj")   # admin gets the share
         self.assertFalse(s["snapshot"]["stale"])
+        self.assertIsNone(s["asof"])
         for key in ("running", "queue", "attention", "review", "finished"):
             frag = section(page, key)
             self.assertEqual(badge(frag), len(s[key]), key)
@@ -289,58 +371,102 @@ class Sections(Base):
         self.assertNotIn("<img src=x", page)
         self.assertNotIn('<script>alert("r")', page)
         self.assertIn(html.escape(XSS), page)
-        self.assertNotIn(" on" + "error=", re.sub(r"&lt;img[^<]*", "", page))
         self.assertNotRegex(page, r"<[a-z]+[^>]*\son[a-z]+=")          # no inline event handlers anywhere
 
 
 class Privacy(Base):
     def test_other_persons_prediction_job_hidden(self):
         adv_page, adv_api = self.page("advanced"), json.dumps(self.api("advanced"))
-        for text in ("job_20261105_predict_theirs", "Predict client-x tiles", "someone"):
+        for text in ("job_20261105_predict_theirs", "Predict client-x tiles", "otherperson"):
             self.assertNotIn(text, adv_page)
             self.assertNotIn(text, adv_api)
-        self.assertIn("Someone else&#x27;s prediction job", section(adv_page, "queue"))
-        self.assertIn("job_20261105_predict_mine", adv_page)            # their own: shown
-        self.assertIn("job_20261105_train_next", adv_page)              # lab train jobs: shown
+        self.assertIn(HIDDEN, section(adv_page, "queue"))
         q = self.api("advanced")["queue"]
         self.assertEqual([x["position"] for x in q if x["state"] == "queued"], [1, 2, 3, 4])   # place still counted
         admin_page = self.page("admin")                                 # control: admin sees it
         self.assertIn("job_20261105_predict_theirs", admin_page)
         self.assertIn("Predict client-x tiles", admin_page)
 
+    def test_owner_is_viewer_sees_it(self):
+        # registry who "adv" == the portal roster id "adv" (both are person ids)
+        q = {x["id"]: x for x in self.api("advanced")["queue"] if x["id"]}
+        self.assertEqual(q["job_20261105_predict_mine"]["name"], "Predict my tiles")
+        self.assertIn("job_20261105_train_next", q)                     # registered lab train jobs: shown
+
+    def test_unregistered_queue_job_hidden(self):
+        q = queues_fixture()
+        q[0]["jobs"].append(qjob("job_20261105_predict_unreg", "queued", ready_at=local(1)))
+        q[0]["jobs"].append(qjob("job_20261105_train_unreg", "blocked", reason="secret path C:\\x"))
+        self.swap_live(T.live_doc(queues=q))
+        adv = json.dumps(self.api("advanced")) + self.page("advanced")
+        for text in ("predict_unreg", "train_unreg", "secret path"):
+            self.assertNotIn(text, adv)
+        hidden = [x for x in self.api("advanced")["queue"] if x["private"]]
+        self.assertEqual(len(hidden), 2)                                # someone else's + the unregistered one
+        att = [x for x in self.api("advanced")["attention"] if x["private"]]
+        self.assertEqual([(x["kind"], x["tech"]) for x in att], [("blocked", None)])
+        admin = json.dumps(self.api("admin"))                           # control: admin sees both, with the reason
+        for text in ("job_20261105_predict_unreg", "job_20261105_train_unreg", "secret path"):
+            self.assertIn(text, admin)
+
+    def test_registry_unreadable_fails_closed(self):
+        self.swap_registry(text='{"schema": "job/1"}\n')                # a line without an id: current() raises
+        s = self.api("advanced")
+        self.assertFalse(s["registry"]["present"])
+        self.assertEqual(s["registry"]["problem"], "not readable")      # no exception text for non-admins
+        for key in ("running", "queue", "finished"):
+            self.assertTrue(s[key])
+            self.assertTrue(all(x["private"] and x["id"] is None for x in s[key]), key)
+        self.assertTrue(all(x["private"] for x in s["attention"] if x["kind"] in ("hung", "blocked")))
+        page = self.page("advanced")
+        self.assertNotRegex(main_html(page), r"job_2026\d{4}_")
+        self.assertIn("The lab job list can not be read right now.", page)
+        admin = self.api("admin")                                       # control: admin still sees the ids
+        self.assertIn("job_20261105_train_next", [x["id"] for x in admin["queue"]])
+        self.assertIn("KeyError", admin["registry"]["problem"])
+
+    def test_no_technical_words_for_non_admins(self):
+        page, s = main_html(self.page("advanced")), self.api("advanced")
+        for w in TECH_WORDS:
+            self.assertNotIn(w, page, w)
+        self.assertNotIn("cj-jobs-tech", page)
+        self.assertTrue(all(q["share"] is None and q["detail"] is None for q in s["queues"]))
+        self.assertIsNone(s["snapshot"]["monitor"])
+        self.assertEqual(s["queues"][2]["name"], "GPU computer 3")      # the offline queue: no share path
+        self.assertIn("Can&#x27;t reach GPU computer 3", page)
+        admin = main_html(self.page("admin"))                           # control: admin gets the tech lines
+        for w in ("watcher", "registry", "jobs/sync", "live.json", "\\\\home-laptop\\cj", "train.log"):
+            self.assertIn(w, admin, w)
+
 
 class Snapshots(Base):
-    def swap_live(self, doc):
-        path = self.env.registry / "live" / "live.json"
-        keep = path.read_bytes()
-        if doc is None:
-            path.unlink()
-        else:
-            self.env.write_live(doc)
-        self.addCleanup(path.write_bytes, keep)
-
     def test_stale_banner(self):
         self.swap_live(T.live_doc(age_s=3600, queues=queues_fixture()))
         page = self.page()
-        self.assertIn("Stale snapshot.", page)
-        self.assertIn("1 h old", page)
-        self.assertIn("last known", section(page, "running"))
+        self.assertIn("Status updates have stopped.", page)
+        self.assertIn("The last one came 1 h ago", page)
+        self.assertIn("Running (as of 1 h ago)", section(page, "running"))
+        self.assertIn("working normally · last update 40 s ago (as of 1 h ago)", section(page, "running"))
+        self.assertEqual(section(page, "queue").count("(as of 1 h ago)"), 5)
+        self.assertIn("as of 1 h ago", section(page, "attention"))
+        self.assertNotIn("Nothing is running", page)
         s = self.api()
         self.assertTrue(s["snapshot"]["stale"])
-        self.assertTrue(all(x["stale"] for x in s["running"]))
-        self.assertEqual(s["snapshot"]["age_s"] // 60, 60)
+        self.assertEqual(s["asof"], "as of 1 h ago")
+        self.assertTrue(all(x["stale"] for x in s["running"] + s["queue"]))
 
     def test_fresh_has_no_banner(self):                                 # control for the banner test
         self.swap_live(T.live_doc(age_s=60, queues=queues_fixture()))   # 60 s < 3 x 30 s
         page = self.page()
-        self.assertNotIn("Stale snapshot.", page)
-        self.assertNotIn("last known", section(page, "running"))
+        self.assertNotIn("Status updates have stopped.", page)
+        self.assertNotIn("as of", page)
+        self.assertIn("Updated 1 min ago.", page)
 
     def test_missing_snapshot(self):
         self.swap_live(None)
         page = self.page()
-        self.assertIn("No desktop snapshot.", page)
-        self.assertIn("Unknown: no desktop snapshot.", section(page, "running"))
+        self.assertIn("No status from the GPU computer.", page)
+        self.assertIn("Unknown: no status from the GPU computer.", section(page, "running"))
         self.assertIn("Pre-lipo review (v2)", section(page, "review"))   # the registry still shows
         s = self.api()
         self.assertFalse(s["snapshot"]["present"])
@@ -360,7 +486,7 @@ class Snapshots(Base):
         q[0]["running"]["job"] = "job_20261105_predict_theirs"           # someone else's: progress yes, name no
         self.env.write_live(T.live_doc(queues=q))
         frag = section(self.page("advanced"), "running")
-        self.assertIn("Someone else&#x27;s prediction job", frag)
+        self.assertIn(HIDDEN, frag)
         self.assertIn("Images 40 / 120", frag)
         self.assertNotIn("predict_theirs", frag)
 
@@ -370,11 +496,15 @@ class Snapshots(Base):
         self.swap_live(T.live_doc(queues=q))
         att = self.api()["attention"]
         self.assertEqual(att[0]["kind"], "watcher")
-        self.assertIn("last heartbeat 15 min ago; queued jobs will not start", att[0]["reason"])
+        self.assertEqual(att[0]["title"], "gpu-desktop: status updates have stopped")
+        self.assertEqual(att[0]["reason"], "Last update 15 min ago. Waiting jobs will not start until it is back.")
         q[0]["watcher"].update(display="paused", age_s=30, stale=False, detail="STOP: GPU maintenance")
         self.env.write_live(T.live_doc(queues=q))
         att = self.api()["attention"]
-        self.assertIn("STOP: GPU maintenance; 4 queued job(s) wait", att[0]["reason"])
+        self.assertEqual((att[0]["kind"], att[0]["reason"]),
+                         ("paused", "4 waiting job(s) will not start until it is resumed."))
+        self.assertIn("STOP: GPU maintenance", att[0]["tech"])
+        self.assertIsNone(self.api("advanced")["attention"][0]["tech"])
 
 
 class RegistryCache(unittest.TestCase):
@@ -385,7 +515,8 @@ class RegistryCache(unittest.TestCase):
             jobs, err, _ = J.registry_jobs(root, now=1000.0)
             self.assertIsNone(err)
             self.assertEqual(list(jobs), ["job_20261102_prelipo_review_v2"])
-            write_registry(root, registry_fixture()[:2])
+            lines = "".join(json.dumps(r) + "\n" for r in registry_fixture()[:2])
+            (root / "job.jsonl").write_text(lines, encoding="utf-8")   # no cache clear: that is what is tested
             self.assertEqual(len(J.registry_jobs(root, now=1000.0 + J.REGISTRY_TTL_S - 1)[0]), 1)   # cached
             self.assertEqual(len(J.registry_jobs(root, now=1000.0 + J.REGISTRY_TTL_S + 1)[0]), 2)   # re-read
         finally:
@@ -513,8 +644,8 @@ class Browser(Base):
                         self.assertEqual(page.locator("#cj-jobs-s-running article").count(), 2)
                         self.assertEqual(page.locator("#cj-jobs-s-queue li").count(), 5)
                         self.assertEqual(page.locator("#cj-jobs-s-attention article").count(), 4)
-                        self.assertEqual(page.locator("#cj-jobs-s-review article").count(), 4)
-                        self.assertEqual(page.locator("#cj-jobs-s-finished li").count(), 4)
+                        self.assertEqual(page.locator("#cj-jobs-s-review article").count(), 5)
+                        self.assertEqual(page.locator("#cj-jobs-s-finished li").count(), 5)
                         self.assertEqual(page.locator("body img").count(), 0)          # the XSS name stayed text
                         bg = page.evaluate("getComputedStyle(document.body).backgroundColor")
                         self.assertEqual(bg, "rgb(20, 19, 18)" if scheme == "dark" else "rgb(250, 250, 249)")
@@ -537,7 +668,7 @@ class Browser(Base):
                 page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")   # what a 30 s tick does
             self.assertEqual(resp.value.status, 200)
             page.wait_for_selector(".cj-jobs-banner")
-            self.assertIn("Stale snapshot", page.text_content(".cj-jobs-banner"))
+            self.assertIn("Status updates have stopped", page.text_content(".cj-jobs-banner"))
             self.assertEqual(page.locator("#cj-jobs-s-running article").count(), 2)
             self.assertTrue(page.locator("#cj-jobs-err").is_hidden())
             page.screenshot(path=str(self.shots / "jobs_390_light_stale.png"), full_page=True)
@@ -550,7 +681,7 @@ class Browser(Base):
         try:
             page.goto(self.p.origin + "/jobs/")
             page.wait_for_load_state("networkidle")
-            self.assertIn("Someone else's prediction job", page.text_content("#cj-jobs-s-queue"))
+            self.assertIn(HIDDEN, page.text_content("#cj-jobs-s-queue"))
             sw, iw = page.evaluate("[document.documentElement.scrollWidth, window.innerWidth]")
             self.assertLessEqual(sw, iw)
             self.check_clean(rec)
