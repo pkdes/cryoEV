@@ -5,6 +5,9 @@
 
 Only files matching INCLUDE (and none of EXCLUDE, and <= --max-mb) are copied, byte for byte, to
 <repo>/state/<same relative path>. Mirror files whose source is gone are removed (inside <repo>/state only).
+The portal audit log (<portal state dir>/audit/portal.jsonl) lives outside --source (default state dirs:
+~/.cryoev/portal*, i.e. live and preview; override with repeated --portal-state DIR) and is mirrored to
+<repo>/state/portal_audit/<state dir name>/portal.jsonl with the same size rules.
 <repo>/MANIFEST.md5 lists `md5  relpath`, sorted by path. <repo>/.gitattributes is set to `* -text` so git never
 rewrites line endings (a fresh clone must be byte-identical). Then `git add -A`, a commit only if anything
 changed (`backup <UTC>: N changed`), and `git push` with --push. The source folder is only ever read.
@@ -35,6 +38,7 @@ INCLUDE = [
     "jobs/**",
     "tracking/**",
     "logs/**",
+    "portal_audit/*/portal.jsonl",   # portal audit logs, copied from the portal state dir(s), not from --source
 ]
 EXCLUDE_PATHS = ["registry/live/**",                       # regenerated every 30 s
                  "registry/cache/**"]                      # derived parse caches (safe to delete, rebuilt on import)
@@ -93,8 +97,29 @@ def md5(path):
     return h.hexdigest()
 
 
-def select(source, max_mb):
-    """({relpath: Path}, {reason: [relpath]}) for the source tree. Read-only."""
+def default_portal_dirs():
+    """Portal state dirs that exist under ~/.cryoev (live `portal`, preview `portal*`)."""
+    base = Path.home() / ".cryoev"
+    return sorted(d for d in base.glob("portal*") if d.is_dir()) if base.is_dir() else []
+
+
+def portal_audit_files(portal_dirs):
+    """{mirror relpath: Path} for each state dir's audit/portal.jsonl. Read-only."""
+    out = {}
+    for d in portal_dirs or []:
+        f = Path(d) / "audit" / "portal.jsonl"
+        if not f.is_file():
+            continue
+        label = re.sub(r"[^A-Za-z0-9_.-]", "_", Path(d).name) or "portal"
+        rel, i = f"portal_audit/{label}/portal.jsonl", 2
+        while rel in out:
+            rel, i = f"portal_audit/{label}_{i}/portal.jsonl", i + 1
+        out[rel] = f
+    return out
+
+
+def select(source, max_mb, portal_dirs=()):
+    """({relpath: Path}, {reason: [relpath]}) for the source tree plus portal audit logs. Read-only."""
     source = Path(source)
     max_bytes = int(max_mb * 1024 * 1024)
     chosen, skipped = {}, {}
@@ -114,6 +139,15 @@ def select(source, max_mb):
                 chosen[rel] = p
             else:
                 skipped.setdefault(why, []).append(rel)
+    for rel, p in portal_audit_files(portal_dirs).items():
+        try:
+            why = classify(rel, p.stat().st_size, max_bytes)
+        except OSError:
+            continue
+        if why == "include":
+            chosen[rel] = p
+        else:
+            skipped.setdefault(why, []).append(rel)
     return chosen, skipped
 
 
@@ -147,11 +181,13 @@ def check_paths(source, repo):
         raise RuntimeError("--repo and --source must not contain each other")
 
 
-def backup(source, repo, max_mb=20, push=False, dry_run=False, remote="origin"):
+def backup(source, repo, max_mb=20, push=False, dry_run=False, remote="origin", portal_dirs=None):
     source = Path(source)
     if not source.is_dir():
         raise RuntimeError(f"source not found: {source}")
-    chosen, skipped = select(source, max_mb)
+    if portal_dirs is None:
+        portal_dirs = default_portal_dirs()
+    chosen, skipped = select(source, max_mb, portal_dirs)
     total = sum(p.stat().st_size for p in chosen.values())
     if dry_run:
         print(f"dry-run: would mirror {len(chosen)} files, {total / 1e6:.2f} MB")
@@ -214,11 +250,14 @@ def backup(source, repo, max_mb=20, push=False, dry_run=False, remote="origin"):
     return 0
 
 
-def verify(source, clone, max_mb=20):
+def verify(source, clone, max_mb=20, portal_dirs=None):
     """Restore drill: every mirror file vs the source and vs MANIFEST.md5. Returns the problem count."""
     source, clone = Path(source), Path(clone)
     mirror = mirror_files(clone / MIRROR_DIR)
     manifest = read_manifest(clone / MANIFEST)
+    if portal_dirs is None:
+        portal_dirs = default_portal_dirs()
+    audit = portal_audit_files(portal_dirs)
     problems = []
     for rel in sorted(set(mirror) | set(manifest)):
         if rel not in mirror:
@@ -227,12 +266,12 @@ def verify(source, clone, max_mb=20):
         got = md5(mirror[rel])
         if manifest.get(rel) != got:
             problems.append(f"manifest mismatch: {rel}")
-        src = source / rel
+        src = audit.get(rel, source / rel)
         if not src.is_file():
             problems.append(f"missing from source: {rel}")
         elif md5(src) != got:
             problems.append(f"differs from source (changed since backup?): {rel}")
-    chosen, _ = select(source, max_mb)
+    chosen, _ = select(source, max_mb, portal_dirs)
     for rel in sorted(set(chosen) - set(mirror)):
         problems.append(f"in source, not in backup: {rel}")
     for p in problems:
@@ -248,15 +287,18 @@ def main(argv=None):
     ap.add_argument("--push", action="store_true")
     ap.add_argument("--remote", default="origin")
     ap.add_argument("--max-mb", type=float, default=20)
+    ap.add_argument("--portal-state", action="append", type=Path, metavar="DIR",
+                    help="portal state dir whose audit/portal.jsonl is included (repeatable; "
+                         "default: every ~/.cryoev/portal* dir)")
     ap.add_argument("--dry-run", action="store_true", help="report what would be mirrored; write nothing")
     ap.add_argument("--verify", metavar="CLONE", help="restore drill against a clone (e.g. a fresh clone)")
     a = ap.parse_args(argv)
     try:
         if a.verify:
-            return 1 if verify(a.source, a.verify, a.max_mb) else 0
+            return 1 if verify(a.source, a.verify, a.max_mb, a.portal_state) else 0
         if not a.repo and not a.dry_run:
             ap.error("--repo is required (or use --dry-run / --verify)")
-        return backup(a.source, a.repo, a.max_mb, a.push, a.dry_run, a.remote)
+        return backup(a.source, a.repo, a.max_mb, a.push, a.dry_run, a.remote, a.portal_state)
     except (RuntimeError, OSError) as e:
         print(f"backup_state: FAILED {e}", file=sys.stderr)
         return 1
