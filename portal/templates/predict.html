@@ -1,0 +1,96 @@
+<style>
+/* Predict module (portal/modules/predict.py). cj.css tokens only; every class is cj-predict-*. Phone first. */
+.cj-predict{min-width:0;max-width:980px}
+.cj-predict-head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:10px 16px}
+.cj-predict h1{overflow-wrap:anywhere}
+.cj-predict .cj-card{margin:0 0 10px}
+.cj-predict-what ul{margin:4px 0 0;padding-left:1.2em}
+.cj-predict-what li{margin:2px 0}
+.cj-page a.cj-predict-btn,.cj-predict-btn{display:inline-flex;align-items:center;justify-content:center;min-height:40px;
+  padding:6px 16px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);
+  font:inherit;font-weight:600;text-decoration:none;cursor:pointer}
+.cj-page a.cj-predict-primary,.cj-predict-primary{background:var(--acc);border-color:var(--acc);color:var(--card)}
+.cj-predict-btn:hover,.cj-predict-btn:focus-visible{border-color:var(--acc);outline:none;
+  box-shadow:0 0 0 2px var(--accbg)}
+.cj-predict-btn:disabled{opacity:var(--dim);cursor:progress}
+.cj-predict-inline{margin:0}
+.cj-predict-items{list-style:none;margin:0;padding:0;display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(min(100%,320px),1fr));gap:10px}
+.cj-predict-items .cj-card{margin:0}
+.cj-predict-item p{margin:0}
+.cj-predict-top{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;min-width:0}
+.cj-predict-ttl{font-weight:600;overflow-wrap:anywhere;min-width:0}
+.cj-predict-links{display:flex;gap:14px;font-size:.9rem}
+.cj-predict-chip{flex:none;font-size:.75rem;font-weight:600;line-height:1.5;padding:1px 8px;border-radius:999px;
+  border:1px solid transparent;white-space:nowrap}
+.cj-predict-chip.cj-predict-t-run{background:var(--accbg);color:var(--acc)}
+.cj-predict-chip.cj-predict-t-ok{background:var(--prodbg);color:var(--prod)}
+.cj-predict-chip.cj-predict-t-warn{background:var(--warnbg);color:var(--warn)}
+.cj-predict-chip.cj-predict-t-wait{border-color:var(--line);color:var(--mut)}
+.cj-predict-status .cj-predict-detail{margin:0}
+.cj-predict-bar{-webkit-appearance:none;appearance:none;display:block;width:100%;height:8px;border:0;border-radius:999px;
+  background:var(--line);color:var(--acc);overflow:hidden}
+.cj-predict-bar::-webkit-progress-bar{background:var(--line);border-radius:999px}
+.cj-predict-bar::-webkit-progress-value{background:var(--acc);border-radius:999px}
+.cj-predict-bar::-moz-progress-bar{background:var(--acc);border-radius:999px}
+.cj-predict-tech{margin:0;font-size:.75rem}
+.cj-predict-acts{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));gap:10px}
+.cj-predict-acts .cj-card{margin:0}
+.cj-predict-acts p{margin:0}
+.cj-predict-busy{margin:0;font-weight:600;color:var(--acc)}
+.cj-predict-msg{margin:0 0 10px;padding:8px 12px;border:1px solid var(--warn);border-left-width:4px;border-radius:8px;
+  background:var(--warnbg);color:var(--fg);overflow-wrap:anywhere}
+.cj-predict-msg p{margin:0}
+.cj-predict-msg ul{margin:4px 0 0;padding-left:1.2em}
+.cj-predict-list{margin:0;padding-left:1.6em}
+.cj-predict-list li{padding:5px 0;border-top:1px solid var(--line);display:list-item}
+.cj-predict-list li:first-child{border-top:0}
+.cj-predict-li-main{overflow-wrap:anywhere}
+.cj-predict-tag,.cj-predict-list .cj-predict-tag{display:inline-block;margin-left:8px;font-size:.72rem;font-weight:600;
+  padding:0 8px;border-radius:999px;border:1px solid var(--line);color:var(--mut);white-space:nowrap}
+.cj-predict-srcs{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,280px),1fr));gap:10px}
+.cj-predict-srcs .cj-card{margin:0}
+.cj-page a.cj-predict-src{color:var(--fg);text-decoration:none}
+a.cj-predict-src:hover,a.cj-predict-src:focus-visible{border-color:var(--acc);outline:none}
+.cj-predict-src b{overflow-wrap:anywhere}
+.cj-predict-off{opacity:var(--dim)}
+.cj-predict-form{margin:0}
+.cj-predict p:empty{display:none}
+.cj-predict-fs{margin:0 0 10px;min-width:0}
+.cj-predict-fs legend{font-weight:600;padding:0 4px}
+.cj-predict-field{display:flex;flex-direction:column;gap:4px;margin:4px 0 8px}
+.cj-predict-field span{font-size:.9rem}
+.cj-predict input[type=text],.cj-predict input:not([type]),.cj-predict select,.cj-predict input[type=file]{font:inherit;
+  color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-height:38px;
+  max-width:100%;min-width:0}
+.cj-predict input:focus-visible,.cj-predict select:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.cj-predict input[type=checkbox],.cj-predict input[type=radio]{width:18px;height:18px;accent-color:var(--acc);
+  vertical-align:-3px}
+.cj-predict-nm{width:7em}
+.cj-predict-count{width:5em}
+.cj-predict-radio{display:block;margin:6px 0;line-height:2}
+.cj-predict-confirm{display:block;margin:10px 0 4px;padding:8px 10px;border-radius:8px;background:var(--accbg);
+  font-weight:600}
+.cj-predict-warn{color:var(--warn);font-size:.85rem}
+.cj-predict-qual{margin:4px 0 0;padding-left:1.2em}
+.cj-predict-tablewrap{min-width:0}
+.cj-predict-table{width:100%;border-collapse:collapse;font-size:.92rem}
+.cj-predict-table th{text-align:left;font-size:.75rem;color:var(--mut);font-weight:600;text-transform:uppercase;
+  letter-spacing:.03em;padding:4px 8px 4px 0;border-bottom:1px solid var(--line)}
+.cj-predict-table td{padding:6px 8px 6px 0;border-bottom:1px solid var(--line);vertical-align:middle;
+  overflow-wrap:anywhere}
+.cj-predict-kv{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,180px),1fr));gap:4px 12px;margin:0}
+.cj-predict-kv div{min-width:0}
+.cj-predict-kv dt{font-size:.72rem;color:var(--mut);text-transform:uppercase;letter-spacing:.03em}
+.cj-predict-kv dd{margin:0;overflow-wrap:anywhere}
+@media (max-width:640px){
+  .cj-predict-table thead{display:none}
+  .cj-predict-table,.cj-predict-table tbody,.cj-predict-table tr,.cj-predict-table td{display:block;width:100%}
+  .cj-predict-table tr{padding:6px 0;border-bottom:1px solid var(--line)}
+  .cj-predict-table td{border:0;padding:2px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .cj-predict-table td::before{content:attr(data-l);flex:0 0 6.5em;font:600 .72rem/1.4 var(--cj-font);color:var(--mut);
+    text-transform:uppercase;letter-spacing:.03em}
+  .cj-predict-head .cj-predict-btn{width:100%}}
+</style>
+{{body}}
+<script src="/predict/predict.js" defer></script>
