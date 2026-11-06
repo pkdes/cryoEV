@@ -47,7 +47,8 @@ NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 EXAMPLE_CONFIG = {
     "_comment": "Private: real paths live here, never in the repo. {python} = the python running services.py "
                 "(python.exe, even when started by pythonw.exe); {repo} = this cryoEV checkout; %VARS% and ~ "
-                "are expanded. Optional per service: host (health check, default 127.0.0.1), env {}, log.",
+                "are expanded. Optional per service: host (health check, default 127.0.0.1), health (a path such as /healthz: "
+                "up = HTTP 200 + JSON {\"ok\": true}; unset = GET /api/ping, any HTTP answer is up), env {}, log.",
     "run_dir": "~/.cryoev/run",
     "services": [
         {"name": "review", "enabled": True, "port": 8766, "cwd": "{repo}",
@@ -63,9 +64,11 @@ EXAMPLE_CONFIG = {
                   "--directory", "<CryoAI-laptop>/registry"],
          "log": "~/.cryoev/logs/history.log"},
         {"name": "monitor", "enabled": True, "port": None, "cwd": "{repo}",
-         "argv": ["{python}", "jobs/monitor.py", "--share", "\\\\gpu-desktop\\cj", "--every", "30"],
+         "argv": ["{python}", "jobs/monitor.py", "--share", "\\\\gpu-desktop\\cj", "--every", "30",
+                  "--portal", "http://127.0.0.1:8770/healthz", "--portal", "http://127.0.0.1:8448/healthz"],
          "log": "~/.cryoev/logs/monitor.log"},
         {"name": "portal", "enabled": False, "port": 8770, "cwd": "{repo}",
+         "health": "/healthz",
          "argv": ["{python}", "-m", "portal.app", "--host", "127.0.0.1", "--port", "8770"],
          "log": "~/.cryoev/logs/portal.log"},
     ],
@@ -83,6 +86,7 @@ class Service:
     enabled: bool = True
     log: Path = None
     env: dict = field(default_factory=dict)
+    health: str = None          # path (e.g. /healthz): up = 200 + JSON ok:true; None = /api/ping, any answer
 
 
 @dataclass
@@ -140,6 +144,10 @@ def load_config(path: Path, run_dir: Path = None) -> Config:
         port = s.get("port")
         if port is not None and (not isinstance(port, int) or not 0 < port < 65536):
             raise ConfigError(f"service {name}: port must be an integer 1-65535 or null")
+        health_path = s.get("health")
+        if health_path is not None and not (isinstance(health_path, str) and health_path.startswith("/")
+                                         and not re.search(r"[\s\x00-\x1f\x7f]", health_path)):
+            raise ConfigError(f"service {name}: health must be a path starting with /, e.g. \"/healthz\"")
         enabled = bool(s.get("enabled", True))
         if port and enabled:
             if port in ports:
@@ -148,6 +156,7 @@ def load_config(path: Path, run_dir: Path = None) -> Config:
         log = Path(expand(s["log"])) if s.get("log") else rd.parent / "logs" / f"{name}.log"
         services.append(Service(name=name, argv=[expand(a) for a in argv], cwd=Path(expand(s.get("cwd") or "{repo}")),
                                 port=port, host=s.get("host") or "127.0.0.1", enabled=enabled, log=log,
+                                health=health_path,
                                 env={str(k): expand(str(v)) for k, v in (s.get("env") or {}).items()}))
     return Config(path=path, run_dir=rd, services=services)
 
@@ -381,17 +390,26 @@ def listening(host: str, port: int, timeout: float = 0.5) -> bool:
         return False
 
 
-def health(host: str, port: int, timeout: float = 1.0) -> str:
-    """GET /api/ping: any HTTP answer is up ('http 200', 'http 403' for a review server without its key,
-    'http 404' for http.server). Accepts but no HTTP: 'tcp'. Nothing: 'down'."""
+def health(host: str, port: int, timeout: float = 1.0, path: str = None) -> str:
+    """No `path`: GET /api/ping, any HTTP answer is up ('http 200', 'http 403' for a review server without its key,
+    'http 404' for http.server). With `path` (a service's "health" option, e.g. /healthz): up only on HTTP 200 and
+    a JSON body with "ok": true -> 'ok'; any other answer -> 'http <status>' / 'bad body' (not up). Accepts but no
+    HTTP: 'tcp'. Nothing: 'down'."""
     if not listening(host, port, timeout):
         return "down"
     c = http.client.HTTPConnection(host, port, timeout=timeout)
     try:
-        c.request("GET", "/api/ping")
+        c.request("GET", path or "/api/ping")
         r = c.getresponse()
-        r.read(64)
-        return f"http {r.status}"
+        body = r.read(4096)
+        if not path:
+            return f"http {r.status}"
+        if r.status != 200:
+            return f"http {r.status}"
+        try:
+            return "ok" if json.loads(body).get("ok") is True else "bad body"
+        except (ValueError, AttributeError):
+            return "bad body"
     except (OSError, http.client.HTTPException):
         return "tcp"
     finally:
@@ -425,7 +443,7 @@ def service_status(cfg: Config, svc: Service) -> dict:
         state = "stopped" if svc.enabled else "disabled"
     return {"name": svc.name, "enabled": svc.enabled, "state": state,
             "pid": rec["pid"] if verdict == "ours" else None, "port": svc.port, "listening": listen,
-            "health": health(svc.host, svc.port) if listen else ("-" if svc.port is None else "down"),
+            "health": health(svc.host, svc.port, path=svc.health) if listen else ("-" if svc.port is None else "down"),
             "uptime_s": round(time.time() - rec.get("started", time.time())) if verdict == "ours" else None,
             "log": str(svc.log)}
 

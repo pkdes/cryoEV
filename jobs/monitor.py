@@ -2,7 +2,7 @@
 """Laptop: a live snapshot of the desktop's training queue for the history page's Live tab (docs/JOBS.md).
 
     python jobs/monitor.py --share \\\\gpu-desktop\\cj [--share ...] [--every 30] [--once] [--out <file>]
-        [--servers review=8766,sandbox=8765,history=8768]
+        [--servers review=8766,sandbox=8765,history=8768] [--portal http://127.0.0.1:8770/healthz ...]
 
 Every --every seconds it reads each queue (in a thread, given up after 20 s) and writes one JSON file, by default
 <registry>/live/live.json (the history page fetches live/live.json when served over http):
@@ -17,6 +17,13 @@ Every --every seconds it reads each queue (in a thread, given up after 20 s) and
   - servers: this laptop's review / sandbox / history servers (--servers), each probed with GET /api/ping on
     127.0.0.1 (any HTTP answer, 403 and 404 included, is up; refused or no answer in 1 s is down), all at once,
     in their own threads, given up after 3 s in total. The history page's Servers bar shows them.
+  - portals (--portal URL, repeatable; default none, so the desktop and other callers are unchanged): each URL is
+    GET every cycle; up = HTTP 200 and a JSON body with "ok": true (the portal's /healthz). Down after 2 failed
+    checks in a row. ONE ntfy on going down and ONE on recovery per URL (training/notify.py's sender, topic from env
+    CRYOEV_NTFY_TOPIC, never printed or written; unset: "ntfy not configured" is logged once and nothing is sent).
+    The message names the port, not the host. live.json gets "portals": [{name, port, up, fails, ms}] (only when
+    --portal is given). This covers the portal process dying; the laptop being asleep or off is the Cloudflare
+    Tunnel Health Alert's job (portal/README.md, Uptime).
 Read only on the share: every file is read with common.read_shared (full sharing, closed at once), so a desktop
 delete/rmtree is never blocked by it; an os.replace onto a file being read can still fail for those milliseconds,
 which the desktop's writers retry (common.write_json, train_yolo._write_progress). Nothing under d/.tmp_* is
@@ -38,6 +45,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -470,11 +478,107 @@ def probe_servers(servers, timeout=PROBE_TIMEOUT_S, total=PROBE_TOTAL_S) -> list
     return out
 
 
-def snapshot(shares, reader: Reader, every, servers=()) -> dict:
-    return {"schema": "live/1", "generated": C.now(), "generated_utc": C.now_utc(), "interval_s": every,
+# ---------------------------------------------------------------- portal uptime
+PORTAL_DOWN_AFTER = 2        # consecutive failed checks before a portal counts as down
+PORTAL_TIMEOUT_S = 3.0
+NTFY_TOPIC_ENV = "CRYOEV_NTFY_TOPIC"
+
+
+def portal_check(url: str, timeout=PORTAL_TIMEOUT_S) -> tuple:
+    """GET url -> (up, ms). Up = HTTP 200 and a JSON body {"ok": true}; anything else (401, 404, HTML, a refused
+    connection, a timeout) is down."""
+    u = urlsplit(url)
+    t0 = time.perf_counter()
+    up = False
+    try:
+        c = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=timeout)
+        try:
+            c.request("GET", (u.path or "/") + (f"?{u.query}" if u.query else ""))
+            r = c.getresponse()
+            body = r.read(4096)
+            up = r.status == 200 and json.loads(body).get("ok") is True
+        finally:
+            c.close()
+    except (OSError, http.client.HTTPException, ValueError, AttributeError):
+        up = False
+    return up, round((time.perf_counter() - t0) * 1000)
+
+
+def _default_send(title, message, priority=3):
+    from training import notify
+    notify._send_ntfy(title, message, priority=priority)
+
+
+class PortalWatch:
+    """Per-URL up/down state with ntfy on the two transitions only. `send(title, message, priority)` and
+    `check(url) -> (up, ms)` are injectable (tests). The topic is read from the environment by the sender and is
+    never held, logged or put in a message here."""
+
+    def __init__(self, urls, send=None, check=portal_check, log=print):
+        self.urls = list(urls)
+        self.send, self.check, self.log = send or _default_send, check, log
+        self.fails = {u: 0 for u in self.urls}
+        self.down = {u: False for u in self.urls}
+        self.warned = False
+
+    @staticmethod
+    def label(url: str) -> tuple:
+        port = urlsplit(url).port or 80
+        return f"portal :{port}", port
+
+    def _notify(self, title, message, priority):
+        if not os.environ.get(NTFY_TOPIC_ENV, "").strip():
+            if not self.warned:
+                self.warned = True
+                self.log("[monitor] ntfy not configured (set CRYOEV_NTFY_TOPIC): portal alerts are logged only")
+            return
+        try:
+            self.send(title, message, priority)
+        except Exception as e:                                   # an alert failing must never stop the monitor
+            self.log(f"[monitor] ntfy send failed: {type(e).__name__}")
+
+    def poll(self) -> list:
+        """One cycle: check every URL (in parallel), update state, send the transition alerts ->
+        [{name, port, up, fails, ms}]."""
+        res = [None] * len(self.urls)
+
+        def work(i, u):
+            res[i] = self.check(u)
+        ths = [threading.Thread(target=work, args=(i, u), daemon=True) for i, u in enumerate(self.urls)]
+        for th in ths:
+            th.start()
+        end = time.monotonic() + PORTAL_TIMEOUT_S + 1                  # one overall deadline, not 4 s per thread
+        for th in ths:
+            th.join(max(0.0, end - time.monotonic()))
+        out = []
+        for u, r in zip(self.urls, res):
+            up, ms = r if r is not None else (False, None)
+            name, port = self.label(u)
+            if up:
+                self.fails[u] = 0
+                if self.down[u]:
+                    self.down[u] = False
+                    self.log(f"[monitor] {name} is back up")
+                    self._notify("CryoEV portal recovered", f"{name} is answering again.", 3)
+            else:
+                self.fails[u] += 1
+                if self.fails[u] >= PORTAL_DOWN_AFTER and not self.down[u]:
+                    self.down[u] = True
+                    self.log(f"[monitor] {name} is DOWN ({self.fails[u]} failed checks)")
+                    self._notify("CryoEV portal down",
+                                 f"{name} failed {self.fails[u]} health checks in a row on the laptop.", 4)
+            out.append({"name": name, "port": port, "up": up, "fails": self.fails[u], "ms": ms})
+        return out
+
+
+def snapshot(shares, reader: Reader, every, servers=(), portals: PortalWatch = None) -> dict:
+    snap = {"schema": "live/1", "generated": C.now(), "generated_utc": C.now_utc(), "interval_s": every,
             "monitor": {"machine": platform.node(), "pid": os.getpid()},
             "servers": probe_servers(list(servers)),
             "queues": [reader.read(Path(s)) for s in shares]}
+    if portals is not None and portals.urls:
+        snap["portals"] = portals.poll()
+    return snap
 
 
 def main(argv=None):
@@ -487,7 +591,17 @@ def main(argv=None):
     ap.add_argument("--servers", default=SERVERS,
                     help=f"local servers to probe each cycle, name=port,... on 127.0.0.1 (default {SERVERS}; "
                          "'' = none)")
+    ap.add_argument("--portal", action="append", default=[], metavar="URL",
+                    help="portal health URL, e.g. http://127.0.0.1:8770/healthz (repeatable; default none). Up = 200 + "
+                         "JSON ok:true; ntfy once when down (2 failed checks), once on recovery ($CRYOEV_NTFY_TOPIC)")
     a = ap.parse_args(argv)
+    for u in a.portal:
+        try:
+            ok = u.startswith("http://") and bool(urlsplit(u).hostname) and (urlsplit(u).port or 80) > 0
+        except ValueError:                                           # urlsplit(...).port raises on a bad port
+            ok = False
+        if not ok:
+            ap.error(f"bad --portal {u!r}: expected http://host:port/healthz")
     try:
         servers = parse_servers(a.servers)
     except ValueError as e:
@@ -503,13 +617,16 @@ def main(argv=None):
         print(f"[monitor] another monitor holds {out.parent / LOCK_FILE}; not starting", file=sys.stderr)
         return 3
     reader = Reader()
+    portals = PortalWatch(a.portal)
     print(f"[monitor] {', '.join(map(str, a.share))} -> {out}" + ("" if a.once else f" every {a.every:g} s"),
           flush=True)
+    if a.portal:
+        print("[monitor] portals: " + ", ".join(PortalWatch.label(u)[0] for u in a.portal), flush=True)
     print("[monitor] servers: " + (", ".join(f"{n}=127.0.0.1:{p}" for n, p in servers) or "none"), flush=True)
     try:
         while True:
             t0 = time.time()
-            snap = snapshot(a.share, reader, a.every, servers)
+            snap = snapshot(a.share, reader, a.every, servers, portals)
             try:
                 C.write_json(out, snap)
             except OSError as e:                       # e.g. the page server's reader holds it: next cycle

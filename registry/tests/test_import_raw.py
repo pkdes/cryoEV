@@ -97,6 +97,23 @@ def build_proc(proc):
     w(proc / "20261012" / RAW / "never.mrc.mdoc", header() + zsec(0, 11000, 7.0, -1.0, 1.0, "07:00:00"))
 
 
+SERIAL = "0000"              # the synthetic scope's serial (SCOPE above)
+
+
+def cache_text_without_sigs(text):
+    """The mdoc cache as text with every files[*].sig removed. A sig is [st_mtime_ns, st_size]: an mtime_ns ending
+    0000 is ~1% per file, which made a plain substring test for the serial fail in a few percent of runs
+    (2026-11-06). Everything else (summaries, paths, hashes) is still checked as a plain substring."""
+    d = json.loads(text)
+    for e in (d.get("files") or {}).values():
+        e.pop("sig", None)
+    return json.dumps(d)
+
+
+def leaks(token, text):
+    return token in text
+
+
 class CountingParser:
     def __init__(self):
         self.paths = []
@@ -144,9 +161,10 @@ class SyntheticRaw(unittest.TestCase):
     def test_session_acquisition_known_answers(self):
         s = self.cur["20990101-2"]
         self.assertEqual(s["instrument"], "Scope")                      # model only: no serial, no site
-        for t in ("0000", "Example Lab"):
-            self.assertNotIn(t, json.dumps(s))
-            self.assertNotIn(t, (self.root / importers.MDOC_CACHE).read_text(encoding="utf-8"))
+        cache = (self.root / importers.MDOC_CACHE).read_text(encoding="utf-8")
+        for t in (SERIAL, "Example Lab"):
+            self.assertFalse(leaks(t, json.dumps(s)), t)
+            self.assertFalse(leaks(t, cache_text_without_sigs(cache)), t)
         self.assertEqual((s["n_imaging"], s["n_other"], s["other_magnification"]), (2, 1, [2600]))
         self.assertEqual(s["magnification"], [11000, 45000])            # 210 (atlas) and 2600 (search) left out
         self.assertEqual(s["pixel_size_a"], [6.674, 7.362])
@@ -162,6 +180,19 @@ class SyntheticRaw(unittest.TestCase):
         self.assertEqual(s["local_folder"], "proc/20990101-2")
         self.assertEqual(s["session_grids"], {"5": "9905"})
         self.assertEqual(self.cur["20990101"]["session_grids"], {"1": "9901"})   # -2's slot belongs to -2 only
+
+    def test_leak_check_control(self):
+        """Control for the leak test above: it still sees the serial where it is a word (the raw header, a record
+        field) and ignores the same digits inside a longer number such as a cache mtime_ns."""
+        self.assertTrue(leaks(SERIAL, SCOPE))
+        for bad in ("SN0000", "Scope0000", "0000.mdoc", "Glacios 0000.0"):     # must-catch, record side
+            self.assertTrue(leaks(SERIAL, json.dumps({"instrument": bad})), bad)
+            self.assertTrue(leaks(SERIAL, cache_text_without_sigs(json.dumps({"files": {"a": {"sig": [1, 2], "s": bad}}}))), bad)
+        sig_only = json.dumps({"files": {"a": {"sig": [1793999666509720000, 10000], "s": {"instrument": "Scope"}}}})
+        self.assertTrue(leaks(SERIAL, sig_only))                                 # raw text would flake ...
+        self.assertFalse(leaks(SERIAL, cache_text_without_sigs(sig_only)))       # ... the stripped cache does not
+        self.assertTrue(leaks(SERIAL, json.dumps({"instrument": "Scope 0000"})))
+        self.assertTrue(leaks("Example Lab", SCOPE))
 
     def test_session_gaps(self):
         self.assertIn("no `2. Raw images/` folder", self.cur["20990101"]["acquisition_gap"])
@@ -381,12 +412,25 @@ class RealRegistryCopy(unittest.TestCase):
         self.assertEqual(s["magnification"], sorted(mags))
         self.assertEqual(s["n_mdoc"], len(list(raw.glob("*.mdoc"))))
 
+    # Sessions with raw .mdoc/.idoc on this laptop on 2026-11-06 (8 of 9 local session folders; 20260804's
+    # `1. Raw-mrc/` was moved off the laptop, so it is a gap, not a bug). A floor: it only ever goes up.
+    RAW_SESSIONS_FLOOR = 8
+
     def test_coverage_all_local_sessions(self):
-        """Every local session folder (excluded one aside) gets an acquisition summary (9/9 on 2026-11-05)."""
+        """Every local session folder (excluded one aside) is either fully covered (raw metadata on disk ->
+        instrument, magnification, n_mdoc) or carries `acquisition_gap` (raw moved off the laptop: the importer
+        reports a gap, never crashes). "Has raw metadata" is importers.raw_files, the importer's own rule."""
         local = [d.name for d in PROC.iterdir() if d.is_dir() and validate.ids.is_id("session", d.name)
                  and d.name[:8] not in validate.EXCLUDED_SESSIONS]
-        self.assertGreaterEqual(len(local), 9)
-        for sid in local:
+        has_raw = [sid for sid in local
+                   if importers.raw_files(PROC / sid, importers.RAW_LAYOUT.get(sid, importers.DEFAULT_LAYOUT))]
+        gaps = sorted(set(local) - set(has_raw))
+        self.assertGreaterEqual(len(has_raw), self.RAW_SESSIONS_FLOOR,
+                                f"sessions with raw metadata fell below the floor {self.RAW_SESSIONS_FLOOR}; without raw now: {gaps}. "
+                                "If raw data was moved off on purpose, lower RAW_SESSIONS_FLOOR and note the session")
+        for sid in gaps:
+            self.assertIn("acquisition_gap", self.cur[sid], f"{sid} has no raw .mdoc/.idoc and no acquisition_gap (gap sessions: {gaps})")
+        for sid in has_raw:
             s = self.cur[sid]
             self.assertNotIn("acquisition_gap", s, sid)
             self.assertTrue(s["instrument"] and s["magnification"] and s["n_mdoc"], sid)

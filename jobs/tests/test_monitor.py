@@ -287,5 +287,114 @@ class MonitorTests(T.TempRoots, unittest.TestCase):
         self.assertEqual(self.once(self.share).returncode, 0)
 
 
+class PortalWatchTests(unittest.TestCase):
+    """--portal: a fake /healthz server; the sender is mocked (no network); the topic never appears in a log or a
+    message."""
+    TOPIC = "sekrit-topic-value-123"
+    OK = ("200", b'{"ok": true}')
+
+    def setUp(self):
+        import http.server
+
+        outer = self
+        outer.mode = self.OK
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                status, body = outer.mode
+                self.send_response(int(status))
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.addCleanup(self.srv.server_close)
+        self.addCleanup(self.srv.shutdown)
+        self.port = self.srv.server_address[1]
+        self.url = f"http://127.0.0.1:{self.port}/healthz"
+        self.sent, self.logs = [], []
+        self.saved = os.environ.get("CRYOEV_NTFY_TOPIC")
+        os.environ["CRYOEV_NTFY_TOPIC"] = self.TOPIC
+        self.addCleanup(self.restore)
+        self.w = M.PortalWatch([self.url], send=lambda t, m, p=3: self.sent.append((t, m, p)), log=self.logs.append)
+
+    def restore(self):
+        if self.saved is None:
+            os.environ.pop("CRYOEV_NTFY_TOPIC", None)
+        else:
+            os.environ["CRYOEV_NTFY_TOPIC"] = self.saved
+
+    def test_up_down_stays_down_recovers(self):
+        r = self.w.poll()
+        self.assertEqual((r[0]["up"], r[0]["port"], r[0]["fails"]), (True, self.port, 0))
+        self.assertEqual(self.sent, [])
+        self.mode = ("401", b'{"ok": true}')                     # 401 is down, whatever the body
+        self.w.poll()
+        self.assertEqual(self.sent, [])                          # one failure: no ntfy
+        r = self.w.poll()
+        self.assertFalse(r[0]["up"])
+        self.assertEqual(len(self.sent), 1)                      # two: one ntfy
+        self.assertIn(f":{self.port}", self.sent[0][1])
+        self.assertNotIn("127.0.0.1", self.sent[0][1])
+        for _ in range(3):
+            self.w.poll()
+        self.assertEqual(len(self.sent), 1)                      # stays down: no repeat
+        self.mode = self.OK
+        self.w.poll()
+        self.assertEqual(len(self.sent), 2)                      # recovery: one ntfy
+        self.assertIn("recovered", self.sent[1][0])
+        self.w.poll()
+        self.assertEqual(len(self.sent), 2)
+        for s in [*self.logs, *[x for m in self.sent for x in m[:2]]]:
+            self.assertNotIn(self.TOPIC, str(s))
+
+    def test_single_blip_never_alerts(self):
+        self.w.poll()
+        self.mode = ("500", b"")
+        self.w.poll()
+        self.mode = self.OK
+        self.w.poll()
+        self.mode = ("500", b"")
+        self.w.poll()
+        self.assertEqual(self.sent, [])                          # failures were never two in a row
+
+    def test_not_ok_body_and_dead_port_are_down(self):
+        self.mode = ("200", b'{"ok": false}')
+        self.assertFalse(M.portal_check(self.url)[0])
+        self.mode = self.OK
+        self.assertTrue(M.portal_check(self.url)[0])             # control
+        self.srv.shutdown()
+        self.srv.server_close()
+        self.assertFalse(M.portal_check(self.url, timeout=1)[0])
+
+    def test_no_topic_logs_once_and_sends_nothing(self):
+        os.environ.pop("CRYOEV_NTFY_TOPIC", None)
+        self.mode = ("404", b"")
+        for _ in range(4):
+            self.w.poll()
+        self.mode = self.OK
+        self.w.poll()
+        self.assertEqual(self.sent, [])
+        self.assertEqual(sum("ntfy not configured" in x for x in self.logs), 1)
+
+    def test_default_sender_goes_through_notify_without_network(self):
+        from unittest import mock
+        w = M.PortalWatch([self.url], log=self.logs.append)
+        self.mode = ("404", b"")
+        with mock.patch("urllib.request.urlopen") as uo:
+            w.poll()
+            w.poll()
+        self.assertEqual(uo.call_count, 1)
+        self.assertNotIn(self.TOPIC, " ".join(self.logs))
+
+    def test_snapshot_has_portals_only_when_asked(self):
+        rd = M.Reader()
+        self.assertNotIn("portals", M.snapshot([], rd, 30))
+        self.assertEqual(M.snapshot([], rd, 30, (), self.w)["portals"][0]["port"], self.port)
+
+
 if __name__ == "__main__":
     unittest.main()
