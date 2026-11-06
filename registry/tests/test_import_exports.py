@@ -83,11 +83,74 @@ class ExportMembershipUnit(unittest.TestCase):
         self.assertNotIn("lists/x.tsv", self.imp.lists)
         self.assertIsNone(self.imp.export_membership("never tracked", "lists/y.tsv", None)["image_list"])
 
-    def test_list_names(self):
-        names = importers.export_list_names([V5, V5 + " (rf download)", "roboflow20260604", "roboflow-20260604"])
-        self.assertEqual(names[V5], "lists/export_roboflow_20261028_cryoai_v5.tsv")
-        self.assertEqual(names[V5 + " (rf download)"], "lists/export_roboflow_20261028_cryoai_v5_rf_download.tsv")
-        self.assertEqual(len(set(names.values())), 4)                      # same slug -> sha suffix, no collision
+    def test_rf_name_claimed_by_two_images_is_not_used(self):
+        del self.imp._by_rf_name
+        self.imp._img_ids = set()
+        self.imp.out = [("image", {"id": "x_1_png", "rf_name": "dup.png"}),
+                        ("image", {"id": "x_2_png", "rf_name": "dup.png"}),
+                        ("image", {"id": "x_3_png", "rf_name": "one.png"})]
+        self.assertEqual(self.imp.image_by_rf_name(), {"one.png": "x_3_png"})
+        self.assertEqual(self.imp.export_key({"file_name": "zz_png.rf.0a.jpg", "extra": {"name": "dup.png"}}), "zz_png")
+        self.assertEqual(self.imp.export_key({"file_name": "zz_png.rf.0a.jpg", "extra": {"name": "one.png"}}),
+                         "x_3_png")                                           # control: a unique name is used
+
+    def test_list_names_depend_on_the_id_alone(self):
+        a, b = importers.export_list_name("roboflow20260604"), importers.export_list_name("roboflow-20260604")
+        self.assertTrue(a.startswith("lists/exports/roboflow20260604_") and a.endswith(".tsv"), a)
+        self.assertNotEqual(a, b)                                            # same slug, different files
+        self.assertEqual(a, importers.export_list_name("roboflow20260604"))  # stable: no other id changes it
+        self.assertRegex(importers.export_list_name(V5 + " (rf download)"),
+                         r"^lists/exports/roboflow_20261028_cryoai_v5_rf_download_[0-9a-f]{8}\.tsv$")
+
+
+class ListFilesGoWithTheirLine(unittest.TestCase):
+    """importer write(): a list is written with its record's line (under the lock); a refused line leaves none."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "registry"
+        self.imp = importers.Importer(self.root, laptop=self.tmp.name, cache=self.tmp.name, processing=None)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def export(self, eid, text, **kw):
+        rel = importers.export_list_name(eid)
+        self.imp.lists[rel] = text
+        rec = {"schema": "roboflow_export/1", "id": eid, "path": "p", "counts": {}, "image_list":
+               {"file": rel, "sha256": importers.hashlib.sha256(text.encode()).hexdigest(), "n": 1, "method": "m"}}
+        rec.update(kw)
+        return rec, self.root / rel
+
+    def test_refused_line_leaves_no_list_and_repair(self):
+        good, good_path = self.export("roboflow - good", "a_1\ttrain\n")
+        bad, bad_path = self.export("roboflow - bad", "b_2\ttrain\n")
+        del bad["counts"]                                                     # schema refuses this line
+        self.imp.out = [("roboflow_export", good), ("roboflow_export", bad)]
+        res = self.imp.write()
+        self.assertEqual(res["roboflow_export"], 1)
+        self.assertEqual(res["(image list files)"], 1)
+        self.assertTrue(good_path.is_file())
+        self.assertFalse(bad_path.exists())                                   # no orphan list
+        self.assertTrue(any(k.startswith("roboflow_export: refused") for k in self.imp.refused), self.imp.refused)
+        good_path.unlink()                                                    # unchanged record: list repaired
+        res = importers.Importer(self.root, laptop=self.tmp.name, cache=self.tmp.name, processing=None)
+        res.lists, res.out = self.imp.lists, [("roboflow_export", good)]
+        out = res.write()
+        self.assertEqual((out.get("roboflow_export", 0), out["(image list files)"]), (0, 1))
+        self.assertEqual(good_path.read_text(encoding="utf-8"), "a_1\ttrain\n")
+
+    def test_changed_list_replaces_the_old_one(self):
+        rec, path = self.export("roboflow - grows", "a_1\ttrain\n")
+        self.imp.out = [("roboflow_export", rec)]
+        self.imp.write()
+        rec2, _ = self.export("roboflow - grows", "a_1\ttrain\nc_3\tvalid\n")
+        imp2 = importers.Importer(self.root, laptop=self.tmp.name, cache=self.tmp.name, processing=None)
+        imp2.lists, imp2.out = self.imp.lists, [("roboflow_export", rec2)]
+        out = imp2.write()
+        self.assertEqual((out["roboflow_export"], out["(image list files)"]), (1, 1))
+        cur = registry.current("roboflow_export", self.root)["roboflow - grows"]
+        self.assertEqual(importers.sha256_file(path), cur["image_list"]["sha256"])
 
 
 def rows_of(text):

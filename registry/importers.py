@@ -21,10 +21,14 @@ v2 (jobs and inputs, TRACKING_CONTRACT.md addendum):
 - a run folder with its own `run.json` (run_experiments.py, 2026-11-02) gives status (finished; error/oom ->
   failed, with a note), job_bundle and config as written; older run folders are derived as before.
 - export membership (2026-11-05, additive): each roboflow_export gets `image_list` {file, sha256, method, n}
-  (`<root>/lists/export_<slug>.tsv`, `stem\tsplit`), counts_listed and not_listed, from its own COCO files (exact;
-  excluded-session images counted, not listed), else from tracking/v2 `in: <export>` (tracked images only; method
-  says so), else image_list null + image_list_gap. Image ids: the export file name's key, else the image whose
-  rf_name is the COCO `extra.name`. The portal's Lineage follows it from an export to its images' grids / sessions.
+  (`<root>/lists/exports/<slug>_<sha8 of id>.tsv`, `stem\tsplit`), counts_listed and not_listed, from its own COCO
+  files (exact; excluded-session images counted, not listed), else from tracking/v2 `in: <export>` (tracked images
+  only; method says so), else image_list null + image_list_gap. Image ids: the export file name's key, else the
+  image whose rf_name is the COCO `extra.name` (a name two images claim is not used). The portal's Lineage follows
+  it from an export to its images' grids / sessions.
+- list files are written with their record's line, under the registry lock (append files=, replace_files=True), so
+  a refused line leaves no list behind; a list whose unchanged record already names it is only repaired if missing
+  or different.
 
 Raw imaging (2026-11-05, additive; nothing in Cryo-image-processing is written):
 - grid: imaged_grids_master.csv fields (sample_label, project, prep_date, grid_type, replicate, glow_discharge,
@@ -108,13 +112,12 @@ def list_text(pairs):
     return "".join(f"{stem}\t{split}\n" for stem, split in rows)
 
 
-def export_list_names(export_ids):
-    """Export id -> its image list file, `lists/export_<slug>.tsv` (slug: runs of other characters -> `_`; a slug
-    two exports share gets the id's sha256[:8] appended, so names never collide)."""
-    slug = {e: "export_" + (re.sub(r"[^A-Za-z0-9]+", "_", e).strip("_") or "x") for e in export_ids}
-    n = Counter(slug.values())
-    return {e: f"{LISTS}/{s}" + (f"_{hashlib.sha256(e.encode('utf-8')).hexdigest()[:8]}" if n[s] > 1 else "") + ".tsv"
-            for e, s in slug.items()}
+def export_list_name(export_id):
+    """Export id -> its image list file, `lists/exports/<slug>_<sha256(id)[:8]>.tsv` (slug: runs of other characters
+    -> `_`). It depends on the id alone, so a later export never renames an existing file, and the hash keeps two ids
+    with one slug apart."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", export_id).strip("_") or "x"
+    return f"{LISTS}/exports/{slug}_{hashlib.sha256(export_id.encode('utf-8')).hexdigest()[:8]}.tsv"
 
 
 def split_counts(pairs):
@@ -682,7 +685,6 @@ class Importer:
     def exports_datasets_runs(self):
         s = self.s
         self.export_stems = {}
-        slugs = export_list_names(s.exports)
         for eid, e in sorted(s.exports.items()):
             d = self.cache / "training images" / eid
             counts, classes, lines, members = {}, [], [], []
@@ -697,7 +699,7 @@ class Importer:
             self.add("roboflow_export", id=eid, path=str(d), counts=counts, classes=classes,
                      derived_from=e["derived_from"], split_file=e["split_file"].name if e["split_file"] else None,
                      note=None if counts else "local placeholder: no COCO in the cache",
-                     **self.export_membership(eid, slugs[eid], members if counts else None))
+                     **self.export_membership(eid, export_list_name(eid), members if counts else None))
         self.exp_counts = {r["id"]: r for ent, r in self.out if ent == "roboflow_export"}
         for did, d in sorted(s.datasets.items()):
             if not did:
@@ -916,11 +918,25 @@ class Importer:
             self.add("inference_check", id=bid, owner=f"{bj}#{bid}")
 
     # ------------------------------------------------------------ write
-    def write_lists(self, dry_run=False):
-        """Image lists next to the registry; (re)written only when the text changed. -> n files to write."""
+    def list_files(self, rec):
+        """{rel: bytes} for the image list a record names, when this import built its text, else None."""
+        il = rec.get("image_list")
+        rel = il.get("file") if isinstance(il, dict) else None
+        return {rel: self.lists[rel].encode("utf-8")} if rel in self.lists else None
+
+    def changed_files(self, files):
+        """How many of {rel: bytes} are missing or differ on disk."""
+        return sum(1 for rel, data in (files or {}).items()
+                   if not (self.root / rel).is_file() or (self.root / rel).read_bytes() != data)
+
+    def write_lists(self, dry_run=False, only=None):
+        """Image lists next to the registry (those in `only`); (re)written only when the text changed. -> n files to
+        write. Used to repair a list whose record is unchanged; a new or changed record's list goes with its line."""
         n = 0
         for rel, text in sorted(self.lists.items()):
-            path = self.root / rel
+            if only is not None and rel not in only:
+                continue
+            path = registry.registry_file(self.root, rel)
             if path.exists() and path.read_bytes() == text.encode("utf-8"):
                 continue
             n += 1
@@ -948,7 +964,9 @@ class Importer:
         return True
 
     def write(self, dry_run=False):
-        lists_written = self.write_lists(dry_run)
+        """Append new / changed records. A record's image list is written with its line under the registry lock
+        (nothing for a refused line); a list whose record is unchanged is repaired afterwards if missing or changed."""
+        lists_written, repair = 0, set()
         self.write_mdoc_cache(dry_run)
         cur = registry.current(root=self.root)
         appended = Counter()
@@ -976,23 +994,28 @@ class Importer:
                     rec["note"] = old["note"]
                 if old.get("blocked_reason") and not rec.get("blocked_reason"):     # job: blocked by hand
                     rec["blocked_reason"] = old["blocked_reason"]
+            files = self.list_files(rec)
             if old is not None:
                 full = registry.derive(entity, rec)
                 if {k: v for k, v in full.items() if k not in IGNORE} == \
                         {k: v for k, v in old.items() if k not in IGNORE}:
+                    repair |= set(files or ())
                     continue
             rec = dict(rec, recorded_by=self.tag)
-            if not dry_run:
-                try:
-                    registry.append(rec, root=self.root)
-                except registry.RegistryError as e:
-                    self.refuse(f"{entity}: {str(e)[:90]}", rid)
-                    continue
+            try:
+                n_files = self.changed_files(files)
+                if not dry_run:
+                    registry.append(rec, root=self.root, files=files, replace_files=True)
+            except registry.RegistryError as e:
+                self.refuse(f"{entity}: {str(e)[:90]}", rid)
+                continue
             appended[entity] += 1
+            lists_written += n_files
             if entity == "image":
                 img_session[rid] = rec.get("session")
             if entity == "roboflow_image":
                 stem_rf[rec["stem"]] = rid
+        lists_written += self.write_lists(dry_run, only=repair)
         if lists_written:
             appended["(image list files)"] += lists_written
         prod_id, who = PRODUCTION

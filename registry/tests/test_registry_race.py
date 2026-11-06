@@ -153,6 +153,34 @@ class TestNewOnly(unittest.TestCase):
             registry.append(dict(ds, id="x3"), root=self.root, files={"../escape.tsv": b"x\n"})
         self.assertFalse((self.root.parent / "escape.tsv").exists())
 
+    def test_files_never_leave_the_registry(self):
+        ds = dict(sample("dataset"), id="paths")
+        bad = ["/escape.tsv", "lists/../../escape.tsv", ""] + \
+            (["\\escape.tsv", "C:escape.tsv", "C:/x/escape.tsv"] if os.name == "nt" else [])   # root / drive forms
+        for rel in bad:
+            with self.subTest(rel=rel), self.assertRaisesRegex(registry.RegistryError, "registry folder"):
+                registry.append(ds, root=self.root, files={rel: b"x\n"})
+        self.assertNotIn("paths", registry.current(root=self.root))
+        registry.append(ds, root=self.root, files={"lists/ok.tsv": b"x\n"})          # control: a plain one is fine
+        self.assertEqual((self.root / "lists" / "ok.tsv").read_bytes(), b"x\n")
+
+    @unittest.skipUnless(os.name == "nt", "directory junctions are Windows only")
+    def test_files_refused_through_a_junction(self):
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        (self.root / "lists").mkdir(parents=True)
+        r = subprocess.run(["cmd", "/c", "mklink", "/J", str(self.root / "lists" / "j"), str(outside)],
+                           capture_output=True, text=True)
+        if r.returncode != 0 or not (self.root / "lists" / "j").exists():
+            self.skipTest(f"mklink /J unavailable: {r.stdout} {r.stderr}")
+        try:
+            with self.assertRaisesRegex(registry.RegistryError, "leads outside the registry folder"):
+                registry.append(dict(sample("dataset"), id="via_j"), root=self.root, files={"lists/j/x.tsv": b"x\n"})
+            self.assertFalse((outside / "x.tsv").exists())
+            self.assertNotIn("via_j", registry.current(root=self.root))
+        finally:
+            os.rmdir(self.root / "lists" / "j")                   # removes the junction only, not its target
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -142,7 +142,7 @@
    "required": [
     "file"
    ],
-   "description": "which images went into this export: (stem, split) lines in registry/<file>; method says where they come from. null = unknown"
+   "description": "which images went into this export: (stem, split) lines in registry/<file> (lists/exports/<slug>_<sha256(id)[:8]>.tsv); method says where they come from. null = unknown"
   },
   "image_list_gap": {
    "type": [

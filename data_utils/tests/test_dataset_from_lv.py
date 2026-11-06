@@ -401,6 +401,63 @@ class TestRegistry(Fixture):
             D.register(prov, self.root / "out" / "lv_ds_fixture", reg_root)
         self.assertEqual(len((reg_root / "dataset.jsonl").read_text(encoding="utf-8").splitlines()), 1)
 
+    RACE_WORKER = r"""
+import json, sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from data_utils import dataset_from_lv as D
+prov_file, folder, reg_root, barrier, me = sys.argv[2:7]
+barrier = Path(barrier)
+real = D.check_id_free
+def check_then_wait(*a, **k):          # the early check has passed: meet the other register, then append
+    out = real(*a, **k)
+    (barrier / f"ready_{me}").write_text("x")
+    end = time.time() + 60
+    while len(list(barrier.glob("ready_*"))) < 2:
+        if time.time() > end:
+            print("BARRIER_TIMEOUT"); sys.exit(4)
+        time.sleep(0.02)
+    return out
+D.check_id_free = check_then_wait
+try:
+    line = D.register(json.loads(Path(prov_file).read_text(encoding="utf-8")), folder, reg_root)
+    print("WON " + line["image_list"]["sha256"])
+except D.BuildError as e:
+    print("REFUSED " + str(e))
+"""
+
+    def test_racing_registers_one_winner_and_its_list(self):
+        reg_root, barrier = self.root / "registry", self.root / "barrier"
+        barrier.mkdir()
+        jobs = []
+        for me in ("a", "b"):
+            prov, _ = build(self.base_lv, self.export, "race_ds", self.root / f"out_{me}", "ev_nonev")
+            folder = self.root / f"out_{me}" / "race_ds"
+            if me == "b":                                    # a different list, so the file shows whose it is
+                lst = folder / D.IMAGE_LIST
+                data = b"".join(lst.read_bytes().splitlines(keepends=True)[:-1])
+                lst.write_bytes(data)
+                prov["dataset_record"]["image_list"]["sha256"] = hashlib.sha256(data).hexdigest()
+            pf = self.root / f"prov_{me}.json"
+            pf.write_text(json.dumps(prov), encoding="utf-8")
+            jobs.append([sys.executable, "-B", "-c", self.RACE_WORKER, str(REPO), str(pf), str(folder), str(reg_root),
+                         str(barrier), me])
+        procs = [subprocess.Popen(j, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                  env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1")) for j in jobs]
+        outs = []
+        for p in procs:
+            out, err = p.communicate(timeout=120)
+            self.assertNotIn("Traceback", err, err)
+            outs.append(out.strip().splitlines()[-1])
+        self.assertEqual(sorted(o.split(" ")[0] for o in outs), ["REFUSED", "WON"], outs)
+        self.assertIn("already used by dataset/1", next(o for o in outs if o.startswith("REFUSED")))
+        lines = (reg_root / "dataset.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1)
+        rec = json.loads(lines[0])
+        won_sha = next(o for o in outs if o.startswith("WON")).split(" ")[1]
+        self.assertEqual(rec["image_list"]["sha256"], won_sha)
+        self.assertEqual(hashlib.sha256((reg_root / rec["image_list"]["file"]).read_bytes()).hexdigest(), won_sha)
+
     def test_register_refuses_a_bare_coco(self):
         bare = self.root / "bare"
         bare.mkdir()

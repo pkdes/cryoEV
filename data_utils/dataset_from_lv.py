@@ -546,9 +546,9 @@ def register(prov, dataset_dir, root=None):
         reg._guard(root)
         reg._guard(lst)
         reg._check(dict(rec, logged=reg.now()), root)          # schema check before anything is written
-        lst.parent.mkdir(parents=True, exist_ok=True)
-        lst.write_bytes(data)
-        return reg.append(rec, root=root)
+        # check_id_free above is only the early refusal: the id, the list file and the line are settled under the
+        # registry lock, so of two racing registers exactly one wins and the list file is the winner's
+        return reg.append(rec, root=root, new_only=True, files={rec["image_list"]["file"]: data})
     except reg.RegistryError as e:
         raise BuildError(f"registry refused: {e}")
 

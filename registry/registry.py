@@ -192,31 +192,46 @@ def id_used_by(id, root):
     return None
 
 
-def _write_files(root, files):
+def registry_file(root, rel):
+    """<root>/<rel> for a registry-relative path, or RegistryError: no drive, no root, no `..`, and the real path
+    (links and junctions followed) must stay inside the real registry folder."""
+    p = Path(rel)
+    if not str(rel).strip() or p.is_absolute() or p.drive or p.root or ".." in p.parts:
+        raise RegistryError(f"refused: {rel} is not a path inside the registry folder")
+    path = Path(root) / p
+    real_root, real = Path(root).resolve(), path.resolve()
+    if real != real_root and real_root not in real.parents:
+        raise RegistryError(f"refused: {rel} leads outside the registry folder")
+    _guard(path)
+    return path
+
+
+def _write_files(root, files, replace=False):
     """{registry-relative path: bytes} -> written (tmp + replace); a file already there with the same bytes is left
-    alone, one with other content is refused before anything is written. Called under the lock, before the line."""
+    alone, one with other content is refused (replace=False) before anything is written. Called under the lock,
+    before the line. -> number of files written."""
     todo = []
     for rel, data in (files or {}).items():
-        path = root / rel
-        if Path(rel).is_absolute() or ".." in Path(rel).parts:
-            raise RegistryError(f"refused: {rel} is not a path inside the registry folder")
-        _guard(path)
+        path = registry_file(root, rel)
         if path.exists():
-            if path.read_bytes() != data:
+            if path.read_bytes() == data:
+                continue
+            if not replace:
                 raise RegistryError(f"refused: {path} exists with other content")
-            continue
         todo.append((path, data))
     for path, data in todo:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_bytes(data)
         tmp.replace(path)
+    return len(todo)
 
 
-def append(record, root=None, _via_set_status=False, new_only=False, files=None):
+def append(record, root=None, _via_set_status=False, new_only=False, files=None, replace_files=False):
     """Validate, then append one line to <root>/<entity>.jsonl. Returns the stored line.
     new_only: refuse an id already used by any record (creators: new_job, dataset_from_lv), checked under the lock.
-    files: {registry-relative path: bytes} written under the lock after the checks, before the line."""
+    files: {registry-relative path: bytes} written under the lock after the checks, before the line; a file there
+    with other content is refused unless replace_files (the importer: a list whose record changes with it)."""
     root = Path(root or default_root())
     rec = dict(record)
     rec.setdefault("logged", now())
@@ -233,7 +248,7 @@ def append(record, root=None, _via_set_status=False, new_only=False, files=None)
                 raise RegistryError(f"refused: id {rec.get('id')} is already used by {used}/1 (new_only)")
         path = root / f"{e}.jsonl"
         _guard(path)
-        _write_files(root, files)
+        _write_files(root, files, replace_files)
         line = compact(e, rec)
         lead = ""
         if path.exists() and path.stat().st_size:      # a line cut short must not swallow the next one

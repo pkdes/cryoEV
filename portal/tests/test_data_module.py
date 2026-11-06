@@ -796,6 +796,9 @@ def lineage_records() -> dict:
                             rec("roboflow_export", id="list exp S1", derived_from="list exp", classes=[],
                                 image_list={"file": "lists/export_list_exp_S1.tsv", "n": 2,
                                             "method": "export COCO split folders"}),
+                            rec("roboflow_export", id="drop resplit", derived_from="list exp", classes=[],
+                                image_list={"file": "lists/export_drop.tsv", "n": 1,
+                                            "method": "export COCO split folders"}),
                             rec("roboflow_export", id="orphan resplit", derived_from="gone exp", classes=[],
                                 image_list={"file": "lists/export_list_exp_S1.tsv", "n": 2,
                                             "method": "export COCO split folders"}),
@@ -831,6 +834,7 @@ def add_lineage_records(registry: Path):
                                                             encoding="utf-8")
     (registry / "lists" / "export_list_exp_S1.tsv").write_text("t1\ttest\nt2\ttrain\n", encoding="utf-8")
     (registry / "lists" / "export_untraced.tsv").write_text("zz_untraced\ttrain\n", encoding="utf-8")
+    (registry / "lists" / "export_drop.tsv").write_text("t2\ttrain\n", encoding="utf-8")       # drops t1's grid
     for entity, recs in lineage_records().items():
         with open(registry / f"{entity}.jsonl", "a", encoding="utf-8") as fh:
             fh.write("".join(json.dumps(r) + "\n" for r in recs))
@@ -1100,6 +1104,9 @@ class Lineage(LineageBase):
         self.assertEqual(t["root"]["note"], "2 of 2 images traced to sessions 20261104.")
         self.assertEqual(self.parents(t["root"]), [("export", "list exp", "ok")])      # no duplicate grids here
         self.assertEqual(self.parents(t["root"]["parents"][0]), [("grid", "2602", "ok"), ("session", "20261104", "ok")])
+        drop = self.tree("images", "drop resplit")["root"]                   # drops a grid: shows its own
+        self.assertEqual(self.parents(drop), [("export", "list exp", "ok"), ("session", "20261104", "ok")])
+        self.assertEqual(drop["note"], "1 of 1 images traced to sessions 20261104.")
         orphan = self.tree("images", "orphan resplit")["root"]               # parent not in the registry
         self.assertEqual(self.parents(orphan), [("export", "gone exp", "unknown"), ("grid", "2602", "ok"),
                                                 ("session", "20261104", "ok")])
@@ -1112,6 +1119,16 @@ class Lineage(LineageBase):
         ta = self.tree("images", "resplit of priv", "admin")                 # control: admin sees the parent
         self.assertEqual(self.parents(ta["root"]), [("export", "priv exp", "ok"), ("grid", "2602", "ok"),
                                                     ("session", "20261104", "ok")])
+
+    def test_summary_counts_listed_images_with_no_session(self):
+        t = self.tree("images", "list exp")
+        self.assertEqual((t["summary"]["unknown"], t["summary"]["untraced_images"]), (0, 1))     # zz_untraced
+        self.assertNotIn("zz_untraced", json.dumps(t))                        # a number, never the ids
+        self.assertIn("1 listed image not traced to an imaging session.",
+                      main_html(self.page("/data/lineage/images/list%20exp/")))
+        self.assertEqual(self.tree("images", "list exp S1")["summary"]["untraced_images"], 1)   # via its parent
+        self.assertEqual(self.tree("images", "plain exp")["summary"]["untraced_images"], 0)     # control: no list
+        self.assertNotIn("not traced to an imaging session", main_html(self.page("/data/lineage/images/plain%20exp/")))
 
     def test_tracked_export_list_says_so(self):
         note = self.tree("images", "tracked exp")["root"]["note"]
