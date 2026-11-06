@@ -262,7 +262,7 @@ def queue_train(job_id, dataset_dir, exp_args, share, max_hours, hold=False, che
 
 
 PREDICT_LOCK = "predict.lock"                    # <predict root>/predict.lock, held by jobs/predict_local.py
-PREDICT_HOURS = 2.0                              # push-predict's default --max-hours (200 tiles take minutes)
+PREDICT_HOURS = 2.0                              # push-predict's default --max-hours (a 1000-tile set takes minutes)
 
 
 def push_predict(ps, share, job_id=None, copier="auto", check_origin=True, max_hours=PREDICT_HOURS, hold=False):

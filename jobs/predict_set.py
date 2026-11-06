@@ -5,7 +5,7 @@
         --model <model id> --owner <person>
         (--sample-label <label> | --sample-label-from manifest:<column>)
         (--nm-per-px <x> | --nm-from-manifest) --nm-confirmed-by <person>
-        [--conf 0.25] [--max-det 1000] [--imgsz N] [--session YYYYMMDD] [--link] [--registry <dir>] [--root <dir>]
+        [--conf 0.25] [--max-det 1000] [--imgsz N] [--session YYYYMMDD] [--name <text>] [--link] [--registry <dir>] [--root <dir>]
 
 Writes <root>/<ps id>/ (default root <CryoAI-laptop>/predict; the id ps_<YYYYMMDD>_<6 hex> is made here):
   images/<nnnn>.png|.jpg   the tiles, numbered in name order; the extension comes from the content. Copied (md5
@@ -13,20 +13,21 @@ Writes <root>/<ps id>/ (default root <CryoAI-laptop>/predict; the id ps_<YYYYMMD
                            The original file name is never in a path, only in images.csv orig_name
   images.csv               image,file,orig_name,sample_label,nm_per_px,nm_confirmed_by,source,md5 (raw values: it is
                            machine-read; labels and names a spreadsheet would run are refused at create)
-  request.json             ps, owner, model, conf, max_det, imgsz, source, created
+  request.json             ps, owner, model, conf, max_det, imgsz, source, created, and `name` (only when one was
+                           given: clean_name(), at most 80 characters; not in the registry; the portal renames it)
   status.json              state queued, n_done 0, n_total, where laptop, job null, error null, updated, pid null,
                            waiting null
 and appends a prediction_set/1 record (status queued) to the registry. The folder is built in <root>/.incoming/ and
 renamed into place, so a reader never sees half a set.
 
-Refused, with every problem listed and nothing written: no images, or more than 200; a file that is not an 8-bit
+Refused, with every problem listed and nothing written: no images, or more than 1000; a file that is not an 8-bit
 PNG or JPEG by its content (the extension is not trusted; MANIFEST.csv, the --manifest file and OS files such as
 desktop.ini are skipped), or one with a side over 8192 px (checked before it is decoded); nm/px missing for any
 image; no --nm-confirmed-by; a sample label or file name starting with = + - @ (a spreadsheet would run it); mixed tile sizes (or nm/px spread over 1 % of the median) within one sample label; an unknown model; --only
 names that are not plain file names. The manifest's name column is output_name (or image, file_name, filename,
 name), its nm/px column nm_per_px.
 
-Python API (the portal): create(...) -> the set's folder. It reads, md5s and decodes every tile (seconds for 200):
+Python API (the portal): create(...) -> the set's folder. It reads, md5s and decodes every tile (seconds per 100 tiles; minutes for 1000):
 call it from a worker thread, never on the event loop. find(ps) -> folder; read_status / write_status (atomic,
 read-modify-write under a lock); update_record(ps_id, **fields) appends the registry line after a status change.
 Imported as jobs.predict_set it changes no sys.path and loads registry/registry.py by path (as cj_registry, like
@@ -48,6 +49,7 @@ import statistics
 import sys
 import threading
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -64,7 +66,8 @@ from data_utils import config  # noqa: E402
 from data_utils.oslock import acquire_lock  # noqa: E402
 from data_utils.path_guard import protected_problem  # noqa: E402
 
-MAX_IMAGES = 200
+MAX_IMAGES = 1000
+NAME_MAX = 80                                    # an analysis's optional display name (request.json `name`)
 MAX_SIDE = 8192                                  # px, per side, read from the header before any decode
 PREDICT_DIR = "predict"                          # <CryoAI-laptop>/predict/<ps id>/
 INCOMING, LOCKS = ".incoming", ".locks"
@@ -349,6 +352,18 @@ def _scan(from_dir: Path, manifest: Path | None, names) -> list:
                    and not p.name.startswith(".") and p.resolve() not in skip), key=lambda p: p.name)
 
 
+_NAME_DROP = re.compile("[\u202a-\u202e\u2066-\u2069\u200e\u200f\u200b-\u200d\ufeff]")
+
+
+def clean_name(s) -> str | None:
+    """An analysis name for display: trimmed, control (Cc), bidi-control and zero-width characters removed, at most
+    NAME_MAX characters. Nothing left -> None. Not an escape: pages still escape it."""
+    if not isinstance(s, str):
+        return None
+    s = "".join(ch for ch in _NAME_DROP.sub("", s) if unicodedata.category(ch) != "Cc")
+    return s.strip()[:NAME_MAX].strip() or None
+
+
 def _place(src: Path, dst: Path, md5: str, link: bool) -> str:
     """Copy (md5 checked), or with link=True hard-link when on one drive and not from a protected folder."""
     if link and protected_problem(src) is None and os.stat(src).st_dev == os.stat(dst.parent).st_dev:
@@ -366,9 +381,14 @@ def _place(src: Path, dst: Path, md5: str, link: bool) -> str:
 # ---------------------------------------------------------------- create
 def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_label_column=None, nm_per_px=None,
            nm_from_manifest=False, manifest=None, names=None, conf=0.25, max_det=1000, imgsz=None, session=None,
-           registry_root=None, root=None, link=False, where="laptop") -> Path:
+           registry_root=None, root=None, link=False, where="laptop", name=None, progress=None) -> Path:
     """Make a prediction set (see the module doc). -> its folder. Raises PredictSetError (nothing written).
-    Slow (md5 + decode of every tile): the portal calls it from a worker thread."""
+    Slow (md5 + decode of every tile): the portal calls it from a worker thread.
+    name: an optional display name (clean_name) written to request.json only when set. progress: optional
+    callback(done, total, phase) with phase "checking" (md5 + decode) then "placing" (copy or link); additive, the
+    CLI passes none."""
+    note = progress or (lambda *a: None)
+    set_name = clean_name(name)                 # `name` is reused below as a file name
     from_dir = Path(from_dir)
     root = Path(root) if root else default_root()
     reg = Path(registry_root) if registry_root else config.registry_root()
@@ -449,7 +469,8 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
     if nm_from_manifest and man and NM_COLUMN not in next(iter(man.values())):
         raise PredictSetError(f"refused: {manifest.name} has no {NM_COLUMN} column")
     items = []
-    for p in files:
+    for k, p in enumerate(files, 1):
+        note(k - 1, len(files), "checking")
         try:
             ext, size = inspect_image(p)
         except (ValueError, OSError) as e:
@@ -520,6 +541,7 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
         tag = f"session:{session}" if session else "upload"
         for i, it in enumerate(items, 1):
             name = f"{i:04d}{it['ext']}"
+            note(i - 1, len(items), "placing")
             how[_place(it["src"], inc / IMAGES / name, it["md5"], link)] += 1
             rows.append({"image": f"{i:04d}", "file": f"{IMAGES}/{name}", "orig_name": it["src"].name,
                          "sample_label": it["label"], "nm_per_px": repr(float(it["nm"])),
@@ -530,11 +552,15 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
             w.writerows(rows)
         source = {"kind": "session", "session": str(session), "dir": str(from_dir.resolve())} if session \
             else {"kind": "upload"}
-        write_json_atomic(inc / REQUEST, {"ps": ps_id, "owner": owner, "model": model, "conf": conf,
-                                          "max_det": max_det, "imgsz": imgsz, "source": source, "created": created})
+        request = {"ps": ps_id, "owner": owner, "model": model, "conf": conf, "max_det": max_det, "imgsz": imgsz,
+                   "source": source, "created": created}
+        if set_name:
+            request["name"] = set_name
+        write_json_atomic(inc / REQUEST, request)
         write_json_atomic(inc / STATUS, {"state": "queued", "n_done": 0, "n_total": len(rows), "where": where,
                                          "job": None, "error": None, "updated": created, "pid": None,
                                          "waiting": None})
+        note(len(items), len(items), "placing")
         with locked(reg / REGISTRY_LOCK):
             inc.rename(final)
             try:
@@ -572,6 +598,7 @@ def main(argv=None):
     c.add_argument("--max-det", default=1000)
     c.add_argument("--imgsz", help="inference size (default: the model's registered imgsz)")
     c.add_argument("--session", help="YYYYMMDD when the tiles are a session's (source kind session)")
+    c.add_argument("--name", help="display name of the analysis (at most 80 characters)")
     c.add_argument("--link", action="store_true", help="hard-link tiles on the same drive instead of copying")
     c.add_argument("--registry", type=Path, help="registry folder (default <CryoAI-laptop>/registry)")
     c.add_argument("--root", type=Path, help=f"where sets live (default <CryoAI-laptop>/{PREDICT_DIR})")
@@ -585,7 +612,7 @@ def main(argv=None):
                     sample_label_column=a.sample_label_from, nm_per_px=a.nm_per_px,
                     nm_from_manifest=a.nm_from_manifest, manifest=a.manifest, names=names, conf=a.conf,
                     max_det=a.max_det, imgsz=a.imgsz, session=a.session, registry_root=a.registry, root=a.root,
-                    link=a.link)
+                    link=a.link, name=a.name)
     except (PredictSetError, config.ConfigError, OSError) as e:
         print(f"[predict_set] {e}", file=sys.stderr)
         return 2

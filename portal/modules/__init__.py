@@ -69,8 +69,12 @@ def _redirect(to: str):
     return go
 
 
+HELPERS = {"names"}                       # importable helpers in this folder that are not plug-ins (no PREFIX / routes)
+
+
 def discover() -> list:
-    return sorted(m.name for m in pkgutil.iter_modules([str(HERE)]) if not m.name.startswith("_"))
+    return sorted(m.name for m in pkgutil.iter_modules([str(HERE)])
+                  if not m.name.startswith("_") and m.name not in HELPERS)
 
 
 def load(ctx: Ctx, names=None):

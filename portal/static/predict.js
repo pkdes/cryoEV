@@ -7,6 +7,8 @@
 //   upload session (POST /predict/api/upload), then one "create" request. A dropped connection is retried, and pressing
 //   the button again resumes where it stopped (the session id is kept in sessionStorage). Without JavaScript the form
 //   posts as a plain multi-file form (small sets only; the server says so).
+// - Progress page (#cj-predict-prep): a set is made in the background; poll its JSON and open the analysis when done.
+// - Time line (#cj-predict-est, data-a data-b data-ahead): "about N min once it starts" for the tile count shown.
 (function () {
   'use strict';
   if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
@@ -42,6 +44,40 @@
     document.addEventListener('visibilitychange', function () { if (!document.hidden && timer) tick(); });
   }
 
+  // seconds = a + b * images (the server fits it to finished runs); rewritten here as the tile count changes
+  function estimate(n) {
+    var el = document.getElementById('cj-predict-est');
+    if (!el) return;
+    var a = parseFloat(el.dataset.a), b = parseFloat(el.dataset.b), ahead = parseInt(el.dataset.ahead, 10) || 0;
+    if (!(n > 0) || isNaN(a) || isNaN(b)) { el.textContent = ''; return; }
+    var text = 'about ' + Math.max(1, Math.round((a + b * n) / 60)) + ' min once it starts';
+    if (ahead > 0) text += ' · ' + ahead + (ahead === 1 ? ' analysis' : ' analyses') + ' ahead of you';
+    el.textContent = text;
+  }
+
+  var prep = document.getElementById('cj-predict-prep');
+  if (prep && prep.dataset.tid && prep.dataset.live === '1') {
+    var pbusy = false, ptimer = null, perr = document.getElementById('cj-predict-err');
+    var ptick = function () {
+      if (pbusy) return;
+      pbusy = true;
+      fetch('/predict/api/preparing/' + encodeURIComponent(prep.dataset.tid) + '?html=1', {cache: 'no-store', credentials: 'same-origin'})
+        .then(function (r) { if (!r.ok) throw new Error('status ' + r.status); return r.json(); })
+        .then(function (j) {
+          swap('cj-predict-prepstatus', ((j && j.html) || {}).status);
+          if (perr) { perr.textContent = ''; perr.hidden = true; }
+          if (j.href) { clearInterval(ptimer); location.assign(j.href); }
+          else if (!j.live) clearInterval(ptimer);
+        })
+        .catch(function (e) {
+          if (perr) { perr.textContent = 'Could not refresh (' + e.message + '); the analysis is still being prepared.'; perr.hidden = false; }
+        })
+        .then(function () { pbusy = false; });
+    };
+    ptimer = setInterval(ptick, 2000);
+    ptick();
+  }
+
   var set = document.getElementById('cj-predict-set');
   if (set && set.dataset.ps) {
     poller(set, '/predict/api/set/' + encodeURIComponent(set.dataset.ps) + '?html=1',
@@ -64,7 +100,7 @@
 
   var sess = document.getElementById('cj-predict-session');
   if (sess) {
-    var out = document.getElementById('cj-predict-sel'), max = parseInt(sess.dataset.max, 10) || 200;
+    var out = document.getElementById('cj-predict-sel'), max = parseInt(sess.dataset.max, 10) || 1000;   // data-max: the server's limit
     var count = sess.querySelector('input[name="count"]');
     var update = function () {
       var n = 0;
@@ -75,6 +111,7 @@
         if (k > 0) n = Math.min(n, k);
       }
       out.textContent = n + ' tile' + (n === 1 ? '' : 's') + ' will be analysed' + (n > max ? ' (too many: at most ' + max + ')' : '') + '.';
+      estimate(Math.min(n, max));
     };
     sess.addEventListener('input', update);
     sess.addEventListener('change', update);
@@ -118,6 +155,7 @@
       if (fs.length > maxFiles) bad = 'At most ' + maxFiles + ' files.';
       else if (big.length) bad = big[0].name + ' is over ' + Math.round(maxBytes / 1048576) + ' MB.';
       if (info) info.textContent = bad ? msg + '. ' + bad : msg;
+      estimate(bad ? 0 : fs.length);
       input.setCustomValidity(bad);
     };
     input.addEventListener('change', check);

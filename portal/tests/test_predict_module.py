@@ -196,9 +196,26 @@ class Base(unittest.TestCase):
         data.update(kw)
         return {k: v for k, v in data.items() if v is not None}
 
+    def follow(self, loc, who="basic", timeout=120):
+        """A 303 to the progress page (the set is made in the background) -> where it ends: /predict/<ps>/."""
+        if not (loc or "").startswith("/predict/preparing/"):
+            return loc
+        tid = loc.rstrip("/").split("/")[-1]
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            st, _, body = self.get(f"/predict/api/preparing/{tid}", who)
+            j = json.loads(body)
+            if j.get("href"):
+                return j["href"]
+            if j.get("state") == "failed":
+                self.fail(f"create failed: {j}")
+            time.sleep(0.1)
+        self.fail(f"{loc} not done after {timeout} s")
+
     def submit_a(self, who="basic", **kw):
         st, h, body = self.post(f"/predict/new/session/{self.key_a}/", self.form_a(who, **kw), who)
-        return st, T.hget(h, "location"), body.decode("utf-8")
+        loc = T.hget(h, "location")
+        return st, (self.follow(loc, who) if st == 303 else loc), body.decode("utf-8")
 
     def wait_state(self, ps, states=("done", "failed"), timeout=90):
         t0 = time.time()
@@ -252,7 +269,8 @@ class Roles(Base):
             page = self.page(path)
             self.assertIn('<script src="/predict/predict.js" defer></script>', page)
             self.assertEqual(re.findall(r"<script(?![^>]*\ssrc=)[^>]*>", page), [], path)
-            self.assertEqual(re.findall(r"<[a-z][^>]*\son[a-z]+\s*=", page), [], path)   # no inline handlers
+            bare = re.sub(r'"[^"]*"', '""', page)             # attribute values are escaped text, not handlers
+            self.assertEqual(re.findall(r"<[a-z][^>]*\son[a-z]+\s*=", bare), [], path)   # no inline handlers
 
     def test_sources_plain_for_basic_paths_for_admin(self):
         basic, admin = self.page("/predict/new/", "basic"), self.page("/predict/new/", "admin")
@@ -411,8 +429,9 @@ class SessionFlow(Base):
                 "label": "Prep B"}
         self.assertEqual(self.post(f"/predict/new/session/{self.key_b}/", data, "basic")[0], 400)
         data["nm_g0"] = "1.5"
-        st, _, body = self.post(f"/predict/new/session/{self.key_b}/", data, "basic")
+        st, h, body = self.post(f"/predict/new/session/{self.key_b}/", data, "basic")
         self.assertEqual(st, 303, body[:500])
+        self.follow(T.hget(h, "location"))
         ps = (set(self.sets()) - before).pop()
         row = read_rows(self.root / ps / "images.csv")[0]
         self.assertEqual((row["sample_label"], float(row["nm_per_px"]), row["source"]),

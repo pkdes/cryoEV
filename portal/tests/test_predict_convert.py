@@ -389,6 +389,17 @@ class Base(unittest.TestCase):
         return st, self.jpost(f"/predict/api/upload/{st['upload']}/create", {}, who)
 
     # ---- helpers
+    def follow(self, loc, who="advanced", timeout=120) -> str:
+        """A set is made in the background: /predict/preparing/<id>/ -> /predict/<ps>/ once it is done."""
+        if not loc.startswith("/predict/preparing/"):
+            return loc
+        tid = loc.rstrip("/").split("/")[-1]
+        wait_for(lambda: self.get(f"/predict/api/preparing/{tid}", who).json().get("state") in ("done", "failed"),
+                 timeout, what="the set being prepared")
+        j = self.get(f"/predict/api/preparing/{tid}", who).json()
+        self.assertEqual(j["state"], "done", j)
+        return j["href"]
+
     def sets(self) -> list:
         return sorted(p.name for p in self.w.root.iterdir() if p.name.startswith("ps_")) if self.w.root.exists() \
             else []
@@ -670,7 +681,7 @@ class Visibility(Base):
         self.assertEqual(self.sets(), self.sets0)
         r = self.form(path, {**data, "confirm": "yes"}, "advanced")
         self.assertEqual(r.status_code, 303, r.text[:800])
-        ps = r.headers["location"].strip("/").split("/")[-1]
+        ps = self.follow(r.headers["location"]).strip("/").split("/")[-1]
         req = json.loads((self.w.root / ps / "request.json").read_text(encoding="utf-8"))
         self.assertEqual((req["owner"], req["source"]["kind"], req["source"]["session"]),
                          ("adv", "session", "20260827-2"))
@@ -682,17 +693,22 @@ class Visibility(Base):
         wait_for(lambda: json.loads((self.w.root / ps / "status.json").read_text(encoding="utf-8"))["state"]
                  in ("done", "failed"), 60, what="the fake predictor")
 
-    def test_200_tile_cap_applies(self):
-        os.environ["FAKE_CONVERT_N"] = "201"
+    def test_tile_cap_applies(self):
+        self.assertEqual(P.MAX_FILES, 1000)
+        os.environ["FAKE_CONVERT_N"] = "5"
         cid = self.converted("advanced", session="20261101", recipe="20261101")
         path = f"/predict/new/session/{self.src_key(cid)}/"
+        with mock.patch.object(P, "MAX_FILES", 4):
+            return self._tile_cap(path)
+
+    def _tile_cap(self, path):
         form = self.page(path, "advanced")
-        self.assertIn("At most 200 tiles per analysis", form)
+        self.assertIn("At most 4 tiles per analysis", form)
         sig = re.search(r'name="sig" value="([0-9a-f]+)"', form).group(1)
         r = self.form(path, {"sig": sig, "samples": ["g0", "g1"], "nm_g0": "1.4724", "nm_g1": "1.4724",
                              "how": "all", "confirm": "yes", "model": MODEL}, "advanced")
         self.assertEqual(r.status_code, 400)
-        self.assertIn("201 tiles chosen", r.text)
+        self.assertIn("5 tiles chosen", r.text)
         self.assertEqual(self.sets(), self.sets0)
 
 
@@ -714,7 +730,7 @@ class Upload(Base):
             st, r = self.upload("basic", "tiles", self.fields(), self.tiles(3), chunk=700)
         self.assertEqual(st["chunk"], 700)
         self.assertEqual(r.status_code, 200, r.text[:600])
-        ps = r.json()["href"].strip("/").split("/")[-1]
+        ps = self.follow(r.json()["href"], "basic").strip("/").split("/")[-1]
         self.assertEqual(sorted(set(self.sets()) - set(self.sets0)), [ps])
         rows = list(csv.DictReader(open(self.w.root / ps / "images.csv", newline="", encoding="utf-8")))
         self.assertEqual([(r_["orig_name"], r_["nm_confirmed_by"], r_["sample_label"]) for r_ in rows],
@@ -758,7 +774,7 @@ class Upload(Base):
                     off = rr.json()["received"][n]
             r = self.jpost(f"/predict/api/upload/{uid}/create", {}, "basic")
         self.assertEqual(r.status_code, 200, r.text)
-        ps = r.json()["href"].strip("/").split("/")[-1]
+        ps = self.follow(r.json()["href"], "basic").strip("/").split("/")[-1]
         self.assertEqual(len(list(csv.DictReader(open(self.w.root / ps / "images.csv", encoding="utf-8")))), 2)
         self.assertTrue(self.scratch_empty())
         wait_for(lambda: json.loads((self.w.root / ps / "status.json").read_text(encoding="utf-8"))["state"]
