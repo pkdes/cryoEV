@@ -898,6 +898,11 @@ def detail_model(records, record) -> dict:
                        checks=checks, production=production)
 
 
+def hide_private(records, viewer, ref_id, hint=None):
+    """An id to quote in a field, or "Not visible to you" when it names a private set this viewer may not see."""
+    return "Not visible to you" if ref_hidden(records, viewer, ref_id, hint) else ref_id
+
+
 def detail_images(records, entity, record, viewer, page) -> dict:
     set_id = record["id"]
     model, source = _text(record.get("model")), _dict(record.get("source"))
@@ -918,7 +923,8 @@ def detail_images(records, entity, record, viewer, page) -> dict:
               entity_href("session", source["session"]) if source.get("session") in records["session"] else None),
         field("Reviewers", ", ".join(map(str, _list(record.get("reviewers"))))),
         field("Edits recorded", str(record["n_edit_records"]) if record.get("n_edit_records") is not None else None),
-        field("Starts from", _text(record.get("base")) or _text(record.get("derived_from"))),
+        field("Starts from", hide_private(records, viewer, _text(record.get("base"))
+                                          or _text(record.get("derived_from")), record.get("base_kind"))),
         field("Splits", split_counts(record)), field("Classes", ", ".join(map(str, _list(record.get("classes"))))),
         field("Review package", package_shown,
               entity_href("images", package_shown) if package_shown in records["review_package"] else None))
@@ -951,7 +957,7 @@ def detail_labels(records, record, viewer, page) -> dict:
         field("Images changed", str(record["n_images_applied"]) if record.get("n_images_applied") is not None
               else None),
         field("Changes", ", ".join(f"{k} {v}" for k, v in ops.items())),
-        field("Starts from", _text(record.get("base"))),
+        field("Starts from", hide_private(records, viewer, _text(record.get("base")))),
         field("Review package", shown_package,
               entity_href("images", shown_package) if shown_package in records["review_package"] else None),
         field("Replaces", replaces, entity_href("labels", replaces) if replaces in records["label_version"] else None),
@@ -978,13 +984,15 @@ def detail_dataset(records, record, viewer, page) -> dict:
     split = _dict(record.get("split"))
     source_id = _text(source.get("id"))
     source_is_set = bool(source_id) and visible_set(records, source_id, viewer)[1] is not None
+    source_hidden = bool(source_id) and ref_hidden(records, viewer, source_id, source.get("kind"))
     fields = present(
         field("Status", status_word(record["status"]) if _text(record.get("status")) else None),
         field("Created", short_date(_when(record))), field("Splits (images)", split_counts(record)),
         field("Classes", ", ".join(map(str, _list(record.get("classes"))))),
         field("Merged classes", ", ".join(f"{k} as {v}" for k, v in class_map.items())),
         field("Label version", label, entity_href("labels", label) if label in records["label_version"] else None),
-        field("Source", (source_id or _text(source.get("kind"))) if source else None,
+        field("Source", ("Not visible to you" if source_hidden else source_id or _text(source.get("kind")))
+              if source else None,
               entity_href("images", source_id) if source_is_set else None),
         field("Split rule", f"{split['method']}, seed {split.get('seed')}" if split.get("method") else None),
         field("Note", _text(record.get("note"))))
@@ -1092,11 +1100,11 @@ KIND_TO_NODE = {"session": "session", "grid": "grid", "images": "images", "label
                 "model": "model"}
 STEP_NAMES = {"model": "Model", "run": "Training run", "dataset": "Dataset", "label": "Label version",
               "export": "Roboflow export", "pull": "Roboflow download", "images": "Image set", "grid": "Grid",
-              "session": "Imaging session", "source": "Source"}
+              "session": "Imaging session", "source": "Source", "hidden": "Step"}
 NODE_THUMB_KIND = {"session": "session", "grid": "grid", "images": "images", "label": "labels", "dataset": "dataset"}
 HINT_TO_NODE = {"roboflow_export": "export", "export": "export", "label_version": "label", "lv": "label",
                 "pull": "pull", "review_package": "images", "package": "images", "prediction_set": "images",
-                "dataset": "dataset", "model": "model", "session": "session", "run": "run"}
+                "dataset": "dataset", "model": "model", "session": "session", "run": "run", "grid": "grid"}
 NODE_RECORDS = {"model": "model", "run": "run", "dataset": "dataset", "label": "label_version",
                 "export": "roboflow_export", "pull": "pull", "grid": "grid", "session": "session"}
 
@@ -1113,19 +1121,46 @@ def locate(records, ref_id, hint=None):
             return find_set(records, ref_id)[1] is not None
         return ntype in NODE_RECORDS and ref_id in records[NODE_RECORDS[ntype]]
     first = HINT_TO_NODE.get(str(hint))
-    for ntype in ([first] if first else []) + ["export", "label", "pull", "images", "dataset", "model", "run"]:
+    for ntype in ([first] if first else []) + ["export", "label", "pull", "images", "dataset", "model", "run",
+                                                        "grid", "session"]:
         if has(ntype):
             return ntype
     return None
 
 
-def ref_spec(records, ref_id, hint=None):
-    """A parent link for a recorded id: ('node', type, id) when something has it, else ('unknown', type, why, id)."""
+def private_stub(ref_id, hint=None):
+    """(entity, stub record) when an id is of a private kind (prediction set / prediction package), else None. Used
+    to test visibility of an id that has no registry record, the way detail_labels does."""
+    ref_id = str(ref_id)
+    if PREDICTION_SET_ID.match(ref_id) or str(hint) == "prediction_set":
+        return "prediction_set", {"id": ref_id}
+    if PREDICTION_PACKAGE_ID.match(ref_id) or ref_id.startswith("pred_"):
+        return "review_package", {"id": ref_id, "kind": "prediction"}
+    return None
+
+
+def ref_hidden(records, viewer, ref_id, hint=None) -> bool:
+    """True when `ref_id` names a private set this viewer may not see (recorded or not): such an id must never be
+    quoted. Fails closed: an owner nobody knows means admins only."""
+    if not _text(ref_id):
+        return False
+    entity, record = find_set(records, ref_id)
+    if record is not None:
+        return not set_is_visible(viewer, entity, record)
+    stub = private_stub(ref_id, hint)
+    return bool(stub) and not set_is_visible(viewer, *stub)
+
+
+def ref_spec(records, viewer, ref_id, hint=None):
+    """A parent link for a recorded id: ('node', type, id) when something has it, ('hidden',) when it is a private
+    set the viewer may not see, else ('unknown', type, why, id)."""
     if not _text(ref_id):
         return None
     ntype = locate(records, ref_id, hint)
     if ntype:
         return ("node", ntype, ref_id)
+    if ref_hidden(records, viewer, ref_id, hint):
+        return ("hidden",)
     return ("unknown", HINT_TO_NODE.get(str(hint), "source"),
             "It is recorded here but is not in the registry.", ref_id)
 
@@ -1134,7 +1169,7 @@ def unknown_spec(ntype, why):
     return ("unknown", ntype, why, None)
 
 
-def input_specs(records, record, seen) -> list:
+def input_specs(records, viewer, record, seen) -> list:
     """Parent links from the record's generic `inputs` list (child -> parent), skipping ids already linked."""
     specs = []
     for item in _list(record.get("inputs")):
@@ -1142,8 +1177,30 @@ def input_specs(records, record, seen) -> list:
         ref_id = _text(item.get("id"))
         if ref_id and ref_id not in seen and item.get("role") not in ("init_weights", "replaces"):
             seen.add(ref_id)
-            specs.append(ref_spec(records, ref_id, item.get("entity")))
-    return specs
+            specs.append(ref_spec(records, viewer, ref_id, item.get("entity")))
+    return capped(specs, lambda spec: spec, "sources")
+
+
+def image_sources(records, match) -> dict:
+    """Grids and sessions of the registry's image records that `match` picks (those naming a session):
+    {"grids": {grid: n}, "sessions": {session: n} for images with no grid, "all_sessions": set, "n": traced}."""
+    grids: dict = {}
+    sessions: dict = {}
+    seen_sessions = set()
+    n = 0
+    for image in records["image"].values():
+        if not match(image) or not _text(image.get("session")):
+            continue
+        n += 1
+        sid, slot = image["session"], image.get("session_grid")
+        seen_sessions.add(sid)
+        grid = _text(image.get("grid")) or _dict(_dict(records["session"].get(sid)).get("session_grids")).get(
+            str(slot) if slot is not None else "")
+        if grid:
+            grids[grid] = grids.get(grid, 0) + 1
+        else:
+            sessions[sid] = sessions.get(sid, 0) + 1
+    return {"grids": grids, "sessions": sessions, "all_sessions": seen_sessions, "n": n}
 
 
 def pull_sources(records, pull_id) -> tuple:
@@ -1152,19 +1209,26 @@ def pull_sources(records, pull_id) -> tuple:
     for images with no grid)."""
     names = {r.get("name") for r in records["roboflow_image"].values() if r.get("first_seen_pull") == pull_id}
     names.discard(None)
-    grids: dict = {}
-    sessions: dict = {}
-    for image in records["image"].values():
-        if image.get("rf_name") not in names or not _text(image.get("session")):
-            continue
-        sid, slot = image["session"], image.get("session_grid")
-        grid = _text(image.get("grid")) or _dict(_dict(records["session"].get(sid)).get("session_grids")).get(
-            str(slot) if slot is not None else "")
-        if grid:
-            grids[grid] = grids.get(grid, 0) + 1
-        else:
-            sessions[sid] = sessions.get(sid, 0) + 1
-    return grids, sessions
+    found = image_sources(records, lambda image: image.get("rf_name") in names)
+    return found["grids"], found["sessions"]
+
+
+def read_image_list(root, record):
+    """The stems in a dataset's image list (first column of registry/<image_list.file>), or None when there is no
+    readable list. The file must sit under the registry folder."""
+    name = _text(_dict(record.get("image_list")).get("file"))
+    if not name or root is None:
+        return None
+    path = Path(root) / name
+    if path.suffix.lower() not in (".tsv", ".txt", ".csv") or not is_contained(path, root):
+        return None
+    try:
+        if path.stat().st_size > MAX_JSON_BYTES:
+            return None
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, ValueError):
+        return None
+    return [ln.split("\t")[0].strip() for ln in lines if ln.strip()]
 
 
 def capped(specs: list, make, label: str) -> list:
@@ -1179,8 +1243,8 @@ class Lineage:
     """One walk over the registry for one viewer. Every object passes the viewer's visibility test before any of its
     facts are read."""
 
-    def __init__(self, records, viewer):
-        self.records, self.viewer, self.count = records, viewer, 0
+    def __init__(self, records, viewer, root=None):
+        self.records, self.viewer, self.root, self.count = records, viewer, root, 0
         self.admin = _dict(viewer.user).get("role") == "admin"
 
     # ---- lookup and visibility
@@ -1194,6 +1258,8 @@ class Lineage:
                 return ("hidden", None, None)
             return ("export", record, entity) if entity == "roboflow_export" else ("images", record, entity)
         record = self.records[NODE_RECORDS[ntype]].get(nid) if ntype in NODE_RECORDS else None
+        if record and ntype == "export" and not set_is_visible(self.viewer, "roboflow_export", record):
+            return ("hidden", None, None)
         return (ntype, record, None) if record else None
 
     # ---- the walk
@@ -1202,37 +1268,49 @@ class Lineage:
                 "chips": [], "fields": [], "note": None, "url": None, "lineage": None, "thumbs": None,
                 "parents": []}
         node.update(extra)
+        self.count += 1                                     # every step shown counts toward the cap
         return node
 
     def walk(self, ntype, nid, path, depth) -> dict:
         found = self.lookup(ntype, nid)
         if found is None:
+            if ref_hidden(self.records, self.viewer, nid):
+                return self.hidden_node()
             return self.node(ntype, None, "unknown", note="Recorded as a source but not found in the registry.",
                              chips=[("Unknown", "warn")], recorded=nid)
         ntype, record, entity = found
         if ntype == "hidden":
-            return self.node("images", None, "hidden", "Not visible to you", chips=[("Not visible to you", "warn")],
-                             note="This step exists but belongs to someone else, so its details are not shown.")
+            return self.hidden_node()
         key = (ntype, nid)
         if key in path:                                     # bad data: this step leads back to itself
             return self.node(ntype, nid, "loop", title=self.title(ntype, nid), chips=[("Loop in the registry", "warn")],
                              note="The registry links this step back to one above it, so the chain stops here.")
         if depth >= LINEAGE_MAX_DEPTH or self.count >= LINEAGE_MAX_NODES:
             return self.node(ntype, nid, "cut", title=self.title(ntype, nid),
-                             note="The chain is longer than this page follows. Open this step to continue.",
+                             note="Not shown: limit reached." + (" Use \"Lineage from here\" to continue."
+                                                                  if self.lineage_url(ntype, nid, entity) else ""),
                              url=self.url(ntype, nid, entity), lineage=self.lineage_url(ntype, nid, entity))
-        self.count += 1
         title, chips, fields, specs, note = self.describe(ntype, nid, record, entity)
+        specs = [sp for sp in specs if sp]
+        room = max(0, LINEAGE_MAX_NODES - self.count - 1)
+        if len(specs) > room + 1:                           # keep the whole tree under the cap
+            specs = specs[:room] + [("more", len(specs) - room, "steps")]
         node = self.node(ntype, nid, title=title, chips=chips, fields=fields, note=note,
                          url=self.url(ntype, nid, entity), lineage=self.lineage_url(ntype, nid, entity))
         if entity:
             node["set_kind"] = SET_KIND_NAMES.get(entity)
         node["thumbs"] = self.thumbs(ntype, nid, record, depth)
         child_path = path | {key}
-        node["parents"] = [self.child(spec, child_path, depth + 1) for spec in specs if spec]
+        node["parents"] = [self.child(spec, child_path, depth + 1) for spec in specs]
         return node
 
+    def hidden_node(self) -> dict:
+        return self.node("hidden", None, "hidden", "Not visible to you", chips=[("Not visible to you", "warn")],
+                         note="This step exists but belongs to someone else, so its details are not shown.")
+
     def child(self, spec, path, depth) -> dict:
+        if spec[0] == "hidden":
+            return self.hidden_node()
         if spec[0] == "node":
             return self.walk(spec[1], spec[2], path, depth)
         if spec[0] == "more":
@@ -1298,8 +1376,9 @@ class Lineage:
             specs.append(("node", "run", run) if run_ok else (
                 ("unknown", "run", "It is recorded here but is not in the registry.", run) if run else
                 unknown_spec("run", "The registry does not say which training run made this model.")))
-            specs.append(ref_spec(self.records, dataset, "dataset") or
+            specs.append(ref_spec(self.records, self.viewer, dataset, "dataset") or
                          unknown_spec("dataset", "The registry does not say which dataset this model was trained on."))
+        specs += input_specs(self.records, self.viewer, rec, {nid, run, dataset})
         production = rec.get("status") == "production"
         fields = present(
             field("Status", status_word(rec["status"]) if _text(rec.get("status")) else None),
@@ -1313,7 +1392,7 @@ class Lineage:
     def describe_run(self, nid, rec):
         config, metrics = _dict(rec.get("config")), _dict(rec.get("metrics"))
         dataset = _text(rec.get("dataset"))
-        specs = [ref_spec(self.records, dataset, "dataset") or
+        specs = [ref_spec(self.records, self.viewer, dataset, "dataset") or
                  unknown_spec("dataset", "The registry does not say which dataset this run trained on.")]
         fields = present(
             field("Status", status_word(rec["status"]) if _text(rec.get("status")) else None),
@@ -1335,8 +1414,18 @@ class Lineage:
         for ref_id, hint in ((label, "label_version"), (_text(source.get("id")), source.get("kind"))):
             if ref_id and ref_id not in seen:
                 seen.add(ref_id)
-                specs.append(ref_spec(self.records, ref_id, hint))
-        specs += input_specs(self.records, rec, seen)
+                specs.append(ref_spec(self.records, self.viewer, ref_id, hint))
+        specs += input_specs(self.records, self.viewer, rec, seen)
+        note = None
+        stems = read_image_list(self.root, rec)
+        if stems:
+            wanted = set(stems)
+            found = image_sources(self.records, lambda image: image.get("id") in wanted)
+            sessions = sorted(found["all_sessions"])
+            shown = ", ".join(sessions[:6]) + (f" and {len(sessions) - 6} more" if len(sessions) > 6 else "")
+            note = (f"{found['n']} of {len(wanted)} images traced to sessions {shown}." if sessions else
+                    f"0 of {len(wanted)} images traced to a session.")
+            specs += self.source_specs(found["grids"], found["sessions"])
         if not specs:
             specs = [unknown_spec("source", "The registry does not say what this dataset was built from.")]
         fields = present(
@@ -1344,7 +1433,18 @@ class Lineage:
             field("Images per split", split_counts(rec)),
             field("Classes", ", ".join(map(str, _list(rec.get("classes"))))),
             field("Created", short_date(_when(rec))))
-        return nid, status_tags(rec), fields, specs, None
+        return nid, status_tags(rec), fields, specs, note
+
+    def source_specs(self, grids, sessions) -> list:
+        """Grid and session parents for traced images: grids by image count, then sessions with no recorded grid."""
+        ordered = sorted(grids.items(), key=lambda kv: (-kv[1], grid_sort_key(kv[0])))
+        specs = capped(ordered, lambda kv: ("node", "grid", kv[0]) if kv[0] in self.records["grid"] else
+                       ("unknown", "grid", "The grid is recorded on its images but is not in the registry.", kv[0]),
+                       "grids")
+        by_count = sorted(sessions.items(), key=lambda kv: (-kv[1], kv[0]))
+        return specs + capped(by_count, lambda kv: ("node", "session", kv[0]) if kv[0] in self.records["session"] else
+                              ("unknown", "session", "The session is recorded on its images but is not in the "
+                               "registry.", kv[0]), "sessions without a recorded grid")
 
     def describe_label(self, nid, rec):
         seen = {nid}
@@ -1354,8 +1454,8 @@ class Lineage:
         for ref_id, hint in ((base, base_hint), (_text(rec.get("pkg")), "review_package")):
             if ref_id and ref_id not in seen:
                 seen.add(ref_id)
-                specs.append(ref_spec(self.records, ref_id, hint))
-        specs += input_specs(self.records, rec, seen)
+                specs.append(ref_spec(self.records, self.viewer, ref_id, hint))
+        specs += input_specs(self.records, self.viewer, rec, seen)
         if not specs:
             specs = [unknown_spec("source", "The registry does not say what these labels were made from.")]
         note, tone = review_note(rec)
@@ -1369,9 +1469,16 @@ class Lineage:
         return nid, [(note, tone)] + status_tags(rec), fields, specs, None
 
     def describe_export(self, nid, rec, entity=None):
-        parent = _text(rec.get("derived_from"))
-        specs = [ref_spec(self.records, parent, "roboflow_export") or
-                 unknown_spec("source", "The registry does not record which images went into this export.")]
+        parent, label = _text(rec.get("derived_from")), _text(rec.get("label_version"))
+        seen = {nid}
+        specs = []
+        for ref_id, hint in ((parent, "roboflow_export"), (label, "label_version")):
+            if ref_id and ref_id not in seen:
+                seen.add(ref_id)
+                specs.append(ref_spec(self.records, self.viewer, ref_id, hint))
+        specs += input_specs(self.records, self.viewer, rec, seen)
+        if not specs:
+            specs = [unknown_spec("source", "The registry does not record which images went into this export.")]
         fields = present(field("Classes", ", ".join(map(str, _list(rec.get("classes"))))),
                          field("Images per split", split_counts(rec)),
                          field("Made from export", parent, self.link("images", parent) if parent else None))
@@ -1379,14 +1486,7 @@ class Lineage:
 
     def describe_pull(self, nid, rec):
         grids, sessions = pull_sources(self.records, nid)
-        ordered = sorted(grids.items(), key=lambda kv: (-kv[1], grid_sort_key(kv[0])))
-        specs = capped(ordered, lambda kv: ("node", "grid", kv[0]) if kv[0] in self.records["grid"] else
-                       ("unknown", "grid", "The grid is recorded on its images but is not in the registry.", kv[0]),
-                       "grids")
-        by_count = sorted(sessions.items(), key=lambda kv: (-kv[1], kv[0]))
-        specs += capped(by_count, lambda kv: ("node", "session", kv[0]) if kv[0] in self.records["session"] else
-                        ("unknown", "session", "The session is recorded on its images but is not in the registry.",
-                         kv[0]), "sessions without a recorded grid")
+        specs = self.source_specs(grids, sessions)
         note = ("Grids and sessions come from the registry's image records, matched by image name to the images "
                 "first seen in this download.")
         if not specs:
@@ -1406,7 +1506,7 @@ class Lineage:
             source = _dict(rec.get("source"))
             session = _text(source.get("session"))
             if session:
-                specs.append(ref_spec(self.records, session, "session"))
+                specs.append(ref_spec(self.records, self.viewer, session, "session"))
             elif source.get("kind") == "upload":
                 note = "Uploaded by its owner. It does not come from a recorded imaging session."
             else:
@@ -1418,8 +1518,8 @@ class Lineage:
                                  "review_package"), (base, rec.get("base_kind"))):
                 if ref_id and ref_id not in seen:
                     seen.add(ref_id)
-                    specs.append(ref_spec(self.records, ref_id, hint))
-            specs += input_specs(self.records, rec, seen)
+                    specs.append(ref_spec(self.records, self.viewer, ref_id, hint))
+            specs += input_specs(self.records, self.viewer, rec, seen)
             if not specs:
                 specs = [unknown_spec("source", "The registry does not say what this package was made from.")]
         model, n = _text(rec.get("model")), image_count_of(rec)
@@ -1457,12 +1557,12 @@ class Lineage:
         return f"Session {nid}", status_tags(rec), fields, [], note
 
 
-def lineage_tree(records, viewer, kind, entity_id):
+def lineage_tree(records, viewer, kind, entity_id, root=None):
     """-> the lineage dict for a catalog item, or None when it is unknown or hidden from this viewer."""
     ntype = KIND_TO_NODE.get(kind)
     if ntype is None or not _text(entity_id):
         return None
-    walker = Lineage(records, viewer)
+    walker = Lineage(records, viewer, root)
     found = walker.lookup(ntype, entity_id)
     if found is None or found[0] == "hidden":
         return None
@@ -1822,14 +1922,16 @@ def routes(ctx) -> list:
 
     def lineage_page(request: Request):
         records, error, viewer = state(request)
-        tree = lineage_tree(records, viewer, request.path_params["kind"], request.path_params["eid"])
+        tree = lineage_tree(records, viewer, request.path_params["kind"], request.path_params["eid"],
+                            getattr(ctx.cfg, "registry", None))
         if tree is None:
             return missing(request)
         return html_page(request, "Lineage of " + tree["title"], render_lineage(tree, error))
 
     def api_lineage(request: Request):
         records, _, viewer = state(request)
-        tree = lineage_tree(records, viewer, request.path_params["kind"], request.path_params["eid"])
+        tree = lineage_tree(records, viewer, request.path_params["kind"], request.path_params["eid"],
+                            getattr(ctx.cfg, "registry", None))
         return ctx.json(tree) if tree is not None else ctx.json({"error": "not found"}, 404)
 
     found = [Route(PREFIX + "/", index, methods=["GET"]),

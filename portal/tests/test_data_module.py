@@ -759,24 +759,35 @@ def lineage_records() -> dict:
                     config={"arch": "yolov8m-seg", "epochs": 300, "imgsz": 1440}, machine="ML desktop",
                     metrics={"mask_map50": 0.9}),
                 rec("run", id="r_xss", dataset=LIN_BAD, status="finished")],
-        "dataset": [rec("dataset", id="ds_chain", label_version="lv_chain", status="built",
+        "dataset": [rec("dataset", id="ds_listed", status="built",
+                        image_list={"file": "lists/ds_listed.tsv", "n": 3}),
+                    rec("dataset", id="ds_privexp", source={"kind": "roboflow_export", "id": "priv exp"},
+                        status="built"),
+                    rec("dataset", id="ds_chain", label_version="lv_chain", status="built",
                         counts={"train": {"images": 5}, "valid": {"images": 2}}, classes=["EV"]),
                     rec("dataset", id="ds_mine", source={"kind": "prediction_set", "id": "ps_20261105_aaaaaa"},
                         status="built"),
                     rec("dataset", id="ds_theirs", source={"kind": "prediction_set", "id": "ps_20261105_bbbbbb"},
                         status="built"),
                     rec("dataset", id="ds_loop", label_version="lv_loop", status="built")],
-        "label_version": [rec("label_version", id="lv_chain", pkg="pkg_chain", base="pull_chain", status="active",
+        "label_version": [rec("label_version", id="lv_unreg", pkg="pred_ps_20261101_abcdef", status="active"),
+                          rec("label_version", id="lv_unreg_in", status="active",
+                              inputs=[{"id": "ps_20261101_abcdef", "role": "edits", "entity": "prediction_set"}]),
+                          rec("label_version", id="lv_unreg_mine", pkg="pred_ps_20261101_a1a1a1", status="active"),
+                          rec("label_version", id="lv_chain", pkg="pkg_chain", base="pull_chain", status="active",
                               n_images_applied=2),
                           rec("label_version", id="lv_loop", base="ds_loop", status="active")],
-        "review_package": [rec("review_package", id="pkg_chain", path="x/review/pkg_chain", kind="prediction",
+        "review_package": [rec("review_package", id="pkg_startpriv", path="x/review/pkg_startpriv", kind="review",
+                               base="ps_20261105_bbbbbb", base_kind="prediction_set", n_images=1, status="in_review"),
+                           rec("review_package", id="pkg_chain", path="x/review/pkg_chain", kind="prediction",
                                owner="adv", prediction_set="ps_20261105_aaaaaa", n_images=2, status="in_review")],
         "pull": [rec("pull", id="pull_chain", created="2026-11-03T10:00", n_images=2, path="x/pull_chain")],
         "roboflow_image": [rec("roboflow_image", id="rf1", name="t1.jpg", first_seen_pull="pull_chain"),
                            rec("roboflow_image", id="rf2", name="t2.jpg", first_seen_pull="pull_chain")],
         "image": [rec("image", id="t1", rf_name="t1.jpg", session="20261104", session_grid="1", grid=None),
                   rec("image", id="t2", rf_name="t2.jpg", session="20261104", session_grid="2", grid=None)],
-        "roboflow_export": [rec("roboflow_export", id="cyc a", derived_from="cyc b", classes=[]),
+        "roboflow_export": [rec("roboflow_export", id="priv exp", owner="otherperson", classes=[]),
+                            rec("roboflow_export", id="cyc a", derived_from="cyc b", classes=[]),
                             rec("roboflow_export", id="cyc b", derived_from="cyc a", classes=[]),
                             rec("roboflow_export", id="plain exp", classes=[])],
         "prediction_set": [
@@ -791,6 +802,13 @@ def lineage_records() -> dict:
 
 
 def add_lineage_records(registry: Path):
+    predict = Path(os.environ["CRYOEV_LAPTOP_ROOT"]) / "predict"
+    for ps, owner in (("ps_20261101_abcdef", "otherperson"), ("ps_20261101_a1a1a1", "adv")):
+        (predict / ps).mkdir(parents=True, exist_ok=True)           # on disk with an owner, NOT in the registry
+        (predict / ps / "request.json").write_text(json.dumps({"owner": owner}), encoding="utf-8")
+    (registry / "lists").mkdir(exist_ok=True)
+    (registry / "lists" / "ds_listed.tsv").write_text("t1\ttrain\nt2\tvalid\nzz_untraced\ttest\n",
+                                                      encoding="utf-8")
     for entity, recs in lineage_records().items():
         with open(registry / f"{entity}.jsonl", "a", encoding="utf-8") as fh:
             fh.write("".join(json.dumps(r) + "\n" for r in recs))
@@ -997,6 +1015,68 @@ class Lineage(LineageBase):
         st, _, body = self.get("/data/lineage/model/%3Cb%3Ex%3C%2Fb%3E/")
         self.assertEqual(st, 404)
         self.assertNotIn(b"<b>x</b>", body)
+
+    def test_unregistered_private_ids_are_never_quoted(self):
+        for lv in ("lv_unreg", "lv_unreg_in"):
+            with self.subTest(lv=lv):
+                t = self.tree("labels", lv, "advanced")
+                self.assertNotIn("abcdef", json.dumps(t))
+                self.assertNotIn("abcdef", main_html(self.page(f"/data/lineage/labels/{lv}/", "advanced")))
+                self.assertEqual([n["status"] for n in t["root"]["parents"]], ["hidden"])
+                self.assertEqual(t["root"]["parents"][0]["type"], "hidden")
+                ta = self.tree("labels", lv, "admin")                   # control: admin may see the owner's id
+                self.assertEqual([(n["status"], n.get("recorded")) for n in ta["root"]["parents"]],
+                                 [("unknown", "pred_ps_20261101_abcdef" if lv == "lv_unreg" else "ps_20261101_abcdef")])
+        mine = self.tree("labels", "lv_unreg_mine", "advanced")         # control: the owner sees their own id
+        self.assertEqual([(n["status"], n.get("recorded")) for n in mine["root"]["parents"]],
+                         [("unknown", "pred_ps_20261101_a1a1a1")])
+
+    def test_export_parent_follows_visibility(self):
+        t = self.tree("dataset", "ds_privexp", "advanced")
+        self.assertEqual([n["status"] for n in t["root"]["parents"]], ["hidden"])
+        self.assertNotIn("priv exp", json.dumps(t))
+        self.assertNotIn("priv exp", self.page("/data/lineage/dataset/ds_privexp/", "advanced"))
+        ta = self.tree("dataset", "ds_privexp", "admin")
+        self.assertEqual([(n["status"], n["id"]) for n in ta["root"]["parents"]], [("ok", "priv exp")])
+
+    def test_existing_pages_do_not_quote_hidden_ids(self):
+        for path in ("/data/dataset/ds_theirs", "/data/images/pkg_startpriv", "/data/api/dataset/ds_theirs",
+                     "/data/api/images/pkg_startpriv"):
+            with self.subTest(path=path):
+                body = self.get(path, "advanced")[2].decode()
+                self.assertNotIn("bbbbbb", body)
+                self.assertIn("Not visible to you", body)
+                self.assertIn("bbbbbb", self.get(path, "admin")[2].decode())     # control
+
+    def test_dataset_image_list_traces_sessions(self):
+        t = self.tree("dataset", "ds_listed")
+        self.assertEqual(t["root"]["note"], "2 of 3 images traced to sessions 20261104.")
+        ids = [(n["type"], n["id"]) for n in t["root"]["parents"]]
+        self.assertEqual(ids, [("grid", "2602"), ("session", "20261104")])
+        self.assertIn("2 of 3 images traced", main_html(self.page("/data/lineage/dataset/ds_listed/")))
+        self.assertIsNone(self.tree("dataset", "ds_chain")["root"]["note"])    # control: no list, no note
+
+    def test_total_steps_are_capped_on_a_wide_graph(self):
+        records = {e: {} for e in D.ENTITIES}
+        for layer in range(12):
+            for j in range(25):
+                nxt = [{"id": f"d{layer + 1}_{k}", "entity": "dataset", "role": "source"} for k in range(25)]
+                records["dataset"][f"d{layer}_{j}"] = {"id": f"d{layer}_{j}", "inputs": nxt}
+        viewer = D.Viewer(lambda user, owner: True, {"id": "a", "role": "admin"})
+        t = D.lineage_tree(records, viewer, "dataset", "d0_0")
+        self.assertLessEqual(len(list(walk(t["root"]))), 2 * D.LINEAGE_MAX_NODES)
+        self.assertLess(len(json.dumps(t)), 200_000)
+        self.assertTrue(any(n["status"] == "more" for n in walk(t["root"])))
+
+    def test_cut_step_without_a_page_has_no_dead_hint(self):
+        old = D.LINEAGE_MAX_DEPTH
+        D.LINEAGE_MAX_DEPTH = 1
+        try:
+            t = self.tree("model", "m_chain")
+        finally:
+            D.LINEAGE_MAX_DEPTH = old
+        cut = next(n for n in walk(t["root"]) if n["status"] == "cut")
+        self.assertEqual((cut["type"], cut["note"]), ("run", "Not shown: limit reached."))
 
     def test_reads_do_not_write_the_registry(self):
         before = {f.name: f.read_bytes() for f in self.env.registry.glob("*.jsonl")}
