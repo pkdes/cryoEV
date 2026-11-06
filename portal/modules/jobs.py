@@ -13,8 +13,9 @@ Jobs module (CJ portal): what is running, waiting, stuck and done, from two sour
     POST /jobs/api/release   {job}: sync.release of a held job (admin only)
   The two POSTs (the Gate already requires a same-origin Origin) re-check the permission on every call, take the
   share ONLY from the server's live.json queues[].share (a client-sent share/path is ignored), refuse when the
-  snapshot is stale or the queue unreachable, run the SMB write in a worker thread with a timeout, and append one
-  line {time, actor, action, job, reason, result} to <state dir>/audit/portal.jsonl (never a key).
+  snapshot is stale or the queue unreachable, run the SMB write in a worker thread with a timeout, and append
+  audit lines through portal/audit.py (<state dir>/audit/portal.jsonl; never a key): {t, actor, action,
+  target: job, detail: {reason, result, phase: requested | result}}.
 
 Rules:
   - A job on a queue in live.json is shown from live.json only; the registry fills in its name and owner.
@@ -51,6 +52,8 @@ from pathlib import Path
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
+
+from portal import audit as PA
 
 PREFIX = "/jobs"
 ROLES = ("admin", "advanced")
@@ -845,7 +848,6 @@ JS = r"""// Jobs page (portal/modules/jobs.py): cancel / release buttons (two-st
 log = logging.getLogger("cj.jobs")
 _sync_mod = None
 _ids_mod = None
-_audit_lock = threading.Lock()
 _job_locks: dict = {}
 _job_locks_guard = threading.Lock()
 POOL_SIZE = 16
@@ -887,19 +889,14 @@ def share_ok(share) -> bool:
 
 
 def audit_path(cfg) -> Path:
-    return Path(cfg.state_dir) / "audit" / "portal.jsonl"
+    return PA.audit_path(cfg.state_dir)
 
 
 def audit(cfg, actor, action, job, reason, result):
-    """One JSON line. Raises OSError if it can't be written. A request writes "requested" BEFORE the share is
-    touched, then a second line with the outcome."""
-    line = json.dumps({"time": datetime.now(timezone.utc).isoformat(timespec="seconds"), "actor": actor,
-                       "action": action, "job": job, "reason": reason, "result": result}, ensure_ascii=False)
-    p = audit_path(cfg)
-    with _audit_lock:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a", encoding="utf-8", newline="\n") as f:
-            f.write(line + "\n")
+    """One line through portal/audit.py. Raises OSError if it can't be written. A request writes "requested" BEFORE
+    the share is touched (write-ahead: no line, nothing done), then a second line with the outcome."""
+    PA.audit(cfg.state_dir, actor, action, job,
+             {"reason": reason, "result": result, "phase": "requested" if result == "requested" else "result"})
 
 
 def job_lock(job) -> threading.Lock:
