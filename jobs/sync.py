@@ -23,6 +23,8 @@ pull: for each d/<job>/ with DONE.json not pulled yet, copies runs/<run>/ to <Cr
   ~209 MB each) stay on the share unless --all-weights; best.pt and last.pt always come; the ledger line's
   not_pulled = {files, bytes, paths} lists what was left.
 retry: moves d/<job>/ to d/.retired/<job>_<time>/ so the runner picks the job again (nothing is deleted).
+queue_train(job, dataset_dir, exp_args, share, max_hours) (Python only; the portal's Train page): make_job_bundle's
+  make_bundle, then push, in one call; refusals listed on the function.
 push-predict --ps <ps id> --share ...: a prediction set as a predict job (images-only dataset pack + thin zip); pull
   lands its p/ in <CryoAI-laptop>/predict/<ps>/ and updates the set's status.json and registry record. Off unless
   $CRYOEV_PREDICT_JOBS=1 (docs/JOBS.md, "Predict jobs").
@@ -65,10 +67,10 @@ class SyncError(RuntimeError):
     pass
 
 
-def registry_job(job_id):
-    """The job's current registry record (read only), or None."""
+def registry_job(job_id, root=None):
+    """The job's current registry record (read only), or None. root: the registry folder (default the configured one)."""
     import registry
-    return registry.current("job", config.registry_root()).get(job_id)
+    return registry.current("job", Path(root) if root else config.registry_root()).get(job_id)
 
 
 # ---------------------------------------------------------------- push
@@ -207,6 +209,56 @@ def push_pack(job, bundle, share, copier="auto") -> dict:
     inc.rename(dest)
     (dest / C.READY).write_text(C.now() + "\n", encoding="utf-8")   # last
     return fields
+
+
+def repo_weights(exp_args) -> list:
+    """exp_args with a relative --weights path that exists under the repo made absolute (the portal writes
+    models/<id>/best.pt; make_bundle resolves relative paths against the current folder, as the CLI does)."""
+    exp = [y for x in map(str, exp_args) for y in (x.split("=", 1) if x.startswith("--weights=") else [x])]
+    if "--weights" in exp:
+        i = exp.index("--weights") + 1
+        if i < len(exp) and not Path(exp[i]).is_absolute() and (REPO / exp[i]).is_file():
+            exp[i] = str(REPO / exp[i])
+    return exp
+
+
+def queue_train(job_id, dataset_dir, exp_args, share, max_hours, hold=False, check_origin=True, *, out=None,
+                registry_root=None, expect_sha256=None, copier="auto", allow_dirty=False) -> Path:
+    """One call from a registry train job to the GPU queue: training/make_job_bundle.make_bundle, then push (the
+    same functions as `make_job_bundle.py` + `sync.py push`). docs/JOBS.md, "queue_train".
+    - dataset_dir, exp_args: as make_job_bundle.py --dataset-dir ... -- <exp_args>; a relative --weights path is
+      taken from the repo. out: the bundle folder (default <CryoAI-laptop>/job_bundles, as the CLI).
+    - registry_root: the registry holding job_id (default the configured one). expect_sha256: the dataset_sha256 the
+      registry recorded for this dataset (dataset_from_lv.py writes labels.dataset_sha256), when there is one.
+    Refused with SyncError, nothing written to the share: the share missing (never created); a bad job id, or not a
+    train job in the registry; the job already on the share (q/ or d/); the bundle refused (uncommitted code,
+    no dataset.yaml, an unknown run_experiments flag, ...); the bundle's dataset_sha256 differing from expect_sha256;
+    the commit not on origin/main (check_origin); the share's ds/<sha>/ holding another pack (push_pack).
+    The checks that need no bundle run before it is made. -> q/<job> (READY written unless hold)."""
+    import ids
+    from training import make_job_bundle as MB
+    share = Path(share)
+    if not share.is_dir():                         # as push: never create a queue root
+        raise SyncError(f"share {share} not found: a desktop share is \\\\host\\cj (two leading backslashes), "
+                        f"and the queue root must already exist")
+    if not ids.is_id("job", job_id) or len(job_id) > C.MAX_JOB_ID:
+        raise SyncError(f"{job_id!r} is not a job id of <= {C.MAX_JOB_ID} characters (job_<YYYYMMDD>_<slug>)")
+    rec = registry_job(job_id, registry_root)
+    if rec is None or rec.get("type") != "train":
+        raise SyncError(f"{job_id} is not a train job in the registry; create it with "
+                        f"`registry.py job new --type train --where desktop ...`")
+    if (share / C.Q / job_id).exists() or (share / C.D / job_id).exists():
+        raise SyncError(f"{job_id} is already in the queue (q/ or d/); use a new job, or `retry` for d/")
+    try:
+        b = MB.make_bundle(Path(dataset_dir), repo_weights(exp_args), out, allow_dirty=allow_dirty)
+    except SystemExit as e:                        # make_job_bundle refuses with SystemExit (its CLI contract)
+        raise SyncError(f"bundle refused: {e.code}") from None
+    if expect_sha256 and b["dataset_sha256"] != expect_sha256:
+        raise SyncError(f"dataset sha mismatch: {Path(dataset_dir).name} hashes to {str(b['dataset_sha256'])[:12]}, "
+                        f"the registry recorded {str(expect_sha256)[:12]}: the folder changed since it was recorded "
+                        f"(nothing was sent; the bundle stays in {b['zip'].parent})")
+    return push(job_id, b["zip"], share, copier, check_registry=False, check_origin=check_origin,
+                max_hours=max_hours, hold=hold)
 
 
 PREDICT_LOCK = "predict.lock"                    # <predict root>/predict.lock, held by jobs/predict_local.py

@@ -7,7 +7,13 @@ for non-admins, and the pages in a browser (Playwright, Edge channel: 390 and 12
 scroll, same-origin requests only, no console errors). Screenshots go to $CJ_SHOT_DIR when set (else a temp folder,
 removed afterwards).
 
-Temp roster / state dir / registry / queue share only (cjtest.Env); never the real ones. Nothing is ever pushed.
+With a queue share set (CJ_TRAIN_SHARE = the TEMP share), Queue also sends: the registry job, then
+jobs/sync.queue_train in its own thread (one job folder on the temp share, its JOB.json carrying the plan's
+arguments), and three audit lines; a failed send marks the job blocked; an unreachable share, a missing dataset folder
+or a job already on the share writes nothing; the laptop preset keeps the commands.
+
+Temp roster / state dir / registry / queue share / CryoAI / bundle folder only (cjtest.Env); never the real ones.
+Nothing is pushed anywhere but the temp share; commit_on_origin is replaced (no git fetch).
 
   python -m unittest discover -s portal/tests -v
 """
@@ -22,8 +28,10 @@ import sys
 import tempfile
 import types
 import unittest
+import zipfile
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 from urllib.parse import urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -197,6 +205,11 @@ class Base(unittest.TestCase):
 
     def setUp(self):
         os.environ.pop(TR.SETTING, None)
+        env = mock.patch.dict(os.environ)                   # no share setting leaks in from the machine or a test
+        env.start()
+        self.addCleanup(env.stop)
+        for k in (TR.SHARE_SETTING, TR.LOCAL_SHARES_ENV, TR.SEND_ROLES_SETTING):
+            os.environ.pop(k, None)
         TR._reg_cache.clear()
 
     def get(self, path, role="admin"):
@@ -559,6 +572,235 @@ class QueueOn(Base):
         self.assertEqual(st, 500)
         self.assertIn("nothing was queued", body.decode())
         self.assertEqual(snap(self.env.registry, self.share), before)
+
+
+class QueueSend(Base):
+    """CJ_TRAIN_QUEUE on and a queue share known: one click = registry job + bundle + push (to the TEMP share)."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.cai = cls.env.tmp / "cai"
+        cls.lap = cls.env.tmp / "lap"
+        cls.lap.mkdir()
+        ds = cls.cai / "training outputs" / "ds_test_v1"           # dataset_folder(): <CryoAI>/training outputs/<id>
+        for s in ("train", "val"):
+            (ds / "images" / s).mkdir(parents=True)
+            (ds / "labels" / s).mkdir(parents=True)
+            (ds / "images" / s / f"{s}_0.png").write_bytes(b"\x89PNG " + s.encode())
+            (ds / "labels" / s / f"{s}_0.txt").write_text("0 0.1 0.1 0.2 0.1 0.2 0.2\n", encoding="utf-8")
+        (ds / "dataset.yaml").write_text("train: images/train\nval: images/val\nnames:\n  0: EV\n", encoding="utf-8")
+        cls.S = TR.sync_module()
+        from training import make_job_bundle as mjb
+        cls.mjb = mjb
+
+    def setUp(self):
+        super().setUp()
+        os.environ.update({TR.SETTING: "on", TR.SHARE_SETTING: str(self.share), "CRYOEV_CRYOAI_ROOT": str(self.cai),
+                           "CRYOEV_LAPTOP_ROOT": str(self.lap),
+                           "CRYOEV_PROCESSING_ROOT": str(self.env.tmp / "no_processing")})
+        os.environ.pop("CRYOEV_REGISTRY", None)
+        self.origin = []                                            # answers in turn; then None = on origin/main
+        self.dirty = []
+        for p in (mock.patch.object(self.S, "commit_on_origin",
+                                    lambda commit: self.origin.pop(0) if self.origin else None),
+                  mock.patch.object(self.mjb, "uncommitted_code", lambda: self.dirty)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def job(self, jid):
+        return TR.registry_module().current("job", self.env.registry).get(jid)
+
+    def audits(self, jid):
+        return [x for x in self.audit_lines() if x["target"] == jid]
+
+    def test_one_click_registry_job_and_share_job(self):
+        name, jid = "send_one", f"job_{TODAY}_send_one"
+        reg_before = lines(self.env.registry / "job.jsonl")
+        st, _, body = self.post("/train/queue", self.good(name=name))
+        self.assertEqual(st, 200, body[:600])
+        text = body.decode()
+        self.assertIn("is being sent to the GPU computer", text)
+        self.assertNotIn("make_job_bundle", text)                  # no "run these commands" fallback when it works
+        self.assertNotIn("jobs/sync.py push", text)
+        self.assertTrue(TR.wait_sends(60))
+        # the registry: exactly one new line, the job, still ready
+        after = lines(self.env.registry / "job.jsonl")
+        self.assertEqual(after[:-1], reg_before)
+        self.assertEqual((after[-1]["id"], after[-1]["status"]), (jid, "ready"))
+        # the share: exactly one job folder, READY last, its bundle carrying the plan's arguments
+        jobs = [p.name for p in (self.share / "q").iterdir() if p.is_dir() and not p.name.startswith(".")]
+        self.assertEqual(jobs, [jid])
+        q = self.share / "q" / jid
+        self.assertTrue((q / "READY").is_file())
+        spec = json.loads((q / "job.json").read_text(encoding="utf-8"))
+        self.assertEqual((spec["job"], spec["type"], spec["max_hours"], spec["dataset"]),
+                         (jid, "train", 48.0, "ds_test_v1"))
+        _, p = TR.plan(self.env.config(), self.good(name="other_name"), {"id": "tester", "role": "admin"})
+        with zipfile.ZipFile(q / spec["zip"]) as z:
+            job = json.loads(z.read("ds_test_v1/JOB.json"))
+        self.assertEqual(job["run_experiments_args"], ["--dataset", "ds_test_v1"] + p["run_experiments_args"])
+        self.assertTrue((self.share / "ds" / spec["dataset_sha256"] / "READY").is_file())
+        self.assertTrue(list((self.lap / "job_bundles").glob("ds_test_v1__job_*.zip")))   # the temp bundle folder
+        # the audit: requested (write-ahead), the registry result, the send result
+        au = self.audits(jid)
+        self.assertEqual([x["detail"]["phase"] for x in au], ["requested", "result", "send"])
+        self.assertEqual([x["detail"]["result"] for x in au], [None, "ok", "ok"])
+        self.assertEqual({x["detail"]["send"] for x in au}, {"gpu_queue"})
+        # the page afterwards says it is on the queue
+        _, _, page = self.get("/train/")
+        self.assertIn(f"Job <b>{jid}</b> is on the GPU computer", page.decode())
+
+    def test_push_failure_marks_the_job_failed_without_the_error(self):
+        """Sending allowed for advanced (CJ_TRAIN_SEND_ROLES); the send fails after the job exists with an error that
+        names a UNC share, a host and a path: the registry gets the plain reason only, so the requester's Jobs page
+        shows none of them; the error is in the admin-only audit line and the admin's Train page."""
+        os.environ[TR.SEND_ROLES_SETTING] = "admin, advanced"
+        name, jid = "send_fail", f"job_{TODAY}_send_fail"
+        secret = "bundle commit abc is not on origin/main (\\\\gpu-secret-host\\cj, C:\\secret_dir\\cj_repo)"
+        self.origin = [None, secret]                    # the pre-check passes; the push's own check fails
+        R = TR.registry_module()
+        roster = R.roster()
+        with mock.patch.object(R, "roster", lambda path=None: set(roster) | {"adv"}):   # adv owns the job
+            st, _, body = self.post("/train/queue", self.good(name=name), "advanced")
+            self.assertEqual(st, 200, body[:600])
+            self.assertTrue(TR.wait_sends(60))
+        rec = self.job(jid)
+        self.assertEqual((rec["status"], rec["who"], rec["status_by"]), ("blocked", "adv", "adv"))
+        self.assertEqual(rec["blocked_reason"], TR.FAILED_REASON)
+        self.assertFalse((self.share / "q" / jid).exists())
+        au = self.audits(jid)
+        self.assertEqual([x["detail"]["phase"] for x in au], ["requested", "result", "send"])
+        self.assertTrue(au[-1]["detail"]["result"].startswith("failed: SyncError"))
+        self.assertIn("gpu-secret-host", au[-1]["detail"]["result"])          # the full error: admin-only audit
+        # the requester's Jobs page (HTML and JSON): the plain reason, no UNC, host or path
+        for path in ("/jobs/", "/jobs/api/summary"):
+            with self.subTest(path=path):
+                st, _, page = self.get(path, "advanced")
+                self.assertEqual(st, 200)
+                text = html.unescape(page.decode())
+                self.assertIn("not sent to the GPU queue (portal Train)", text)   # the job is shown (control)
+                for bad in ("gpu-secret-host", "secret_dir", "\\\\", str(self.share), str(self.env.tmp),
+                            str(self.share).replace("\\", "\\\\")):
+                    self.assertNotIn(bad, text)
+        # plain words for the requester on Train; the error and the hand commands for admins
+        _, _, page = self.get("/train/", "advanced")
+        text = page.decode()
+        self.assertIn(f"Job <b>{jid}</b> could not be sent to the GPU computer", text)
+        self.assertIn("marked failed (blocked) in the registry", text)
+        self.assertIn("Ask an admin", text)
+        self.assertNotIn("gpu-secret-host", text)
+        self.assertNotIn("set-status", text)
+        _, _, page = self.get("/train/")
+        text = html.unescape(page.decode())
+        self.assertIn("gpu-secret-host", text)
+        self.assertIn("Send it by hand (admin)", text)
+        self.assertIn(f"python jobs/sync.py push {jid} --bundle", text)
+        self.assertIn(f"python registry/registry.py set-status {jid} ready", text)
+
+    def test_sending_is_admin_only_by_default(self):
+        before = snap(self.env.registry, self.share, self.lap)
+        n_audit = len(self.audit_lines())
+        st, _, body = self.post("/train/check", self.good(name="adv_send"), "advanced")
+        self.assertEqual(st, 200)
+        text = html.unescape(body.decode())
+        self.assertIn("Preview only: this is exactly what would be queued.", text)
+        self.assertIn("an admin must send this one", text)
+        self.assertNotIn('action="/train/queue"', text)                  # no Queue button
+        st, _, body = self.post("/train/queue", self.good(name="adv_send"), "advanced")
+        self.assertEqual(st, 409)
+        self.assertIn("an admin must send this one", html.unescape(body.decode()))
+        self.assertEqual(snap(self.env.registry, self.share, self.lap), before)
+        self.assertEqual(len(self.audit_lines()), n_audit)
+        # the setting lets advanced users send (the other half: test_push_failure... sends as advanced)
+        os.environ[TR.SEND_ROLES_SETTING] = "admin,advanced"
+        st, _, body = self.post("/train/check", self.good(name="adv_send"), "advanced")
+        self.assertIn('action="/train/queue"', body.decode())
+        self.assertTrue(TR.may_send(self.env.config(), {"role": "advanced"}))
+        os.environ.pop(TR.SEND_ROLES_SETTING)
+        self.assertFalse(TR.may_send(self.env.config(), {"role": "advanced"}))
+        self.assertTrue(TR.may_send(self.env.config(), {"role": "admin"}))
+
+    def test_foreseeable_failures_refused_before_the_job(self):
+        """Uncommitted code and a commit not on origin/main: 409 before new_job, nothing written."""
+        for name, setup, want in (("dirty", lambda: setattr(self, "dirty", ["jobs/sync.py"]), "not committed"),
+                                  ("noorigin", lambda: setattr(self, "origin", ["bundle commit x is not on origin"]),
+                                   "not on GitHub yet")):
+            with self.subTest(name=name):
+                self.dirty, self.origin = [], []
+                setup()
+                before = snap(self.env.registry, self.share, self.lap)
+                n_audit = len(self.audit_lines())
+                st, _, body = self.post("/train/queue", self.good(name=name))
+                self.assertEqual(st, 409)
+                self.assertIn(want, html.unescape(body.decode()))
+                self.assertEqual(snap(self.env.registry, self.share, self.lap), before)
+                self.assertEqual(len(self.audit_lines()), n_audit)
+                self.assertIsNone(self.job(f"job_{TODAY}_{name}"))
+        self.dirty = []
+
+    def test_outcome_unknown_after_a_restart(self):
+        """requested + result ok with send gpu_queue and no send line, and not a send of this process."""
+        _, p = TR.plan(self.env.config(), self.good(name="lost_send"), {"id": "tester", "role": "admin"})
+        TR.audit(self.env.config(), "tester", p["job"], p, "requested", None, "gpu_queue")
+        TR.audit(self.env.config(), "tester", p["job"], p, "result", "ok", "gpu_queue")
+        _, _, page = self.get("/train/")
+        self.assertIn(f"Job <b>{p['job']}</b> was being sent to the GPU computer when the portal restarted",
+                      page.decode())
+        _, _, page = self.get("/train/", "advanced")                   # someone else's: not shown
+        self.assertNotIn(p["job"], page.decode())
+        TR.audit(self.env.config(), "tester", p["job"], p, "send", "ok", "gpu_queue")
+        _, _, page = self.get("/train/")
+        self.assertNotIn("when the portal restarted", page.decode())
+
+    def test_unc_rule(self):
+        for s, ok in (("\\\\host\\cj", True), ("\\\\gpu-desktop\\cj\\q", True), ("\\\\?\\C:\\cj", False),
+                      ("\\\\.\\pipe\\x", False), ("C:\\cj", False), ("\\\\host", False)):
+            self.assertIs(bool(TR.UNC.match(s)), ok, s)
+
+    def test_refusals_write_nothing(self):
+        (self.share / "q" / f"job_{TODAY}_on_share").mkdir()
+        cases = [({TR.SHARE_SETTING: str(self.env.tmp / "gpu-desktop" / "cj")}, "unreach",
+                  "queue can't be reached"),
+                 ({"CRYOEV_CRYOAI_ROOT": str(self.env.tmp / "nowhere")}, "nofolder", "folder is not on this computer"),
+                 ({}, "on_share", "already on the GPU computer's queue")]
+        (self.env.tmp / "nowhere").mkdir()
+        for env, name, want in cases:
+            with self.subTest(name=name):
+                before = snap(self.env.registry, self.share)
+                n_audit = len(self.audit_lines())
+                with mock.patch.dict(os.environ, env):
+                    st, _, body = self.post("/train/queue", self.good(name=name))
+                self.assertEqual(st, 409)
+                self.assertIn(want, html.unescape(body.decode()))
+                self.assertEqual(snap(self.env.registry, self.share), before)
+                self.assertEqual(len(self.audit_lines()), n_audit)
+        self.assertFalse((self.env.tmp / "gpu-desktop").exists(), "no stray share folder")
+
+    def test_laptop_preset_keeps_the_commands(self):
+        before = snap(self.share)
+        st, _, body = self.post("/train/queue", self.good(name="lap_one", preset="laptop", base=TR.YOLO))
+        self.assertEqual(st, 200)
+        self.assertIn("jobs/sync.py local", body.decode())
+        self.assertTrue(TR.wait_sends(5))
+        self.assertEqual(snap(self.share), before)
+        self.assertEqual({x["detail"]["send"] for x in self.audits(f"job_{TODAY}_lap_one")}, {"commands"})
+
+    def test_off_writes_nothing_even_with_a_share(self):
+        os.environ[TR.SETTING] = "off"
+        before = snap(self.env.registry, self.share, self.lap)
+        n_audit = len(self.audit_lines())
+        st, _, _ = self.post("/train/queue", self.good(name="off_share"))
+        self.assertEqual(st, 409)
+        self.assertEqual(snap(self.env.registry, self.share, self.lap), before)
+        self.assertEqual(len(self.audit_lines()), n_audit)
+
+    def test_share_from_live_json(self):
+        os.environ.pop(TR.SHARE_SETTING)
+        self.assertIsNone(TR.train_share(self.env.config()))       # a plain local folder in live.json: not used
+        os.environ[TR.LOCAL_SHARES_ENV] = str(self.share)
+        self.assertEqual(TR.train_share(self.env.config()), str(self.share))
+        self.assertEqual(TR.train_share(types.SimpleNamespace(train_share="X:\\q", registry=None)), "X:\\q")
 
 
 class Escaping(Base):

@@ -14,6 +14,9 @@ JOB.json carries `bundle_id` (= the zip stem) and the pack reference (`dataset_s
     python training/make_job_bundle.py --dataset-dir <folder with dataset.yaml, images/, labels/> \
         [--out <dir>] [--dataset-name NAME] [--single-zip] -- --single-run --model-size m --batch 8 --rect 0 ...
 
+From Python: make_bundle(dataset_dir, exp_args, out, dataset_name=None, single_zip=False, allow_dirty=False) -> dict
+writes the same files (main() only parses the arguments and prints; jobs/sync.py queue_train calls it).
+
 Everything after `--` goes to training/run_experiments.py unchanged, except --dataset (set by the
 bundle) and --weights (a file outside the repo's models/ is packed into the zip and re-pointed).
 
@@ -224,35 +227,31 @@ Images and labels are unchanged (md5 list in `JOB.json`).
 """
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dataset-dir", required=True, type=Path,
-                    help="prepared YOLO dataset: dataset.yaml, images/<split>/, labels/<split>/")
-    ap.add_argument("--dataset-name", help="folder name on the desktop (default: --dataset-dir's name)")
-    ap.add_argument("--out", type=Path, help="default <CryoAI-laptop>/job_bundles")
-    ap.add_argument("--single-zip", action="store_true",
-                    help="one zip with the images and labels inside (the old format; no dataset pack)")
-    ap.add_argument("--allow-dirty", action="store_true",
-                    help=f"bundle even with uncommitted changes under {', '.join(CODE_DIRS)} (tests only)")
-    ap.add_argument("exp_args", nargs=argparse.REMAINDER,
-                    help="after --: arguments for training/run_experiments.py")
-    a = ap.parse_args()
-    dirty = [] if a.allow_dirty else uncommitted_code()
+def make_bundle(dataset_dir: Path, exp_args: list, out: Path | None, dataset_name: str | None = None,
+                single_zip: bool = False, allow_dirty: bool = False) -> dict:
+    """Write one bundle: the CLI's work without the printing (main() is a thin wrapper around this).
+    exp_args: the run_experiments.py arguments (what follows `--` on the command line); a relative --weights path is
+    resolved against the current folder, as on the CLI. out None = <CryoAI-laptop>/job_bundles.
+    Refusals raise SystemExit, as the CLI always has (the checks are the CLI's, in the same order).
+    -> {zip, md5 (of the zip), md5_path, readme, pack (None with single_zip), pack_reused, pack_bytes,
+        dataset_sha256 (None with single_zip), job_json (the JOB.json dict), name, exp (as written), changes, n_files}."""
+    dirty = [] if allow_dirty else uncommitted_code()
     if dirty:
         raise SystemExit(f"uncommitted changes in {', '.join(dirty[:5])}: commit (and push, for the desktop) first, "
                          f"so the bundle's commit is the code that runs")
-    if a.out is None:
+    if out is None:
         try:
-            a.out = config.laptop_root() / "job_bundles"
+            out = config.laptop_root() / "job_bundles"
         except config.ConfigError as e:
             raise SystemExit(f"{e} (or pass --out)")
+    out = Path(out)
 
-    root = a.dataset_dir.resolve()
+    root = Path(dataset_dir).resolve()
     for need in ("dataset.yaml", "images", "labels"):
         if not (root / need).exists():
             raise SystemExit(f"{root} has no {need}")
-    name = a.dataset_name or root.name
-    exp = a.exp_args[1:] if a.exp_args[:1] == ["--"] else a.exp_args
+    name = dataset_name or root.name
+    exp = list(exp_args)
     # --flag=value -> --flag value, so --weights=PATH is found (and packed) like --weights PATH.
     exp = [y for x in exp for y in (x.split("=", 1) if x.startswith("--") and "=" in x else [x])]
     known = run_experiments_flags()
@@ -265,8 +264,8 @@ def main():
 
     created = time.strftime("%Y-%m-%d %H:%M")
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    a.out.mkdir(parents=True, exist_ok=True)
-    zip_path = a.out / f"{name}__job_{stamp}.zip"
+    out.mkdir(parents=True, exist_ok=True)
+    zip_path = out / f"{name}__job_{stamp}.zip"
     text, changes = rewrite_dataset_yaml((root / "dataset.yaml").read_text(encoding="utf-8"), root)
 
     extra, weights_note = {}, ""
@@ -290,13 +289,13 @@ def main():
 
     files = sorted(p for d in ("images", "labels") for p in (root / d).rglob("*") if p.is_file())
     md5, pack_ref, pack, reused = {}, {}, None, False
-    if not a.single_zip:                                # the dataset pack first: the job zip names it
-        pack, sha, pack_md5, md5, reused = dataset_cache.write_pack(a.out, root, files)
+    if not single_zip:                                  # the dataset pack first: the job zip names it
+        pack, sha, pack_md5, md5, reused = dataset_cache.write_pack(out, root, files)
         pack_ref = {"dataset_sha256": sha, "dataset_pack": pack.name, "dataset_pack_md5": pack_md5,
                     "dataset_pack_bytes": pack.stat().st_size}
     with zipfile.ZipFile(zip_path, "w") as z:
         z.writestr(f"{name}/dataset.yaml", text, compress_type=zipfile.ZIP_DEFLATED)
-        for p in files if a.single_zip else ():
+        for p in files if single_zip else ():
             rel = p.relative_to(root).as_posix()
             data = p.read_bytes()
             md5[rel] = hashlib.md5(data).hexdigest()
@@ -321,16 +320,38 @@ def main():
     zip_md5 = md5_file(zip_path)
     md5_path = zip_path.with_name(zip_path.name + ".md5")          # sidecar: jobs/sync.py and run_job.py check it
     md5_path.write_text(f"{zip_md5}  {zip_path.name}\n", encoding="utf-8")
+    return {"zip": zip_path, "md5": zip_md5, "md5_path": md5_path, "readme": readme_path, "pack": pack,
+            "pack_reused": reused, "pack_bytes": pack_ref.get("dataset_pack_bytes"),
+            "dataset_sha256": pack_ref.get("dataset_sha256"), "job_json": job, "name": name, "exp": exp,
+            "changes": changes, "n_files": len(files)}
 
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dataset-dir", required=True, type=Path,
+                    help="prepared YOLO dataset: dataset.yaml, images/<split>/, labels/<split>/")
+    ap.add_argument("--dataset-name", help="folder name on the desktop (default: --dataset-dir's name)")
+    ap.add_argument("--out", type=Path, help="default <CryoAI-laptop>/job_bundles")
+    ap.add_argument("--single-zip", action="store_true",
+                    help="one zip with the images and labels inside (the old format; no dataset pack)")
+    ap.add_argument("--allow-dirty", action="store_true",
+                    help=f"bundle even with uncommitted changes under {', '.join(CODE_DIRS)} (tests only)")
+    ap.add_argument("exp_args", nargs=argparse.REMAINDER,
+                    help="after --: arguments for training/run_experiments.py")
+    a = ap.parse_args()
+    b = make_bundle(a.dataset_dir, a.exp_args[1:] if a.exp_args[:1] == ["--"] else a.exp_args, a.out,
+                    a.dataset_name, a.single_zip, a.allow_dirty)
+    pack, zip_path, name, exp = b["pack"], b["zip"], b["name"], b["exp"]
     if pack:
-        print(f"{pack}  ({pack.stat().st_size / 1e6:.1f} MB, {len(files)} files, "
-              f"{'reused: same content hash' if reused else 'new'}; dataset_sha256 {pack_ref['dataset_sha256'][:12]})")
+        print(f"{pack}  ({pack.stat().st_size / 1e6:.1f} MB, {b['n_files']} files, "
+              f"{'reused: same content hash' if b['pack_reused'] else 'new'}; "
+              f"dataset_sha256 {b['dataset_sha256'][:12]})")
         print(f"{zip_path}  ({zip_path.stat().st_size / 1e6:.2f} MB, thin: refers to {pack.name})")
     else:
-        print(f"{zip_path}  ({zip_path.stat().st_size / 1e6:.1f} MB, {len(files)} files)")
-    print(f"{readme_path}")
-    print(f"{md5_path}  (md5 {zip_md5})")
-    for c in changes:
+        print(f"{zip_path}  ({zip_path.stat().st_size / 1e6:.1f} MB, {b['n_files']} files)")
+    print(f"{b['readme']}")
+    print(f"{b['md5_path']}  (md5 {b['md5']})")
+    for c in b["changes"]:
         print(f"  dataset.yaml {c}")
     print("  run on desktop: python training/run_experiments.py --dataset "
           f"\"{name}\" " + " ".join(f'"{x}"' if " " in x else x for x in exp))

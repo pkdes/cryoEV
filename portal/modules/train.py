@@ -12,18 +12,28 @@ Train module (CJ portal): a new training job, the live training run, and past ru
                                  registry record is a `train` job (nothing at all while the registry can't be
                                  read: fail closed, as Jobs), and no share path, machine, detail or raw reason
 
-What "queue" creates. Today a training job is three steps by hand (docs/JOBS.md): (1) `registry.py job new --type
-train ...` (registry.new_job), (2) `training/make_job_bundle.py` (a CLI main() only: no callable function), (3)
-`jobs/sync.py push` (needs step 2's zip). This module does step 1 only, through registry.new_job, the very function
-the CLI calls; the settings (preset, base model, run_experiments arguments, max hours) go into the job's `note`. The
-result page gives admins the exact commands for steps 2 and 3. Nothing is ever written to a queue share here.
+What "queue" creates. A training job is three steps (docs/JOBS.md): (1) `registry.py job new --type train ...`
+(registry.new_job), (2) `training/make_job_bundle.py` (make_bundle), (3) `jobs/sync.py push`. Step 1 goes through
+registry.new_job, the very function the CLI calls; the settings (preset, base model, run_experiments arguments, max
+hours) go into the job's `note`. Steps 2 and 3 are jobs/sync.py queue_train (make_bundle + push), run in its own thread
+after the registry job exists, for a desktop job when a queue share is known (train_share: the Config attribute
+`train_share`, else $CJ_TRAIN_SHARE, else the one UNC share live.json names). A laptop job, or no share known: the
+result page gives admins the exact commands for steps 2 and 3, as before, and nothing is written to a queue share.
 
 The setting CJ_TRAIN_QUEUE (the Config attribute `train_queue` if it has one, else the environment variable; default
 "off"; only the exact word "on", any case, turns it on; read on every request):
   - off: /train/queue answers 409 with "Preview only: this is exactly what would be queued" and writes NOTHING (no
-    registry line, no list file, no audit line);
-  - on: re-validates on the server, writes an audit line through portal/audit.py BEFORE the registry (write-ahead:
-    no line, nothing done), calls registry.new_job, then a second audit line with the result.
+    registry line, no list file, no audit line, nothing on a share);
+  - on: re-validates on the server; with a share, sending is for the roles in CJ_TRAIN_SEND_ROLES (default admin
+    only; others get the preview and 409, nothing written), and before anything is written it checks that the share
+    can be reached, the dataset folder is here, the job id is not on the share, the code is committed and its commit
+    is on origin/main (send_target). Then an audit line through portal/audit.py BEFORE the registry (write-ahead: no
+    line, nothing done; detail.send = gpu_queue | commands), registry.new_job, a second audit line with the result,
+    and with a share the send thread: sync.queue_train, then a third audit line (phase send, ok | failed: <error>).
+    A failed send marks the job blocked with a plain reason (FAILED_REASON, never the error: the Jobs page shows it
+    to non-admins; registry.set_status, the job schema has no "failed"). The page says so in plain words; admins see
+    the error and the commands to send it by hand. Send states live in this process; after a restart, a send with
+    no audit `send` line shows as "outcome unknown".
 
 The preview is built from the same pieces as new_job (read_image_list, ids.job_id, JOB_UNITS) and checked with the
 registry's own schema check; portal/tests/test_train_module.py proves that it equals what the CLI writes.
@@ -67,6 +77,12 @@ TEMPLATE = HERE.parent / "templates" / "train.html"
 MODELS_YAML = REPO / "models" / "models.yaml"
 SCHEMA = "cj_train/1"
 SETTING = "CJ_TRAIN_QUEUE"
+SHARE_SETTING = "CJ_TRAIN_SHARE"   # the GPU queue share to send to (else the one live.json names; see train_share)
+LOCAL_SHARES_ENV = "CJ_JOBS_LOCAL_SHARES"   # as portal/modules/jobs.py: local queue folders that count as shares
+UNC = re.compile(r"^\\\\(?![?.]\\)[^\\/]+\\[^\\/]+")   # \\host\share; never \\?\ or \\.\ (device paths)
+SENDS_SHOWN_S = 24 * 3600          # the page lists this process's sends (and unknown outcomes) of the last 24 h
+SEND_ROLES_SETTING = "CJ_TRAIN_SEND_ROLES"   # roles that may send to the GPU queue (default admin only)
+FAILED_REASON = "not sent to the GPU queue (portal Train); details in the audit log"   # registry: no raw error
 REGISTRY_TTL_S = 10.0          # one read of the registry files serves the page for 10 s (writes re-read fresh)
 STALE_FACTOR = 3               # live.json older than 3 x interval_s is stale (as home and Jobs)
 MAX_BODY = 8192
@@ -102,6 +118,10 @@ _reg_lock = threading.Lock()
 _reg_cache: dict = {}
 _queue_lock = threading.Lock()          # one queue at a time in this process (new_job checks the id, then appends)
 _yaml_cache: dict = {}
+_sync_mod = None
+_send_lock = threading.Lock()           # one send to the GPU queue at a time (two sends of one new dataset would race)
+_sends_lock = threading.Lock()
+_sends: dict = {}                       # job id -> {state sending|queued|failed, uid, error, marked, t, thread}
 
 
 # ---------------------------------------------------------------- small helpers
@@ -521,7 +541,8 @@ def plan(cfg, form: dict, user: dict, fresh: bool = False) -> tuple:
                 "base": base, "base_status": _s(model.get("status")) if model else None, "size": size,
                 "epochs": epochs, "imgsz": imgsz, "seed": seed, "max_hours": max_hours, "fixed": fx,
                 "run_experiments_args": args, "note": note, "who": who, "record": record,
-                "list_file": lp, "dataset_dir": _s(ds.get("dataset_dir"))}
+                "list_file": lp, "dataset_dir": _s(ds.get("dataset_dir")),
+                "dataset_sha256": _s(_d(ds.get("labels")).get("dataset_sha256"))}
 
 
 def form_values(p: dict) -> dict:
@@ -531,8 +552,8 @@ def form_values(p: dict) -> dict:
             "max_hours": f"{p['max_hours']:g}"}
 
 
-def next_steps(cfg, p: dict) -> list:
-    """Admin only: the exact commands for steps 2 and 3 (docs/JOBS.md)."""
+def dataset_folder(p: dict) -> str:
+    """The prepared dataset folder: the registry's dataset_dir, else <CryoAI>/training outputs/<dataset>."""
     ddir = p.get("dataset_dir")
     if not ddir:
         try:
@@ -541,6 +562,12 @@ def next_steps(cfg, p: dict) -> list:
             ddir = str(Path(c) / "training outputs" / p["dataset"]) if c else f"<CryoAI>/training outputs/{p['dataset']}"
         except Exception:
             ddir = f"<CryoAI>/training outputs/{p['dataset']}"
+    return ddir
+
+
+def next_steps(cfg, p: dict) -> list:
+    """Admin only: the exact commands for steps 2 and 3 (docs/JOBS.md)."""
+    ddir = dataset_folder(p)
     args = " ".join(f'"{a}"' if " " in a else a for a in p["run_experiments_args"])
     out = [f'python training/make_job_bundle.py --dataset-dir "{ddir}" -- {args}']
     if p["where"] == "laptop":
@@ -559,15 +586,176 @@ def next_steps(cfg, p: dict) -> list:
 
 
 # ---------------------------------------------------------------- queue (the one write)
-def audit(cfg, uid, job, p: dict, phase: str, result=None):
+def audit(cfg, uid, job, p: dict, phase: str, result=None, send=None):
     PA.audit(cfg.state_dir, uid, "train_queue", job,
              {"dataset": p["dataset"], "base": p["base"], "preset": p["preset"], "where": p["where"],
               "epochs": p["epochs"], "imgsz": p["imgsz"], "seed": p["seed"], "max_hours": p["max_hours"],
-              "phase": phase, "result": result})
+              "phase": phase, "result": result, "send": send})
+
+
+def sync_module():
+    """jobs/sync.py, loaded once by path (jobs/ is not a package; sync.py puts its own folders on sys.path)."""
+    global _sync_mod
+    if _sync_mod is None:
+        spec = importlib.util.spec_from_file_location("cj_train_sync", REPO / "jobs" / "sync.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _sync_mod = mod
+    return _sync_mod
+
+
+def train_share(cfg) -> str | None:
+    """The GPU queue share a desktop job is sent to: the Config attribute `train_share`, else $CJ_TRAIN_SHARE, else
+    the one share live.json names. Only that last source must be a UNC path (\\\\host\\share; not \\\\?\\ or \\\\.\\)
+    or listed in $CJ_JOBS_LOCAL_SHARES (the Jobs page's rule); a setting is taken as given. None (no share, or several
+    in live.json) = the job is created and the admin gets the commands."""
+    v = getattr(cfg, "train_share", None) or os.environ.get(SHARE_SETTING)
+    if v:
+        return str(v).strip() or None
+    live, _ = read_live(getattr(cfg, "registry", None))
+    local = tuple(x for x in os.environ.get(LOCAL_SHARES_ENV, "").split(os.pathsep) if x)
+    found = {s for q in _l(_d(live).get("queues")) for s in [_s(_d(q).get("share"))]
+             if s and (UNC.match(s) or s in local)}
+    return found.pop() if len(found) == 1 else None
+
+
+def send_roles(cfg) -> set:
+    """Roles that may send a job to the GPU queue: Config `train_send_roles`, else $CJ_TRAIN_SEND_ROLES (comma
+    separated), else admin only."""
+    v = getattr(cfg, "train_send_roles", None) or os.environ.get(SEND_ROLES_SETTING) or "admin"
+    items = v if isinstance(v, (list, tuple, set)) else str(v).split(",")
+    return {str(x).strip().lower() for x in items if str(x).strip()}
+
+
+def would_send(cfg, p: dict) -> bool:
+    """A desktop job, with a queue share known: Queue sends it (only for send_roles)."""
+    return p["where"] == "desktop" and train_share(cfg) is not None
+
+
+def may_send(cfg, user) -> bool:
+    return (user or {}).get("role") in send_roles(cfg)
+
+
+SEND_FOR_ADMINS = ("Sending a training job to the GPU computer is for admins on this portal, so nothing was written: "
+                   "an admin must send this one.")
+
+
+def send_target(cfg, p: dict, user) -> tuple:
+    """-> (target or None, error or None). A desktop job with a share goes to the GPU queue (target {share, dataset_dir,
+    sha}); a laptop job, or no share known, keeps the manual commands (None, None). Checked BEFORE the registry job is
+    made, so every failure that can be foreseen writes nothing: a role not in send_roles, a share that can't be
+    reached, a missing dataset folder, a job id already on the share, uncommitted code (make_job_bundle's own check)
+    and a commit not on origin/main (sync.commit_on_origin, a git fetch). The dataset sha is checked in the send:
+    it needs an md5 of every image (minutes for a full dataset), and make_bundle computes it anyway."""
+    admin = is_admin(user)
+    if not would_send(cfg, p):
+        return None, None
+    if not may_send(cfg, user):
+        return None, SEND_FOR_ADMINS
+    share = train_share(cfg)
+    sh = Path(share)
+    if not sh.is_dir():
+        return None, ("The GPU computer's queue can't be reached right now, so nothing was queued."
+                      + (f" ({share} not found)" if admin else " Try again later, or ask an admin."))
+    ddir = Path(dataset_folder(p))
+    if not (ddir / "dataset.yaml").is_file():
+        return None, ("That dataset's folder is not on this computer, so it can't be sent to the GPU computer; "
+                      "nothing was queued." + (f" ({ddir} has no dataset.yaml)" if admin else " Ask an admin."))
+    if (sh / "q" / p["job"]).exists() or (sh / "d" / p["job"]).exists():
+        return None, (f"A job called {p['job']} is already on the GPU computer's queue: pick another name."
+                      + (f" ({share})" if admin else ""))
+    try:
+        S = sync_module()
+        from training import make_job_bundle as MB
+        dirty = MB.uncommitted_code()
+        if dirty:
+            return None, ("The code on this computer has changes that are not committed, so the GPU computer would "
+                          "not run the code that was tested; nothing was queued."
+                          + (f" ({', '.join(dirty[:5])})" if admin else " Ask an admin."))
+        why = S.commit_on_origin(S.git("rev-parse", "HEAD").stdout.strip())
+    except Exception as e:                              # git missing, a bug: refuse, never half-send
+        why = f"{type(e).__name__}: {e}"
+    if why:
+        return None, ("This computer's code is not on GitHub yet (or GitHub can't be reached), and the GPU computer "
+                      "trains with the code on GitHub; nothing was queued." + (f" ({why})" if admin else
+                                                                                " Ask an admin."))
+    return {"share": share, "dataset_dir": str(ddir), "sha": p.get("dataset_sha256")}, None
+
+
+def recovery_steps(p: dict, target: dict) -> list:
+    """Admin: by hand after a failed send (docs/JOBS.md, "queue_train"): bundle, push, then the job back to ready."""
+    args = " ".join(f'"{a}"' if " " in a else a for a in p["run_experiments_args"])
+    return [f'python training/make_job_bundle.py --dataset-dir "{target["dataset_dir"]}" -- {args}',
+            f"python jobs/sync.py push {p['job']} --bundle <zip from the line above> --share {target['share']} "
+            f"--max-hours {p['max_hours']:g}",
+            f"python registry/registry.py set-status {p['job']} ready --who <your people.json id>"]
+
+
+def mark_failed(cfg, p: dict) -> bool:
+    """The job was created but not sent: blocked, through registry.set_status (the function behind `registry.py
+    set-status`; the job schema has no "failed", and blocked + reason is how a failed job reads). The reason is the
+    plain FAILED_REASON, never the error (the Jobs page shows blocked_reason to non-admins; the error is in the audit
+    log's send line, admin-only). Set by the requester if they are a people.json id, else by the platform owner
+    (registry.PRODUCTION_WHO)."""
+    R = registry_module()
+    who = p["who"] if p.get("who") in R.roster() else R.PRODUCTION_WHO
+    try:
+        R.set_status(p["job"], "blocked", who, root=Path(cfg.registry), reason=FAILED_REASON)
+        return True
+    except Exception as e:
+        log.error("train: %s not sent and not marked blocked (%s: %s)", p["job"], type(e).__name__, e)
+        return False
+    finally:
+        with _reg_lock:
+            _reg_cache.pop(str(cfg.registry), None)
+
+
+def _send(cfg, uid, p: dict, target: dict):
+    """The worker thread: sync.queue_train (bundle + push), then the audit's send line; on failure the job is marked
+    blocked. One send at a time (_send_lock)."""
+    jid = p["job"]
+    with _send_lock:
+        try:
+            S = sync_module()
+            S.queue_train(jid, Path(target["dataset_dir"]), p["run_experiments_args"], target["share"],
+                          p["max_hours"], registry_root=Path(cfg.registry), expect_sha256=target["sha"],
+                          out=getattr(cfg, "train_bundles", None))
+            state, error, marked, result = "queued", None, None, "ok"
+        except Exception as e:                           # SyncError, ConfigError, OSError, a bug: never unhandled
+            error = f"{type(e).__name__}: {e}"
+            state, result = "failed", f"failed: {error}"[:500]
+            marked = mark_failed(cfg, p)
+            log.error("train: %s not sent to the GPU queue: %s", jid, error)
+        try:
+            audit(cfg, uid, jid, p, "send", result, "gpu_queue")
+        except (OSError, TypeError, AttributeError) as e:
+            log.warning("train audit send line not written (%s): %s %s", type(e).__name__, jid, result)
+        with _sends_lock:
+            _sends[jid].update(state=state, error=error, marked=marked, t=time.time())
+
+
+def start_send(cfg, uid, p: dict, target: dict) -> threading.Thread:
+    t = threading.Thread(target=_send, args=(cfg, uid, p, target), name=f"cj-train-send-{p['job']}", daemon=True)
+    with _sends_lock:
+        _sends[p["job"]] = {"state": "sending", "uid": uid, "error": None, "marked": None, "t": time.time(),
+                            "thread": t, "recover": recovery_steps(p, target)}
+    t.start()
+    return t
+
+
+def wait_sends(timeout: float = 60.0) -> bool:
+    """Wait for every send started in this process (tests). -> True when none is still running."""
+    with _sends_lock:
+        threads = [s["thread"] for s in _sends.values()]
+    end = time.monotonic() + timeout
+    for t in threads:
+        t.join(max(0.0, end - time.monotonic()))
+    return not any(t.is_alive() for t in threads)
 
 
 def queue(cfg, form: dict, user: dict) -> tuple:
-    """Runs in a worker thread. -> (http status, errors, plan or None, created record or None, message)."""
+    """Runs in a worker thread. -> (http status, errors, plan or None, created record or None, "sending" or None).
+    With a share (send_target), the registry job is followed by sync.queue_train in its own thread (_send)."""
     if not queue_on(cfg):
         errs, p = plan(cfg, form, user)
         return 409, errs, p, None, None
@@ -576,8 +764,12 @@ def queue(cfg, form: dict, user: dict) -> tuple:
         errs, p = plan(cfg, form, user, fresh=True)
         if errs:
             return 400, errs, None, None, None
+        target, why = send_target(cfg, p, user)
+        if why:
+            return 409, [why], p, None, None
+        send = "gpu_queue" if target else "commands"
         try:
-            audit(cfg, uid, p["job"], p, "requested")       # write-ahead: no audit line, no job
+            audit(cfg, uid, p["job"], p, "requested", None, send)   # write-ahead: no audit line, no job
         except (OSError, TypeError, AttributeError) as e:
             log.error("train audit not writable (%s): nothing queued", type(e).__name__)
             return 500, ["The audit log can't be written, so nothing was queued."], p, None, None
@@ -585,18 +777,82 @@ def queue(cfg, form: dict, user: dict) -> tuple:
         try:
             line = R.new_job("train", p["where"], p["name"], images=p["list_file"], who=p["who"],
                              root=Path(cfg.registry), note=p["note"])
-            result, out = "ok", (200, [], p, line, None)
+            result, out = "ok", (200, [], p, line, "sending" if target else None)
         except Exception as e:                           # RegistryError, or the disk failing mid-write
-            result = f"error: {type(e).__name__}"
+            result, line = f"error: {type(e).__name__}", None
             out = (409, ["The job was not created." + (f" ({e})" if admin else " Ask an admin to check the registry.")],
                    p, None, None)
         try:
-            audit(cfg, uid, p["job"], p, "result", result)
+            audit(cfg, uid, p["job"], p, "result", result, send)
         except (OSError, TypeError, AttributeError) as e:
             log.warning("train audit result line not written (%s): %s %s", type(e).__name__, p["job"], result)
         with _reg_lock:
             _reg_cache.pop(str(cfg.registry), None)
+        if line is not None and target:
+            start_send(cfg, uid, p, target)
         return out
+
+
+def unknown_sends(cfg, user, known) -> list:
+    """Job ids of the last 24 h whose audit has `requested` + `result ok` with send gpu_queue and no `send` line, and
+    that this process did not start (`known`): the portal stopped mid-send, so the outcome is unknown. The user's own
+    (admins: all)."""
+    admin, uid = is_admin(user), (user or {}).get("id")
+    try:
+        rows, _ = PA.read_audit(cfg.state_dir, n=2000)
+    except Exception:
+        return []
+    now = time.time()
+    seen, out = {}, []
+    for r in reversed(rows):                            # oldest first
+        d = _d(r.get("detail"))
+        if r.get("action") != "train_queue" or d.get("send") != "gpu_queue" or not _s(r.get("target")):
+            continue
+        try:
+            t = datetime.fromisoformat(str(r.get("t"))).timestamp()
+        except (TypeError, ValueError):
+            continue
+        if now - t > SENDS_SHOWN_S or not (admin or r.get("actor") == uid):
+            continue
+        s = seen.setdefault(r["target"], set())
+        s.add("ok" if d.get("phase") == "result" and d.get("result") == "ok" else d.get("phase"))
+    for jid, phases in seen.items():
+        if "ok" in phases and "send" not in phases and jid not in known:
+            out.append(jid)
+    return out
+
+
+def sends_html(cfg, user) -> str:
+    """This process's sends of the last 24 h: the user's own (admins: all), plain words; for admins the error and the
+    recovery commands. Sends started before a restart show as "outcome unknown" (from the audit log)."""
+    admin, uid = is_admin(user), (user or {}).get("id")
+    now = time.time()
+    with _sends_lock:
+        known = set(_sends)
+        rows = sorted(((j, dict(s)) for j, s in _sends.items()
+                       if now - s["t"] < SENDS_SHOWN_S and (admin or s["uid"] == uid)),
+                      key=lambda r: r[1]["t"], reverse=True)
+    out = [f'<p class="cj-train-warn" role="status">Job <b>{esc(jid)}</b> was being sent to the GPU computer when '
+           f'the portal restarted, so how it went is unknown. The Jobs page shows its status'
+           + (": check the queue (jobs/sync.py status) and the audit log." if admin else "; or ask an admin.")
+           + "</p>" for jid in unknown_sends(cfg, user, known)]
+    for jid, s in rows:
+        if s["state"] == "sending":
+            out.append(f'<p class="cj-train-banner" role="status">Job <b>{esc(jid)}</b> is being sent to the GPU '
+                       f'computer. A new dataset can take several minutes.</p>')
+        elif s["state"] == "queued":
+            out.append(f'<p class="cj-train-banner cj-train-on" role="status">Job <b>{esc(jid)}</b> is on the GPU '
+                       f'computer\'s queue; it shows under Live training when it starts.</p>')
+        else:
+            out.append(f'<div class="cj-train-errs" role="alert">Job <b>{esc(jid)}</b> could not be sent to the GPU '
+                       f'computer, so it was '
+                       + ("marked failed (blocked) in the registry." if s["marked"] else
+                          "not started. Marking it failed in the registry did not work either.")
+                       + (f' <span class="cj-mut">{esc(s["error"] or "")}</span>'
+                          f'<details class="cj-train-more"><summary>Send it by hand (admin)</summary>'
+                          f'<pre class="cj-train-pre">{esc(chr(10).join(s.get("recover") or []))}</pre></details>'
+                          if admin else " Ask an admin to look at it.") + "</div>")
+    return "".join(out)
 
 
 # ---------------------------------------------------------------- live
@@ -824,8 +1080,11 @@ def form_html(data, form: dict, admin: bool, root) -> str:
 WEIGHTS_ARG = re.compile(r"--weights \S+")
 
 
-def plan_html(cfg, p: dict, admin: bool, on: bool, state: str, created=None) -> str:
-    """state: preview (after Check) | refused (Queue while off) | created."""
+def plan_html(cfg, p: dict, admin: bool, on: bool, state: str, created=None, sending: bool = False,
+              send_refused: bool = False) -> str:
+    """state: preview (after Check) | refused (Queue while off) | created. sending: the job is being sent to the GPU
+    queue (queue_train in its own thread), so no manual commands. send_refused: Queue would send, and this user's
+    role may not (send_roles): no Queue button."""
     c = p["counts"]
     base = ("the YOLO base weights" if p["base"] == YOLO else
             f"{p['base']}" + (" (production)" if p["base_status"] == "production" else ""))
@@ -844,7 +1103,15 @@ def plan_html(cfg, p: dict, admin: bool, on: bool, state: str, created=None) -> 
     if not admin and isinstance(shown.get("note"), str):
         shown["note"] = WEIGHTS_ARG.sub("--weights (the base model's file)", shown["note"])
     js = esc(json.dumps(shown, indent=1, ensure_ascii=False))
-    if state == "created":
+    if state == "created" and sending:
+        head = (f'<h3 class="cj-sec">Queued</h3><p class="cj-train-ok" role="status">Job <b>{esc(p["job"])}</b> was '
+                f'created in the registry (status: ready) and is being sent to the GPU computer. A new dataset can '
+                f'take several minutes. An audit line was written.</p>'
+                f'<p class="cj-mut">The sending runs inside this portal: reload this page to see how it went, until '
+                f'the portal restarts. The Jobs page always shows the job\'s status; if sending fails, the job is '
+                f'marked failed (blocked) there.</p>')
+        foot = ""
+    elif state == "created":
         head = (f'<h3 class="cj-sec">Queued</h3><p class="cj-train-ok" role="status">Job <b>{esc(p["job"])}</b> was '
                 f'created in the registry (status: ready). An audit line was written.</p>')
         foot = ""
@@ -852,7 +1119,10 @@ def plan_html(cfg, p: dict, admin: bool, on: bool, state: str, created=None) -> 
         head = ('<h3 class="cj-sec">Summary</h3>'
                 + ('<p class="cj-train-warn" role="status">Queueing is off, so nothing was written.</p>'
                    if state == "refused" else ""))
-        if on:
+        if on and send_refused:
+            foot = ('<p class="cj-train-preview"><b>Preview only: this is exactly what would be queued.</b> '
+                    + esc(SEND_FOR_ADMINS) + '</p>')
+        elif on:
             hidden = "".join(f'<input type="hidden" name="{k}" value="{esc(v)}">' for k, v in form_values(p).items())
             foot = (f'<form method="post" action="{PREFIX}/queue" class="cj-train-btns">{hidden}'
                     f'<button class="cj-train-btn cj-train-primary" type="submit">Queue this job</button></form>'
@@ -862,7 +1132,9 @@ def plan_html(cfg, p: dict, admin: bool, on: bool, state: str, created=None) -> 
                     'Queueing is turned off on this portal, so nothing is written. Only the platform owner turns '
                     'it on.</p>')
     steps = ""
-    if admin:
+    if sending:                                         # sent by the portal: no "run these commands" fallback
+        pass
+    elif admin:
         cmds = "\n".join(next_steps(cfg, p))
         steps = (f'<details class="cj-train-more"{" open" if state == "created" else ""}><summary>Then, to start it '
                  f'on the GPU (admin)</summary><p class="cj-mut">The portal makes the registry job only. Make the '
@@ -971,7 +1243,7 @@ def page_body(cfg, user, form=None, result="", status_note="") -> str:
     on = queue_on(cfg)
     banner = ('<p class="cj-train-banner cj-train-on">Queueing is on: Queue writes the job to the registry.</p>' if on
               else '<p class="cj-train-banner">Queueing is off: Check shows exactly what would be queued, and '
-                   'nothing is written.</p>')
+                   'nothing is written.</p>') + sends_html(cfg, user)
     form_part = (form_html(data, form or {}, admin, root) if not err else
                  f'<p class="cj-mut">The registry can’t be read, so no job can be made'
                  f'{(": " + esc(err)) if admin else "."}</p>')
@@ -1074,7 +1346,8 @@ def routes(ctx) -> list:
         def work():
             errs, p = plan(ctx.cfg, form, user)
             admin, on = is_admin(user), queue_on(ctx.cfg)
-            result = errors_html(errs) if errs else plan_html(ctx.cfg, p, admin, on, "preview")
+            refused = bool(p) and on and not may_send(ctx.cfg, user) and would_send(ctx.cfg, p)
+            result = errors_html(errs) if errs else plan_html(ctx.cfg, p, admin, on, "preview", send_refused=refused)
             r = ctx.page(request, "Train", page_body(ctx.cfg, user, form, result), active="train")
             r.status_code = 400 if errs else 200
             return r
@@ -1087,12 +1360,14 @@ def routes(ctx) -> list:
         user = ctx.user(request)
 
         def work():
-            code, errs, p, created, _ = queue(ctx.cfg, form, user)
+            code, errs, p, created, sending = queue(ctx.cfg, form, user)
             admin, on = is_admin(user), queue_on(ctx.cfg)
             if errs:
-                result = errors_html(errs) + (plan_html(ctx.cfg, p, admin, on, "preview") if p and code != 400 else "")
+                refused = bool(p) and on and not may_send(ctx.cfg, user) and would_send(ctx.cfg, p)
+                result = errors_html(errs) + (plan_html(ctx.cfg, p, admin, on, "preview", send_refused=refused)
+                                              if p and code != 400 else "")
             elif created is not None:
-                result = plan_html(ctx.cfg, p, admin, on, "created", created)
+                result = plan_html(ctx.cfg, p, admin, on, "created", created, sending == "sending")
             else:
                 result = plan_html(ctx.cfg, p, admin, on, "refused")
             r = ctx.page(request, "Train", page_body(ctx.cfg, user, form, result), active="train")
