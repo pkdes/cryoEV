@@ -4,9 +4,11 @@ Predict module (CJ portal, journey J1): a person runs the production model on th
 
     GET  /predict/                        My analyses (admin: everyone's) + "New analysis"
     GET  /predict/predict.js              the module's script (a file: no inline script anywhere)
-    GET  /predict/new/                    step 1: what images work; pick a processed session
+    GET  /predict/new/                    step 1: what images work; pick a processed session or upload
     GET  /predict/new/session/<key>/      step 2: tiles (all, a count, by sample), nm/px per sample + the
     POST /predict/new/session/<key>/        confirmation tick, model -> create() + start_detached() -> 303 set page
+    GET  /predict/new/upload/             upload processed 8-bit PNG/JPEG tiles (caps MAX_FILES x MAX_FILE_BYTES),
+    POST /predict/new/upload/               sample label + nm/px + tick; streamed to <root>/.portal/up_<hex>/
     GET  /predict/<ps>/                   the set: status (auto-refresh), Review / Results, spot-check list
     POST /predict/<ps>/review             build the prediction review package in a thread (if missing)
     POST /predict/<ps>/results            compute results/results.json in a thread (if missing or older than edits)
@@ -31,7 +33,7 @@ Rules:
   - nm/px is never defaulted: each sample's value is shown (from the manifest when it has one) and the person must
     tick "I confirm the pixel size"; their id goes into images.csv nm_confirmed_by. No tick: refused, nothing written.
   - Model: the registry's production model (also in models/models.yaml) by default; basic users get only that one.
-  - Long work (create(), the review package, results) runs in worker threads, never on the event
+  - Long work (create(), uploads to disk, the review package, results) runs in worker threads, never on the event
     loop. The predictor itself is a detached process (jobs.predict_local.start_detached); status.json says the rest.
   - Plain words for scientists: paths, ids of folders and raw errors only on admin-only lines.
   - Everything shown is escaped here.
@@ -70,13 +72,19 @@ MODELS_YAML = REPO / "models" / "models.yaml"
 PORTAL_TMP = ".portal"                    # <root>/.portal/: the portal's own scratch (consumers skip dot entries)
 IMAGE_EXT = (".png", ".jpg", ".jpeg")
 SAMPLE_COLUMNS = ("sample_label", "sample", "grid")
-MAX_FILES = PS.MAX_IMAGES                 # 200 tiles per analysis (= a prediction set's maximum)
+MAX_FILES = PS.MAX_IMAGES                 # 200 tiles per analysis or upload (= a prediction set's maximum)
+MAX_FILE_BYTES = 100 * 1024 * 1024        # 100 MB per file
+MAX_FIELD_BYTES = 4096                    # a text field of the upload form
+MAX_FIELDS = 20
+FREE_MARGIN_BYTES = 2 * 1024 ** 3         # an upload must leave this much disk free
 NM_MIN, NM_MAX = 0.01, 100.0              # a plausible nm/px (cryo-EM tiles); outside = a typo
 STALE_RUNNING_S = 120                     # predict_local refreshes `updated` every 2 s while running
 REFRESH_S = 5
 SPOT_N = 10
 SCHEMA_MINE = "cj_predict_mine/1"
 SCHEMA_SET = "cj_predict_set/1"
+NAME_BAD = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]')
+WIN_RESERVED = re.compile(r"^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$", re.I)
 
 esc = html.escape
 
@@ -727,7 +735,7 @@ def page_new(cfg, user) -> str:
     if err and admin:
         cards.append(msg_box("The session list setting can't be read.", extra=tech(err)))
     sess = ("".join(cards) or '<p class="cj-mut">No processed sessions are set up for analysis yet'
-            + (' (set CJ_PREDICT_SOURCES).' if admin else '; ask the admin.') + '</p>')
+            + (' (set CJ_PREDICT_SOURCES).' if admin else '; ask the admin, or upload your own images.') + '</p>')
     return wrap(
         '<div class="cj-predict"><p class="cj-mut"><a href="/predict/">← My analyses</a></p>'
         '<h1>New analysis</h1>'
@@ -739,6 +747,9 @@ def page_new(cfg, user) -> str:
         'sample: sizes in nm depend on it.</li></ul></div>'
         '<h2 class="cj-sec">1. Pick a processed session</h2>'
         f'<div class="cj-predict-srcs">{sess}</div>'
+        '<h2 class="cj-sec">Or upload your own tiles</h2>'
+        '<a class="cj-card cj-predict-src" href="/predict/new/upload/"><b>Upload images</b>'
+        f'<span class="cj-mut">Up to {MAX_FILES} PNG or JPEG files, {MAX_FILE_BYTES // 2 ** 20} MB each</span></a>'
         '</div>')
 
 
@@ -801,6 +812,34 @@ def page_session_form(cfg, user, src: dict, t: dict, form=None, error=None) -> s
         + f'</fieldset>{model_block(cfg, user, form.get("model"))}'
         f'<p><button class="cj-predict-btn cj-predict-primary" type="submit" data-busy="Preparing your images… '
         f'this can take a minute">Start analysis</button></p></form></div>')
+
+
+def page_upload_form(cfg, user, form=None, error=None) -> str:
+    form = form or {}
+    err = msg_box("", extra=f'<div>{problem_list(error)}</div>') if error else ""
+    again = '<p class="cj-mut">Choose the files again (a browser forgets them after a refusal).</p>' if error else ""
+    return wrap(
+        f'<div class="cj-predict"><p class="cj-mut"><a href="/predict/new/">← Back</a></p>'
+        f'<h1>Upload images</h1>{err}{again}'
+        f'<form method="post" enctype="multipart/form-data" class="cj-predict-form" id="cj-predict-upload" '
+        f'data-max-files="{MAX_FILES}" data-max-bytes="{MAX_FILE_BYTES}">'
+        f'<fieldset class="cj-card cj-predict-fs"><legend>Images</legend>'
+        f'<label class="cj-predict-field"><span>Processed 8-bit PNG or JPEG tiles of one sample (up to {MAX_FILES}, '
+        f'{MAX_FILE_BYTES // 2 ** 20} MB each)</span><input type="file" name="files" multiple required '
+        f'accept=".png,.jpg,.jpeg,image/png,image/jpeg"></label>'
+        f'<p class="cj-mut" id="cj-predict-files" role="status"></p></fieldset>'
+        f'<fieldset class="cj-card cj-predict-fs"><legend>Sample and pixel size</legend>'
+        f'<label class="cj-predict-field"><span>Sample name (shown in the results)</span>'
+        f'<input name="sample_label" maxlength="80" required value="{esc(form.get("sample_label", ""))}"></label>'
+        f'<label class="cj-predict-field"><span>Pixel size (nm per pixel)</span>'
+        f'<input class="cj-predict-nm" name="nm_per_px" inputmode="decimal" required '
+        f'value="{esc(form.get("nm_per_px", ""))}"></label>'
+        f'<label class="cj-predict-confirm"><input type="checkbox" name="confirm" value="yes" required> '
+        f'I confirm the pixel size</label>'
+        f'<p class="cj-mut">Sizes in nm are computed from it. Your name is recorded as the person who confirmed it.'
+        f'</p></fieldset>{model_block(cfg, user, form.get("model"))}'
+        f'<p><button class="cj-predict-btn cj-predict-primary" type="submit" data-busy="Uploading… keep this '
+        f'page open">Upload and start</button></p></form></div>')
 
 
 def page_set(cfg, user, d: Path, req: dict) -> str:
@@ -946,11 +985,176 @@ def session_submit(cfg, user, src: dict, form: dict) -> Path:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ---------------------------------------------------------------- upload (multipart, streamed to disk)
+def safe_name(raw: str) -> str | None:
+    name = re.split(r"[\\/]", raw or "")[-1].strip()
+    if (not name or name in (".", "..") or name.startswith(".") or len(name) > 150 or NAME_BAD.search(name)
+            or WIN_RESERVED.match(name) or name.endswith((" ", "."))):
+        return None
+    return name
+
+
+class UploadSink:
+    """Takes the parser's events (in order) and writes file parts to `dest` under their checked names; enforces
+    the caps. Runs in a worker thread (file writes)."""
+
+    def __init__(self, dest: Path):
+        self.dest, self.fields, self.files, self.seen = dest, {}, [], set()
+        self.cur, self.fh, self.size, self.n_fields = None, None, 0, 0
+
+    def apply(self, events):
+        for ev in events:
+            kind = ev[0]
+            if kind == "part":
+                _, name, filename = ev
+                if filename is None:
+                    self.n_fields += 1
+                    if self.n_fields > MAX_FIELDS:
+                        raise Refusal("Too many form fields.", 413)
+                    self.cur = {"kind": "field", "name": name, "buf": bytearray()}
+                elif filename == "":
+                    self.cur = {"kind": "skip"}              # an empty file input
+                else:
+                    if name != "files":
+                        raise Refusal("Unexpected file field.", 400)
+                    if len(self.files) >= MAX_FILES:
+                        raise Refusal(f"More than {MAX_FILES} files: an analysis takes at most {MAX_FILES}. "
+                                      f"Nothing was kept.", 413)
+                    safe = safe_name(filename)
+                    if safe is None:
+                        raise Refusal(f"File name not accepted: {filename[:80]!r}. Rename it (letters, digits, "
+                                      f"- _ . and spaces) and upload again.", 400)
+                    if safe.lower() in self.seen:
+                        raise Refusal(f"Two files are named {safe!r}; each name must be unique.", 400)
+                    self.seen.add(safe.lower())
+                    self.files.append(safe)
+                    self.fh = open(self.dest / safe, "xb")
+                    self.size = 0
+                    self.cur = {"kind": "file", "name": safe}
+            elif kind == "data":
+                c = self.cur or {}
+                if c.get("kind") == "file":
+                    self.size += len(ev[1])
+                    if self.size > MAX_FILE_BYTES:
+                        raise Refusal(f"{c['name']} is over {MAX_FILE_BYTES // 2 ** 20} MB. Nothing was kept.", 413)
+                    self.fh.write(ev[1])
+                elif c.get("kind") == "field":
+                    c["buf"] += ev[1]
+                    if len(c["buf"]) > MAX_FIELD_BYTES:
+                        raise Refusal("A form field is too long.", 413)
+            elif kind == "end":
+                c = self.cur or {}
+                if c.get("kind") == "file":
+                    self.fh.close()
+                    self.fh = None
+                elif c.get("kind") == "field":
+                    self.fields.setdefault(c["name"], c["buf"].decode("utf-8", "replace"))
+                self.cur = None
+
+    def close(self):
+        if self.fh is not None:
+            self.fh.close()
+            self.fh = None
+
+
+async def receive_upload(request: Request, dest: Path) -> UploadSink:
+    """Stream a multipart/form-data body into `dest` (python-multipart's push parser; file writes and checks in a
+    worker thread). Raises Refusal on a bad body or a cap."""
+    from python_multipart.multipart import MultipartParser, parse_options_header
+    ctype, params = parse_options_header(request.headers.get("content-type"))
+    boundary = params.get(b"boundary")
+    if ctype != b"multipart/form-data" or not boundary:
+        raise Refusal("Expected a file upload (multipart/form-data).", 400)
+    try:
+        length = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        length = 0
+    limit = MAX_FILES * (MAX_FILE_BYTES + 4096) + MAX_FIELDS * (MAX_FIELD_BYTES + 1024)
+    if length > limit:
+        raise Refusal(f"The upload is too big: at most {MAX_FILES} files of {MAX_FILE_BYTES // 2 ** 20} MB.", 413)
+    free = shutil.disk_usage(dest).free
+    if length and length > free - FREE_MARGIN_BYTES:
+        raise Refusal("Not enough disk space on the server for this upload. Ask the admin.", 507,
+                      tech=f"{length} bytes asked, {free} free")
+    events, hdr = [], {"field": b"", "value": b"", "headers": {}}
+
+    def on_part_begin():
+        hdr["headers"] = {}
+
+    def on_header_field(data, start, end):
+        hdr["field"] += data[start:end]
+
+    def on_header_value(data, start, end):
+        hdr["value"] += data[start:end]
+
+    def on_header_end():
+        hdr["headers"][hdr["field"].lower()] = hdr["value"]
+        hdr["field"], hdr["value"] = b"", b""
+
+    def on_headers_finished():
+        _, opts = parse_options_header(hdr["headers"].get(b"content-disposition"))
+        name = opts.get(b"name", b"").decode("utf-8", "replace")
+        fn = opts.get(b"filename")
+        events.append(("part", name, None if fn is None else fn.decode("utf-8", "replace")))
+
+    def on_part_data(data, start, end):
+        events.append(("data", bytes(data[start:end])))
+
+    def on_part_end():
+        events.append(("end",))
+
+    parser = MultipartParser(boundary, {"on_part_begin": on_part_begin, "on_header_field": on_header_field,
+                                        "on_header_value": on_header_value, "on_header_end": on_header_end,
+                                        "on_headers_finished": on_headers_finished, "on_part_data": on_part_data,
+                                        "on_part_end": on_part_end})
+    sink = UploadSink(dest)
+    total = 0
+    try:
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > limit:
+                raise Refusal("The upload is too big.", 413)
+            try:
+                parser.write(chunk)
+            except Exception as e:
+                raise Refusal("The upload could not be read; try again.", 400, tech=str(e))
+            if events:
+                batch, events[:] = list(events), []
+                await run_in_threadpool(sink.apply, batch)
+        parser.finalize()
+        if events:
+            await run_in_threadpool(sink.apply, list(events))
+    finally:
+        sink.close()
+    return sink
+
+
+def upload_submit(cfg, user, dest: Path, sink: UploadSink) -> Path:
+    f = sink.fields
+    problems = []
+    if f.get("confirm") != "yes":
+        raise Refusal("Tick “I confirm the pixel size”: nothing was started.")
+    if not sink.files:
+        problems.append("Choose at least one image.")
+    label = str(f.get("sample_label") or "").strip()
+    if not label or len(label) > 80:
+        problems.append("Sample name: 1-80 characters.")
+    nm, err = check_nm(f.get("nm_per_px"), "Pixel size")
+    if err:
+        problems.append(err)
+    m_err = check_model(cfg, user, f.get("model"))
+    if m_err:
+        problems.append(m_err)
+    if problems:
+        raise Refusal(f"Please fix ({len(problems)}):\n" + "\n".join(problems))
+    return create_and_start(cfg, dest, user, f["model"], sample_label=label, nm=nm)
+
+
 # ---------------------------------------------------------------- the page's script (served as /predict/predict.js)
 JS = r"""// Predict module (portal/modules/predict.py). No inline script: this file is the module's only script.
 // - Set page (#cj-predict-set[data-live="1"]): every few seconds GET /predict/api/set/<ps>?html=1 (same origin) and
 //   swap in the status and actions fragments, rendered and escaped by the server; stops when nothing is left to do.
-// - Forms: show what is selected, disable the button while it works.
+// - Forms: show what is selected, check the upload caps before sending, disable the button while it works.
 (function () {
   'use strict';
   if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
@@ -1021,6 +1225,23 @@ JS = r"""// Predict module (portal/modules/predict.py). No inline script: this f
     });
     update();
   }
+
+  var up = document.getElementById('cj-predict-upload');
+  if (up) {
+    var input = up.querySelector('input[type="file"]'), info = document.getElementById('cj-predict-files');
+    var maxFiles = parseInt(up.dataset.maxFiles, 10), maxBytes = parseInt(up.dataset.maxBytes, 10);
+    var check = function () {
+      var fs = Array.prototype.slice.call(input.files || []), big = fs.filter(function (f) { return f.size > maxBytes; });
+      var mb = fs.reduce(function (a, f) { return a + f.size; }, 0) / 1048576;
+      var msg = fs.length + ' file' + (fs.length === 1 ? '' : 's') + ', ' + mb.toFixed(1) + ' MB';
+      var bad = '';
+      if (fs.length > maxFiles) bad = 'At most ' + maxFiles + ' files.';
+      else if (big.length) bad = big[0].name + ' is over ' + Math.round(maxBytes / 1048576) + ' MB.';
+      info.textContent = bad ? msg + '. ' + bad : msg;
+      input.setCustomValidity(bad);
+    };
+    input.addEventListener('change', check);
+  }
 })();
 """
 
@@ -1076,6 +1297,31 @@ def routes(ctx) -> list:
                 return refused_page(request, src["label"],
                                     page_session_form(cfg, user, src, tiles_of(src), form, msg), status)
             return await run_in_threadpool(again)
+        return RedirectResponse(f"/predict/{ps_dir.name}/", status_code=303)
+
+    def upload_form(request: Request):
+        return ctx.page(request, "Upload images", page_upload_form(cfg, ctx.user(request)), active="predict")
+
+    async def upload_post(request: Request):
+        user = ctx.user(request)
+        dest = await run_in_threadpool(scratch, cfg, "up")
+        sink = None
+        try:
+            try:
+                sink = await receive_upload(request, dest)
+                ps_dir = await run_in_threadpool(upload_submit, cfg, user, dest, sink)
+            except OSError as e:                     # disk full, a locked file: nothing is kept
+                raise Refusal("The server could not store the upload. Try again, or ask the admin.", 500,
+                              tech=f"{type(e).__name__}: {e}")
+        except Refusal as e:
+            msg, status = e.msg + (f"\n(admin) {e.tech}" if e.tech and user.get("role") == "admin" else ""), e.status
+            form = dict(sink.fields) if sink else {}
+
+            def again():
+                return refused_page(request, "Upload images", page_upload_form(cfg, user, form, msg), status)
+            return await run_in_threadpool(again)
+        finally:
+            await run_in_threadpool(shutil.rmtree, dest, True)
         return RedirectResponse(f"/predict/{ps_dir.name}/", status_code=303)
 
     def set_page(request: Request):
@@ -1136,6 +1382,8 @@ def routes(ctx) -> list:
             Route(PREFIX + "/new/", new, methods=["GET"]),
             Route(PREFIX + "/new/session/{key}/", session_form, methods=["GET"]),
             Route(PREFIX + "/new/session/{key}/", session_post, methods=["POST"]),
+            Route(PREFIX + "/new/upload/", upload_form, methods=["GET"]),
+            Route(PREFIX + "/new/upload/", upload_post, methods=["POST"]),
             Route(PREFIX + "/api/mine", api_mine, methods=["GET"]),
             Route(PREFIX + "/api/set/{ps}", api_set, methods=["GET"]),
             Route(PREFIX + "/{ps}/", set_page, methods=["GET"]),

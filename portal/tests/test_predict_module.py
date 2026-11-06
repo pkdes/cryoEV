@@ -3,9 +3,10 @@ Predict module (portal/modules/predict.py): roles through the Gate, the session-
 predictor (jobs/tests/fake_predictor.py through the jobs test hooks; never the real GPU), the set page reaching
 done, Review / Results building the package and results.json in temp roots (known answer: the golden fixture's
 expected counts), the nm/px confirmation (no tick = refused, nothing written), ownership (someone else's set = the
-same 404 as no set), the Origin check, escaping, and the pages in a browser (Playwright, Edge channel: 390 and
-1280 px, light and dark, no horizontal scroll, same-origin requests only, no console errors, the status
-refresh). Screenshots go to $CJ_SHOT_DIR when set (else a temp folder, removed afterwards).
+same 404 as no set), the Origin check, uploads (caps, content checks: a non-image and a 16-bit PNG refused, the
+scratch folder emptied), escaping, and the pages in a browser (Playwright, Edge channel: 390 and 1280 px, light and
+dark, no horizontal scroll, same-origin requests only, no console errors, the status refresh). Screenshots go to
+$CJ_SHOT_DIR when set (else a temp folder, removed afterwards).
 
 Temp roster / registry / predict and review roots only; never the real ones.
 
@@ -13,6 +14,7 @@ Temp roster / registry / predict and review roots only; never the real ones.
 """
 import csv
 import html
+import io
 import json
 import os
 import re
@@ -23,6 +25,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cjtest as T  # noqa: E402
@@ -53,6 +56,28 @@ def golden_rows():
 def read_rows(path) -> list:
     with open(path, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
+
+
+def multipart(fields: dict, files: list) -> tuple:
+    """-> (content-type, body) for fields {name: value} and files [(field, filename, bytes)]."""
+    b = "cjb" + uuid.uuid4().hex
+    out = io.BytesIO()
+    for k, v in fields.items():
+        out.write(f'--{b}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode("utf-8"))
+    for field, name, data in files:
+        out.write(f'--{b}\r\nContent-Disposition: form-data; name="{field}"; filename="{name}"\r\n'
+                  f'Content-Type: application/octet-stream\r\n\r\n'.encode("utf-8"))
+        out.write(data + b"\r\n")
+    out.write(f"--{b}--\r\n".encode())
+    return f"multipart/form-data; boundary={b}", out.getvalue()
+
+
+def png16() -> bytes:
+    from PIL import Image
+    im = Image.new("I;16", (64, 64), 1000)
+    buf = io.BytesIO()
+    im.save(buf, "PNG")
+    return buf.getvalue()
 
 
 class Base(unittest.TestCase):
@@ -192,7 +217,7 @@ class Roles(Base):
 
     def test_every_role_in_no_session_out(self):
         for who in ("admin", "advanced", "basic"):
-            for path in ("/predict/", "/predict/new/", "/predict/predict.js",
+            for path in ("/predict/", "/predict/new/", "/predict/new/upload/", "/predict/predict.js",
                          "/predict/api/mine", f"/predict/new/session/{self.key_a}/"):
                 with self.subTest(who=who, path=path):
                     self.assertEqual(self.get(path, who)[0], 200)
@@ -202,7 +227,7 @@ class Roles(Base):
         st, h, body = self.get("/predict/predict.js")
         self.assertEqual(st, 200)
         self.assertTrue(T.hget(h, "content-type").startswith("text/javascript"))
-        for path in ("/predict/", "/predict/new/", f"/predict/new/session/{self.key_a}/"):
+        for path in ("/predict/", "/predict/new/", f"/predict/new/session/{self.key_a}/", "/predict/new/upload/"):
             page = self.page(path)
             self.assertIn('<script src="/predict/predict.js" defer></script>', page)
             self.assertEqual(re.findall(r"<script(?![^>]*\ssrc=)[^>]*>", page), [], path)
@@ -363,6 +388,91 @@ class SessionFlow(Base):
         self.wait_state(ps)
 
 
+class Upload(Base):
+    def up(self, fields, files, who="basic", origin=True):
+        ctype, body = multipart(fields, files)
+        st, h, out = self.post("/predict/new/upload/", body, who, origin=origin, ctype=ctype)
+        return st, T.hget(h, "location"), out.decode("utf-8")
+
+    def ok_fields(self, **kw):
+        f = {"sample_label": "Upload S", "nm_per_px": "1.4724", "confirm": "yes", "model": MODEL}
+        f.update(kw)
+        return {k: v for k, v in f.items() if v is not None}
+
+    def tiles(self, n=2):
+        return [("files", f"my tile {i}.png", (GOLDEN / "images" / f"000{i}.png").read_bytes()) for i in range(1, n + 1)]
+
+    def assert_scratch_empty(self):
+        tmp = self.root / P.PORTAL_TMP
+        self.assertFalse(tmp.exists() and any(tmp.iterdir()), list(tmp.iterdir()) if tmp.exists() else None)
+
+    def test_upload_creates_a_set(self):
+        before = set(self.sets())
+        st, loc, body = self.up(self.ok_fields(sample_label="S " + XSS), self.tiles(2))
+        self.assertEqual(st, 303, body[:800])
+        ps = (set(self.sets()) - before).pop()
+        self.assertEqual(loc, f"/predict/{ps}/")
+        req = json.loads((self.root / ps / "request.json").read_text(encoding="utf-8"))
+        self.assertEqual((req["owner"], req["source"]), ("bas", {"kind": "upload"}))
+        rows = read_rows(self.root / ps / "images.csv")
+        self.assertEqual([(r["image"], r["orig_name"], r["nm_confirmed_by"]) for r in rows],
+                         [("0001", "my tile 1.png", "bas"), ("0002", "my tile 2.png", "bas")])
+        self.assert_scratch_empty()
+        page = self.page(f"/predict/{ps}/", "basic")
+        self.assertIn("Uploaded images", page)
+        self.assertIn("S &lt;img src=x onerror=alert(1)&gt;", page)
+        self.assertNotIn(XSS, page)
+        self.wait_state(ps)
+
+    def test_content_checks(self):
+        before = self.sets()
+        cases = {"not a PNG or JPEG": [("files", "fake.png", b"MZ\x90\x00 not an image" * 10)],
+                 "16-bit PNG": [("files", "deep.png", png16())]}
+        for why, files in cases.items():
+            with self.subTest(why=why):
+                st, _, body = self.up(self.ok_fields(), files)
+                self.assertEqual(st, 400)
+                self.assertIn(why, body)
+                self.assertNotIn(str(self.root), body)                    # no server paths in the message
+                self.assertEqual(self.sets(), before)
+                self.assert_scratch_empty()
+
+    def test_caps(self):
+        before = self.sets()
+        with mock.patch.object(P, "MAX_FILES", 2):
+            st, _, body = self.up(self.ok_fields(), self.tiles(3))
+            self.assertEqual(st, 413)
+            self.assertIn("More than 2 files", body)
+        with mock.patch.object(P, "MAX_FILE_BYTES", 1000):
+            st, _, body = self.up(self.ok_fields(), self.tiles(1))
+            self.assertEqual(st, 413)
+            self.assertIn("is over", body)
+        self.assertEqual(self.sets(), before)
+        self.assert_scratch_empty()
+
+    def test_refusals_write_nothing(self):
+        before = self.sets()
+        for fields, files, why in (
+                (self.ok_fields(confirm=None), self.tiles(1), "I confirm the pixel size"),
+                (self.ok_fields(nm_per_px="abc"), self.tiles(1), "enter the pixel size"),
+                (self.ok_fields(sample_label=""), self.tiles(1), "Sample name"),
+                (self.ok_fields(), [("files", "a:b.png", b"x")], "File name not accepted"),
+                (self.ok_fields(), self.tiles(1) + [("files", "MY TILE 1.png", b"x")], "Two files are named"),
+                (self.ok_fields(), [], "Choose at least one image")):
+            with self.subTest(why=why):
+                st, _, body = self.up(fields, files)
+                self.assertIn(st, (400, 413))
+                self.assertIn(why, body)
+        self.assertEqual(self.sets(), before)
+        self.assert_scratch_empty()
+
+    def test_upload_needs_origin(self):
+        before = self.sets()
+        st, _, _ = self.up(self.ok_fields(), self.tiles(1), origin=False)
+        self.assertEqual(st, 403)
+        self.assertEqual(self.sets(), before)
+
+
 def launch(p):
     for kw in ({"channel": "msedge"}, {"channel": "chrome"}, {}):
         try:
@@ -437,7 +547,7 @@ class Browser(Base):
         self.fake_set("bas", "running", n_done=1)
         self.fake_set("bas", "queued", waiting="gpu busy: pid 1 python.exe 900 MB")
         pages = {"list": "/predict/", "new": "/predict/new/", "session": f"/predict/new/session/{self.key_a}/",
-                 "set": f"/predict/{ps}/"}
+                 "upload": "/predict/new/upload/", "set": f"/predict/{ps}/"}
         for scheme in ("light", "dark"):
             for width in (390, 1280):
                 ctx, page, rec = self.session(width, scheme)
