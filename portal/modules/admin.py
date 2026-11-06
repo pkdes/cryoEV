@@ -10,11 +10,16 @@ Admin module (CJ portal, admin only): people and their key links, health at a gl
                                  every request, so it takes effect on that person's next request)
     GET  /admin/people/revoke    ?id= -> the confirmation page (a form; no script, no confirm())
     POST /admin/people/revoke    id + confirm=yes -> revoked: that person's sessions end at once
+    GET  /admin/predict          Predict sessions: the sessions Predict offers (found by the scan of processed
+                                 data, plus CJ_PREDICT_SOURCES), each with tiles, samples, usable yes / no + why,
+                                 the name people see (editable) and shown / hidden (portal/predict_sources.py)
+    POST /admin/predict/label    key + label ('' = the default name)
+    POST /admin/predict/show     key + hidden=yes|no
     GET  /admin/health           services (tools/services.py status --json, in a subprocess), the GPU computers'
                                  watchers (<registry>/live/live.json), the backup (last commit of the backup clone,
                                  the scheduled task's last result)
     GET  /admin/audit            Recent actions: the last AUDIT_SHOW audit lines (every module), newest first
-    GET  /admin/api/people | /admin/api/health | /admin/api/audit     the same as JSON
+    GET  /admin/api/people | /admin/api/predict | /admin/api/health | /admin/api/audit     the same as JSON
     GET  /admin/admin.js         the key page's Copy button (a file: no inline script)
 
 Rules:
@@ -32,6 +37,9 @@ Rules:
     Origin reduced to scheme://host[:port].
   - Audit: portal/audit.py (shared with Jobs), <state dir>/audit/portal.jsonl. `audit(ctx, actor, action, target,
     detail)` here is a thin wrapper. The Recent actions page shows the last AUDIT_SHOW lines of every module.
+  - Predict sessions: overrides in <state dir>/predict_sources.json (predict_sources.set_override: its own thread +
+    OS lock, atomic write); one audit line per change (predict_source_renamed / _hidden / _shown, target = the
+    source key). The page rescans the folders (in a worker thread); Predict uses the scan cached for a minute.
   - Health never blocks the event loop (threads), and every source may be missing: "unknown", never an error page.
     Backup clone: env CJ_BACKUP_REPO, else "backup_repo" in <state dir>/admin.json. Task: BACKUP_TASK.
 """
@@ -64,6 +72,7 @@ from starlette.routing import Route
 
 from portal import audit as PA
 from portal import auth as A
+from portal import predict_sources as PSRC
 
 PREFIX = "/admin"
 ROLES = ("admin",)
@@ -90,7 +99,8 @@ ROLE_DESC = {"admin": "everything, including people and health",
              "advanced": "jobs, history, training (when it opens)",
              "basic": "their own uploads, predictions and results"}
 ACTION_WORD = {"person_added": "added", "role_changed": "changed the role of", "person_revoked": "revoked",
-               "cancel": "cancel", "release": "release"}
+               "cancel": "cancel", "release": "release", "predict_source_renamed": "renamed the Predict session",
+               "predict_source_hidden": "hid the Predict session", "predict_source_shown": "showed the Predict session"}
 
 esc = html.escape
 log = logging.getLogger("cj.admin")
@@ -630,7 +640,8 @@ def chip(label, tone) -> str:
 
 
 def subnav(active: str) -> str:
-    items = (("people", "People", PREFIX + "/"), ("health", "Health", PREFIX + "/health"),
+    items = (("people", "People", PREFIX + "/"), ("predict", "Predict sessions", PREFIX + "/predict"),
+             ("health", "Health", PREFIX + "/health"),
              ("audit", "Recent actions", PREFIX + "/audit"))
     cur = ' aria-current="page"'
     links = "".join(f'<a href="{href}"{cur if k == active else ""}>{esc(name)}</a>' for k, name, href in items)
@@ -748,6 +759,105 @@ def render_revoke(pid, me, why, tok) -> str:
             f'<button class="cj-admin-btn cj-admin-dangerbtn" type="submit">Yes, revoke {esc(pid)}</button>'
             f'<a class="cj-admin-link" href="{PREFIX}/">Cancel</a></form></section>')
 
+
+def session_name(r) -> str:
+    return f'{r["session"]}{r.get("suffix") or ""}'
+
+
+def public_source(r) -> dict:
+    """A merged row for the JSON view (admin only: paths included)."""
+    return {"key": r["key"], "session": session_name(r), "label": r["label"], "default_label": r["default_label"],
+            "origin": r["origin"], "tiles": r["tiles"], "samples": r["samples"], "nm_min": r["nm_min"],
+            "nm_max": r["nm_max"], "compatible": r["compatible"], "reason": r["reason"], "hidden": r["hidden"],
+            "dir": str(r["dir"])}
+
+
+def nm_text(r) -> str:
+    a, b = r.get("nm_min"), r.get("nm_max")
+    if a is None:
+        return ""
+    return f"{a:.3g} nm/px" if abs(b - a) < 5e-4 else f"{a:.3g}–{b:.3g} nm/px"
+
+
+def render_predict(m: dict, tok, msg_html="") -> str:
+    locked = bool(m.get("overrides_error"))
+    top = []
+    if not m["roots"]:
+        top.append(note("No folder is scanned (CJ_PREDICT_SCAN_ROOTS is off, or the processed-data folder was not "
+                        "found): only sessions listed by hand (CJ_PREDICT_SOURCES) are offered.", "warn"))
+    for r in m["roots"]:
+        if r["problem"]:
+            top.append(note(f"Scan folder {r['root']}: {r['problem']}.", "warn"))
+    if m.get("list_error"):
+        top.append(note(f"The hand list can't be read, so Predict offers no sessions: {m['list_error']}", "warn"))
+    if locked:
+        top.append(note(f"The Predict session settings can't be read ({m['overrides_error']}), so Predict offers "
+                        "no sessions and nothing here can be changed. Fix or remove the file in the portal's state "
+                        "folder.", "warn"))
+
+    def row(r, i):
+        sid = session_name(r)
+        origin = {"found": "found", "listed": "listed by hand", "both": "found, listed by hand"}[r["origin"]]
+        nm = nm_text(r)
+        where = (f'<td data-l="Session"><b class="cj-wrap">{esc(sid)}</b>'
+                 f'<span class="cj-mut cj-admin-psmeta">{esc(origin)}{" · " + esc(nm) if nm else ""}</span>'
+                 f'<span class="cj-admin-path">{esc(str(r["dir"]))}</span></td>')
+        fid = f"cj-admin-ps{i}"
+        dflt = (f'<span class="cj-mut cj-admin-psmeta">Default: {esc(r["default_label"])}</span>'
+                if r["label"] != r["default_label"] else "")
+        if locked:
+            name = f'<td data-l="Name people see"><span class="cj-wrap">{esc(r["label"])}</span>{dflt}</td>'
+        else:
+            name = (f'<td data-l="Name people see"><form class="cj-admin-psform" method="post" '
+                    f'action="{PREFIX}/predict/label">{hidden_token(tok)}'
+                    f'<input type="hidden" name="key" value="{esc(r["key"])}">'
+                    f'<label class="cj-admin-sr" for="{fid}">Name people see for session {esc(sid)}</label>'
+                    f'<input class="cj-admin-in" id="{fid}" name="label" value="{esc(r["label"])}" '
+                    f'maxlength="{PSRC.LABEL_MAX}" placeholder="{esc(r["default_label"])}" autocomplete="off">'
+                    f'<button class="cj-admin-btn" type="submit">Save</button></form>{dflt}</td>')
+        samples = "–" if r["samples"] is None else str(r["samples"])
+        usable = (chip("Yes", "ok") if r["compatible"] else
+                  chip("No", "warn") + f'<span class="cj-mut cj-admin-psmeta">{esc(r["reason"] or "")}</span>')
+        if not r["compatible"]:
+            shown = chip("Not offered", "off")
+        else:
+            shown = chip("Hidden", "warn") if r["hidden"] else chip("Shown", "ok")
+            if not locked:
+                verb = "Show" if r["hidden"] else "Hide"
+                shown += (f'<form method="post" action="{PREFIX}/predict/show">{hidden_token(tok)}'
+                          f'<input type="hidden" name="key" value="{esc(r["key"])}">'
+                          f'<input type="hidden" name="hidden" value="{"no" if r["hidden"] else "yes"}">'
+                          f'<button class="cj-admin-btn" type="submit" aria-label="{verb} session {esc(sid)}">'
+                          f'{verb}</button></form>')
+        return (f'<tr class="cj-admin-psrow{" cj-admin-psoff" if r["hidden"] or not r["compatible"] else ""}">'
+                f'{where}{name}<td data-l="Tiles" class="cj-num">{r["tiles"]}</td>'
+                f'<td data-l="Samples" class="cj-num">{esc(samples)}</td>'
+                f'<td data-l="Usable"><div class="cj-admin-pscell">{usable}</div></td>'
+                f'<td data-l="In Predict"><div class="cj-admin-pscell">{shown}</div></td></tr>')
+
+    rows = m["sources"]
+    n_on = sum(1 for r in rows if r["compatible"] and not r["hidden"])
+    if rows:
+        table = (f'<div class="cj-card cj-admin-pswrap"><table class="cj-admin-ps">'
+                 f'<caption class="cj-admin-sr">Predict sessions</caption><thead><tr><th scope="col">Session</th>'
+                 f'<th scope="col">Name people see</th><th scope="col">Tiles</th><th scope="col">Samples</th>'
+                 f'<th scope="col">Usable</th><th scope="col">In Predict</th></tr></thead>'
+                 f'<tbody>{"".join(row(r, i) for i, r in enumerate(rows))}</tbody></table></div>')
+    else:
+        table = '<p class="cj-mut">No session with model-ready tiles was found.</p>'
+    skipped = m.get("skipped") or []
+    if skipped:
+        names = ", ".join(s["folder"] for s in skipped)
+        table += (f'<details class="cj-admin-gone"><summary>Session folders without model-ready tiles '
+                  f'({len(skipped)})</summary><p class="cj-mut cj-wrap">{esc(names)}</p><p class="cj-mut">They '
+                  f'appear here once their processing writes a “{esc(PSRC.TILES_PREFIX)}…” folder with a '
+                  f'MANIFEST.csv.</p></details>')
+    return (f'<h1>Predict sessions</h1><p class="cj-mut">Sessions whose tiles are model-ready (a '
+            f'“{esc(PSRC.TILES_PREFIX)}…” folder with a MANIFEST.csv giving nm/px) appear in Predict by themselves. '
+            f'Hide one, or give it a clearer name (leave the name empty for the default). Predict re-checks the '
+            f'folders every minute; this page checks them now.</p>{msg_html}{"".join(top)}'
+            f'<h2 class="cj-sec">In the list <span class="cj-admin-n">{len(rows)}</span> '
+            f'<span class="cj-mut">· {n_on} offered</span></h2>{table}')
 
 def render_health(h: dict) -> str:
     now = time.time()
@@ -957,10 +1067,10 @@ def routes(ctx) -> list:
         text = flash_take(request.cookies.get(A.COOKIE) or "", request.query_params.get("f"))
         return people_page(request, note(text) if text else "")
 
-    def done(request: Request, text: str):
-        """303 to People with a one-time message for this session (a bare URL shows nothing)."""
+    def done(request: Request, text: str, to: str = PREFIX + "/"):
+        """303 to People (or `to`) with a one-time message for this session (a bare URL shows nothing)."""
         tok = flash_put(request.cookies.get(A.COOKIE) or "", text)
-        return ctx.no_store(RedirectResponse(f"{PREFIX}/?f={quote(tok)}", status_code=303))
+        return ctx.no_store(RedirectResponse(f"{to}?f={quote(tok)}", status_code=303))
 
     async def change(request: Request, fn, *args):
         """-> (result, None) or (None, the People page saying why nothing was changed)."""
@@ -1054,6 +1164,92 @@ def routes(ctx) -> list:
         except ValueError as e:
             return ctx.json({"schema": "cj_admin_people/1", "people": [], "problem": str(e)}, 500)
 
+    # ---- Predict sessions
+    def predict_page(request: Request, msg_html="", status=200):
+        if not msg_html:
+            text = flash_take(request.cookies.get(A.COOKIE) or "", request.query_params.get("f"))
+            msg_html = note(text) if text else ""
+        m = PSRC.merged(ctx.cfg, fresh=True)
+        return show(request, "Predict sessions", "predict", render_predict(m, token(request), msg_html), status)
+
+    def predict_apply(key, hidden, label, actor) -> tuple:
+        """-> (flash text, (action, target, detail) for the audit line, or None when nothing changed).
+        Raises Refused or OSError (nothing changed)."""
+        m = PSRC.merged(ctx.cfg)
+        if m.get("overrides_error"):
+            raise Refused(f"Nothing was changed: {m['overrides_error']}.", 500)
+        r = next((x for x in m["sources"] if x["key"] == key), None)
+        if r is None:
+            raise Refused("That session is not in the list any more. Nothing was changed.", 404)
+        sid = session_name(r)
+        if hidden is not None:
+            if bool(r["hidden"]) == hidden:
+                return f"Session {sid} is already {'hidden' if hidden else 'shown'}.", None
+            try:
+                PSRC.set_override(ctx.cfg.state_dir, key, hidden=hidden, actor=actor)
+            except ValueError as e:
+                raise Refused(f"Nothing was changed: {e}", 400)
+            word = "hidden from Predict" if hidden else "shown in Predict"
+            return (f"Session {sid} ({r['label']}) is now {word}.",
+                    ("predict_source_hidden" if hidden else "predict_source_shown", key,
+                     {"session": sid, "label": r["label"]}))
+        try:
+            new = PSRC.clean_label(label)
+        except ValueError as e:
+            raise Refused(f"Nothing was changed: {e}", 400)
+        want = new or r["default_label"]
+        if want == r["label"]:
+            return f"Session {sid} already has that name.", None
+        try:
+            PSRC.set_override(ctx.cfg.state_dir, key, label=new, actor=actor)
+        except ValueError as e:
+            raise Refused(f"Nothing was changed: {e}", 400)
+        text = (f"Session {sid} is now called “{want}”." if new else
+                f"Session {sid} is back to its default name, “{want}”.")
+        return text, ("predict_source_renamed", key, {"session": sid, "from": r["label"], "to": want})
+
+    async def predict_post(request: Request, kind: str):
+        f, err = await form(request)
+        if err:
+            return err
+        actor, key = me(request), f.get("key", "")
+        hidden = label = None
+        if kind == "show":
+            if f.get("hidden") not in ("yes", "no"):
+                return await run_in_threadpool(predict_page, request, note("That form could not be read.", "warn"),
+                                               400)
+            hidden = f["hidden"] == "yes"
+        else:
+            label = f.get("label", "")
+        try:
+            text, aud = await run_in_threadpool(predict_apply, key, hidden, label, actor)
+        except Refused as e:
+            return await run_in_threadpool(predict_page, request, note(str(e), "warn"), e.status)
+        except OSError as e:
+            log.error("admin: predict sessions not written (%s)", type(e).__name__)
+            msg = ("Nothing was changed: the settings are being changed elsewhere right now. Try again."
+                   if "elsewhere" in str(e) else
+                   f"Nothing was changed: the settings could not be written ({type(e).__name__}). Try again.")
+            return await run_in_threadpool(predict_page, request, note(msg, "warn"), 503)
+        if aud:
+            warn = await run_in_threadpool(try_audit, actor, *aud)
+            if warn:
+                return await run_in_threadpool(predict_page, request, warn)
+        return done(request, text, PREFIX + "/predict")
+
+    async def predict_label(request: Request):
+        return await predict_post(request, "label")
+
+    async def predict_show(request: Request):
+        return await predict_post(request, "show")
+
+    def api_predict(request: Request):
+        m = PSRC.merged(ctx.cfg, fresh=True)
+        return ctx.json({"schema": "cj_admin_predict/1", "sources": [public_source(r) for r in m["sources"]],
+                         "skipped": [{"folder": s["folder"], "reason": s["reason"]} for s in m["skipped"]],
+                         "roots": [{"root": str(r["root"]), "problem": r["problem"]} for r in m["roots"]],
+                         "list_error": m["list_error"], "overrides_error": m["overrides_error"]})
+
     def script(request: Request):
         r = Response(JS, media_type="text/javascript; charset=utf-8")
         r.headers["Cache-Control"] = "no-cache"
@@ -1064,6 +1260,10 @@ def routes(ctx) -> list:
             Route(PREFIX + "/people/role", role, methods=["POST"]),
             Route(PREFIX + "/people/revoke", revoke_page, methods=["GET"]),
             Route(PREFIX + "/people/revoke", revoke, methods=["POST"]),
+            Route(PREFIX + "/predict", predict_page, methods=["GET"]),
+            Route(PREFIX + "/predict/label", predict_label, methods=["POST"]),
+            Route(PREFIX + "/predict/show", predict_show, methods=["POST"]),
+            Route(PREFIX + "/api/predict", api_predict, methods=["GET"]),
             Route(PREFIX + "/health", health_page, methods=["GET"]),
             Route(PREFIX + "/audit", audit_page, methods=["GET"]),
             Route(PREFIX + "/admin.js", script, methods=["GET"]),

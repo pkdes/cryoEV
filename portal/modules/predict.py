@@ -67,6 +67,7 @@ from starlette.routing import Route
 
 from jobs import predict_local as PL
 from jobs import predict_set as PS
+from portal import predict_sources as PSRC
 
 PREFIX = "/predict"
 ROLES = ("admin", "advanced", "basic")
@@ -137,38 +138,11 @@ def registry_root(cfg):
 
 
 def sources(cfg) -> list:
-    """The admin's source folders: [{key, label, dir, manifest, session, sample_column, problem}]. A bad setting
-    gives an empty list (and the admin sees why on the page)."""
-    raw = _setting(cfg, "CJ_PREDICT_SOURCES")
-    if not raw:
-        return []
-    if isinstance(raw, (list, tuple)):
-        items = list(raw)
-    else:
-        text = str(raw).strip()
-        if not text.startswith("["):
-            text = Path(text).read_text(encoding="utf-8-sig")
-        items = json.loads(text)
-    out = []
-    for it in items if isinstance(items, list) else []:
-        if not isinstance(it, dict) or not it.get("dir"):
-            continue
-        d = Path(str(it["dir"]))
-        man = Path(str(it["manifest"])) if it.get("manifest") else (d / "MANIFEST.csv")
-        session = str(it.get("session") or "")
-        if not session:
-            m = re.search(r"(?<!\d)(\d{8})(?!\d)", d.name) or re.search(r"(?<!\d)(\d{8})(?!\d)", str(d))
-            session = m.group(1) if m else ""
-        problem = None
-        if not d.is_dir():
-            problem = "folder not found"
-        elif not PS.SESSION_RE.match(session):
-            problem = 'no session date: add "session": "YYYYMMDD" to this source'
-        out.append({"key": hashlib.sha1(os.path.normcase(str(d)).encode("utf-8")).hexdigest()[:10],
-                    "label": str(it.get("label") or d.name), "dir": d,
-                    "manifest": man if man.is_file() else None, "session": session,
-                    "sample_column": it.get("sample_column"), "problem": problem})
-    return out
+    """The sessions people may pick: [{key, label, dir, manifest, session, sample_column, problem}]. The admin's
+    CJ_PREDICT_SOURCES list (as before) merged with the sessions found by the scan, with the Admin page's overrides
+    (portal/predict_sources.py). A hidden or incompatible source has a problem (shown to the admin only). A bad
+    setting raises (sources_safe: an empty list, and the admin sees why on the page)."""
+    return PSRC.for_predict(cfg)
 
 
 def sources_safe(cfg):

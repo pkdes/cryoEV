@@ -62,6 +62,34 @@ select.cj-admin-in{width:auto;min-width:9em}
 .cj-admin-aud{display:flex;flex-wrap:wrap;gap:2px 12px;padding:9px 0;border-top:1px solid var(--line);min-width:0}
 .cj-admin-aud:first-child{border-top:0}
 .cj-admin-aud>span:last-child{flex:1 1 16em;min-width:0;overflow-wrap:anywhere}
+/* Predict sessions: a table at desk width, one card per session on a phone */
+.cj-admin-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);
+  white-space:nowrap;border:0}
+.cj-admin-pswrap{padding:0;margin-top:10px;overflow:hidden}
+.cj-admin-ps{width:100%;border-collapse:collapse;table-layout:auto}
+.cj-admin-ps th{font-size:.75rem;font-weight:600;color:var(--mut);text-align:left;padding:10px 12px;
+  border-bottom:1px solid var(--line);white-space:nowrap}
+.cj-admin-ps td{padding:10px 12px;border-top:1px solid var(--line);vertical-align:top;min-width:0}
+.cj-admin-ps tbody tr:first-child td{border-top:0}
+.cj-admin-psmeta{display:block;font-size:.8rem;margin-top:2px;overflow-wrap:anywhere}
+.cj-admin-path{display:block;font-family:var(--cj-mono);font-size:.72rem;color:var(--mut);margin-top:2px;
+  overflow-wrap:anywhere;word-break:break-all}
+.cj-admin-psform{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-width:0}
+.cj-admin-psform .cj-admin-in{flex:1 1 9em;width:auto}
+@media (min-width:761px){.cj-admin-ps td:first-child{max-width:20em}.cj-admin-ps td:nth-child(2){min-width:17em}}
+.cj-admin-pscell{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px}
+.cj-admin-pscell .cj-admin-psmeta{flex:1 0 100%}
+.cj-admin-psoff td:first-child b{color:var(--mut)}
+@media (max-width:760px){
+  .cj-admin-ps thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+  .cj-admin-ps,.cj-admin-ps tbody,.cj-admin-ps td{display:block;width:auto;min-width:0}
+  .cj-admin-ps tr{display:grid;grid-template-columns:1fr 1fr;padding:6px 0;border-top:1px solid var(--line)}
+  .cj-admin-ps td:nth-child(1),.cj-admin-ps td:nth-child(2){grid-column:1 / -1}
+  .cj-admin-ps tbody tr:first-child{border-top:0}
+  .cj-admin-ps td{border-top:0;padding:6px 14px}
+  .cj-admin-ps td::before{content:attr(data-l);display:block;font-size:.72rem;font-weight:600;color:var(--mut);
+    margin-bottom:2px}
+}
 </style>
 <div class="cj-admin" id="cj-admin">
 {{sub}}
