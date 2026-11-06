@@ -689,5 +689,356 @@ class Browser(Base):
             ctx.close()
 
 
+class ActionBase(unittest.TestCase):
+    """Cancel / release against a TEMP share folder laid out like a desktop queue (q/<job>/job.json [+ READY]).
+    live.json's queues[].share points at it; the real share is never touched."""
+
+    JOBS = {"job_20261105_admin_q": ("queued", "tester"), "job_20261105_adv_q": ("queued", "adv"),
+            "job_20261105_other_q": ("queued", "adv2"), "job_20261105_hold": ("held", "adv"),
+            "job_20261105_run": ("running", "adv"), "job_20261105_orphan": ("queued", None)}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = T.Env()
+        cls.adv_key = A.add_key(cls.env.roster, "adv", "advanced")
+        cls.adv2_key = A.add_key(cls.env.roster, "adv2", "advanced")
+        cls.bas_key = A.add_key(cls.env.roster, "bas", "basic")
+        cls.share = cls.env.tmp / "share"
+        cls.decoy = cls.env.tmp / "decoy"
+        for root in (cls.share, cls.decoy):
+            for job in cls.JOBS:
+                (root / "q" / job).mkdir(parents=True)
+                (root / "q" / job / "job.json").write_text("{}", encoding="utf-8")
+        for job, (state, _) in cls.JOBS.items():
+            if state != "held":
+                (cls.share / "q" / job / "READY").write_text("x", encoding="utf-8")
+        recs = [{"schema": "job/1", "id": j, "logged": local(1), "name": j, "type": "train", "where": "desktop",
+                 "status": "ready", **({"who": who} if who else {})} for j, (_, who) in cls.JOBS.items()]
+        write_registry(cls.env.registry, recs)
+        cls.write_live()
+        cls.p = T.Portal(cls.env.config())
+        cls.tok = {"admin": T.login(cls.p.port, cls.env.key), "advanced": T.login(cls.p.port, cls.adv_key),
+                   "adv2": T.login(cls.p.port, cls.adv2_key), "basic": T.login(cls.p.port, cls.bas_key)}
+
+    @classmethod
+    def live_queues(cls, reach="ok"):
+        jobs = [qjob(j, st) for j, (st, _) in cls.JOBS.items()]
+        return [{"share": str(cls.share), "reach": reach, "detail": None,
+                 "watcher": {"display": "alive", "state": "running", "detail": None, "job": "job_20261105_run",
+                             "age_s": 5, "stale": False, "machine": "gpu-desktop"},
+                 "jobs": jobs, "running": {"job": "job_20261105_run", "phase": "training", "epoch": 3, "epochs": 100,
+                                           "eta_s": 600, "elapsed_s": 60, "cancel_requested": False},
+                 "finished": []}]
+
+    @classmethod
+    def write_live(cls, age_s=5, reach="ok"):
+        cls.env.write_live(T.live_doc(age_s=age_s, queues=cls.live_queues(reach)))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.p.stop()
+        cls.env.cleanup()
+
+    def setUp(self):
+        for root in (self.share, self.decoy):
+            for job in self.JOBS:
+                (root / "q" / job / "CANCEL").unlink(missing_ok=True)
+        for job, (st, _) in self.JOBS.items():
+            r = self.share / "q" / job / "READY"
+            if st == "held":
+                r.unlink(missing_ok=True)
+            else:
+                r.write_text("x", encoding="utf-8")
+        self.audit_file = self.env.state / "audit" / "portal.jsonl"
+        self.audit_file.unlink(missing_ok=True)
+        self.write_live()
+
+    def post(self, path, body, role="admin", origin="same", raw=None):
+        h = {**T.cookie(self.tok[role]), "Content-Type": "application/json"}
+        if origin == "same":
+            h["Origin"] = self.p.origin
+        elif origin:
+            h["Origin"] = origin
+        data = raw if raw is not None else json.dumps(body).encode()
+        st, hd, out = T.request(self.p.port, "POST", path, h, data)
+        return st, (json.loads(out) if out[:1] == b"{" else out), hd
+
+    def cancel_file(self, job, root=None):
+        return (root or self.share) / "q" / job / "CANCEL"
+
+    def audit_lines(self):
+        if not self.audit_file.exists():
+            return []
+        return [json.loads(x) for x in self.audit_file.read_text(encoding="utf-8").splitlines()]
+
+
+class Actions(ActionBase):
+    def test_admin_cancels_queued_job(self):
+        st, out, hd = self.post("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "wrong dataset"})
+        self.assertEqual((st, out["ok"]), (200, True), out)
+        self.assertEqual(T.hget(hd, "cache-control"), "no-store")
+        self.assertIn("will not be started", out["message"])
+        doc = json.loads(self.cancel_file("job_20261105_admin_q").read_text(encoding="utf-8"))
+        self.assertEqual((doc["job"], doc["who"], doc["reason"]), ("job_20261105_admin_q", "tester", "wrong dataset"))
+        self.assertFalse(self.cancel_file("job_20261105_admin_q", self.decoy).exists())
+
+    def test_cancel_running_says_ten_seconds(self):
+        st, out, _ = self.post("/jobs/api/cancel", {"job": "job_20261105_run", "reason": "stuck"})
+        self.assertEqual(st, 200)
+        self.assertIn("within about 10 s", out["message"])
+        self.assertTrue(self.cancel_file("job_20261105_run").is_file())
+
+    def test_owner_cancels_own_job(self):
+        st, out, _ = self.post("/jobs/api/cancel", {"job": "job_20261105_adv_q", "reason": "my mistake"}, "advanced")
+        self.assertEqual((st, out["ok"]), (200, True), out)
+        doc = json.loads(self.cancel_file("job_20261105_adv_q").read_text(encoding="utf-8"))
+        self.assertEqual((doc["who"], doc["reason"]), ("adv", "my mistake"))
+
+    def test_non_owner_advanced_gets_403_and_no_file(self):
+        for job in ("job_20261105_adv_q", "job_20261105_admin_q", "job_20261105_orphan"):   # last: owner unknown
+            with self.subTest(job=job):
+                st, out, _ = self.post("/jobs/api/cancel", {"job": job, "reason": "x"}, "adv2")
+                self.assertEqual(st, 403)
+                self.assertFalse(out["ok"])
+                self.assertFalse(self.cancel_file(job).exists())
+        st, _, _ = self.post("/jobs/api/cancel", {"job": "job_20261105_orphan", "reason": "x"}, "advanced")
+        self.assertEqual(st, 403)                                   # an advanced user is not the owner of an unowned job
+        self.assertEqual(self.audit_lines(), [])                    # a refused request is not an action
+
+    def test_basic_role_403_at_the_gate(self):
+        for path, body in (("/jobs/api/cancel", {"job": "job_20261105_adv_q", "reason": "x"}),
+                           ("/jobs/api/release", {"job": "job_20261105_hold"})):
+            st, _, _ = self.post(path, body, "basic")
+            self.assertEqual(st, 403)
+        self.assertFalse(self.cancel_file("job_20261105_adv_q").exists())
+        self.assertFalse((self.share / "q" / "job_20261105_hold" / "READY").exists())
+
+    def test_missing_reason_refused(self):
+        for body in ({"job": "job_20261105_admin_q"}, {"job": "job_20261105_admin_q", "reason": ""},
+                     {"job": "job_20261105_admin_q", "reason": "  \n "}, {"job": "job_20261105_admin_q", "reason": 5},
+                     {"job": "job_20261105_admin_q", "reason": "x" * 400}):
+            with self.subTest(body=body):
+                st, out, _ = self.post("/jobs/api/cancel", body)
+                self.assertEqual(st, 400)
+                self.assertFalse(out["ok"])
+        self.assertFalse(self.cancel_file("job_20261105_admin_q").exists())
+        st, _, _ = self.post("/jobs/api/cancel", None, raw=b"not json")
+        self.assertEqual(st, 400)
+
+    def test_control_characters_in_reason_are_flattened(self):
+        st, _, _ = self.post("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "a\r\nb\x00c"})
+        self.assertEqual(st, 200)
+        doc = json.loads(self.cancel_file("job_20261105_admin_q").read_text(encoding="utf-8"))
+        self.assertEqual(doc["reason"], "a  b c")
+
+    def test_stale_live_json_refused(self):
+        self.write_live(age_s=3600)
+        for path, body in (("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "x"}),
+                           ("/jobs/api/release", {"job": "job_20261105_hold"})):
+            st, out, _ = self.post(path, body)
+            self.assertEqual(st, 409)
+            self.assertIn("out of date", out["message"])
+        self.assertFalse(self.cancel_file("job_20261105_admin_q").exists())
+        self.assertFalse((self.share / "q" / "job_20261105_hold" / "READY").exists())
+        (self.env.registry / "live" / "live.json").unlink()          # no snapshot at all
+        st, _, _ = self.post("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "x"})
+        self.assertEqual(st, 409)
+
+    def test_unreachable_queue_refused(self):
+        self.write_live(reach="offline")
+        st, out, _ = self.post("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "x"})
+        self.assertEqual(st, 409)
+        self.assertIn("can't reach", out["message"])
+        self.assertFalse(self.cancel_file("job_20261105_admin_q").exists())
+
+    def test_unknown_job_and_bad_ids(self):
+        st, _, _ = self.post("/jobs/api/cancel", {"job": "job_20261105_nope", "reason": "x"})
+        self.assertEqual(st, 404)
+        for bad in ("../../etc", "a/b", "..", "", None, 7):
+            with self.subTest(job=bad):
+                st, _, _ = self.post("/jobs/api/cancel", {"job": bad, "reason": "x"})
+                self.assertEqual(st, 400)
+
+    def test_client_supplied_share_is_ignored(self):
+        body = {"job": "job_20261105_admin_q", "reason": "x", "share": str(self.decoy), "path": str(self.decoy),
+                "queue": str(self.decoy)}
+        st, _, _ = self.post("/jobs/api/cancel", body)
+        self.assertEqual(st, 200)
+        self.assertTrue(self.cancel_file("job_20261105_admin_q").is_file())
+        self.assertFalse(self.cancel_file("job_20261105_admin_q", self.decoy).exists())
+        st, _, _ = self.post("/jobs/api/release", {"job": "job_20261105_hold", "share": str(self.decoy)})
+        self.assertEqual(st, 200)
+        self.assertTrue((self.share / "q" / "job_20261105_hold" / "READY").is_file())
+        self.assertFalse((self.decoy / "q" / "job_20261105_hold" / "READY").exists())
+
+    def test_release_admin_only(self):
+        for role in ("advanced", "adv2"):                            # even the held job's own owner
+            st, _, _ = self.post("/jobs/api/release", {"job": "job_20261105_hold"}, role)
+            self.assertEqual(st, 403)
+        self.assertFalse((self.share / "q" / "job_20261105_hold" / "READY").exists())
+        st, out, _ = self.post("/jobs/api/release", {"job": "job_20261105_hold"})
+        self.assertEqual((st, out["ok"]), (200, True), out)
+        self.assertTrue((self.share / "q" / "job_20261105_hold" / "READY").is_file())
+        st, _, _ = self.post("/jobs/api/release", {"job": "job_20261105_admin_q"})     # not held
+        self.assertEqual(st, 409)
+
+    def test_already_requested_or_finished_is_refused_plainly(self):
+        q = self.live_queues()
+        q[0]["jobs"][0]["cancel_requested"] = True
+        self.env.write_live(T.live_doc(queues=q))
+        st, out, _ = self.post("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "x"})
+        self.assertEqual(st, 409)
+        self.write_live()
+        done = self.share / "d" / "job_20261105_admin_q"             # finished between snapshots: sync.cancel refuses
+        done.mkdir(parents=True)
+        (done / "DONE.json").write_text("{}", encoding="utf-8")
+        self.addCleanup(shutil.rmtree, done, True)
+        st, out, _ = self.post("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "x"})
+        self.assertEqual(st, 502)
+        self.assertFalse(self.cancel_file("job_20261105_admin_q").exists())
+        self.assertEqual(self.audit_lines()[-1]["result"], "error: SyncError")
+
+    def test_audit_lines(self):
+        self.post("/jobs/api/cancel", {"job": "job_20261105_adv_q", "reason": "because"}, "advanced")
+        self.post("/jobs/api/release", {"job": "job_20261105_hold"})
+        self.post("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "x"}, "adv2")   # refused: no line
+        lines = self.audit_lines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual([(x["actor"], x["action"], x["job"], x["reason"]) for x in lines],
+                         [("adv", "cancel", "job_20261105_adv_q", "because"),
+                          ("tester", "release", "job_20261105_hold", None)])
+        for x in lines:
+            self.assertTrue({"time", "actor", "action", "job", "reason"} <= set(x))
+            self.assertEqual(x["result"], "ok")
+            self.assertRegex(x["time"], r"^\d{4}-\d\d-\d\dT")
+        text = self.audit_file.read_text(encoding="utf-8")
+        for secret in (self.env.key, self.adv_key, self.tok["admin"], self.tok["advanced"]):
+            self.assertNotIn(secret, text)
+
+    def test_cross_origin_post_403(self):
+        for origin in ("http://evil.example", "null", None):
+            with self.subTest(origin=origin):
+                st, _, _ = self.post("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "x"},
+                                     origin=origin)
+                self.assertEqual(st, 403)
+                self.assertFalse(self.cancel_file("job_20261105_admin_q").exists())
+        st, _, _ = self.post("/jobs/api/release", {"job": "job_20261105_hold"}, origin="http://evil.example")
+        self.assertEqual(st, 403)
+        self.assertEqual(self.audit_lines(), [])
+
+    def test_get_not_allowed(self):
+        st, _, _ = T.request(self.p.port, "GET", "/jobs/api/cancel", T.cookie(self.tok["admin"]))
+        self.assertEqual(st, 405)
+
+    def test_audit_unwritable_means_nothing_done(self):
+        bad = self.env.state / "audit"
+        shutil.rmtree(bad, ignore_errors=True)
+        bad.write_text("a file where the folder should be", encoding="utf-8")
+        self.addCleanup(lambda: (bad.unlink(missing_ok=True)))
+        st, out, _ = self.post("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "x"})
+        self.assertEqual(st, 500)
+        self.assertFalse(self.cancel_file("job_20261105_admin_q").exists())
+
+
+class Buttons(ActionBase):
+    def jobs_with(self, page, act):
+        return set(re.findall(r'data-act="%s" data-job="([^"]+)"' % act, page))
+
+    def page(self, role):
+        st, _, body = T.request(self.p.port, "GET", "/jobs/", T.cookie(self.tok[role]))
+        self.assertEqual(st, 200)
+        return body.decode("utf-8")
+
+    def test_admin_sees_cancel_on_every_open_job_and_release_on_held(self):
+        pg = self.page("admin")
+        self.assertEqual(self.jobs_with(pg, "ask"), set(self.JOBS))
+        self.assertEqual(self.jobs_with(pg, "release"), {"job_20261105_hold"})
+        self.assertIn("Yes, cancel", pg)
+        self.assertIn("Cancel this job?", pg)
+        self.assertIn(" hidden>", pg)                                # the confirm form starts hidden
+
+    def test_owner_sees_only_own_cancel_buttons(self):
+        pg = self.page("advanced")
+        self.assertEqual(self.jobs_with(pg, "ask"), {"job_20261105_adv_q", "job_20261105_hold", "job_20261105_run"})
+        self.assertEqual(self.jobs_with(pg, "release"), set())
+        pg2 = self.page("adv2")
+        self.assertEqual(self.jobs_with(pg2, "ask"), {"job_20261105_other_q"})
+
+    def test_no_buttons_on_stale_snapshot_or_cancel_in_flight(self):
+        self.write_live(age_s=3600)
+        self.assertNotIn("data-act=", self.page("admin"))
+        q = self.live_queues()
+        q[0]["jobs"][0]["cancel_requested"] = True
+        self.env.write_live(T.live_doc(queues=q))
+        self.assertNotIn('data-act="ask" data-job="job_20261105_admin_q"', self.page("admin"))
+        self.assertIn('data-act="ask" data-job="job_20261105_adv_q"', self.page("admin"))
+
+    def test_api_flags_match(self):
+        st, _, body = T.request(self.p.port, "GET", "/jobs/api/summary", T.cookie(self.tok["advanced"]))
+        s = json.loads(body)
+        self.assertEqual({x["id"] for x in s["queue"] if x["can_cancel"]}, {"job_20261105_adv_q", "job_20261105_hold"})
+        self.assertFalse(any(x["can_release"] for x in s["queue"]))
+
+
+@unittest.skipIf(sync_playwright is None, "playwright not installed")
+class CancelFlowBrowser(ActionBase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.pw = sync_playwright().start()
+        cls.browser = launch(cls.pw)
+        if cls.browser is None:
+            cls.pw.stop()
+            super().tearDownClass()
+            raise unittest.SkipTest("no Edge / Chrome for Playwright")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.pw.stop()
+        super().tearDownClass()
+
+    def test_two_step_cancel_at_390px_without_dialogs(self):
+        ctx = self.browser.new_context(viewport={"width": 390, "height": 900})
+        dialogs, errors = [], []
+        page = ctx.new_page()
+        page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        try:
+            page.goto(f"{self.p.origin}/login?k={self.adv_key}")
+            page.goto(self.p.origin + "/jobs/")
+            page.wait_for_load_state("networkidle")
+            job = "job_20261105_adv_q"
+            act = page.locator(f'.cj-jobs-act:has(button[data-act="ask"][data-job="{job}"])')
+            form = act.locator("form.cj-jobs-cf")
+            self.assertTrue(form.is_hidden())
+            act.locator('button[data-act="ask"]').click()
+            self.assertTrue(form.is_visible())
+            self.assertIn("Cancel this job?", form.inner_text())
+            sw, iw = page.evaluate("[document.documentElement.scrollWidth, window.innerWidth]")
+            self.assertLessEqual(sw, iw, "horizontal scroll")
+            form.locator("button[data-act=back]").click()              # step back: nothing sent
+            self.assertTrue(form.is_hidden())
+            self.assertFalse(self.cancel_file(job).exists())
+            act.locator('button[data-act="ask"]').click()
+            form.locator("button[type=submit]").click()                # no reason: the browser blocks the submit
+            self.assertTrue(form.is_visible())
+            self.assertFalse(self.cancel_file(job).exists())
+            form.locator("input[name=reason]").fill("typed in the browser")
+            with page.expect_response(lambda r: r.url.endswith("/jobs/api/cancel")) as resp:
+                form.locator("button[type=submit]").click()
+            self.assertEqual(resp.value.status, 200)
+            res = act.locator(".cj-jobs-res")
+            res.wait_for(state="visible")
+            self.assertIn("Cancel requested", res.inner_text())
+            self.assertTrue(form.is_hidden())
+            doc = json.loads(self.cancel_file(job).read_text(encoding="utf-8"))
+            self.assertEqual((doc["who"], doc["reason"]), ("adv", "typed in the browser"))
+            self.assertEqual(dialogs, [])
+            self.assertEqual(errors, [])
+        finally:
+            ctx.close()
+
+
 if __name__ == "__main__":
     unittest.main()

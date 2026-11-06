@@ -54,6 +54,22 @@
   border-radius:50%;background:var(--accbg);color:var(--acc);font-weight:700;font-size:.8rem}
 .cj-jobs-pos.cj-jobs-t-off{background:transparent;color:var(--mut)}
 .cj-jobs-foot{margin-top:20px}
+.cj-jobs-act{display:flex;flex-direction:column;align-items:flex-start;gap:6px;margin-top:4px;min-width:0}
+.cj-jobs-btn{min-height:40px;padding:6px 14px;border:1px solid var(--line);border-radius:8px;background:var(--card);
+  color:var(--fg);font:inherit;font-size:.88rem;cursor:pointer}
+.cj-jobs-btn:hover,.cj-jobs-btn:focus-visible{border-color:var(--acc)}
+.cj-jobs-btn:disabled{opacity:var(--dim);cursor:default}
+.cj-jobs-btn-warn{border-color:var(--warn);color:var(--warn)}
+.cj-jobs-cf{display:flex;flex-direction:column;gap:8px;width:100%;padding:8px 10px;border:1px solid var(--warn);
+  border-radius:8px;background:var(--warnbg)}
+.cj-jobs-cf[hidden],.cj-jobs-res[hidden],.cj-jobs-btn[hidden]{display:none}
+.cj-jobs-cq{margin:0;font-size:.88rem}
+.cj-jobs-lbl{display:flex;flex-direction:column;gap:3px;font-size:.8rem;color:var(--mut)}
+.cj-jobs-in{min-height:40px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--card);
+  color:var(--fg);font:inherit;font-size:1rem;width:100%;box-sizing:border-box}
+.cj-jobs-btns{display:flex;flex-wrap:wrap;gap:8px}
+.cj-jobs-res{margin:0;font-size:.88rem;overflow-wrap:anywhere}
+.cj-jobs-res-bad{color:var(--warn);font-weight:600}
 </style>
 <div class="cj-jobs" id="cj-jobs">
 <h1>Jobs</h1>
@@ -64,6 +80,6 @@
 <section class="cj-jobs-sec" id="cj-jobs-s-attention" aria-labelledby="cj-jobs-h-attention">{{attention}}</section>
 <section class="cj-jobs-sec" id="cj-jobs-s-review" aria-labelledby="cj-jobs-h-review">{{review}}</section>
 <section class="cj-jobs-sec" id="cj-jobs-s-finished" aria-labelledby="cj-jobs-h-finished">{{finished}}</section>
-<p class="cj-mut cj-jobs-foot">Read only. This page refreshes every 30 s.</p>
+<p class="cj-mut cj-jobs-foot">This page refreshes every 30 s.</p>
 </div>
 <script src="/jobs/jobs.js" defer></script>

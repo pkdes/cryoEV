@@ -1,5 +1,5 @@
 """
-Jobs module (CJ portal, read only): what is running, waiting, stuck and done, from two sources:
+Jobs module (CJ portal): what is running, waiting, stuck and done, from two sources:
   - the GPU computers' queues: <registry>/live/live.json, written by jobs/monitor.py (train jobs; predict jobs carry
     kind "predict" + n_done / n_total; queued jobs may carry ready_at, the time they became READY);
   - the registry's jobs: registry.current("job") (review / annotation / check jobs, and any train / predict job
@@ -9,6 +9,12 @@ Jobs module (CJ portal, read only): what is running, waiting, stuck and done, fr
     GET /jobs/jobs.js        the page's refresh script (a file, so a later CSP script-src 'self' keeps working)
     GET /jobs/api/summary    the same as JSON (schema cj_jobs/1, see summary()); ?html=1 adds "html": the page's
                              section fragments, rendered and escaped here (the page swaps them in every 30 s)
+    POST /jobs/api/cancel    {job, reason}: sync.cancel on the job's queue (admin: any job; owner: own jobs)
+    POST /jobs/api/release   {job}: sync.release of a held job (admin only)
+  The two POSTs (the Gate already requires a same-origin Origin) re-check the permission on every call, take the
+  share ONLY from the server's live.json queues[].share (a client-sent share/path is ignored), refuse when the
+  snapshot is stale or the queue unreachable, run the SMB write in a worker thread with a timeout, and append one
+  line {time, actor, action, job, reason, result} to <state dir>/audit/portal.jsonl (never a key).
 
 Rules:
   - A job on a queue in live.json is shown from live.json only; the registry fills in its name and owner.
@@ -25,10 +31,12 @@ Rules:
     "pujan"). For a non-admin, a job is hidden (no id, name, owner, reason or hint; state and place are kept)
     when it is someone else's predict job, when a queue job is not in the registry (owner unknown), and for every
     queue job while the registry can't be read.
-Nothing here writes anything.
+The only writes are the two actions above (CANCEL / READY files on the share, and the audit line).
 """
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import html
 import importlib.util
 import json
@@ -56,6 +64,9 @@ N_FINISHED = 10
 OPEN = ("in_progress", "ready", "blocked")
 SECTIONS = ("head", "running", "queue", "attention", "review", "finished")
 PRIVATE_NAME = "Job details hidden"
+ACTION_TIMEOUT_S = 25.0       # the SMB write runs in a worker thread; past this the page is told the result is unknown
+REASON_MAX = 300
+CANCELLABLE = ("running", "queued", "held")
 
 esc = html.escape
 
@@ -267,6 +278,7 @@ def summary(cfg, user: dict, can_see, now=None) -> dict:
     """Everything the page shows, as data (schema cj_jobs/1). `can_see(user, owner)` is ctx.can_see."""
     now = time.time() if now is None else now
     admin = (user or {}).get("role") == "admin"
+    uid = (user or {}).get("id")
     live, live_err = read_live(getattr(cfg, "registry", None))
     snap = snapshot_info(live, live_err, now)
     reg, reg_err, reg_age = registry_jobs(getattr(cfg, "registry", None))
@@ -286,6 +298,15 @@ def summary(cfg, user: dict, can_see, now=None) -> dict:
         if kind != "predict" and rec.get("type") != "predict":
             return False
         return not can_see(user, rec.get("who"))
+
+    def acts(job_id, state, requested=False) -> dict:
+        """Which buttons this user gets for a queue job (the POST re-checks all of it): cancel for an admin or the
+        job's registry owner, release for an admin; none on a stale snapshot, a hidden job or a cancel in flight."""
+        if not job_id or stale or private(job_id, None, True):
+            return {"can_cancel": False, "can_release": False}
+        mine = admin or (reg_err is None and bool(uid) and can_see(user, _d(reg.get(job_id)).get("who")))
+        return {"can_cancel": bool(mine and state in CANCELLABLE and not requested),
+                "can_release": bool(admin and state == "held")}
 
     def ident(job_id, kind=None, queue_job=True) -> dict:
         """id + display name (the registry's name when it has one), or hidden."""
@@ -356,6 +377,7 @@ def summary(cfg, user: dict, can_see, now=None) -> dict:
                     "pct": pct(done, total), "eta_s": _n(r.get("eta_s")),
                     "eta_text": eta_text({**r, "kind": kind, "phase": phase}), "elapsed_s": _n(r.get("elapsed_s")),
                     "hung": hung, "hung_text": hung_text, "cancel_requested": bool(r.get("cancel_requested")),
+                    **acts(r["job"], "running", bool(r.get("cancel_requested"))),
                     "map50_95": _n(r.get("map50_95")) if kind == "train" else None,
                     "watcher": {"display": disp, "plain": WATCH_WORD.get(disp, disp), "age_s": hb},
                     "tech": " · ".join(x for x in (f"run {r['run']}" if _s(r.get("run")) and not idn["private"]
@@ -388,7 +410,8 @@ def summary(cfg, user: dict, can_see, now=None) -> dict:
             label, tone = DESK_STATE[state]
             queue.append({**ident(j["job"]), "queue": where, "source": "desktop", "state": state, "label": label,
                           "tone": tone, "position": pos if numbered and state == "queued" else None,
-                          "ready_at": _s(j.get("ready_at")), "note": note, "tech": tech, "stale": stale})
+                          "ready_at": _s(j.get("ready_at")), "note": note, "tech": tech, "stale": stale,
+                          **acts(j["job"], state, bool(j.get("cancel_requested")))})
         ended = {f["job"]: parse_local(f.get("ended")) for f in fins}
         for j in jobs:
             st, jid = j.get("state"), j["job"]
@@ -513,6 +536,28 @@ def bar(done, total, unit_label) -> str:
             f'aria-label="{esc(unit_label)} {int(done)} of {int(total)}"></progress>')
 
 
+def actions_html(x: dict) -> str:
+    """The buttons for one job (summary() decided who gets them). Cancel is two steps built into the page: the
+    button reveals a form (reason + 'Yes, cancel'); nothing is sent before that. Script: /jobs/jobs.js."""
+    if not x.get("id") or not (x.get("can_cancel") or x.get("can_release")):
+        return ""
+    job, out = esc(x["id"], quote=True), []
+    if x.get("can_release"):
+        out.append(f'<button type="button" class="cj-jobs-btn" data-act="release" data-job="{job}">'
+                   "Release (let it start)</button>")
+    if x.get("can_cancel"):
+        out.append(f'<button type="button" class="cj-jobs-btn cj-jobs-btn-warn" data-act="ask" data-job="{job}">'
+                   "Cancel job&hellip;</button>"
+                   f'<form class="cj-jobs-cf" data-job="{job}" hidden><p class="cj-jobs-cq"><b>Cancel this job?</b> '
+                   "A running job is stopped (its partial run is kept); a waiting one is never started.</p>"
+                   f'<label class="cj-jobs-lbl">Reason (required)<input class="cj-jobs-in" name="reason" required '
+                   f'maxlength="{REASON_MAX}" autocomplete="off"></label>'
+                   '<span class="cj-jobs-btns"><button type="submit" class="cj-jobs-btn cj-jobs-btn-warn">'
+                   'Yes, cancel</button><button type="button" class="cj-jobs-btn" data-act="back">'
+                   "No, keep it</button></span></form>")
+    return f'<div class="cj-jobs-act">{"".join(out)}<p class="cj-jobs-res" role="status" hidden></p></div>'
+
+
 def render(s: dict) -> dict:
     """summary() -> {section: html fragment}; the page's placeholders and the refresh both use these."""
     snap, out, asof, admin = s["snapshot"], {}, s["asof"], s["admin"]
@@ -592,6 +637,7 @@ def render(s: dict) -> dict:
         if r["cancel_requested"]:
             body.append(f'<p class="cj-jobs-warn">{esc("Cancel requested: it stops within a few seconds.")}</p>')
         body.append(tech(r))
+        body.append(actions_html(r))
         cards.append(f'<article class="cj-card cj-jobs-item">{"".join(body)}</article>')
     if cards:
         parts.append(f'<div class="cj-jobs-grid">{"".join(cards)}</div>')
@@ -610,7 +656,7 @@ def render(s: dict) -> dict:
         num = (f'<span class="cj-jobs-pos">{x["position"]}</span>' if x["position"] else
                '<span class="cj-jobs-pos cj-jobs-t-off" aria-hidden="true">•</span>')
         rows.append(f'<li class="cj-jobs-row">{num}<span class="cj-jobs-main">{name_line(x)}'
-                    f'<span class="cj-mut">{esc(x["note"] + sfx)}</span>{tech(x)}</span>'
+                    f'<span class="cj-mut">{esc(x["note"] + sfx)}</span>{tech(x)}{actions_html(x)}</span>'
                     f'{chip(x["label"], x["tone"])}</li>')
     parts.append(f'<ol class="cj-card cj-jobs-rows">{"".join(rows)}</ol>' if rows else
                  empty(f"Nothing was waiting {asof}." if asof else "Nothing is waiting." if s["snapshot"]["present"]
@@ -688,7 +734,7 @@ def page_body(fragments: dict) -> str:
 
 
 # ---------------------------------------------------------------- the page's script (served as /jobs/jobs.js)
-JS = r"""// Jobs page refresh (portal/modules/jobs.py): every 30 s, and when the tab comes back, GET api/summary?html=1
+JS = r"""// Jobs page (portal/modules/jobs.py): cancel / release buttons (two-step cancel form, no dialogs); refresh every 30 s, and when the tab comes back, GET api/summary?html=1
 // (same origin) and swap in the section fragments. The fragments are rendered and escaped by the server, exactly
 // as on first load; this script never builds HTML from data. Opened as a file, it does nothing.
 (function () {
@@ -703,6 +749,9 @@ JS = r"""// Jobs page refresh (portal/modules/jobs.py): every 30 s, and when the
     err.textContent = text || '';
     err.hidden = !text;
   }
+  function editing() {   // a refresh must not wipe a cancel form the person is filling in, or a result message
+    return !!document.querySelector('.cj-jobs-cf:not([hidden]), .cj-jobs-res:not([hidden])');
+  }
   function swap(frag) {
     Object.keys(IDS).forEach(function (k) {
       var box = document.getElementById(IDS[k]);
@@ -713,7 +762,7 @@ JS = r"""// Jobs page refresh (portal/modules/jobs.py): every 30 s, and when the
     });
   }
   function load() {
-    if (busy || document.hidden) return;
+    if (busy || document.hidden || editing()) return;
     busy = true;
     fetch('api/summary?html=1', {cache: 'no-store', credentials: 'same-origin'})
       .then(function (r) {
@@ -724,10 +773,169 @@ JS = r"""// Jobs page refresh (portal/modules/jobs.py): every 30 s, and when the
       .catch(function (e) { note('Could not refresh (' + e.message + '); showing the last loaded state.'); })
       .then(function () { busy = false; });
   }
+  function say(act, text, bad) {
+    var res = act.querySelector('.cj-jobs-res');
+    if (!res) return;
+    res.textContent = text;
+    res.hidden = !text;
+    res.classList.toggle('cj-jobs-res-bad', !!bad);
+  }
+  function post(act, path, body, btn) {
+    btn.disabled = true;
+    say(act, 'Sending...', false);
+    fetch(path, {method: 'POST', credentials: 'same-origin', cache: 'no-store',
+                 headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)})
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return [r.status, j]; }); })
+      .then(function (sj) {
+        var ok = sj[0] === 200 && sj[1].ok;
+        say(act, sj[1].message || (ok ? 'Done.' : 'It did not work (status ' + sj[0] + ').'), !ok);
+        if (ok) {
+          act.querySelectorAll('button').forEach(function (b) { b.hidden = true; });
+          var f = act.querySelector('form'); if (f) f.hidden = true;
+        } else { btn.disabled = false; }
+      })
+      .catch(function () { say(act, 'Could not reach the portal. Nothing was confirmed; try again.', true); btn.disabled = false; });
+  }
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('button[data-act]');
+    var act = b && b.closest('.cj-jobs-act');
+    if (!act) return;
+    var form = act.querySelector('form.cj-jobs-cf');
+    if (b.dataset.act === 'ask' && form) {
+      form.hidden = false; b.hidden = true; say(act, '', false);
+      var inp = form.querySelector('input'); if (inp) inp.focus();
+    } else if (b.dataset.act === 'back' && form) {
+      form.hidden = true; say(act, '', false);
+      var ask = act.querySelector('button[data-act="ask"]'); if (ask) ask.hidden = false;
+    } else if (b.dataset.act === 'release') {
+      post(act, 'api/release', {job: b.dataset.job}, b);
+    }
+  });
+  document.addEventListener('submit', function (e) {
+    var form = e.target.closest && e.target.closest('form.cj-jobs-cf');
+    if (!form) return;
+    e.preventDefault();
+    var reason = form.elements.reason.value.trim();
+    var act = form.closest('.cj-jobs-act');
+    if (!reason) { say(act, 'Please type a reason first.', true); return; }
+    post(act, 'api/cancel', {job: form.dataset.job, reason: reason}, form.querySelector('button[type=submit]'));
+  });
   setInterval(load, 30000);
   document.addEventListener('visibilitychange', function () { if (!document.hidden) load(); });
 })();
 """
+
+
+# ---------------------------------------------------------------- actions (cancel / release)
+_sync_mod = None
+_audit_lock = threading.Lock()
+_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="cj-jobs-act")
+CTRL = re.compile(r"[\x00-\x1f\x7f]")
+JOB_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,120}$")
+
+
+def sync_module():
+    """jobs/sync.py, loaded once by path (jobs/ is not a package; sync.py puts its own folders on sys.path)."""
+    global _sync_mod
+    if _sync_mod is None:
+        spec = importlib.util.spec_from_file_location("cj_jobs_sync", REPO / "jobs" / "sync.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _sync_mod = mod
+    return _sync_mod
+
+
+def audit_path(cfg) -> Path:
+    return Path(cfg.state_dir) / "audit" / "portal.jsonl"
+
+
+def audit(cfg, actor, action, job, reason, result):
+    """One JSON line per action. Raises OSError if it can't be written (callers check first with audit_ready)."""
+    line = json.dumps({"time": datetime.now(timezone.utc).isoformat(timespec="seconds"), "actor": actor,
+                       "action": action, "job": job, "reason": reason, "result": result}, ensure_ascii=False)
+    with _audit_lock, open(audit_path(cfg), "a", encoding="utf-8", newline="\n") as f:
+        f.write(line + "\n")
+
+
+def audit_ready(cfg) -> bool:
+    try:
+        audit_path(cfg).parent.mkdir(parents=True, exist_ok=True)
+        return True
+    except (OSError, TypeError, AttributeError):
+        return False
+
+
+def act(cfg, user: dict, can_see, action: str, job, reason, now=None) -> tuple:
+    """Runs in a worker thread. -> (http status, {"ok": bool, "message": str}). Every check is made here, on the
+    server, from live.json and the registry; nothing the client sends but the job id and the reason is used."""
+    now = time.time() if now is None else now
+    admin = (user or {}).get("role") == "admin"
+    uid = (user or {}).get("id")
+
+    def no(code, msg):
+        return code, {"ok": False, "message": msg}
+    if not isinstance(job, str) or not JOB_RE.match(job):
+        return no(400, "That job id is not valid.")
+    if action == "release" and not admin:
+        return no(403, "Only an admin can release a held job.")
+    if action == "cancel":
+        reg, reg_err, _ = registry_jobs(getattr(cfg, "registry", None))
+        owner = reg_err is None and bool(uid) and can_see(user, _d(reg.get(job)).get("who"))
+        if not (admin or owner):
+            return no(403, "You can only cancel your own jobs.")
+        reason = CTRL.sub(" ", reason).strip() if isinstance(reason, str) else ""
+        if not reason:
+            return no(400, "Please type a reason for cancelling.")
+        if len(reason) > REASON_MAX:
+            return no(400, f"The reason is too long (at most {REASON_MAX} characters).")
+    else:
+        reason = None
+    live, err = read_live(getattr(cfg, "registry", None))
+    snap = snapshot_info(live, err, now)
+    if not snap["present"] or snap["stale"]:
+        return no(409, "The GPU computer's status is out of date, so this was not sent. Wait for the page to "
+                       "update, then try again.")
+    found = None
+    for q in _l(live.get("queues")):
+        q = _d(q)
+        for j in _l(q.get("jobs")):
+            if _d(j).get("job") == job:
+                found = (q, _d(j))
+        if found is None and _d(q.get("running")).get("job") == job:
+            found = (q, {"job": job, "state": "running", "cancel_requested": _d(q.get("running")).get("cancel_requested")})
+        if found:
+            break
+    if found is None:
+        return no(404, "That job is not on a GPU computer's list (it may have finished). Refresh the page.")
+    q, j = found
+    share, state = _s(q.get("share")), j.get("state")
+    if _s(q.get("reach")) != "ok" or not share:
+        return no(409, "The laptop can't reach that GPU computer right now, so this was not sent.")
+    if action == "cancel":
+        if state not in CANCELLABLE:
+            return no(409, "That job is not waiting or running any more.")
+        if j.get("cancel_requested"):
+            return no(409, "A cancel was already requested for this job.")
+    elif state != "held":
+        return no(409, "That job is not on hold.")
+    if not audit_ready(cfg):
+        return no(500, "The audit log can't be written, so nothing was done.")
+    try:
+        S = sync_module()
+        if action == "cancel":
+            S.cancel(job, share, who=uid, reason=reason)
+            msg = ("Cancel requested. The GPU computer stops it within about 10 s." if state == "running" else
+                   "Cancel requested. It will not be started.")
+        else:
+            S.release(job, share)
+            msg = "Released. It starts when its turn comes."
+    except Exception as e:                               # SyncError, or the share failing mid-write
+        audit(cfg, uid, action, job, reason, f"error: {type(e).__name__}")
+        why = f" ({e})" if admin else ""
+        return no(502, f"It was not {'cancelled' if action == 'cancel' else 'released'}: the job may have just "
+                       f"finished or the GPU computer's share is not answering. Refresh and try again.{why}")
+    audit(cfg, uid, action, job, reason, "ok")
+    return 200, {"ok": True, "message": msg}
 
 
 # ---------------------------------------------------------------- routes
@@ -749,6 +957,31 @@ def routes(ctx) -> list:
         r.headers["Cache-Control"] = "no-cache"
         return r
 
+    async def api_action(request: Request, action: str):
+        try:
+            body = json.loads((await request.body())[:8192] or b"{}")
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            return ctx.json({"ok": False, "message": "That request was not understood."}, 400)
+        user = ctx.user(request)       # a "share" / "path" in the body is never read
+        fut = asyncio.get_running_loop().run_in_executor(
+            _pool, lambda: act(ctx.cfg, user, ctx.can_see, action, body.get("job"), body.get("reason")))
+        try:
+            code, out = await asyncio.wait_for(asyncio.shield(fut), ACTION_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            return ctx.json({"ok": False, "message": "The GPU computer's share is slow to answer. The request may "
+                             "still go through; refresh the page in a minute to check."}, 504)
+        return ctx.json(out, code)
+
+    async def api_cancel(request: Request):
+        return await api_action(request, "cancel")
+
+    async def api_release(request: Request):
+        return await api_action(request, "release")
+
     return [Route(PREFIX + "/", page, methods=["GET"]),
             Route(PREFIX + "/jobs.js", script, methods=["GET"]),
-            Route(PREFIX + "/api/summary", api_summary, methods=["GET"])]
+            Route(PREFIX + "/api/summary", api_summary, methods=["GET"]),
+            Route(PREFIX + "/api/cancel", api_cancel, methods=["POST"]),
+            Route(PREFIX + "/api/release", api_release, methods=["POST"])]
