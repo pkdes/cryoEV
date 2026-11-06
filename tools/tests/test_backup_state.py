@@ -196,6 +196,27 @@ class BackupTests(unittest.TestCase):
         self.run_backup(push=False, portal=[prev])
         self.assertEqual(self.mirrored() - control, {"portal_audit/portal_preview/portal.jsonl"})
 
+    def test_portal_audit_own_cap_and_warning(self):
+        import contextlib
+        import io
+        d = Path(self.tmp.name) / "portal"
+        (d / "audit").mkdir(parents=True)
+        log = d / "audit" / "portal.jsonl"
+        log.write_bytes(b"x" * (2 * 1024 * 1024))     # over --max-mb 1, under the audit cap
+        self.assertEqual(self.run_backup(push=False, portal=[d]), 0)
+        self.assertIn("portal_audit/portal/portal.jsonl", self.mirrored(), "own, larger cap")
+        with mock.patch.object(B, "AUDIT_MAX_MB", 1):   # now over the audit cap
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(self.run_backup(push=False, portal=[d]), 0)   # normal run, not dry-run
+            self.assertIn("WARNING portal audit log NOT backed up (too-big)", err.getvalue())
+            self.assertNotIn("portal_audit/portal/portal.jsonl", self.mirrored())
+        # control: no warning when everything fits
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.run_backup(push=False, portal=[d])
+        self.assertNotIn("WARNING", err.getvalue())
+
     def test_portal_state_flag(self):
         d = Path(self.tmp.name) / "ps"
         (d / "audit").mkdir(parents=True)

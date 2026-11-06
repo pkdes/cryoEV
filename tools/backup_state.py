@@ -7,7 +7,7 @@ Only files matching INCLUDE (and none of EXCLUDE, and <= --max-mb) are copied, b
 <repo>/state/<same relative path>. Mirror files whose source is gone are removed (inside <repo>/state only).
 The portal audit log (<portal state dir>/audit/portal.jsonl) lives outside --source (default state dirs:
 ~/.cryoev/portal*, i.e. live and preview; override with repeated --portal-state DIR) and is mirrored to
-<repo>/state/portal_audit/<state dir name>/portal.jsonl with the same size rules.
+<repo>/state/portal_audit/<state dir name>/portal.jsonl with its own size cap (AUDIT_MAX_MB, 200); a skipped audit log prints a warning.
 <repo>/MANIFEST.md5 lists `md5  relpath`, sorted by path. <repo>/.gitattributes is set to `* -text` so git never
 rewrites line endings (a fresh clone must be byte-identical). Then `git add -A`, a commit only if anything
 changed (`backup <UTC>: N changed`), and `git push` with --push. The source folder is only ever read.
@@ -44,6 +44,7 @@ EXCLUDE_PATHS = ["registry/live/**",                       # regenerated every 3
                  "registry/cache/**"]                      # derived parse caches (safe to delete, rebuilt on import)
 EXCLUDE_NAMES = [".review_key", "*key*", "*.html", "*.htm",  # secrets, generated pages
                  "*.png", "*.jpg", "*.jpeg", "*.tif", "*.tiff", "*.mrc", "*.pt", "*.lock"]
+AUDIT_MAX_MB = 200                  # own cap for portal audit logs (append only, grow forever); ignores --max-mb
 MIRROR_DIR = "state"
 MANIFEST = "MANIFEST.md5"
 GITATTRIBUTES = "* -text\n"
@@ -141,13 +142,14 @@ def select(source, max_mb, portal_dirs=()):
                 skipped.setdefault(why, []).append(rel)
     for rel, p in portal_audit_files(portal_dirs).items():
         try:
-            why = classify(rel, p.stat().st_size, max_bytes)
+            why = classify(rel, p.stat().st_size, int(AUDIT_MAX_MB * 1024 * 1024))
         except OSError:
             continue
         if why == "include":
             chosen[rel] = p
         else:
             skipped.setdefault(why, []).append(rel)
+            print(f"backup_state: WARNING portal audit log NOT backed up ({why}): {p}", file=sys.stderr)
     return chosen, skipped
 
 
