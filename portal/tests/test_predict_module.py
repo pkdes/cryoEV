@@ -146,6 +146,9 @@ class Base(unittest.TestCase):
         time.sleep(0.5)                                    # a detached predictor may still be closing its log
         cls.env.cleanup()
 
+    def setUp(self):
+        P._CREATES.clear()                   # a finished pick pressed again within 10 min opens its set: not across tests
+
     # ---- helpers
     def cfg(self):
         """The module's view of the portal config (what routes(ctx) gets as ctx.cfg)."""

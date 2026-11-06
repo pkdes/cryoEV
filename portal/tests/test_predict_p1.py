@@ -20,7 +20,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cjtest as T  # noqa: E402
 import test_predict_module as TM  # noqa: E402
-from portal.modules import names as NM  # noqa: E402
+from portal import names as NM  # noqa: E402
 from portal.modules import predict as P  # noqa: E402
 
 GOLDEN, MODEL, XSS = TM.GOLDEN, TM.MODEL, TM.XSS
@@ -111,6 +111,25 @@ class Estimate(unittest.TestCase):
         self.assertEqual(P.estimate_line(self.cfg, now=t + 599), first)
         self.assertNotEqual(P.estimate_line(self.cfg, now=t + 601), first)
 
+    def test_last_start_line_counts_and_implausible_runs_are_dropped(self):
+        # a log appended across a restart: an old start two days earlier, then the run that finished
+        d = self.finished(1, 100, 30)
+        t0 = 1_800_000_000
+        iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t))  # noqa: E731
+        log = d / "predict.log"
+        log.write_text(f"=== {iso(t0 - 172800)} predict_local ps on cpu: argv\ncrashed\n" + log.read_text("utf-8"), "utf-8")
+        self.assertEqual(P.run_seconds(d), (100, 30))           # not 172830 s
+        # the points that fit a=-6661, b=462 before: one stalled set among sane ones
+        for i, n in enumerate((10, 50, 120), 2):
+            self.finished(i, n, 10 + 0.2 * n)
+        stalled = self.finished(9, 20, 20 * 6)                  # 6 s per image: a stall, not data
+        self.assertIsNone(P.run_seconds(stalled))
+        a, b, fitted = P.estimate_line(self.cfg)
+        self.assertTrue(fitted)
+        self.assertTrue(0 < b < 1 and a > -5, (a, b))
+        self.finished(10, 30, 0)                                # not positive: dropped, no crash
+        self.assertIsNone(P.run_seconds(self.tmp / "ps_20261106_00000a"))
+
     def test_queue_ahead(self):
         for i, s in enumerate(("queued", "running", "done", "failed"), 1):
             d = self.tmp / f"ps_20261106_{i:06x}"
@@ -121,6 +140,7 @@ class Estimate(unittest.TestCase):
 
 class P1(TM.Base):
     def setUp(self):
+        P._CREATES.clear()
         self.addCleanup(P._CREATES.clear)
 
     # ---- helpers
@@ -337,13 +357,15 @@ class P1(TM.Base):
         src = self.src_a
         need = P.tile_bytes(src)
         self.assertGreater(need, 0)
-        with mock.patch.object(P, "disk_free", return_value=int(need * 1.1) - 1):
+        with mock.patch.object(P, "FREE_MARGIN_BYTES", 0), mock.patch.object(P, "disk_free",
+                                                                               return_value=int(need * 1.1) - 1):
             with self.assertRaises(P.Refusal) as cm:
                 P.check_create_disk(self.root, src, None, False)
             self.assertEqual(cm.exception.status, 507)
             self.assertIn("Not enough disk space", cm.exception.msg)
             P.check_create_disk(self.root, src, None, True)              # same drive + link: nothing is copied
-        with mock.patch.object(P, "disk_free", return_value=int(need * 1.1) + 1):
+        with mock.patch.object(P, "FREE_MARGIN_BYTES", 0), mock.patch.object(P, "disk_free",
+                                                                               return_value=int(need * 1.1) + 1):
             P.check_create_disk(self.root, src, None, False)             # control: 110 % fits
 
     def test_session_pick_refused_when_disk_is_short(self):
@@ -424,13 +446,13 @@ class P1(TM.Base):
         page = self.page(f"/predict/{ps}/", "basic")
         self.assertIn(f'action="/predict/{ps}/rename"', page)
         with mock.patch.object(P, "audit_event") as audit:
-            st, h, _ = self.rename(ps, "Owner  <i>name</i>")
+            st, h, _ = self.rename(ps, "Owner   <i>name</i>")
             self.assertEqual((st, T.hget(h, "location")), (303, f"/predict/{ps}/"))
             self.assertEqual(audit.call_args.args[2:4], ("predict.rename", ps))
         req = json.loads((self.root / ps / "request.json").read_text(encoding="utf-8"))
-        self.assertEqual(req["name"], "Owner  <i>name</i>")
+        self.assertEqual(req["name"], "Owner <i>name</i>")
         self.assertEqual(req["owner"], "bas")                                  # nothing else changed
-        self.assertIn("<h1>Owner  &lt;i&gt;name&lt;/i&gt;</h1>", self.page(f"/predict/{ps}/", "basic"))
+        self.assertIn("<h1>Owner &lt;i&gt;name&lt;/i&gt;</h1>", self.page(f"/predict/{ps}/", "basic"))
         self.assertEqual(self.rename(ps, "Admin did it", "admin")[0], 303)
         self.assertEqual(json.loads((self.root / ps / "request.json").read_text("utf-8"))["name"], "Admin did it")
         self.assertEqual(self.rename(ps, "Nope", "other")[0], 404)
@@ -440,6 +462,160 @@ class P1(TM.Base):
         self.assertEqual(json.loads((self.root / ps / "request.json").read_text("utf-8"))["name"], "Admin did it")
         self.assertEqual(self.rename(ps, " \u200b ")[0], 303)                  # empty: back to the default
         self.assertNotIn("name", json.loads((self.root / ps / "request.json").read_text("utf-8")))
+
+    def test_rename_lock_serialises_the_read_modify_write(self):
+        ps = self.fake_set("bas", "done")
+        self.addCleanup(shutil.rmtree, self.root / ps, True)
+        d = self.root / ps
+        real, state = P.PS.write_json_atomic, {"in": 0, "max": 0}
+        guard = threading.Lock()
+
+        def slow(path, obj):
+            with guard:
+                state["in"] += 1
+                state["max"] = max(state["max"], state["in"])
+            time.sleep(0.15)                                    # the window a missing lock would leave open
+            real(path, obj)
+            with guard:
+                state["in"] -= 1
+        with mock.patch.object(P.PS, "write_json_atomic", slow):
+            ts = [threading.Thread(target=P.rename_set, args=(self.cfg(), {"id": "bas"}, d, f"n{i}")) for i in range(4)]
+            [t.start() for t in ts]
+            [t.join() for t in ts]
+        self.assertEqual(state["max"], 1, "two renames wrote at once")
+        self.assertRegex(json.loads((d / "request.json").read_text("utf-8"))["name"], r"^n\d$")
+
+    def test_rename_oserror_is_a_503_page(self):
+        ps = self.fake_set("bas", "done")
+        self.addCleanup(shutil.rmtree, self.root / ps, True)
+        with mock.patch.object(P, "rename_set", side_effect=OSError("locked")):
+            st, _, body = self.rename(ps, "x")
+        self.assertEqual(st, 503)
+        self.assertIn("can’t be renamed right now", body.decode("utf-8"))
+        self.assertNotIn("locked", body.decode("utf-8"))
+
+    def test_title_cannot_inject_placeholders(self):
+        ps = self.fake_set("bas", "done")
+        self.addCleanup(shutil.rmtree, self.root / ps, True)
+        self.assertEqual(self.rename(ps, "{{body}} {{active}}")[0], 303)
+        page = self.page(f"/predict/{ps}/", "basic")
+        title = re.search(r"<title>(.*?)</title>", page, re.S).group(1)
+        self.assertNotIn("{", title)
+        self.assertNotIn("<", title)
+        self.assertEqual(title, "｛｛body｝｝ ｛｛active｝｝")
+        self.assertIn("<h1>{{body}} {{active}}</h1>", page)
+
+    def test_prefill_unchanged_is_not_stored_changed_is(self):
+        page = self.page(f"/predict/new/session/{self.key_a}/", "basic")
+        default = html.unescape(re.search(r'name="name_default" value="([^"]*)"', page).group(1))
+        self.assertRegex(page, r'<input name="name" maxlength="80" value="' + re.escape(html.escape(default)))
+        ps1 = self.wait_task(self.raw_submit(name=default, name_default=default)[1].rstrip("/").split("/")[-1])
+        self.assertNotIn("name", json.loads((self.root / ps1["href"].strip("/").split("/")[-1] / "request.json")
+                                             .read_text("utf-8")))
+        st, loc, _ = self.raw_submit(name=default + " v2", name_default=default, count="2", how="count")
+        ps2 = self.wait_task(loc.rstrip("/").split("/")[-1])["href"].strip("/").split("/")[-1]
+        self.assertEqual(json.loads((self.root / ps2 / "request.json").read_text("utf-8"))["name"], default + " v2")
+        for ps in (ps1["href"].strip("/").split("/")[-1], ps2):
+            self.wait_state(ps)
+
+    def test_finished_pick_pressed_again_opens_the_same_set(self):
+        before = set(self.sets())
+        st, loc, _ = self.raw_submit()
+        j = self.wait_task(loc.rstrip("/").split("/")[-1])
+        self.assertEqual(j["state"], "done")
+        st2, loc2, _ = self.raw_submit()
+        self.assertEqual((st2, loc2), (303, loc))
+        self.assertEqual(self.get(loc2, "basic")[0], 303)               # on to the existing analysis
+        self.assertEqual(len(set(self.sets()) - before), 1)
+        self.wait_state(j["href"].strip("/").split("/")[-1])
+
+    def test_cancel_refused_while_the_create_runs(self):
+        uid, _ = self.stage_upload(2)
+        real, gate = P.PS.create, threading.Event()
+
+        def slow(*a, **k):
+            gate.wait(30)
+            return real(*a, **k)
+        with mock.patch.object(P.PS, "create", slow):
+            self.jpost(f"/predict/api/upload/{uid}/create", {})
+            st, _, body = self.jpost(f"/predict/api/upload/{uid}/cancel", {})
+            self.assertEqual(st, 409, body)
+            self.assertTrue((self.staging(uid) / "files").is_dir())
+            gate.set()
+            self.assertEqual(self.wait_task(uid)["state"], "done")
+        self.wait_state(self.wait_task(uid)["href"].strip("/").split("/")[-1])
+
+    def test_creates_in_flight_count_toward_the_basic_limit(self):
+        real, gate = P.PS.create, threading.Event()
+
+        def slow(*a, **k):
+            gate.wait(30)
+            return real(*a, **k)
+        before = set(self.sets())
+        started = []
+        with mock.patch.object(P.PS, "create", slow):
+            for n in (1, 2, 3):                                 # three different picks, all still being made
+                st, loc, _ = self.raw_submit("other", how="count", count=str(n))
+                self.assertEqual(st, 303, n)
+                started.append(loc.rstrip("/").split("/")[-1])
+            st, _, body = self.raw_submit("other", nm_g0="1.4725")
+            self.assertEqual(st, 429, body[:300])
+            self.assertIn("already have 3 analyses", body)
+            self.assertEqual(self.raw_submit("other", how="count", count="1")[1], f"/predict/preparing/{started[0]}/")
+            gate.set()
+            for tid in started:
+                self.assertEqual(self.wait_task(tid, "other")["state"], "done")
+        for ps in set(self.sets()) - before:
+            self.wait_state(ps)
+
+    def test_failed_create_refreshes_the_upload_age(self):
+        uid, _ = self.stage_upload(2)
+        meta = self.staging(uid) / "upload.json"
+        old = time.time() - 3000
+        os.utime(meta, (old, old))
+        with mock.patch.object(P.PS, "create", side_effect=P.PS.PredictSetError("refused: boom")):
+            self.jpost(f"/predict/api/upload/{uid}/create", {})
+            self.assertEqual(self.wait_task(uid)["state"], "failed")
+        self.assertGreater(meta.stat().st_mtime, time.time() - 60)
+
+    def test_sweep_removes_stale_incoming_only_when_idle(self):
+        inc = self.root / ".incoming"
+        stale, fresh = inc / "ps_20261106_aaaaaa", inc / "ps_20261106_bbbbbb"
+        for d in (stale, fresh):
+            (d / "images").mkdir(parents=True)
+        old = time.time() - 7200
+        os.utime(stale, (old, old))
+        self.addCleanup(shutil.rmtree, inc, True)
+        with mock.patch.dict(P._CREATES, {"sc_000000000001": {"state": "running", "owner": "x"}}):
+            P.sweep_scratch(self.cfg())
+            self.assertTrue(stale.exists())                     # a create is running: left alone
+        P.sweep_scratch(self.cfg())
+        self.assertFalse(stale.exists())
+        self.assertTrue(fresh.exists())                         # younger than an hour
+
+    def test_script_stops_on_a_vanished_task(self):
+        js = self.get("/predict/predict.js")[2].decode("utf-8")
+        self.assertIn("r.status === 404", js)
+        self.assertIn("This preparation was interrupted. Check My analyses; if it isn", js)
+        self.assertEqual(self.get("/predict/api/preparing/sc_0123456789ab", "basic")[0], 404)
+
+    def test_disk_check_reuses_the_margin_and_uploads_in_flight(self):
+        src, need = self.src_a, P.tile_bytes(self.src_a)
+        with mock.patch.object(P, "FREE_MARGIN_BYTES", 1000):
+            with mock.patch.object(P, "disk_free", return_value=int(need * 1.1) + 999):
+                with self.assertRaises(P.Refusal):
+                    P.check_create_disk(self.root, src, None, False)
+            with mock.patch.object(P, "disk_free", return_value=int(need * 1.1) + 1000):
+                P.check_create_disk(self.root, src, None, False)
+            with mock.patch.object(P, "_held", return_value=5000), \
+                    mock.patch.object(P, "disk_free", return_value=int(need * 1.1) + 1000):
+                with self.assertRaises(P.Refusal):               # uploads in flight hold space
+                    P.check_create_disk(self.root, src, None, False)
+        # a link that cannot be made (volume without hard links) is checked at the copy size
+        with mock.patch.object(P, "can_link", return_value=False), mock.patch.object(P, "disk_free", return_value=10):
+            with self.assertRaises(P.Refusal):
+                P.check_create_disk(self.root, src, None, True)
+        self.assertTrue(P.can_link(self.root))
 
     def test_concurrent_renames_leave_valid_json(self):
         ps = self.fake_set("bas", "done")

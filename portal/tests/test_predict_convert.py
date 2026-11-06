@@ -324,6 +324,7 @@ class Base(unittest.TestCase):
 
     def setUp(self):
         PSRC.clear_cache()
+        P._CREATES.clear()
         P._RECIPES.clear()
         self.w.hooks(HOOKS_OK)
         for k in ("FAKE_CONVERT_MODE", "FAKE_CONVERT_N", "FAKE_CONVERT_GATE", "FAKE_CONVERT_WARN"):

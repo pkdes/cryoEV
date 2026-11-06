@@ -352,16 +352,20 @@ def _scan(from_dir: Path, manifest: Path | None, names) -> list:
                    and not p.name.startswith(".") and p.resolve() not in skip), key=lambda p: p.name)
 
 
-_NAME_DROP = re.compile("[\u202a-\u202e\u2066-\u2069\u200e\u200f\u200b-\u200d\ufeff]")
-
-
 def clean_name(s) -> str | None:
-    """An analysis name for display: trimmed, control (Cc), bidi-control and zero-width characters removed, at most
-    NAME_MAX characters. Nothing left -> None. Not an escape: pages still escape it."""
+    """An analysis name for display: NFC; tab, newline, line and paragraph separators become a space; control (Cc)
+    and format (Cf: bidi controls, zero-width, soft hyphen, word joiners, tag characters) characters are dropped;
+    runs of whitespace collapse to one space; trimmed, at most NAME_MAX characters, and a combining mark left
+    dangling by the cut is removed. Nothing left -> None. Not an escape: pages still escape it."""
     if not isinstance(s, str):
         return None
-    s = "".join(ch for ch in _NAME_DROP.sub("", s) if unicodedata.category(ch) != "Cc")
-    return s.strip()[:NAME_MAX].strip() or None
+    s = unicodedata.normalize("NFC", s)
+    s = "".join(" " if ch in "\t\n\r\u2028\u2029" else ch for ch in s)
+    s = "".join(ch for ch in s if unicodedata.category(ch) not in ("Cc", "Cf"))
+    s = " ".join(s.split())[:NAME_MAX]
+    while s and unicodedata.category(s[-1]).startswith("M"):
+        s = s[:-1]
+    return s.strip() or None
 
 
 def _place(src: Path, dst: Path, md5: str, link: bool) -> str:

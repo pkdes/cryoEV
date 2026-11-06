@@ -322,8 +322,18 @@ class CreateTests(PredictRoots, unittest.TestCase):
         self.assertIsNone(PS.clean_name(""))
         self.assertIsNone(PS.clean_name("   "))
         self.assertIsNone(PS.clean_name(None))
-        self.assertEqual(PS.clean_name("a⁦b⁩c‎d‏e﻿f‌g‍h	z"), "abcdefghz")
         self.assertEqual(PS.clean_name("<b>x</b>"), "<b>x</b>")   # not an escape: the pages escape it
+        # Cf (bidi, zero-width, word joiners, soft hyphen, Arabic letter mark, Mongolian vowel sep., tags) and Cc go
+        self.assertEqual(PS.clean_name("a⁦b⁩c‎d‏e﻿f‌g‍h"), "abcdefgh")
+        self.assertEqual(PS.clean_name("a؜b⁠c⁤d­e᠎f\U000e0041g\x07h"), "abcdefgh")
+        # NFC: e + combining acute equals the precomposed letter
+        self.assertEqual(PS.clean_name("Café"), "Café")
+        # tab, newline, CR, line and paragraph separators become one space; runs collapse
+        self.assertEqual(PS.clean_name("a\tb\n\r\nc d   e   f"), "a b c d e f")
+        # a combining mark left at the end by the cut goes (q + two marks, cut between them)
+        self.assertEqual(PS.clean_name("x" * 78 + "q́̂y"), "x" * 78 + "q")
+        self.assertEqual(PS.clean_name("ok ́́"), "ok")
+
 
     def test_progress_and_link(self):
         d = self.tmp / "prog"

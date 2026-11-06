@@ -112,7 +112,7 @@ Rules:
     another drive) and the staging is removed only after success: a failed create keeps the upload ("Try again").
     TILES_MAX_TOTAL_BYTES and a free-disk check (copies: total + 10 %) refuse early. The forms show an estimate
     (a + b * images fitted to finished laptop runs, cached 10 min) and an optional Name (request.json `name`,
-    kept as typed when the prefill is unchanged); POST /predict/<ps>/rename changes it (portal/modules/names.py has
+    not stored when it is still the prefill); POST /predict/<ps>/rename changes it (portal/names.py has
     display_name).
   - A basic user has at most MAX_ACTIVE_BASIC sets queued or running. A review package built here is appended to
     the registry (review_package) once.
@@ -147,7 +147,7 @@ from jobs import convert_raw as CR
 from jobs import predict_local as PL
 from jobs import predict_set as PS
 from portal import predict_sources as PSRC
-from portal.modules import names as NM
+from portal import names as NM
 
 PREFIX = "/predict"
 ROLES = ("admin", "advanced", "basic")
@@ -163,7 +163,9 @@ MAX_FILES = PS.MAX_IMAGES                 # 1000 tiles per analysis or upload (=
 TILES_MAX_TOTAL_BYTES = 20 * 1024 ** 3    # one tile upload, all files together (raw uploads: RAW_MAX_TOTAL_BYTES)
 DISK_NEED_FACTOR = 1.1                    # a set's tiles are copied: their total + 10 % must be free (links need none)
 EST_FALLBACK = (12.0, 0.17)               # seconds: a + b * images, until 3 finished laptop sets fit a line
+RESUBMIT_S = 600                          # a finished pick pressed again within this opens its set
 EST_TTL_S = 600                           # the fitted line is cached this long
+EST_MAX_S_PER_IMAGE = 5                   # a finished run slower than this per image is a stall, not data
 EST_MAX_SETS = 300                        # finished sets read for the fit, newest first
 CREATE_ID_RE = re.compile(r"^(?:us|sc)_[0-9a-f]{12}$")   # a background create: us_ = an upload id, sc_ = a session pick
 MAX_FILE_BYTES = 100 * 1024 * 1024        # 100 MB per file
@@ -797,6 +799,12 @@ def source_text(req: dict, srcs, admin=False) -> str:
     return NM.source_label(req, session_label(req, srcs, admin))
 
 
+def tab_title(text: str) -> str:
+    """A browser-tab title safe for ctx.page's `{{...}}` substitution (it escapes & so entities would show): the
+    braces of a free-text name become full-width ones."""
+    return text.replace("{", "\uff5b").replace("}", "\uff5d")
+
+
 def set_title(req: dict, srcs, admin=False) -> str:
     """What the analysis is called everywhere: its name, else "<source> · <date>" (names.display_name)."""
     return NM.display_name(req, session_label(req, srcs, admin))
@@ -924,7 +932,7 @@ def mine_html(items, admin) -> str:
         li.append(f'<li class="cj-card cj-predict-item"><div class="cj-predict-top">'
                   f'<a class="cj-predict-ttl" href="{esc(it["href"])}">{esc(it["title"])}</a>'
                   f'{chip(it["label"], tone)}</div>'
-                  f'<p class="cj-mut">{esc(it["source"] + " · ") if it.get("named") else ""}{esc(when(it["created"]))} · '
+                  f'<p class="cj-mut">{esc(it["source"] + " · " + when(it["created"]) + " · ") if it.get("named") else ""}'
                   f'{esc(prog)}{who}</p>'
                   + (f'<p class="cj-predict-links">{links}</p>' if links else "") + '</li>')
     return f'<ul class="cj-predict-items">{"".join(li)}</ul>'
@@ -1022,10 +1030,19 @@ def page_new(cfg, user, can_see) -> str:
         f'{raw}</div>')
 
 
-def name_field(value) -> str:
+def name_field(value, prefill) -> str:
+    """The Name box, prefilled with the default name; the prefill travels in a hidden field so an unchanged box is
+    not stored as a name (chosen_name)."""
     return (f'<fieldset class="cj-card cj-predict-fs"><legend>Name</legend>'
             f'<label class="cj-predict-field"><span>Analysis name (optional; you can rename it later)</span>'
-            f'<input name="name" maxlength="{PS.NAME_MAX}" value="{esc(value)}"></label></fieldset>')
+            f'<input name="name" maxlength="{PS.NAME_MAX}" value="{esc(value)}"></label>'
+            f'<input type="hidden" name="name_default" value="{esc(prefill)}"></fieldset>')
+
+
+def chosen_name(f: dict):
+    """The name to store: the cleaned Name field, or None when empty or still the prefill that was offered."""
+    n = PS.clean_name(f.get("name"))
+    return None if n is None or n == PS.clean_name(f.get("name_default")) else n
 
 
 def default_name_for(source: dict, label=None) -> str:
@@ -1084,8 +1101,9 @@ def page_session_form(cfg, user, src: dict, t: dict, form=None, error=None) -> s
     over = t["n"] > MAX_FILES
     err = msg_box("", extra=f'<div>{problem_list(error)}</div>') if error else ""
     n0 = sum(len(g["names"]) for i, g in enumerate(t["groups"]) if f"g{i}" in picked and not g["mixed"])
-    name_val = form["name"] if "name" in form else default_name_for(
+    prefill = form["name_default"] if "name_default" in form else default_name_for(
         {"kind": "session", "session": src["session"]}, src["label"])
+    name_val = form["name"] if "name" in form else prefill
     return wrap(
         f'<div class="cj-predict"><p class="cj-mut"><a href="/predict/new/">← Back</a></p>'
         f'<h1>{esc(src["label"])}</h1><p class="cj-mut">Session {esc(src["session"])} · {t["n"]} tiles'
@@ -1109,13 +1127,14 @@ def page_session_form(cfg, user, src: dict, t: dict, form=None, error=None) -> s
         f'<p class="cj-mut" id="cj-predict-sel" role="status"></p>'
         + estimate_html(cfg, min(n0, MAX_FILES))
         + (f'<p class="cj-mut">At most {MAX_FILES} tiles per analysis: choose a number.</p>' if over else "")
-        + f'</fieldset>{name_field(name_val)}{model_block(cfg, user, form.get("model"))}'
+        + f'</fieldset>{name_field(name_val, prefill)}{model_block(cfg, user, form.get("model"))}'
         f'<p><button class="cj-predict-btn cj-predict-primary" type="submit" data-busy="Preparing your images… '
         f'this can take a minute">Start analysis</button></p></form></div>')
 
 
 def page_upload_form(cfg, user, form=None, error=None) -> str:
     form = form or {}
+    up_prefill = form["name_default"] if "name_default" in form else default_name_for({"kind": "upload"})
     err = msg_box("", extra=f'<div>{problem_list(error)}</div>') if error else ""
     again = '<p class="cj-mut">Choose the files again (a browser forgets them after a refusal).</p>' if error else ""
     return wrap(
@@ -1141,7 +1160,7 @@ def page_upload_form(cfg, user, form=None, error=None) -> str:
         f'I confirm the pixel size</label>'
         f'<p class="cj-mut">Sizes in nm are computed from it. Your name is recorded as the person who confirmed it.'
         f'</p></fieldset>'
-        f'{name_field(form["name"] if "name" in form else default_name_for({"kind": "upload"}))}'
+        f'{name_field(form["name"] if "name" in form else up_prefill, up_prefill)}'
         f'{model_block(cfg, user, form.get("model"))}'
         f'<fieldset class="cj-card cj-predict-fs"><legend>Images</legend>'
         f'<label class="cj-predict-field"><span>Processed 8-bit PNG or JPEG tiles of one sample (up to {MAX_FILES}, '
@@ -1234,8 +1253,10 @@ _RUN_START = re.compile(r"^=== (\S+) predict_local ")
 
 
 def run_seconds(d: Path):
-    """(images, seconds) of one finished laptop run: the first `=== <iso> predict_local` line of predict.log to
-    status.json `updated`. None when this set is not a finished laptop run or its log can't be read."""
+    """(images, seconds) of one finished laptop run: the LAST `=== <iso> predict_local` line of predict.log (the log
+    is appended across restarts; the last start is the run that finished) to status.json `updated`. None when this
+    set is not a finished laptop run, its log can't be read, or the figure is implausible (over EST_MAX_S_PER_IMAGE
+    seconds per image, or not positive)."""
     st = _read_json(d / PS.STATUS)
     if not isinstance(st, dict) or st.get("state") != "done" or st.get("where") not in (None, "laptop"):
         return None
@@ -1243,12 +1264,18 @@ def run_seconds(d: Path):
     if isinstance(n, bool) or not isinstance(n, int) or n < 1:
         return None
     try:
+        last = None
         with open(d / PS.C.PREDICT_LOG, encoding="utf-8", errors="replace") as f:
             for line in f:
                 m = _RUN_START.match(line)
                 if m:
-                    t0, t1 = _parse_local(m.group(1)), _parse_local(st.get("updated"))
-                    return (n, t1 - t0) if t0 is not None and t1 is not None and t1 > t0 else None
+                    last = m.group(1)
+        if last is None:
+            return None
+        t0, t1 = _parse_local(last), _parse_local(st.get("updated"))
+        if t0 is None or t1 is None or not 0 < t1 - t0 <= EST_MAX_S_PER_IMAGE * n:
+            return None
+        return n, t1 - t0
     except OSError:
         pass
     return None
@@ -1340,6 +1367,12 @@ def create_running(tid) -> bool:
     return (create_task(tid) or {}).get("state") == "running"
 
 
+def recently_done(tid) -> bool:
+    """The same pick finished within EST_TTL_S: pressing the button again opens that set, it makes no copy."""
+    t = create_task(tid) or {}
+    return t.get("state") == "done" and time.time() - t.get("finished", 0) < RESUBMIT_S
+
+
 def running_creates(user, exclude=None) -> int:
     with _CREATE_LOCK:
         return sum(1 for k, t in _CREATES.items()
@@ -1369,7 +1402,7 @@ def start_create(tid, owner, fn, *, back, upload=None) -> bool:
     def run():
         try:
             ps_dir = fn(progress)
-            change = {"state": "done", "ps": Path(ps_dir).name}
+            change = {"state": "done", "ps": Path(ps_dir).name, "finished": time.time()}
         except Refusal as e:
             change = {"state": "failed", "error": e.msg, "tech": e.tech, "status": e.status}
         except OSError as e:
@@ -1460,16 +1493,39 @@ def same_volume(a: Path, b: Path) -> bool:
         return False
 
 
+_LINK_OK: dict = {}                      # predict root -> whether this volume can hard-link (probed once)
+
+
+def can_link(root: Path) -> bool:
+    """Whether hard links work on the volume of `root` (some, e.g. exFAT or a network share, can't): probed with
+    two scratch names under <root>/.portal."""
+    key = str(root)
+    if key not in _LINK_OK:
+        probe = root / PORTAL_TMP / f"probe_{secrets.token_hex(4)}"
+        try:
+            probe.parent.mkdir(parents=True, exist_ok=True)
+            probe.write_bytes(b"x")
+            os.link(probe, str(probe) + ".l")
+            _LINK_OK[key] = True
+        except OSError:
+            _LINK_OK[key] = False
+        finally:
+            for q in (probe, Path(str(probe) + ".l")):
+                try:
+                    q.unlink()
+                except OSError:
+                    pass
+    return _LINK_OK[key]
+
+
 def check_create_disk(root: Path, d_from: Path, names, link: bool):
-    """Refuse (507) when the tiles to be copied (their total + 10 %) do not fit. Hard links need none: when the
-    tiles are on the set's drive and link is wanted, nothing is copied (_place falls back to a copy otherwise)."""
-    if link and same_volume(d_from, root):
+    """Refuse (507) when the tiles to be copied (their total x 1.1, plus the free margin and the uploads in flight:
+    check_disk_for) do not fit. Hard links need none: only when link is wanted, the tiles are on the set's drive
+    AND that drive can link; otherwise _place copies and the copy size is checked."""
+    if link and same_volume(d_from, root) and can_link(root):
         return
-    need = int(tile_bytes(d_from, names) * DISK_NEED_FACTOR)
-    free = disk_free(_existing(root))
-    if need > free:
-        raise Refusal(f"Not enough disk space on the server for these images (about {need / 2 ** 30:.1f} GB needed). "
-                      f"Nothing was started. Ask the admin.", 507, tech=f"{free} bytes free, need {need}")
+    check_disk_for(root, tile_bytes(d_from, names), DISK_NEED_FACTOR, "for these images",
+                   "Nothing was started. Ask the admin.")
 
 
 def create_and_start(cfg, d_from, user, model, *, names=None, manifest=None, sample_label=None, nm=None,
@@ -1587,10 +1643,10 @@ def session_plan(cfg, user, src: dict, form: dict) -> dict:
                   "tiles": len(set(names) & set(g["names"]))}
                  for g in chosen if g["nm_in"] is not None and (g["nm_range"] or (g["nm_missing"] and g["nm_values"]))]
     tid = selection_key(user, src["session"], form["model"], [(n, label_of[n], repr(float(nm_of[n]))) for n in names])
-    if not create_running(tid):
+    if not create_running(tid) and not recently_done(tid):
         check_active(cfg, user, exclude=tid)
     return {"tid": tid, "names": names, "label_of": label_of, "nm_of": nm_of, "overrides": overrides,
-            "model": form["model"], "name": PS.clean_name(form.get("name"))}
+            "model": form["model"], "name": chosen_name(form)}
 
 
 def session_run(cfg, user, src: dict, plan: dict, progress=None) -> Path:
@@ -1940,7 +1996,7 @@ def upload_submit(cfg, user, dest: Path, sink: UploadSink) -> Path:
     label, nm = upload_fields(cfg, user, sink.fields, bool(sink.files))
     check_active(cfg, user)
     return create_and_start(cfg, dest, user, sink.fields["model"], sample_label=label, nm=nm,
-                            name=PS.clean_name(sink.fields.get("name")), link=True)
+                            name=chosen_name(sink.fields), link=True)
 
 
 def nojs_too_big() -> str:
@@ -2209,17 +2265,19 @@ def input_bytes(meta: dict) -> int:
     return total
 
 
-def check_disk_for(where: Path, nbytes: int):
+def check_disk_for(where: Path, nbytes: int, factor=DISK_FACTOR, what="to convert these",
+                   tail="Ask the admin."):
     """A conversion writes its work copies and tiles next to the predict root: refuse (507) unless about
-    DISK_FACTOR x its raw input is free on top of FREE_MARGIN_BYTES and the uploads in flight."""
+    `factor` x its input is free on top of FREE_MARGIN_BYTES and the uploads in flight (a set made from copies:
+    DISK_NEED_FACTOR)."""
     free = disk_free(_existing(where))
     dev = _dev(where)
     with _RES_LOCK:
         held = _held(dev)
-    need = DISK_FACTOR * int(nbytes or 0) + FREE_MARGIN_BYTES
+    need = int(factor * int(nbytes or 0)) + FREE_MARGIN_BYTES
     if free - held < need:
-        raise Refusal(f"Not enough disk space on the server to convert these (about "
-                      f"{DISK_FACTOR * int(nbytes or 0) / 2 ** 30:.1f} GB needed). Ask the admin.", 507,
+        raise Refusal(f"Not enough disk space on the server {what} (about "
+                      f"{factor * int(nbytes or 0) / 2 ** 30:.1f} GB needed). {tail}", 507,
                       tech=f"{free} bytes free, {held} held by uploads, need {need}")
 
 
@@ -3140,12 +3198,19 @@ def upload_create(cfg, user, d: Path, meta: dict) -> str:
         if not create_running(uid):                      # the same upload pressed again: the same task, no new check
             label, nm = upload_fields(cfg, user, fields, True)
             check_active(cfg, user, exclude=uid)
-            name = PS.clean_name(fields.get("name"))
+            name = chosen_name(fields)
 
             def run(progress):
                 # hard links: the staged names are removed after, the set keeps its own; a failure leaves the upload
-                ps_dir = create_and_start(cfg, d / UPLOAD_FILES, user, fields["model"], sample_label=label, nm=nm,
-                                          name=name, link=True, progress=progress)
+                try:
+                    ps_dir = create_and_start(cfg, d / UPLOAD_FILES, user, fields["model"], sample_label=label,
+                                              nm=nm, name=name, link=True, progress=progress)
+                except BaseException:
+                    try:                             # kept for the stated hour from now, not from the first request
+                        os.utime(d / UPLOAD_META)
+                    except OSError:
+                        pass
+                    raise
                 drop_upload(d, uid)
                 return ps_dir
             start_create(uid, user["id"], run, back="/predict/new/upload/", upload=uid)
@@ -3422,11 +3487,22 @@ def sweep_scratch(cfg, max_age_s=SCRATCH_MAX_AGE_S) -> int:
                     and age(p) > max_age_s]
         except Exception:                            # no root configured or not there yet: nothing to sweep
             continue
+    try:                                             # a set half built when the portal stopped (no create is running)
+        with _CREATE_LOCK:
+            busy = any(t["state"] == "running" for t in _CREATES.values())
+        inc = predict_root(cfg) / PS.INCOMING
+        if not busy and inc.is_dir():
+            for p in inc.iterdir():
+                if time.time() - p.stat().st_mtime > max_age_s:
+                    shutil.rmtree(p, ignore_errors=True)
+                    old.append(p)
+    except Exception:                                # no root configured or not there yet
+        pass
     for p in old:
         if UPLOAD_RE.match(p.name):
             if not create_running(p.name):
                 drop_upload(p, p.name)
-        else:
+        elif p.exists():
             shutil.rmtree(p, ignore_errors=True)
     return len(old)
 
@@ -3527,8 +3603,9 @@ def routes(ctx) -> list:
                 return refused_page(request, src["label"], page_session_form(cfg, user, src, t, form, msg), status)
             return await run_in_threadpool(again)
         # the work runs in a task, keyed by the pick: pressing the button twice (or a retried request) joins it
-        start_create(plan["tid"], user["id"], lambda progress: session_run(cfg, user, src, plan, progress),
-                     back=f"/predict/new/session/{src['key']}/")
+        if not recently_done(plan["tid"]):
+            start_create(plan["tid"], user["id"], lambda progress: session_run(cfg, user, src, plan, progress),
+                         back=f"/predict/new/session/{src['key']}/")
         return RedirectResponse(f"/predict/preparing/{plan['tid']}/", status_code=303)
 
     def upload_form(request: Request):
@@ -3648,7 +3725,7 @@ def routes(ctx) -> list:
         if d is None:
             return not_found(request)
         srcs, _ = sources_safe(cfg, user, ctx.can_see)
-        return ctx.page(request, set_title(req, srcs, user.get("role") == "admin"),
+        return ctx.page(request, tab_title(set_title(req, srcs, user.get("role") == "admin")),
                         page_set(cfg, user, d, req, ctx.can_see), active="predict")
 
     def prep_load(request: Request):
@@ -3702,10 +3779,12 @@ def routes(ctx) -> list:
         raw = fd.get("name")
         try:
             await run_in_threadpool(rename_set, cfg, user, d, raw if isinstance(raw, str) else "")
-        except Refusal as e:
+        except (Refusal, OSError) as e:
+            msg, status = (e.msg, e.status) if isinstance(e, Refusal) else (
+                "This analysis can’t be renamed right now. Try again later.", 503)
             return await run_in_threadpool(lambda: refused_page(
-                request, "Rename", wrap(f'<div class="cj-predict">{msg_box(e.msg)}'
-                                        f'<p><a href="/predict/{esc(d.name)}/">Back</a></p></div>'), e.status))
+                request, "Rename", wrap(f'<div class="cj-predict">{msg_box(msg)}'
+                                        f'<p><a href="/predict/{esc(d.name)}/">Back</a></p></div>'), status))
         return RedirectResponse(f"/predict/{d.name}/", status_code=303)
 
     def action(kind):
@@ -3854,6 +3933,9 @@ def routes(ctx) -> list:
         d, _ = await run_in_threadpool(load_upload, cfg, user, uid)
         if d is None:
             return ctx.json(GONE, 404)
+        if create_running(uid):                          # its images are being added to an analysis
+            return ctx.json({"error": "These images are being prepared; they can’t be cancelled now.",
+                             "dropped": False}, 409)
         async with upload_lock(uid):
             await run_in_threadpool(drop_upload, d, uid)
         return ctx.json({"ok": True})

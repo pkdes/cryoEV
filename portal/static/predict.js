@@ -62,7 +62,11 @@
       if (pbusy) return;
       pbusy = true;
       fetch('/predict/api/preparing/' + encodeURIComponent(prep.dataset.tid) + '?html=1', {cache: 'no-store', credentials: 'same-origin'})
-        .then(function (r) { if (!r.ok) throw new Error('status ' + r.status); return r.json(); })
+        .then(function (r) {
+          if (r.status === 404) throw {gone: true};            // the portal restarted: the task is gone
+          if (!r.ok) throw new Error('status ' + r.status);
+          return r.json();
+        })
         .then(function (j) {
           swap('cj-predict-prepstatus', ((j && j.html) || {}).status);
           if (perr) { perr.textContent = ''; perr.hidden = true; }
@@ -70,6 +74,12 @@
           else if (!j.live) clearInterval(ptimer);
         })
         .catch(function (e) {
+          if (e && e.gone) {
+            clearInterval(ptimer);
+            swap('cj-predict-prepstatus', '<p class="cj-predict-msg">This preparation was interrupted. Check My analyses; if it isn’t there, start again.</p>');
+            if (perr) { perr.textContent = ''; perr.hidden = true; }
+            return;
+          }
           if (perr) { perr.textContent = 'Could not refresh (' + e.message + '); the analysis is still being prepared.'; perr.hidden = false; }
         })
         .then(function () { pbusy = false; });
