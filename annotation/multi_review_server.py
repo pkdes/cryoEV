@@ -15,8 +15,18 @@ review_server.py is wrapped, not changed; the real review (review_server.py on :
 - Errors: an unknown id and a wrong key both get 403, so ids can't be enumerated; a malformed id or a path with
   .., \\ or : -> 400; / -> 404 (no listing). /<id> (with its key) redirects to /<id>/ so the page's relative URLs
   (data.js, images/, api/...) stay inside the package.
+- Portal identity (BUILD_CONTRACTS.md section 8): the CJ portal proxies /review/<id>/app/... here with the package's key
+  as X-Review-Key and the signed-in user's id as X-CJ-User (portal/proxy.py drops any client-sent X-CJ-* first). That
+  id is trusted ONLY when the same request brought this package's key in X-Review-Key (no ?k=, no cookie). Then:
+    GET /<id>/            index.html with window.REVIEW_IDENTITY = {"who": <id>, "locked": true} put before its first
+                          <script> (the page skips the "Who is reviewing?" picker; the file on disk is unchanged)
+    PUT /<id>/api/edits   every decision in the body gets who = <id> (a client-sent who never counts) before
+                          review_server merges it, so reviewed_by (prediction_package) names the portal user
+    POST /<id>/api/claim  ?who= = <id>
+  Without that header, every request is handled exactly as before (the page asks for a name as it always did).
 """
 import argparse
+import io
 import json
 import re
 import secrets
@@ -25,7 +35,7 @@ import threading
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit
 
 REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
@@ -37,6 +47,7 @@ PREFIX = "pred_"
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 BAD_PATH = ("..", "\\", ":")
 COMPLETE = "review_package.json"  # prediction_package.build writes it last (and builds in a temp folder anyway)
+IDENTITY_HEADER = "X-CJ-User"     # set by portal/proxy.py (client copies stripped); trusted only with the key header
 
 
 def cookie_name(port: int, pkg_id: str) -> str:
@@ -64,6 +75,37 @@ def package_key(pkg: Path) -> str:
         return f.read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+
+
+def identity_script(who: str) -> bytes:
+    """The inline script that tells the review tool who the (portal) reviewer is; <, > and & escaped for HTML."""
+    js = json.dumps({"who": who, "locked": True}).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    return f"<script>window.REVIEW_IDENTITY = {js};</script>\n".encode()
+
+
+def inject_identity(page: bytes, who: str) -> bytes:
+    """index.html with identity_script(who) before its first <script> (so before data.js and the tool), else before
+    </head>, else at the start."""
+    low = page.lower()
+    at = low.find(b"<script")
+    if at < 0:
+        at = max(low.find(b"</head>"), 0)
+    return page[:at] + identity_script(who) + page[at:]
+
+
+def stamp_identity(edit, who: str):
+    """A PUT body with every decision's who set to `who` (a bare-string decision becomes {v, t, who}, as
+    review_server._migrate would read it). Echoed copies of other reviewers' saved decisions keep their saved who:
+    review_server._same ignores who, so the saved entry wins the merge. Anything not shaped like an edit is returned
+    unchanged (review_server rejects it)."""
+    if not isinstance(edit, dict) or not isinstance(edit.get("dec"), dict):
+        return edit
+    for k, d in list(edit["dec"].items()):
+        if isinstance(d, dict):
+            d["who"] = who
+        elif isinstance(d, str):
+            edit["dec"][k] = {"v": d, "t": edit.get("t", 0), "who": who}
+    return edit
 
 
 class Packages:
@@ -99,7 +141,7 @@ class Packages:
                 return cookie_name(h.server.server_address[1], _id)
 
             cls = type(f"Pkg_{pkg_id}", (Dispatch, inner), {"_cookie": _cookie, "pkg_id": pkg_id, "packages": self,
-                                                            "log_message": inner.log_message})
+                                                            "pkg_dir": pkg, "log_message": inner.log_message})
             self._cache[pkg] = (sig, cls)
             return cls
 
@@ -113,6 +155,8 @@ class Dispatch(BaseHTTPRequestHandler):
     (it stays first in the MRO, so a kept-alive connection is dispatched again on its next request)."""
     timeout = rs.SOCKET_TIMEOUT
     packages: Packages = None
+    pkg_dir: Path = None
+    reviewer = None  # the portal user this request is for (_portal_identity), else None: the page's own claims, as before
 
     def _given_key(self, query, pkg_id):
         """The key this request brings for pkg_id: ?k=, else X-Review-Key, else this package's cookie."""
@@ -158,12 +202,73 @@ class Dispatch(BaseHTTPRequestHandler):
             else:
                 self._plain(403, json.dumps({"error": "access key required"}), ctype="application/json")
             return False
+        try:
+            self.reviewer = self._portal_identity(url.query)
+        except ValueError:
+            self._plain(400, json.dumps({"error": "bad reviewer identity"}), ctype="application/json")
+            return False
         if len(parts) == 2:  # /<id> -> /<id>/, keeping ?k=
             self._plain(301, "moved", {"Location": f"/{pkg_id}/" + (f"?{url.query}" if url.query else "")})
             return False
         self.path = "/" + parts[2] + (f"?{url.query}" if url.query else "")
         self.__class__ = cls
         return True
+
+    def _portal_identity(self, query):
+        """The portal user this request is for: the X-CJ-User header, trusted only because this request brought the
+        package's key in X-Review-Key (checked by Packages.handler just before; no ?k=, which would outrank it, and not
+        a cookie, which any browser that once opened a ?k= link sends). None when there is no such header, or the key
+        came another way (the header is then ignored). ValueError for a trusted header that isn't one valid id."""
+        vals = self.headers.get_all(IDENTITY_HEADER) or []
+        if not vals:
+            return None
+        if parse_qs(query).get("k", [None])[0] or self.headers.get("X-Review-Key") is None:
+            return None
+        who = vals[0].strip()
+        if len(vals) != 1 or not who or not rs.valid_who(who):
+            raise ValueError("bad identity")
+        return who
+
+    # ---- after dispatch (self is the package's class): with a portal identity, the page and saves carry it ----
+    def do_GET(self):
+        url = urlsplit(self.path)
+        if self.reviewer and url.path in ("/", "/index.html"):
+            path = self.pkg_dir / "index.html"
+            if path.is_file():
+                return self._send(200, inject_identity(path.read_bytes(), self.reviewer), "text/html; charset=utf-8")
+        return super().do_GET()
+
+    def do_HEAD(self):
+        return self.do_GET()
+
+    def do_PUT(self):
+        if not self.reviewer:
+            return super().do_PUT()
+        try:
+            n = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            n = -1
+        if not 0 < n <= rs.MAX_BODY:  # review_server answers these (400 / 413) without reading the body
+            return super().do_PUT()
+        raw = self.rfile.read(n)
+        try:
+            body = json.dumps(stamp_identity(json.loads(raw, parse_constant=rs._no_constant), self.reviewer)).encode()
+        except ValueError:  # not JSON: review_server rejects the original bytes
+            body = raw
+        del self.headers["Content-Length"]
+        self.headers["Content-Length"] = str(len(body))
+        rfile, self.rfile = self.rfile, io.BytesIO(body)
+        try:
+            return super().do_PUT()
+        finally:
+            self.rfile = rfile
+
+    def do_POST(self):
+        if self.reviewer:
+            url = urlsplit(self.path)
+            q = [(k, v) for k, v in parse_qsl(url.query, keep_blank_values=True) if k != "who"]
+            self.path = url.path + "?" + urlencode(q + [("who", self.reviewer)])
+        return super().do_POST()
 
     def log_message(self, fmt, *args):  # before dispatch (400/403/404/301): the same redaction as review_server
         msg = re.sub(r"([?&]k=)[^&\s\"]*", r"\1***", fmt % args)
