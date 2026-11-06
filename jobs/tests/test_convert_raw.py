@@ -104,7 +104,7 @@ def write_idoc_montage(folder, stem="grid3-1", ps=7.362, tile=(384, 512), grid=(
 # ---------------------------------------------------------------- a stand-in processing repo
 STUB_FILES = {
     "cryoem_core/__init__.py": """
-        from . import discovery, metadata, stitching
+        from . import device, discovery, metadata, stitching
         from dataclasses import dataclass, field
         from pathlib import Path
 
@@ -115,6 +115,7 @@ STUB_FILES = {
             raw_subdir: str = None
             notes_subdir: str = None
             use_gpu: bool = False
+            contrast_level_sampling_A: float = None
             name: str = field(default='')
 
             @property
@@ -124,6 +125,10 @@ STUB_FILES = {
             @property
             def sample_key_csv(self):
                 return Path(self.dataset_dir) / 'sample_key.csv'
+        """,
+    "cryoem_core/device.py": """
+        def describe_device(prefer_gpu=True):
+            return 'CPU (NumPy)'
         """,
     "cryoem_core/metadata.py": """
         def parse_metadata(path):
@@ -158,21 +163,31 @@ STUB_FILES = {
             placement: str = None
 
         class FlatGridPositionMrcLayout:
+            def __init__(self, aliases=None):
+                self.aliases = aliases or {}
+
             def find(self, d):
                 out = []
                 for p in sorted(Path(d).glob('*.mrc.mdoc')):
-                    m = re.match(r'^grid(\\d+)-pos(\\d+)$', p.name[:-len('.mrc.mdoc')])
+                    stem = p.name[:-len('.mrc.mdoc')]
+                    m = re.match(r'^grid(\\d+)-pos(\\d+)$', stem)
                     if m:
                         out.append(MontageRef(int(m[1]), int(m[2]), p, 'grid%s_%s' % (m[1], m[2])))
+                    elif stem in self.aliases:
+                        region, suffix = self.aliases[stem]
+                        g = int(re.match(r'^grid(\\d+)', stem)[1])
+                        out.append(MontageRef(g, region, p, 'grid%d_%d_%s' % (g, region, suffix), suffix))
                 return out
 
         class FlatGridPositionLayout:
             def find(self, d):
                 return []
 
-        class FlatGridSquareHoleLayout:
-            def find(self, d):
-                return []
+        class FlatGridRegionLayout(FlatGridPositionLayout):
+            pass
+
+        class FlatGridSquareHoleLayout(FlatGridPositionLayout):
+            pass
         """,
     "cryoem_core/stitching.py": """
         def mrc_path_for(mont, global_params):
@@ -195,10 +210,14 @@ STUB_FILES = {
             native.mkdir(parents=True)
             small.mkdir(parents=True)
             rows = []
+            print('  Warning: missing tile stub0001.tif, skipping')
             for m in cfg.layout.find(cfg.raw_dir):
                 if 'boom' in m.basename:
                     raise SystemExit('%s: no tiles loaded' % m.basename)
-                ps = float(parse_metadata(m.idoc_path)[0]['PixelSpacing'])
+                if 'crash' in m.basename:
+                    raise RuntimeError('stub crash')
+                if float(parse_metadata(m.idoc_path)[0]['PixelSpacing']) > TARGET_A_PX:
+                    raise SystemExit('a coarse montage reached the render')
                 name = 'g%d_Grid_%d__%s_r0c0_t00__denoised_nobar_14p72Apx.png' % (m.grid, m.grid, m.basename)
                 Image.new('L', (8, 6), 128).save(small / name)
                 Image.new('L', (16, 12), 128).save(native / name)
@@ -212,11 +231,35 @@ STUB_FILES = {
                     w.writerows(rows)
             return 0
         """,
+    # The session recipe: its own sampling is read from <stub repo>/session (one sidecar at 7.362 A/px).
     "datasets/process_20261012.py": """
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent))
         from cryoem_core import DatasetConfig, discovery
-        DATASET = DatasetConfig(dataset_dir='unused', layout=discovery.FlatGridPositionMrcLayout())
+        ALIASES = {'grid2-45krerun-1': (104, '45krerun_1')}
+        DATASET = DatasetConfig(dataset_dir=Path(__file__).parent.parent / 'session',
+                                layout=discovery.FlatGridPositionMrcLayout(aliases=ALIASES))
+        if __name__ == '__main__':
+            print('never')
+        """,
+    # An old full-script processor: must be refused without running (it would leave a marker file).
+    "datasets/process_oldstyle.py": """
+        import torch
+        from pathlib import Path
+        Path(__file__).with_name('RAN_oldstyle').write_text('x')
+        print('[GPU] Using device')
+        """,
+    # A combined set, not a session: ManifestLayout.
+    "datasets/process_combo.py": """
+        from pathlib import Path
+        from cryoem_core import DatasetConfig, ManifestLayout
+        RAN = Path(__file__).with_name('RAN_combo').write_text('x')
+        DATASET = DatasetConfig(dataset_dir='x', layout=ManifestLayout('m.csv'))
         """,
 }
+
+MDOC = "{head}ImageSize = 16 12\n\n[ZValue = 0]\nPieceCoordinates = 0 0 0\n"
 
 
 class StubRepo(unittest.TestCase):
@@ -228,6 +271,8 @@ class StubRepo(unittest.TestCase):
             p = self.repo / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(textwrap.dedent(text).lstrip(), encoding="utf-8")
+        (self.repo / "session").mkdir()
+        (self.repo / "session" / "grid1-pos1.mrc.mdoc").write_text(MDOC.format(head="PixelSpacing = 7.362\n"))
         self.raw = self.tmp / "raw"
         self.raw.mkdir()
         self.syspath = list(sys.path)
@@ -240,12 +285,20 @@ class StubRepo(unittest.TestCase):
     def stub_mdoc(self, stem, ps="7.362"):
         (self.raw / f"{stem}.mrc").write_bytes(b"\0" * 16)
         head = f"PixelSpacing = {ps}\n" if ps is not None else ""
-        (self.raw / f"{stem}.mrc.mdoc").write_text(head + "ImageSize = 16 12\n\n[ZValue = 0]\n"
-                                                   "PieceCoordinates = 0 0 0\n", encoding="utf-8")
+        (self.raw / f"{stem}.mrc.mdoc").write_text(MDOC.format(head=head), encoding="utf-8")
         return self.raw / f"{stem}.mrc"
 
     def convert(self, inputs, out, **kw):
         return CR.convert(inputs, out, processing_repo_dir=self.repo, log=io.StringIO(), **kw)
+
+    def cli(self, *args, env_extra=None, repo=True):
+        env = {k: v for k, v in os.environ.items() if k != CR.REPO_ENV}
+        if repo:
+            env[CR.REPO_ENV] = str(self.repo)
+        env.update(env_extra or {})
+        p = subprocess.run([sys.executable, "-m", "jobs.convert_raw", *map(str, args)], cwd=REPO, env=env,
+                           capture_output=True, text=True, timeout=120)
+        return p.returncode, json.loads(p.stdout), p.stderr
 
     def test_output_is_self_contained(self):
         self.stub_mdoc("grid1-pos1")
@@ -257,10 +310,20 @@ class StubRepo(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in out.iterdir()),
                          sorted([t["file"] for t in res["tiles"]] + ["MANIFEST.csv"]))
         self.assertEqual(res["nm_per_px"], [1.4724])
+        self.assertEqual(res["a_px"], {"grid1_1": 7.362, "grid2_3": 7.362})
+        self.assertTrue(res["recipe_defaulted"])
+        self.assertEqual((res["compute"], res["device"]), ("CPU", "CPU (NumPy)"))
         self.assertEqual([r["output_name"] for r in read_manifest(out)], [t["file"] for t in res["tiles"]])
         self.assertTrue(any("grid1-atlas" in w for w in res["warnings"]), res["warnings"])
+        self.assertIn("Warning: missing tile stub0001.tif, skipping", res["warnings"])   # the pipeline's own line
+        self.assertFalse(any("not a sampling" in w for w in res["warnings"]), res["warnings"])
         self.assertEqual(res["entry_point"], "export_detector_tiles.export_dataset")
         self.assertEqual(res["recipe"], "20261012")
+
+    def test_recipe_layout_names_aliased_montages(self):
+        self.stub_mdoc("grid2-45krerun-1")
+        res = self.convert([self.raw], self.tmp / "out")
+        self.assertEqual(res["montages"], ["grid2_104_45krerun_1"])
 
     def test_file_input_with_unknown_name_is_named_from_its_stem(self):
         mrc = self.stub_mdoc("Sample A_area-7")
@@ -268,12 +331,45 @@ class StubRepo(unittest.TestCase):
         self.assertEqual(res["montages"], ["Sample_A_area_7"])
         self.assertTrue(any("no layout knows" in w for w in res["warnings"]))
 
-    def test_no_pixel_spacing_is_refused_and_nothing_written(self):
-        mrc = self.stub_mdoc("grid1-pos1", ps=None)
-        out = self.tmp / "out"
-        with self.assertRaisesRegex(CR.ConvertError, "PixelSpacing"):
-            self.convert([mrc], out)
-        self.assertFalse(out.exists())
+    def test_pixel_spacing_missing_or_not_finite_is_refused(self):
+        for ps in (None, "nan", "inf", "-1", "0", "abc"):
+            with self.subTest(ps=ps):
+                shutil.rmtree(self.raw)
+                self.raw.mkdir()
+                mrc = self.stub_mdoc("grid1-pos1", ps=ps)
+                out = self.tmp / "out"
+                with self.assertRaisesRegex(CR.ConvertError, "PixelSpacing"):
+                    self.convert([mrc], out)
+                self.assertFalse(out.exists())
+
+    def test_coarse_montage_dropped_before_rendering(self):
+        good, coarse = self.stub_mdoc("grid1-pos1"), self.stub_mdoc("grid1-pos2", ps="30")
+        res = self.convert([good, coarse], self.tmp / "out", recipe="20261012")
+        self.assertEqual(res["montages"], ["grid1_1"])
+        self.assertTrue(any("grid1_2" in w and "coarser" in w for w in res["warnings"]), res["warnings"])
+        with self.assertRaisesRegex(CR.ConvertError, "every montage is coarser"):
+            self.convert([coarse], self.tmp / "out2")
+
+    def test_default_recipe_sampling_range(self):
+        far = self.stub_mdoc("grid1-pos1", ps="1.0")          # < 0.5 x 7.362
+        with self.assertRaisesRegex(CR.ConvertError, "outside the default recipe's range") as cm:
+            self.convert([far], self.tmp / "out")
+        self.assertIsInstance(cm.exception.warnings, list)
+        res = self.convert([far], self.tmp / "out", recipe="20261012")   # named: allowed, with a warning
+        self.assertFalse(res["recipe_defaulted"])
+        self.assertTrue(any("not a sampling of recipe 20261012" in w for w in res["warnings"]), res["warnings"])
+        near = self.stub_mdoc("grid1-pos2", ps="5.0")          # in range but not the session's: warning only
+        res = self.convert([near], self.tmp / "out2")
+        self.assertTrue(any("5.000 A/px is not a sampling" in w for w in res["warnings"]), res["warnings"])
+
+    def test_old_and_combined_recipes_refused_without_running(self):
+        mrc = self.stub_mdoc("grid1-pos1")
+        for recipe, msg in (("oldstyle", "not a session config"), ("combo", "not a session layout")):
+            with self.subTest(recipe=recipe):
+                log = io.StringIO()
+                with self.assertRaisesRegex(CR.ConvertError, msg):
+                    CR.convert([mrc], self.tmp / "out", recipe=recipe, processing_repo_dir=self.repo, log=log)
+                self.assertFalse((self.repo / "datasets" / f"RAN_{recipe}").exists())
 
     def test_refusals(self):
         mrc = self.stub_mdoc("grid1-pos1")
@@ -297,6 +393,28 @@ class StubRepo(unittest.TestCase):
         self.assertEqual([p.name for p in full.iterdir()], ["keep.txt"])
         self.assertFalse(any((self.tmp / f"o{i}").exists() for i in range(1, 7)))
 
+    def test_memory_estimate_refuses(self):
+        mrc = self.stub_mdoc("grid1-pos1")                     # 16 x 12 x 1 piece x 14 B = 2688 B
+        with unittest.mock.patch.object(CR, "available_ram", return_value=2000):
+            with self.assertRaisesRegex(CR.ConvertError, "GB free now"):
+                self.convert([mrc], self.tmp / "out")
+        with unittest.mock.patch.object(CR, "available_ram", return_value=None):
+            res = self.convert([mrc], self.tmp / "out")
+        self.assertIn("free RAM unreadable; memory not checked", res["warnings"])
+
+    def test_gpu_busy_refused_and_fallback_recorded(self):
+        mrc = self.stub_mdoc("grid1-pos1")
+        hooks = lambda gpu: {"CRYOEV_JOBS_TESTING": "1", "CRYOEV_JOBS_TEST_HOOKS": json.dumps({"gpu": gpu})}  # noqa
+        busy = {"total_mb": 4096, "apps": [[4242, "C:\\Python\\python.exe", 900]]}
+        with unittest.mock.patch.dict(os.environ, hooks(busy)):
+            with self.assertRaisesRegex(CR.ConvertError, "--gpu: gpu busy"):
+                self.convert([mrc], self.tmp / "out", gpu=True)
+        self.assertFalse((self.tmp / "out").exists())
+        with unittest.mock.patch.dict(os.environ, hooks({"total_mb": 4096, "apps": []})):
+            res = self.convert([mrc], self.tmp / "out", gpu=True)   # the stub core has no GPU: falls back
+        self.assertEqual(res["compute"], "CPU")
+        self.assertTrue(any("ran on the CPU" in w for w in res["warnings"]), res["warnings"])
+
     def test_missing_repo_is_refused(self):
         with self.assertRaisesRegex(CR.ConvertError, "processing repo"):
             CR.convert([self.raw], self.tmp / "o", processing_repo_dir=self.tmp / "nowhere")
@@ -314,22 +432,31 @@ class StubRepo(unittest.TestCase):
             self.convert([mrc, boom], out)
         self.assertEqual(list(out.iterdir()), [])
 
-    def test_cli_json_and_exit_codes(self):
+    def test_cli_always_json(self):
         self.stub_mdoc("grid1-pos1")
-        env = dict(os.environ, **{CR.REPO_ENV: str(self.repo)})
-        ok = subprocess.run([sys.executable, "-m", "jobs.convert_raw", "--in", str(self.raw), "--out",
-                             str(self.tmp / "cli")], cwd=REPO, env=env, capture_output=True, text=True, timeout=120)
-        self.assertEqual(ok.returncode, 0, ok.stderr)
-        res = json.loads(ok.stdout)
+        code, res, err = self.cli("--in", self.raw, "--out", self.tmp / "cli")
+        self.assertEqual(code, 0, err)
         self.assertTrue(res["ok"])
         self.assertEqual(res["n_tiles"], 1)
-        env.pop(CR.REPO_ENV)
-        bad = subprocess.run([sys.executable, "-m", "jobs.convert_raw", "--in", str(self.raw), "--out",
-                              str(self.tmp / "cli2")], cwd=REPO, env=env, capture_output=True, text=True,
-                             timeout=120)
-        self.assertEqual(bad.returncode, 2)
-        self.assertFalse(json.loads(bad.stdout)["ok"])
-        self.assertIn(CR.REPO_ENV, bad.stderr)
+        code, res, err = self.cli("--in", self.raw, "--out", self.tmp / "c2", repo=False)
+        self.assertEqual((code, res["ok"], res["kind"]), (2, False, "refused"))
+        self.assertIn(CR.REPO_ENV, err)
+        code, res, _ = self.cli("--in", self.raw, "--out", self.tmp / "c3", "--recipe", "oldstyle")
+        self.assertEqual((code, res["kind"]), (2, "refused"))
+        nan = self.tmp / "nan"
+        nan.mkdir()
+        (nan / "grid1-pos1.mrc").write_bytes(b"\0")
+        (nan / "grid1-pos1.mrc.mdoc").write_text(MDOC.format(head="PixelSpacing = nan\n"))
+        (nan / "grid1-atlas.mrc.mdoc").write_text("PixelSpacing = 900\n")
+        code, res, _ = self.cli("--in", nan, "--out", self.tmp / "c4")
+        self.assertEqual((code, res["kind"]), (2, "refused"))
+        self.assertIn("PixelSpacing", res["error"])
+        self.assertTrue(any("grid1-atlas" in w for w in res["warnings"]), res)   # warnings kept on a refusal
+        crash = self.stub_mdoc("crash")
+        code, res, err = self.cli("--in", crash, "--out", self.tmp / "c5")
+        self.assertEqual((code, res["ok"], res["kind"]), (1, False, "failed"))
+        self.assertIn("RuntimeError: stub crash", res["error"])
+        self.assertFalse((self.tmp / "c5").exists())
 
 
 # ---------------------------------------------------------------- the real processing repo
@@ -367,6 +494,7 @@ class RealRepo(unittest.TestCase):
         res = CR.convert([mrc], out, log=io.StringIO())
         self.check_tiles(out, res, 4, (384, 512), 7.362)
         self.assertEqual(res["montages"], ["grid1_1"])
+        self.assertEqual(res["a_px"], {"grid1_1": 7.362})
         self.assertTrue(all(t["file"].startswith("g1_Grid_1__grid1_1_r") for t in res["tiles"]))
 
     def test_synthetic_idoc_tiff_montage(self):
@@ -375,6 +503,14 @@ class RealRepo(unittest.TestCase):
         res = CR.convert([self.raw / "grid3-10000.tif"], out, log=io.StringIO())
         self.check_tiles(out, res, 4, (384, 512), 7.362)
         self.assertEqual(res["montages"], ["grid3_1"])
+        self.assertTrue(any("is for MRC montages" in w for w in res["warnings"]), res["warnings"])
+
+    def test_recipe_aliases_name_the_montage(self):
+        if not (Path(os.environ[CR.REPO_ENV]) / "datasets" / "process_20261027.py").is_file():
+            self.skipTest("no 20261027 recipe")
+        write_mrc_montage(self.raw, stem="grid2-45krerun-1")
+        res = CR.convert([self.raw], self.tmp / "out", recipe="20261027", log=io.StringIO())
+        self.assertEqual(res["montages"], ["grid2_104_45krerun_1"])
 
     def test_no_pixel_spacing_refused_before_the_pipeline_defaults_it(self):
         mrc = write_mrc_montage(self.raw, pixel_spacing_line=False)
@@ -382,6 +518,28 @@ class RealRepo(unittest.TestCase):
         with self.assertRaisesRegex(CR.ConvertError, "PixelSpacing"):
             CR.convert([mrc], out, log=io.StringIO())
         self.assertFalse(out.exists())
+
+    def test_old_full_script_and_combined_recipes_refused(self):
+        mrc = write_mrc_montage(self.raw)
+        for recipe in ("20260601", "evcore"):
+            if not (Path(os.environ[CR.REPO_ENV]) / "datasets" / f"process_{recipe}.py").is_file():
+                continue
+            with self.subTest(recipe=recipe):
+                with self.assertRaisesRegex(CR.ConvertError, "refused without running it"):
+                    CR.convert([mrc], self.tmp / "out", recipe=recipe, log=io.StringIO())
+                self.assertFalse((self.tmp / "out").exists())
+
+    def test_cli_corrupt_mrc_and_nan_are_json(self):
+        bad = write_mrc_montage(self.raw)
+        bad.write_bytes(os.urandom(4096))                      # header and data garbage, sidecar intact
+        for args in (["--in", bad], ["--in", bad, "--recipe", "no_such_recipe"]):
+            p = subprocess.run([sys.executable, "-m", "jobs.convert_raw", *map(str, args), "--out",
+                                str(self.tmp / "o")], cwd=REPO, capture_output=True, text=True, timeout=300)
+            res = json.loads(p.stdout)
+            self.assertFalse(res["ok"])
+            self.assertIn(p.returncode, (1, 2))
+            self.assertEqual(res["kind"], {1: "failed", 2: "refused"}[p.returncode])
+            self.assertFalse((self.tmp / "o").exists())
 
 
 @unittest.skipUnless(os.environ.get(CR.REPO_ENV) and os.environ.get("CJ_CONVERT_CONTROL_DIR"),
