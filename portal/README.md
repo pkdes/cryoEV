@@ -1,8 +1,14 @@
 # CryoEV portal (shell)
 
-One address, one sign-in, one look, for the laptop's own tools: a home page, the review inside the shell, plug-in
-modules (Jobs, and later Predict, Results, ...) and History as a hidden "classic" page. Tailnet only. Nothing about
-today's links (443 / 8443 / 8445) changes.
+The lab's multi-user web platform for cryo-EM EV analysis: a home page, the review inside the shell, plug-in modules
+(Data, Jobs, Predict, Results, Train, Admin) and History as a hidden "classic" page. Roles: admin > advanced > basic.
+
+Two doors, one roster (`~/.cryoev/portal_roster.json`), never mixed on one port:
+- **Tailnet** (`--auth key`, default): key links -> session cookie, behind `tailscale serve :8446`.
+- **Internet** (`--auth access`, port 8448): Cloudflare Tunnel + Cloudflare Access (email one-time PIN); the portal trusts
+  only the verified Access JWT, and the email must be an active roster person's. See "Cloudflare access mode" below.
+
+Nothing about today's links (443 / 8443 / 8445) changes.
 
 ```
 phone/laptop ── tailnet ── tailscale serve :8446 ──> 127.0.0.1:8770  CryoEV app (Starlette + uvicorn)

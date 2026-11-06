@@ -18,7 +18,7 @@ See README "Label review in the browser".
 | Build | The 6 "suggested changes to files owned by others" in [TRACKING_CONTRACT.md](TRACKING_CONTRACT.md): `inference_check/1` lines, `supersedes` in version.json, data.js `id`/`base`/`model`/`parent`, a `job_bundle/1` line + `bundle_id`, `run.json`, `models.yaml` keys |
 | Build | Move the hardcoded `C:\Users\pujan\…` defaults to config/env (the repo is a public fork) |
 | Data gaps | JOB.json date format not parsed; grid `replaced_by` for 19 renumbered grids; 28 pre-manifest sessions not in the master CSV |
-| Later | AU remote access (Cloudflare Tunnel + Access), SAM, process-raw jobs, the paused 20261027 sampling report |
+| Later | SAM, the paused 20261027 sampling report. (Done 2026-11-06: remote access via Cloudflare Tunnel + Access, see portal/README.md; process-raw jobs = portal raw → tiles.) |
 
 Status 2026-11-02:
 - `lv_20261030_0909` = 122 September carry-over changes on 28 of the 170 images (81 accepted predictions, 14 drawn, 18 reclass, 5 delete, 4 confirmed). It is **not pushed**. The push waits for the real review.
