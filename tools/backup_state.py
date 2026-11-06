@@ -36,7 +36,8 @@ INCLUDE = [
     "tracking/**",
     "logs/**",
 ]
-EXCLUDE_PATHS = ["registry/live/**"]                       # regenerated every 30 s
+EXCLUDE_PATHS = ["registry/live/**",                       # regenerated every 30 s
+                 "registry/cache/**"]                      # derived parse caches (safe to delete, rebuilt on import)
 EXCLUDE_NAMES = [".review_key", "*key*", "*.html", "*.htm",  # secrets, generated pages
                  "*.png", "*.jpg", "*.jpeg", "*.tif", "*.tiff", "*.mrc", "*.pt", "*.lock"]
 MIRROR_DIR = "state"
