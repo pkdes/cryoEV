@@ -11,9 +11,14 @@
 
 Jobs (contract v2 addendum): `job new` writes a `job/1` line with status ready, n_images, progress {0, n} and
 image_list {file, sha256} (the list is copied to <root>/lists/<job id>.txt). Its id must not equal any existing
-record id. Status changes go through set-status (ready -> in_progress -> done; blocked needs --reason; cancelled).
+record id (settled under the write lock: append(new_only=True)). Status changes go through set-status
+(ready -> in_progress -> done; blocked needs --reason; cancelled).
 
 API (piece 7 reads through these): append(record), current() -> {id: record}, history(id) -> [record, ...].
+append(record, new_only=True) is for creators: it refuses an id any record already uses, checked under the write
+lock, so of two writers racing for one id exactly one wins (importers append new lines for existing ids, so the
+default stays False). `files` {registry-relative path: bytes} are written under the same lock, after the checks
+and before the line (a file there with other content is refused), so a list file can't belong to the loser.
 inference_check and label_version are pointer records (`owner` = batches.jsonl / version.json): the registry
 stores the id, status lines and anything that differs from the owner file; the rest is read from the owner
 file at read time. Explicit status lines (`status_by`, from set-status) beat derived statuses.
@@ -179,8 +184,39 @@ def _check(rec, root, via_set_status=False):
     return e
 
 
-def append(record, root=None, _via_set_status=False):
-    """Validate, then append one line to <root>/<entity>.jsonl. Returns the stored line."""
+def id_used_by(id, root):
+    """Entity whose file has a line with this id (any entity: current() keys by bare id), or None."""
+    for e in ENTITIES:
+        if any(r.get("id") == id for r in _lines(root, e)):
+            return e
+    return None
+
+
+def _write_files(root, files):
+    """{registry-relative path: bytes} -> written (tmp + replace); a file already there with the same bytes is left
+    alone, one with other content is refused before anything is written. Called under the lock, before the line."""
+    todo = []
+    for rel, data in (files or {}).items():
+        path = root / rel
+        if Path(rel).is_absolute() or ".." in Path(rel).parts:
+            raise RegistryError(f"refused: {rel} is not a path inside the registry folder")
+        _guard(path)
+        if path.exists():
+            if path.read_bytes() != data:
+                raise RegistryError(f"refused: {path} exists with other content")
+            continue
+        todo.append((path, data))
+    for path, data in todo:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_bytes(data)
+        tmp.replace(path)
+
+
+def append(record, root=None, _via_set_status=False, new_only=False, files=None):
+    """Validate, then append one line to <root>/<entity>.jsonl. Returns the stored line.
+    new_only: refuse an id already used by any record (creators: new_job, dataset_from_lv), checked under the lock.
+    files: {registry-relative path: bytes} written under the lock after the checks, before the line."""
     root = Path(root or default_root())
     rec = dict(record)
     rec.setdefault("logged", now())
@@ -191,8 +227,13 @@ def append(record, root=None, _via_set_status=False):
         raise RegistryError(f"registry busy: another process held {root / LOCK} for {LOCK_WAIT:.0f} s")
     try:
         e = _check(rec, root, _via_set_status)
+        if new_only:
+            used = id_used_by(rec.get("id"), root)
+            if used:
+                raise RegistryError(f"refused: id {rec.get('id')} is already used by {used}/1 (new_only)")
         path = root / f"{e}.jsonl"
         _guard(path)
+        _write_files(root, files)
         line = compact(e, rec)
         lead = ""
         if path.exists() and path.stat().st_size:      # a line cut short must not swallow the next one
@@ -292,14 +333,10 @@ def new_job(type, where, name, images=None, session=None, who=None, total=None, 
     if note:
         rec["note"] = note
     _check(rec, root)                                   # validate before anything is written
-    path = root / rel
     _guard(root)
-    _guard(path)
-    if path.exists() and path.read_bytes() != text.encode("utf-8"):
-        raise RegistryError(f"refused: {path} exists with other content")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(text.encode("utf-8"))
-    return append(rec, root)
+    # the check above is only the early refusal: the id, the list file and the line are settled under one lock, so
+    # of two `job new` racing for one id exactly one wins and the list file is the winner's
+    return append(rec, root, new_only=True, files={rel: text.encode("utf-8")})
 
 
 def _lines_last(root, entity, id):
