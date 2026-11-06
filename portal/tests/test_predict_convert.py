@@ -62,7 +62,7 @@ ENV_KEYS = ("CJ_PREDICT_SOURCES", "CJ_PREDICT_ROOT", "CJ_REVIEW_ROOT", "CJ_PREDI
             "CRYOEV_LAPTOP_ROOT", "CRYOEV_CRYOAI_ROOT", "CRYOEV_PROCESSING_ROOT", "CRYOEV_REGISTRY",
             "CRYOEV_JOBS_TESTING", "CRYOEV_JOBS_TEST_HOOKS", "CRYOEV_JOBS_TEST_HOOKS_FILE", "FAKE_PRED_FROM",
             "FAKE_PRED_DELAY", "FAKE_CONVERT_MODE", "FAKE_CONVERT_N", "FAKE_CONVERT_GATE", "FAKE_CONVERT_ARGV",
-            "FAKE_CONVERT_WARN")
+            "FAKE_CONVERT_WARN", "CJ_RAW_ROOT", "CJ_RAW_KEEP_DAYS")
 HOOKS_OK = {"gpu": {"total_mb": 4096, "apps": []}, "predict_cmd": FAKE_PRED}
 CID_RE = re.compile(r"^/predict/convert/((\d{8}(?:-\d+)?)_[0-9a-f]{6})/$")
 
@@ -195,7 +195,7 @@ class World:
     """The temp world every class here uses: env, roster (admin tester, adv, adv2, bas), registry, predict root, scan
     root with raw session folders, a stub processing repo and the fake converter."""
 
-    def __init__(self, real_repo=None):
+    def __init__(self, real_repo=None, raw_root=None):
         self.saved = {k: os.environ.get(k) for k in ENV_KEYS}
         self.env = T.Env()
         tmp = self.tmp = self.env.tmp
@@ -252,6 +252,11 @@ class World:
                           CRYOEV_PROCESSING_ROOT=str(tmp / "no_processing"), FAKE_GOLDEN=str(GOLDEN / "images"),
                           FAKE_PRED_FROM=str(GOLDEN / "p" / MODEL / "predictions"),
                           FAKE_CONVERT_ARGV=str(self.argv_log))
+        self.raw_base = Path(raw_root) if raw_root else self.root       # CJ_RAW_ROOT unset = the predict root
+        self.rawtiles = self.raw_base / "raw_tiles"
+        os.environ.pop("CJ_RAW_ROOT", None)
+        if raw_root:
+            os.environ["CJ_RAW_ROOT"] = str(raw_root)
         for k in ("CJ_PREDICT_SOURCES", "CRYOEV_REGISTRY", "FAKE_PRED_DELAY", "FAKE_CONVERT_MODE", "FAKE_CONVERT_N",
                   "FAKE_CONVERT_GATE", "FAKE_CONVERT_WARN", "CRYOEV_JOBS_TEST_HOOKS_FILE"):
             os.environ.pop(k, None)
@@ -1375,7 +1380,10 @@ class KnownAnswer(unittest.TestCase):
                    cls.session / "2. Raw images" / f"{cls.stem}.mrc.mdoc",
                    cls.session / "1. Notes + reports" / "sample_key.csv"]
         cls.before = {str(p): (p.stat().st_size, p.stat().st_mtime_ns) for p in cls.raw}
-        cls.w = World(real_repo=cls.real_repo)
+        # CJ_TEST_RAW_ROOT=1: the same known answer with CJ_RAW_ROOT set to a second temp folder
+        tmp_raw = Path(tempfile.mkdtemp(prefix="cj_rawroot_")) if os.environ.get("CJ_TEST_RAW_ROOT") else None
+        cls._tmp_raw = tmp_raw
+        cls.w = World(real_repo=cls.real_repo, raw_root=tmp_raw)
         cls.tc = TestClient(APP.create_app(cls.w.cfg), base_url=ORIGIN, follow_redirects=False)
         cls.tc.__enter__()
         cls.tok = {}
@@ -1388,6 +1396,8 @@ class KnownAnswer(unittest.TestCase):
     def tearDownClass(cls):
         cls.tc.__exit__(None, None, None)
         cls.w.close()
+        if cls._tmp_raw:
+            shutil.rmtree(cls._tmp_raw, ignore_errors=True)
 
     def h(self, who="admin", **extra):
         return {"Cookie": f"{A.COOKIE}={self.tok[who]}", "Origin": ORIGIN, **extra}
@@ -1396,9 +1406,9 @@ class KnownAnswer(unittest.TestCase):
         st = wait_for(lambda: (lambda s: s if s.get("state") in ("done", "failed") else None)(
             self.tc.get(f"/predict/api/convert/{cid}", headers=self.h()).json()), 900, every=2,
             what=f"conversion {cid}")
-        self.assertEqual(st["state"], "done", (self.w.root / P.RAW_TILES / cid / "convert.log").read_text(
+        self.assertEqual(st["state"], "done", (self.w.rawtiles / cid / "convert.log").read_text(
             encoding="utf-8", errors="replace")[-3000:])
-        out = self.w.root / P.RAW_TILES / cid / "tiles"
+        out = self.w.rawtiles / cid / "tiles"
         with open(out / "MANIFEST.csv", newline="", encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
         self.assertEqual(st["n_tiles"], len(self.mine))

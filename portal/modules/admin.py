@@ -670,6 +670,38 @@ def health(cfg) -> dict:
         return out
 
 
+DISK_WARN_GB = 20.0
+
+
+def disks(cfg) -> dict:
+    """Free space on the drive of the predict root and of the raw root (CJ_RAW_ROOT; the same drive when unset)."""
+    import shutil
+    from portal.modules import predict as P
+    rows = []
+    for label, path in (("Predict sets", P.predict_root(cfg)), ("Raw images", P.raw_base(cfg))):
+        row = {"label": label, "path": str(path), "free_gb": None, "warn": False}
+        try:
+            row["free_gb"] = round(shutil.disk_usage(P._existing(path)).free / 2 ** 30, 1)
+            row["warn"] = row["free_gb"] < DISK_WARN_GB
+        except OSError:
+            pass
+        rows.append(row)
+    return {"rows": rows, "warn_gb": DISK_WARN_GB}
+
+
+DISK_TIMEOUT_S = 5.0
+
+
+def disks_bounded(cfg) -> dict:
+    """disks() in a daemon thread with a short timeout: an unreachable UNC/NAS path can't stall the Health page."""
+    box = []
+    t = threading.Thread(target=lambda: box.append(_safe_call(disks, cfg, default=None)), daemon=True)
+    t.start()
+    t.join(DISK_TIMEOUT_S)
+    return box[0] if box and box[0] else {"rows": [], "warn_gb": DISK_WARN_GB,
+                                           "problem": "The disks did not answer in time."}
+
+
 def _check_health(cfg) -> dict:
     now = time.time()
     with ThreadPoolExecutor(3) as ex:                    # the subprocesses run side by side
@@ -681,6 +713,7 @@ def _check_health(cfg) -> dict:
                "watchers": _safe_call(watchers, getattr(cfg, "registry", None), now,
                                       default={"ok": False, "queues": [], "age_s": None, "stale": True,
                                                "problem": "The status snapshot could not be read."}),
+               "disks": disks_bounded(cfg),
                "backup": {"commit": _safe(fc, {"configured": None, "problem": "Unknown: the check failed."}),
                           "task": _safe(ft, {"found": False, "problem": "The backup task check failed."})}}
     return out
@@ -1028,6 +1061,21 @@ def render_health(h: dict) -> str:
               f'cj-admin-meta">{esc(t.get("problem") or "")}</span></li>')
     bak = f'<ul class="cj-admin-lines">{cl}{tl}</ul>'
 
+    dk = _d(h.get("disks"))
+    dl = []
+    for r in dk.get("rows") or []:
+        r = _d(r)
+        if r.get("free_gb") is None:
+            word, tone, meta = "Unknown", "off", "could not be read"
+        else:
+            low = bool(r.get("warn"))
+            word, tone = (f"{r['free_gb']} GB free", "warn" if low else "ok")
+            meta = f"under {DISK_WARN_GB:g} GB: free some space" if low else ""
+        dl.append(f'<li class="cj-admin-line"><b>{esc(r.get("label"))}</b>{chip(word, tone)}<span class="cj-mut '
+                  f'cj-admin-meta">{esc(r.get("path"))}{" · " + esc(meta) if meta else ""}</span></li>')
+    dsk = (f'<ul class="cj-admin-lines">{"".join(dl)}</ul>' if dl
+           else '<p class="cj-mut">Disk space could not be read.</p>')
+
     def panel(key, title, inner):
         return (f'<section class="cj-card cj-admin-panel" aria-labelledby="cj-admin-h-{key}">'
                 f'<h2 id="cj-admin-h-{key}">{esc(title)}</h2>{inner}</section>')
@@ -1035,7 +1083,8 @@ def render_health(h: dict) -> str:
     return (f'<h1>Health</h1><p class="cj-mut">Checked {esc(when(parse_time(h["generated_utc"]), now))}. '
             f'Reload the page to check again.</p>'
             f'<div class="cj-admin-panels">{panel("svc", "Servers on this laptop", svc)}'
-            f'{panel("gpu", "GPU computers", wat)}{panel("bak", "Backup", bak)}</div>')
+            f'{panel("gpu", "GPU computers", wat)}{panel("bak", "Backup", bak)}'
+            f'{panel("dsk", "Disk space", dsk)}</div>')
 
 
 def render_audit(entries, problem) -> str:
