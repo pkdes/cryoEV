@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -77,8 +78,12 @@ class BackupTests(unittest.TestCase):
         for k, v in (("user.name", "test"), ("user.email", "test@example.invalid")):
             git(self.clone, "config", k, v)
         self.src_snapshot = self.snapshot(self.src)
+        # never read the real ~/.cryoev: no portal dirs unless a test passes them
+        self._p = mock.patch.object(B, "default_portal_dirs", return_value=[])
+        self._p.start()
 
     def tearDown(self):
+        self._p.stop()
         # never write into the source: byte-identical before/after every test
         self.assertEqual(self.snapshot(self.src), self.src_snapshot)
         self.tmp.cleanup()
@@ -87,9 +92,10 @@ class BackupTests(unittest.TestCase):
     def snapshot(folder):
         return {p.relative_to(folder).as_posix(): md5(p) for p in sorted(folder.rglob("*")) if p.is_file()}
 
-    def run_backup(self, push=True):
+    def run_backup(self, push=True, portal=None):
+        extra = [x for d in (portal or []) for x in ("--portal-state", str(d))]
         return B.main(["--source", str(self.src), "--repo", str(self.clone), "--max-mb", "1"]
-                      + (["--push"] if push else []))
+                      + extra + (["--push"] if push else []))
 
     def commits(self):
         return int(git(self.clone, "rev-list", "--count", "HEAD").strip())
@@ -164,6 +170,59 @@ class BackupTests(unittest.TestCase):
             if os.environ.get("GIT_CEILING_DIRECTORIES") == str(Path(self.tmp.name)):
                 del os.environ["GIT_CEILING_DIRECTORIES"]
         self.assertNotEqual(B.main(["--source", str(self.src / "missing"), "--repo", str(self.clone)]), 0)
+
+    def test_portal_audit_included_rest_identical(self):
+        self.run_backup(push=False)
+        control = self.mirrored()
+        self.assertEqual(control, set(INCLUDED))
+        t = Path(self.tmp.name)
+        live, prev = t / "portal", t / "portal_preview"
+        for d, text in ((live, "{\"a\": 1}\n"), (prev, "{\"a\": 2}\n")):
+            (d / "audit").mkdir(parents=True)
+            (d / "audit" / "portal.jsonl").write_text(text)
+            (d / "sessions.json").write_text("SESSIONSECRET")   # siblings must not be copied
+        snap = self.snapshot(live)
+        with mock.patch.object(B, "default_portal_dirs", return_value=[live, prev]):
+            self.assertEqual(self.run_backup(push=False), 0)
+            self.assertEqual(B.verify(self.src, self.clone, 1), 0)
+        self.assertEqual(self.mirrored() - control,
+                         {"portal_audit/portal/portal.jsonl", "portal_audit/portal_preview/portal.jsonl"})
+        self.assertEqual(control - self.mirrored(), set())
+        self.assertEqual((self.clone / "state/portal_audit/portal/portal.jsonl").read_text(), "{\"a\": 1}\n")
+        self.assertNotIn("SESSIONSECRET", git(self.clone, "log", "--all", "-p"))
+        self.assertEqual(self.snapshot(live), snap, "portal state is only read")
+        # live audit log gone -> dropped from the mirror, the rest unchanged
+        (live / "audit" / "portal.jsonl").unlink()
+        self.run_backup(push=False, portal=[prev])
+        self.assertEqual(self.mirrored() - control, {"portal_audit/portal_preview/portal.jsonl"})
+
+    def test_portal_audit_own_cap_and_warning(self):
+        import contextlib
+        import io
+        d = Path(self.tmp.name) / "portal"
+        (d / "audit").mkdir(parents=True)
+        log = d / "audit" / "portal.jsonl"
+        log.write_bytes(b"x" * (2 * 1024 * 1024))     # over --max-mb 1, under the audit cap
+        self.assertEqual(self.run_backup(push=False, portal=[d]), 0)
+        self.assertIn("portal_audit/portal/portal.jsonl", self.mirrored(), "own, larger cap")
+        with mock.patch.object(B, "AUDIT_MAX_MB", 1):   # now over the audit cap
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(self.run_backup(push=False, portal=[d]), 0)   # normal run, not dry-run
+            self.assertIn("WARNING portal audit log NOT backed up (too-big)", err.getvalue())
+            self.assertNotIn("portal_audit/portal/portal.jsonl", self.mirrored())
+        # control: no warning when everything fits
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.run_backup(push=False, portal=[d])
+        self.assertNotIn("WARNING", err.getvalue())
+
+    def test_portal_state_flag(self):
+        d = Path(self.tmp.name) / "ps"
+        (d / "audit").mkdir(parents=True)
+        (d / "audit" / "portal.jsonl").write_text("{}\n")
+        self.assertEqual(self.run_backup(push=False, portal=[d]), 0)
+        self.assertIn("portal_audit/ps/portal.jsonl", self.mirrored())
 
 
 if __name__ == "__main__":

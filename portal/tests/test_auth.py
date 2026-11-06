@@ -243,5 +243,53 @@ class AuthTool(unittest.TestCase):
         self.assertFalse(str(A.default_state_dir()).startswith(str(T.REPO)))
 
 
+class WriteJsonAtomic(unittest.TestCase):
+    def setUp(self):
+        import os
+        import tempfile
+        from unittest import mock
+        self.os, self.mock = os, mock
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.target = self.dir / "x.json"
+        self.real = os.replace
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_normal_path(self):
+        A.write_json_atomic(self.target, {"a": 1})
+        self.assertEqual(json.loads(self.target.read_text(encoding="utf-8")), {"a": 1})
+        self.assertEqual([p.name for p in self.dir.iterdir()], ["x.json"])
+
+    def test_retries_then_succeeds(self):
+        calls = []
+
+        def flaky(src, dst):
+            calls.append(1)
+            if len(calls) <= 2:
+                raise PermissionError("in use")
+            return self.real(src, dst)
+        with self.mock.patch.object(A.os, "replace", flaky):
+            A.write_json_atomic(self.target, {"a": 2})
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(json.loads(self.target.read_text(encoding="utf-8")), {"a": 2})
+        self.assertEqual([p.name for p in self.dir.iterdir()], ["x.json"])
+
+    def test_always_fails_raises_cleanly_and_bounded(self):
+        calls = []
+
+        def never(src, dst):
+            calls.append(1)
+            raise PermissionError("in use")
+        t0 = time.monotonic()
+        with self.mock.patch.object(A.os, "replace", never):
+            with self.assertRaises(PermissionError):
+                A.write_json_atomic(self.target, {"a": 3})
+        self.assertLess(time.monotonic() - t0, 1.0)
+        self.assertEqual(len(calls), A.REPLACE_TRIES)
+        self.assertEqual(list(self.dir.iterdir()), [], "no temp file left, target not created")
+
+
 if __name__ == "__main__":
     unittest.main()

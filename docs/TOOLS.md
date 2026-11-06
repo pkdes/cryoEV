@@ -31,6 +31,8 @@ The laptop data folder holds the only copy of a few MB of text state: the regist
 - **Where it goes:** files are copied byte for byte to `<repo>/state/<same path>`. Files deleted at the source are removed from the mirror.
 - **Manifest and line endings:** it writes `<repo>/MANIFEST.md5` (`md5  path`, sorted by path) and sets `.gitattributes` to `* -text`, so that git never changes line endings.
 - **Commits:** it commits only when something changed (`backup <UTC>: N changed`). It pushes only with `--push`. On any failure the exit code is non-zero.
+- **Portal audit logs:** `<portal state dir>/audit/portal.jsonl` lives outside `--source`. By default the backup takes it from every existing `~/.cryoev/portal*` dir (live and preview) and copies it to `<repo>/state/portal_audit/<state dir name>/portal.jsonl`. Other files in the state dir (sessions) are never copied. Audit logs have their own size cap (`AUDIT_MAX_MB`, 200), independent of `--max-mb`. If one is over the cap, a normal run prints a `WARNING ... NOT backed up` line on stderr and drops it from the mirror.
+- **`--portal-state DIR` (repeatable) REPLACES the defaults.** If you pass it, only the dirs you name are backed up, so list the live and preview dirs both. Use the same flags for `--verify`.
 - **Source folder:** read-only. The script never writes there.
 
 ```
@@ -39,7 +41,7 @@ python tools/backup_state.py --source <laptop data dir> --repo <backup clone> --
 python tools/backup_state.py --source <laptop data dir> --verify <fresh clone>         # restore drill
 ```
 
-- **Restore drill:** `--verify` checks every mirror file's md5 against the manifest and against the source. It also reports whitelisted source files that are missing from the backup. Files that changed after the last backup show up as differences, which is expected.
+- **Restore drill:** `--verify` checks every mirror file's md5 against the manifest and against the source. It also reports whitelisted source files that are missing from the backup. Files that changed after the last backup show up as differences, which is expected. The live audit log is appended to continuously, so `--verify` usually reports it as differing from the source; that is expected, not corruption.
 - **Setup, done once by the user:**
   1. Create the private repo and clone it locally.
   2. Set `user.name` and `user.email` in that clone.

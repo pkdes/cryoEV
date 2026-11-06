@@ -42,6 +42,8 @@ SESSION_S = 30 * 86400            # 30 days
 ROLES = ("admin", "advanced", "basic")   # admin > advanced > basic; modules list every role they allow
 ID_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,39}")
 KEY_BYTES = 32
+REPLACE_TRIES = 10                # os.replace retries on PermissionError; backoff totals ~0.23 s
+REPLACE_PAUSE_S = 0.005
 
 
 def default_dir() -> Path:
@@ -64,8 +66,23 @@ def write_json_atomic(path: Path, obj) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(obj, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(json.dumps(obj, indent=1), encoding="utf-8")
+        # Windows: os.replace raises PermissionError while another process briefly has the file open
+        for attempt in range(REPLACE_TRIES):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == REPLACE_TRIES - 1:
+                    raise
+                time.sleep(REPLACE_PAUSE_S * (attempt + 1))
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def cookie_header(token: str, max_age: int = SESSION_S) -> str:
