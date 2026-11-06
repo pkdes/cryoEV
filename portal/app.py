@@ -101,6 +101,7 @@ ICONS = {
     "sandbox": '<rect x="4" y="4" width="16" height="16" rx="2" stroke-dasharray="3 2.2"/><path d="M9 15l6-6M10 9h5v5"/>',
     "predict": '<path d="M12 15V4M8 8l4-4 4 4M4 14v6h16v-6"/>',
     "results": '<path d="M5 20v-8M10 20V5M15 20v-6M20 20v-10"/>',
+    "reviews": '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 9.5l1.5 1.5L12 8.5M14 10h3M8 15.5l1.5 1.5 2.5-2.5M14 16h3"/>',
     "train": '<path d="M19.5 13a7.5 7.5 0 01-13.3 4.2M4.5 11a7.5 7.5 0 0113.3-4.2"/><path d="M18 3.5v3.5h-3.5M6 20.5V17h3.5"/>',
     "admin": '<path d="M12 3l7 3v5.5c0 4.3-2.9 7.6-7 9.5-4.1-1.9-7-5.2-7-9.5V6z"/><path d="M9.5 12l1.8 1.8 3.4-3.5"/>',
 }

@@ -73,6 +73,7 @@ from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
 
+from portal import access_config
 from portal import audit as PA
 from portal import auth as A
 from portal import predict_sources as PSRC
@@ -102,7 +103,7 @@ ROLE_DESC = {"admin": "everything, including people and health",
              "advanced": "jobs, history, training (when it opens)",
              "basic": "their own uploads, predictions and results"}
 ACTION_WORD = {"person_added": "added", "role_changed": "changed the role of", "person_revoked": "revoked",
-               "email_changed": "changed the sign-in email of",
+               "email_changed": "changed the sign-in email of", "key_made": "made a key link for",
                "cancel": "cancel", "release": "release", "predict_source_renamed": "renamed the Predict session",
                "predict_source_hidden": "hid the Predict session", "predict_source_shown": "showed the Predict session"}
 
@@ -279,6 +280,7 @@ def public_person(p: dict, email: bool = False) -> dict:
            "added": _s(p.get("added")), "revoked": _s(p.get("revoked")), "role_changed": _s(p.get("role_changed"))}
     if email:
         out["email"] = _s(p.get("email"))
+        out["has_key"] = isinstance(p.get("key_sha256"), str)
     return out
 
 
@@ -327,28 +329,52 @@ def _email_free(doc, email, pid) -> None:
         raise Refused(f"{email} is already the email of {other}. Emails are unique among active people.")
 
 
-def add_person(path, pid: str, role: str, email: str | None = None) -> str:
+def add_person(path, pid: str, role: str, email: str | None = None, with_key: bool = True) -> str | None:
     """-> the new key (the caller shows it once and forgets it). Same entry as auth.add_key (+ `email` when given:
-    lower-cased, unique among active people); refuses an id that is already active. Raises Refused, ValueError
+    lower-cased, unique among active people); refuses an id that is already active. `with_key=False` (needs an
+    email) makes an email-only person: no key, so Cloudflare sign-in only; -> None. Raises Refused, ValueError
     (unreadable roster) or OSError (lock or write: nothing changed)."""
     _check_id(pid)
     if role not in A.ROLES:
         raise Refused("Pick a role: Admin, Advanced or Basic.", 400)
     em = _email(email)
+    if not with_key and not em:
+        raise Refused("A person without a key link needs an email to sign in with.", 400)
     with roster_lock(path):
         doc = load_roster(path)
         if _active(doc, pid):
-            raise Refused(f"{pid} is already on the list. To give them a new key link, revoke them first, then add "
-                          "them again.")
+            raise Refused(f"{pid} is already on the list. To give them a new key link, use Make key link on their "
+                          "card (or revoke them and add them again).")
         _email_free(doc, em, pid)
-        key = secrets.token_urlsafe(A.KEY_BYTES)
-        entry = {"id": pid, "role": role, "key_sha256": A.sha256_hex(key),
-                 "added": datetime.now().isoformat(timespec="seconds")}
+        key = secrets.token_urlsafe(A.KEY_BYTES) if with_key else None
+        entry = {"id": pid, "role": role, "added": datetime.now().isoformat(timespec="seconds")}
+        if key:
+            entry["key_sha256"] = A.sha256_hex(key)
         if em:
             entry["email"] = em
         doc["people"] = [p for p in doc["people"] if not (isinstance(p, dict) and p.get("id") == pid)] + [entry]
         write_roster(path, doc)
         return key
+
+
+def make_key(path, pid: str) -> tuple:
+    """Issue a key link for an active person (an email-only person gets their first; otherwise the old key is
+    replaced and its sessions end). Role and email are kept. -> (key, had_key). Refuses a revoked or unknown id."""
+    _check_id(pid)
+    with roster_lock(path):
+        doc = load_roster(path)
+        hits = _active(doc, pid)
+        if not hits:
+            raise Refused(f"{pid} is not on the list, or revoked. Add them again to give them a key link.", 404)
+        p = hits[-1]
+        if p.get("role") not in A.ROLES:
+            raise Refused(f"{pid} has no valid role. Set a role first.")
+        had = isinstance(p.get("key_sha256"), str)
+        key = secrets.token_urlsafe(A.KEY_BYTES)
+        p["key_sha256"] = A.sha256_hex(key)
+        p["key_issued"] = datetime.now().isoformat(timespec="seconds")
+        write_roster(path, doc)
+        return key, had
 
 
 def set_email(path, pid: str, email: str) -> tuple:
@@ -362,6 +388,8 @@ def set_email(path, pid: str, email: str) -> tuple:
         if not hits:
             raise Refused(f"{pid} is not on the list, or revoked.", 404)
         old = str(hits[-1].get("email") or "")
+        if old and not em and not any(isinstance(p.get("key_sha256"), str) for p in hits):
+            raise Refused(f"{pid} has no key link, so the email is their only way in. Make a key link first.")
         if old == em:
             raise Refused(f"{pid} already has that email." if em else f"{pid} has no email.")
         _email_free(doc, em, pid)
@@ -532,8 +560,25 @@ def services_status() -> dict:
     except ValueError:
         return {"ok": False, "rows": [], "problem": "The service tool's answer could not be read."}
     keep = ("name", "enabled", "state", "port", "listening", "health", "uptime_s")
-    return {"ok": True, "rows": [{k: _d(r).get(k) for k in keep} for r in rows if _s(_d(r).get("name"))],
-            "problem": None}
+    paths = _health_paths()
+    out = []
+    for r in rows:
+        if _s(_d(r).get("name")):
+            row = {k: _d(r).get(k) for k in keep}
+            row["health_path"] = row["name"] in paths
+            out.append(row)
+    return {"ok": True, "rows": out, "problem": None}
+
+
+def _health_paths() -> set:
+    """Names of services whose services config has a "health" path (the tool then reports ok / http N / bad body;
+    without one any HTTP answer is 'http N' and counts as up)."""
+    p = os.environ.get("CRYOEV_SERVICES_CONFIG") or str(Path.home() / ".cryoev" / "services.json")
+    try:
+        doc = json.loads(Path(p).read_text(encoding="utf-8-sig"))
+        return {str(x.get("name")) for x in doc.get("services", []) if isinstance(x, dict) and x.get("health")}
+    except (OSError, ValueError, AttributeError):
+        return set()
 
 
 SERVICE_WORD = {"running": ("Running", "ok"), "running (not listening)": ("Running, not answering", "warn"),
@@ -777,7 +822,8 @@ def render_people(rows, me, tok, msg_html="") -> str:
         added = parse_time(r["added"])
         meta = f'Added {esc(when(added))}' if added is not None else "Added: unknown"
         em = r.get("email")
-        mail = (f'<p class="cj-mut cj-admin-meta cj-wrap cj-admin-email">Email: {esc(em)}</p>' if em else
+        mail = (f'<p class="cj-mut cj-admin-meta cj-wrap cj-admin-email">Email: {esc(em)}'
+                f'{"" if r.get("has_key", True) else " · no key link (Cloudflare sign-in only)"}</p>' if em else
                 '<p class="cj-mut cj-admin-meta cj-admin-email">Email: none (no Cloudflare sign-in)</p>')
         if r["state"] == "revoked":
             rt = parse_time(r["revoked"])
@@ -790,6 +836,11 @@ def render_people(rows, me, tok, msg_html="") -> str:
                      f'{hidden_token(tok)}<input type="hidden" name="id" value="{esc(r["id"])}">'
                      f'<label class="cj-admin-lbl" for="{fid}">Role</label>{role_select("role", role, fid)}'
                      f'<button class="cj-admin-btn" type="submit">Change role</button></form>')
+        has_key = r.get("has_key", True)
+        key_form = (f'<form class="cj-admin-row" method="post" action="{PREFIX}/people/key">'
+                    f'{hidden_token(tok)}<input type="hidden" name="id" value="{esc(r["id"])}">'
+                    f'<button class="cj-admin-btn" type="submit">'
+                    f'{"Make a new key link" if has_key else "Make key link"}</button></form>')
         eid = f"cj-admin-e{i}"
         mail_form = (f'<form class="cj-admin-row" method="post" action="{PREFIX}/people/email">'
                      f'{hidden_token(tok)}<input type="hidden" name="id" value="{esc(r["id"])}">'
@@ -808,7 +859,7 @@ def render_people(rows, me, tok, msg_html="") -> str:
                 f'{chip(ROLE_WORD.get(role, role), tone)}</div>'
                 f'<p class="cj-mut cj-admin-meta">{meta}.</p>{mail}{bad}{lastnote}'
                 + ("" if last else f'<div class="cj-admin-acts">{role_form}{rev}</div>')
-                + f'<div class="cj-admin-acts">{mail_form}</div></li>')
+                + f'<div class="cj-admin-acts">{mail_form}{key_form}</div></li>')
 
     roles = "".join(f"<li><b>{ROLE_WORD[r]}</b>: {esc(ROLE_DESC[r])}</li>" for r in A.ROLES)
     add = (f'<section class="cj-card cj-admin-add" aria-labelledby="cj-admin-h-add">'
@@ -819,14 +870,16 @@ def render_people(rows, me, tok, msg_html="") -> str:
            f'<input class="cj-admin-in" id="cj-admin-id" name="id" required maxlength="40" '
            f'pattern="[a-z0-9][a-z0-9_.\\-]{{0,39}}" autocomplete="off" autocapitalize="none" spellcheck="false">'
            f'<label class="cj-admin-lbl" for="cj-admin-email">Email <span class="cj-mut">(optional: their '
-           f'Cloudflare sign-in)</span></label>'
+           f'Cloudflare sign-in; with one they get no key link unless you tick the box)</span></label>'
            f'<input class="cj-admin-in" id="cj-admin-email" name="email" type="email" maxlength="254" '
            f'autocomplete="off" autocapitalize="none" spellcheck="false">'
            f'<label class="cj-admin-lbl" for="cj-admin-role">Role</label>{role_select("role", "basic", "cj-admin-role")}'
-           f'<button class="cj-admin-btn cj-admin-primary" type="submit">Add and make a key link</button></form>'
+           f'<label class="cj-admin-lbl"><input type="checkbox" name="also_key" value="1"> Also make a Tailscale key '
+           f'link <span class="cj-mut">(only matters when an email is entered)</span></label>'
+           f'<button class="cj-admin-btn cj-admin-primary" type="submit">Add person</button></form>'
            f'<ul class="cj-mut cj-admin-roles">{roles}</ul>'
-           f'<p class="cj-mut cj-admin-meta">The key link is shown once, on the next page. Send it to the person '
-           f'privately.</p></section>')
+           f'<p class="cj-mut cj-admin-meta">Without an email, a key link is made and shown once, on the next '
+           f'page. Send it to the person privately.</p></section>')
     act = ("".join(card(r, i) for i, r in enumerate(active)) or
            '<li class="cj-mut">Nobody yet.</li>')
     out = (f'<h1>People</h1><p class="cj-mut">Who can sign in to the portal, and what they can open.</p>{msg_html}'
@@ -840,9 +893,23 @@ def render_people(rows, me, tok, msg_html="") -> str:
     return out + "</section></div>"
 
 
-def render_key(pid, role, link) -> str:
-    return (f'<h1>Key link for {esc(pid)}</h1>'
+def render_signin(pid, role, email, host) -> str:
+    """The result page for an email-only person: where to send them. No host configured: no URL sentence."""
+    where = (f"Send them https://{esc(host)}/ \u2014 they sign in with {esc(email)} (one-time code by email)."
+             if host else f"They sign in with {esc(email)} (one-time code by email).")
+    return (f'<h1>{esc(pid)} added</h1>'
             f'{note(f"{pid} was added as {ROLE_WORD[role]}.")}'
+            f'<section class="cj-card cj-admin-key" aria-labelledby="cj-admin-h-key">'
+            f'<h2 id="cj-admin-h-key">How {esc(pid)} signs in</h2>'
+            f'<p class="cj-admin-signin">{where}</p>'
+            f"<p class=\"cj-mut\">Email-only people can't use the Tailscale link. "
+            f'Use Make key link on their card if they need one.</p></section>'
+            f'<p><a class="cj-admin-link" href="{PREFIX}/">Back to People</a></p>')
+
+
+def render_key(pid, role, link, rotated=False) -> str:
+    return (f'<h1>Key link for {esc(pid)}</h1>'
+            f'{note(f"{pid} was added as {ROLE_WORD[role]}." if not rotated else f"A key link was made for {pid}.")}'
             f'<section class="cj-card cj-admin-key" aria-labelledby="cj-admin-h-key">'
             f'<h2 id="cj-admin-h-key">Send this link to {esc(pid)}, privately</h2>'
             f'<label class="cj-admin-lbl" for="cj-admin-link">Key link</label>'
@@ -999,7 +1066,16 @@ def render_health(h: dict) -> str:
             if r.get("port"):
                 bits.append(f"port {r['port']}")
             if r.get("health") and r.get("health") not in ("-", "down"):
-                bits.append("answers" if str(r["health"]).startswith("http") else str(r["health"]))
+                hs = str(r["health"])
+                if hs.startswith("http") and not r.get("health_path"):
+                    bits.append("answers")          # no health path: any HTTP answer is up
+                elif hs.startswith("http"):
+                    bits.append(f"problem: {hs}")   # a health path was asked and it did not say ok
+                    if tone == "ok":
+                        tone = "warn"
+                        word = "Running, unhealthy"
+                else:
+                    bits.append(hs)
             if isinstance(r.get("uptime_s"), (int, float)):
                 bits.append(f"up {dur(r['uptime_s'])}")
             items.append(f'<li class="cj-admin-line"><b class="cj-wrap">{esc(str(r["name"]))}</b>'
@@ -1239,15 +1315,45 @@ def routes(ctx) -> list:
             return err
         pid, role, actor = f.get("id", "").lower(), f.get("role", ""), me(request)
         email = f.get("email", "")
-        key, err = await change(request, add_person, pid, role, email)
+        with_key = not email.strip() or bool(f.get("also_key"))
+        key, err = await change(request, add_person, pid, role, email, with_key)
         if err:
             return err
         detail = {"role": role, "email": email.lower()} if email else {"role": role}
+        if email and not with_key:
+            detail["key"] = False
         warn = await run_in_threadpool(try_audit, actor, "person_added", pid, detail)
+        if key is None:
+            host = getattr(getattr(ctx.cfg, "access", None), "host", None) \
+                or await run_in_threadpool(access_config.public_host)
+            r = show(request, f"{pid} added", "people", warn + render_signin(pid, role, email.strip().lower(), host))
+            r.headers["Cache-Control"] = "no-store"
+            return r
         base = await run_in_threadpool(link_base, ctx.cfg, request.headers.get("origin"))
         link = f"{base}/login?k={key}"
         del key
         r = show(request, f"Key link for {pid}", "people", warn + render_key(pid, role, link))
+        r.headers["Cache-Control"] = "no-store"
+        r.headers["Pragma"] = "no-cache"
+        return r
+
+    async def makekey(request: Request):
+        f, err = await form(request)
+        if err:
+            return err
+        pid, actor = f.get("id", ""), me(request)
+        res, err = await change(request, make_key, pid)
+        if err:
+            return err
+        key, had = res
+        warn = await run_in_threadpool(try_audit, actor, "key_made", pid, {"rotated": had})
+        base = await run_in_threadpool(link_base, ctx.cfg, request.headers.get("origin"))
+        link = f"{base}/login?k={key}"
+        del key
+        rows = await run_in_threadpool(people, ctx.cfg.roster)
+        role_ = next((r["role"] for r in rows if r["id"] == pid), None)
+        r = show(request, f"Key link for {pid}", "people",
+                 warn + render_key(pid, role_ if role_ in ROLE_WORD else "basic", link, rotated=True))
         r.headers["Cache-Control"] = "no-store"
         r.headers["Pragma"] = "no-cache"
         return r
@@ -1425,6 +1531,7 @@ def routes(ctx) -> list:
             Route(PREFIX + "/people/add", add, methods=["POST"]),
             Route(PREFIX + "/people/role", role, methods=["POST"]),
             Route(PREFIX + "/people/email", email, methods=["POST"]),
+            Route(PREFIX + "/people/key", makekey, methods=["POST"]),
             Route(PREFIX + "/people/revoke", revoke_page, methods=["GET"]),
             Route(PREFIX + "/people/revoke", revoke, methods=["POST"]),
             Route(PREFIX + "/predict", predict_page, methods=["GET"]),

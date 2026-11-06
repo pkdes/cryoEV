@@ -13,6 +13,8 @@
    "health": null, "status": "on", "nav": true, "desc": "Run a model on new images"},
   {"id": "results", "name": "Results", "route": "/results/", "icon": "results", "roles": ["admin", "advanced", "basic"],
    "health": null, "status": "on", "nav": true, "desc": "Counts, sizes and morphology"},
+  {"id": "reviews", "name": "My reviews", "route": "/reviews/", "icon": "reviews", "roles": ["admin", "advanced", "basic"],
+   "health": null, "status": "on", "nav": true, "desc": "Your prediction reviews and how far along they are"},
   {"id": "train", "name": "Train", "route": "/train/", "icon": "train", "roles": ["admin", "advanced"], "health": null,
    "status": "on", "nav": true, "desc": "Queue a training job, watch it, compare past runs"},
   {"id": "admin", "name": "Admin", "route": "/admin/", "icon": "admin", "roles": ["admin"], "health": null,

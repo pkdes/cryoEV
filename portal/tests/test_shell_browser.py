@@ -38,11 +38,12 @@ def _on(role):
     return [m["name"] for m in _MODS if m.get("nav") and m["status"] == "on" and role in m["roles"]]
 
 
-NAV = {"admin": (["Home", "Data", "Jobs", "Review", "Predict", "Results", "Train", "Admin", "Sandbox"], _on("admin")),
-       "advanced": (["Home", "Data", "Jobs", "Predict", "Results", "Train"], _on("advanced")),
-       "basic": (["Home", "Predict", "Results"], _on("basic"))}
-CARDS = {"admin": ["data", "jobs", "review", "predict", "results", "train", "admin", "sandbox"],
-         "advanced": ["data", "jobs", "predict", "results", "train"], "basic": ["predict", "results"]}
+NAV = {"admin": (["Home", "Data", "Jobs", "Review", "Predict", "Results", "My reviews", "Train", "Admin", "Sandbox"], _on("admin")),
+       "advanced": (["Home", "Data", "Jobs", "Predict", "Results", "My reviews", "Train"], _on("advanced")),
+       "basic": (["Home", "Predict", "Results", "My reviews"], _on("basic"))}
+CARDS = {"admin": ["data", "jobs", "review", "predict", "results", "reviews", "train", "admin", "sandbox"],
+         "advanced": ["data", "jobs", "predict", "results", "reviews", "train"],
+         "basic": ["predict", "results", "reviews"]}
 TOKENS = {"light": {"bg": "rgb(243, 245, 247)", "card": "rgb(255, 255, 255)", "hist_bg": "rgb(250, 250, 249)"},
           "dark": {"bg": "rgb(15, 21, 27)", "card": "rgb(23, 32, 41)", "hist_bg": "rgb(20, 19, 18)"}}
 
