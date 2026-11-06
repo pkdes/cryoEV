@@ -716,6 +716,8 @@ class ActionBase(unittest.TestCase):
                  "status": "ready", **({"who": who} if who else {})} for j, (_, who) in cls.JOBS.items()]
         write_registry(cls.env.registry, recs)
         cls.write_live()
+        cls.keep_shares = J.LOCAL_SHARES
+        J.LOCAL_SHARES = (str(cls.share),)             # the temp share is not a UNC path: allow it explicitly
         cls.p = T.Portal(cls.env.config())
         cls.tok = {"admin": T.login(cls.p.port, cls.env.key), "advanced": T.login(cls.p.port, cls.adv_key),
                    "adv2": T.login(cls.p.port, cls.adv2_key), "basic": T.login(cls.p.port, cls.bas_key)}
@@ -736,6 +738,7 @@ class ActionBase(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        J.LOCAL_SHARES = cls.keep_shares
         cls.p.stop()
         cls.env.cleanup()
 
@@ -837,7 +840,8 @@ class Actions(ActionBase):
                            ("/jobs/api/release", {"job": "job_20261105_hold"})):
             st, out, _ = self.post(path, body)
             self.assertEqual(st, 409)
-            self.assertIn("out of date", out["message"])
+            self.assertIn("updates have stopped", out["message"])
+            self.assertIn("1 h ago", out["message"])
         self.assertFalse(self.cancel_file("job_20261105_admin_q").exists())
         self.assertFalse((self.share / "q" / "job_20261105_hold" / "READY").exists())
         (self.env.registry / "live" / "live.json").unlink()          # no snapshot at all
@@ -854,7 +858,8 @@ class Actions(ActionBase):
     def test_unknown_job_and_bad_ids(self):
         st, _, _ = self.post("/jobs/api/cancel", {"job": "job_20261105_nope", "reason": "x"})
         self.assertEqual(st, 404)
-        for bad in ("../../etc", "a/b", "..", "", None, 7):
+        for bad in ("../../etc", "a/b", "..", "", None, 7, "job_20261105_admin_q.", "job_20261105_x/../y",
+                    "job_20261105_" + "a" * 200):
             with self.subTest(job=bad):
                 st, _, _ = self.post("/jobs/api/cancel", {"job": bad, "reason": "x"})
                 self.assertEqual(st, 400)
@@ -903,13 +908,14 @@ class Actions(ActionBase):
         self.post("/jobs/api/release", {"job": "job_20261105_hold"})
         self.post("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "x"}, "adv2")   # refused: no line
         lines = self.audit_lines()
-        self.assertEqual(len(lines), 2)
-        self.assertEqual([(x["actor"], x["action"], x["job"], x["reason"]) for x in lines],
-                         [("adv", "cancel", "job_20261105_adv_q", "because"),
-                          ("tester", "release", "job_20261105_hold", None)])
+        self.assertEqual(len(lines), 4)                       # write-ahead: "requested", then the outcome
+        self.assertEqual([(x["actor"], x["action"], x["job"], x["reason"], x["result"]) for x in lines],
+                         [("adv", "cancel", "job_20261105_adv_q", "because", "requested"),
+                          ("adv", "cancel", "job_20261105_adv_q", "because", "ok"),
+                          ("tester", "release", "job_20261105_hold", None, "requested"),
+                          ("tester", "release", "job_20261105_hold", None, "ok")])
         for x in lines:
-            self.assertTrue({"time", "actor", "action", "job", "reason"} <= set(x))
-            self.assertEqual(x["result"], "ok")
+            self.assertTrue({"time", "actor", "action", "job", "reason", "result"} <= set(x))
             self.assertRegex(x["time"], r"^\d{4}-\d\d-\d\dT")
         text = self.audit_file.read_text(encoding="utf-8")
         for secret in (self.env.key, self.adv_key, self.tok["admin"], self.tok["advanced"]):
@@ -929,6 +935,106 @@ class Actions(ActionBase):
     def test_get_not_allowed(self):
         st, _, _ = T.request(self.p.port, "GET", "/jobs/api/cancel", T.cookie(self.tok["admin"]))
         self.assertEqual(st, 405)
+
+    def test_audit_file_unwritable_means_nothing_done(self):
+        self.audit_file.parent.mkdir(parents=True, exist_ok=True)
+        self.audit_file.mkdir()                                  # portal.jsonl is a folder: opening it fails
+        self.addCleanup(lambda: self.audit_file.exists() and self.audit_file.rmdir())
+        for path, body, f in (("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "x"},
+                               self.cancel_file("job_20261105_admin_q")),
+                              ("/jobs/api/release", {"job": "job_20261105_hold"},
+                               self.share / "q" / "job_20261105_hold" / "READY")):
+            st, out, _ = self.post(path, body)
+            self.assertEqual(st, 500)
+            self.assertFalse(f.exists())
+
+    def test_result_line_failure_still_returns_the_outcome(self):
+        real = J.audit
+        calls = []
+
+        def flaky(cfg, actor, action, job, reason, result):
+            calls.append(result)
+            if result != "requested":
+                raise OSError("disk full")
+            return real(cfg, actor, action, job, reason, result)
+        J.audit = flaky
+        self.addCleanup(setattr, J, "audit", real)
+        with self.assertLogs("cj.jobs", "WARNING"):
+            st, out, _ = self.post("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "x"})
+        self.assertEqual((st, out["ok"]), (200, True))
+        self.assertTrue(self.cancel_file("job_20261105_admin_q").is_file())
+        self.assertEqual(calls, ["requested", "ok"])
+
+    def test_parallel_cancels_write_once(self):
+        import concurrent.futures
+        job = "job_20261105_admin_q"
+        # a slow share write widens the race window; the per-job lock must still let exactly one through
+        S = J.sync_module()
+        real = S.cancel
+        writes = []
+
+        def slow(*a, **k):
+            import time as _t
+            _t.sleep(0.2)
+            writes.append(a[0])
+            return real(*a, **k)
+        S.cancel = slow
+        self.addCleanup(setattr, S, "cancel", real)
+        with concurrent.futures.ThreadPoolExecutor(8) as ex:
+            res = list(ex.map(lambda i: self.post("/jobs/api/cancel", {"job": job, "reason": f"r{i}"})[:2], range(8)))
+        oks = [r for r in res if r[0] == 200]
+        self.assertEqual(len(oks), 1, res)
+        self.assertEqual(len(writes), 1)
+        others = [r for r in res if r[0] != 200]
+        self.assertEqual({(st, o["message"]) for st, o in others},
+                         {(409, "A cancel was already requested for this job.")})
+        lines = self.audit_lines()
+        self.assertEqual([x["result"] for x in lines], ["requested", "ok"])      # no line for the refused seven
+
+    def test_busy_pool_says_try_again(self):
+        held = [J._slots.acquire(blocking=False) for _ in range(J.POOL_SIZE)]
+        try:
+            st, out, _ = self.post("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "x"})
+        finally:
+            for h in held:
+                if h:
+                    J._slots.release()
+        self.assertEqual(st, 503)
+        self.assertIn("busy", out["message"])
+        self.assertFalse(self.cancel_file("job_20261105_admin_q").exists())
+
+    def test_share_must_be_unc_or_allowed(self):
+        q = self.live_queues()
+        q[0]["share"] = str(self.decoy)                          # a local folder that is not on the allow list
+        self.env.write_live(T.live_doc(queues=q))
+        st, out, _ = self.post("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "x"})
+        self.assertEqual(st, 409)
+        self.assertFalse(self.cancel_file("job_20261105_admin_q", self.decoy).exists())
+        self.assertTrue(J.share_ok("\\\\gpu-desktop\\cj"))
+        for bad in ("C:\\Windows", "\\\\host", "\\\\\\x", "/etc", "relative\\q"):
+            self.assertFalse(J.share_ok(bad), bad)
+
+    def test_job_on_two_queues_is_noted(self):
+        q = self.live_queues()
+        q.append({**q[0], "share": str(self.decoy)})
+        self.env.write_live(T.live_doc(queues=q))
+        st, out, _ = self.post("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "x"})
+        self.assertEqual(st, 200)
+        self.assertIn("more than one", out["message"])
+        self.assertTrue(self.cancel_file("job_20261105_admin_q").is_file())
+        self.assertFalse(self.cancel_file("job_20261105_admin_q", self.decoy).exists())
+
+    def test_oversize_body_refused(self):
+        st, out, _ = self.post("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "x" * 20000})
+        self.assertEqual(st, 400)
+        self.assertFalse(self.cancel_file("job_20261105_admin_q").exists())
+
+    def test_unicode_line_separators_flattened(self):
+        st, _, _ = self.post("/jobs/api/cancel", {"job": "job_20261105_admin_q", "reason": "a\u2028b\u2029c\u0085d"})
+        self.assertEqual(st, 200)
+        doc = json.loads(self.cancel_file("job_20261105_admin_q").read_text(encoding="utf-8"))
+        self.assertEqual(doc["reason"], "a b c d")
+        self.assertEqual(len(self.audit_lines()), 2)
 
     def test_audit_unwritable_means_nothing_done(self):
         bad = self.env.state / "audit"
@@ -1036,6 +1142,29 @@ class CancelFlowBrowser(ActionBase):
             self.assertEqual((doc["who"], doc["reason"]), ("adv", "typed in the browser"))
             self.assertEqual(dialogs, [])
             self.assertEqual(errors, [])
+            # the auto-refresh resumes after the request, and the result message clears itself after ~10 s
+            with page.expect_response(lambda r: "/jobs/api/summary?html=1" in r.url, timeout=5000) as r2:
+                page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+            self.assertEqual(r2.value.status, 200)
+            page.wait_for_function("!document.querySelector('.cj-jobs-res:not([hidden])') "
+                                   "|| !document.querySelector('.cj-jobs-res:not([hidden])').textContent", timeout=15000)
+        finally:
+            ctx.close()
+
+    def test_refresh_paused_while_form_open(self):
+        ctx = self.browser.new_context(viewport={"width": 390, "height": 900})
+        page = ctx.new_page()
+        try:
+            page.goto(f"{self.p.origin}/login?k={self.adv_key}")
+            page.goto(self.p.origin + "/jobs/")
+            page.wait_for_load_state("networkidle")
+            seen = []
+            page.on("request", lambda r: "api/summary" in r.url and seen.append(r.url))
+            page.locator('button[data-act="ask"]').first.click()
+            page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+            page.wait_for_timeout(500)
+            self.assertEqual(seen, [])                                 # form open: no refresh, nothing wiped
+            self.assertTrue(page.locator("form.cj-jobs-cf:visible").count() >= 1)
         finally:
             ctx.close()
 

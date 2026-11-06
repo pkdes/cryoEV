@@ -40,6 +40,8 @@ import concurrent.futures
 import html
 import importlib.util
 import json
+import logging
+import os
 import re
 import threading
 import time
@@ -273,12 +275,20 @@ def eta_text(r: dict) -> str:
     return dur(e) + (" (time limit)" if r.get("eta_capped") else "")
 
 
+def may_cancel(user, can_see, reg, reg_err, job_id) -> bool:
+    """Who may cancel a job: an admin, or its registry owner. One rule for the buttons (summary) and the POST (act);
+    an unreadable registry or a job with no owner is admin-only."""
+    if (user or {}).get("role") == "admin":
+        return True
+    uid = (user or {}).get("id")
+    return bool(reg_err is None and uid and job_id and can_see(user, _d(_d(reg).get(job_id)).get("who")))
+
+
 # ---------------------------------------------------------------- summary
 def summary(cfg, user: dict, can_see, now=None) -> dict:
     """Everything the page shows, as data (schema cj_jobs/1). `can_see(user, owner)` is ctx.can_see."""
     now = time.time() if now is None else now
     admin = (user or {}).get("role") == "admin"
-    uid = (user or {}).get("id")
     live, live_err = read_live(getattr(cfg, "registry", None))
     snap = snapshot_info(live, live_err, now)
     reg, reg_err, reg_age = registry_jobs(getattr(cfg, "registry", None))
@@ -304,7 +314,7 @@ def summary(cfg, user: dict, can_see, now=None) -> dict:
         job's registry owner, release for an admin; none on a stale snapshot, a hidden job or a cancel in flight."""
         if not job_id or stale or private(job_id, None, True):
             return {"can_cancel": False, "can_release": False}
-        mine = admin or (reg_err is None and bool(uid) and can_see(user, _d(reg.get(job_id)).get("who")))
+        mine = may_cancel(user, can_see, reg, reg_err, job_id)
         return {"can_cancel": bool(mine and state in CANCELLABLE and not requested),
                 "can_release": bool(admin and state == "held")}
 
@@ -749,8 +759,9 @@ JS = r"""// Jobs page (portal/modules/jobs.py): cancel / release buttons (two-st
     err.textContent = text || '';
     err.hidden = !text;
   }
-  function editing() {   // a refresh must not wipe a cancel form the person is filling in, or a result message
-    return !!document.querySelector('.cj-jobs-cf:not([hidden]), .cj-jobs-res:not([hidden])');
+  var inflight = 0, clearTimer = null;
+  function editing() {   // a refresh must not wipe a cancel form being filled in, or a request in flight
+    return inflight > 0 || !!document.querySelector('.cj-jobs-cf:not([hidden])');
   }
   function swap(frag) {
     Object.keys(IDS).forEach(function (k) {
@@ -779,14 +790,18 @@ JS = r"""// Jobs page (portal/modules/jobs.py): cancel / release buttons (two-st
     res.textContent = text;
     res.hidden = !text;
     res.classList.toggle('cj-jobs-res-bad', !!bad);
+    if (clearTimer) clearTimeout(clearTimer);
+    if (text && inflight === 0) clearTimer = setTimeout(function () { res.textContent = ''; res.hidden = true; }, 10000);
   }
   function post(act, path, body, btn) {
     btn.disabled = true;
+    inflight += 1;
     say(act, 'Sending...', false);
     fetch(path, {method: 'POST', credentials: 'same-origin', cache: 'no-store',
                  headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)})
       .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return [r.status, j]; }); })
       .then(function (sj) {
+        inflight = Math.max(0, inflight - 1);
         var ok = sj[0] === 200 && sj[1].ok;
         say(act, sj[1].message || (ok ? 'Done.' : 'It did not work (status ' + sj[0] + ').'), !ok);
         if (ok) {
@@ -794,7 +809,7 @@ JS = r"""// Jobs page (portal/modules/jobs.py): cancel / release buttons (two-st
           var f = act.querySelector('form'); if (f) f.hidden = true;
         } else { btn.disabled = false; }
       })
-      .catch(function () { say(act, 'Could not reach the portal. Nothing was confirmed; try again.', true); btn.disabled = false; });
+      .catch(function () { inflight = Math.max(0, inflight - 1); say(act, 'Could not reach the portal. Nothing was confirmed; try again.', true); btn.disabled = false; });
   }
   document.addEventListener('click', function (e) {
     var b = e.target.closest && e.target.closest('button[data-act]');
@@ -827,11 +842,20 @@ JS = r"""// Jobs page (portal/modules/jobs.py): cancel / release buttons (two-st
 
 
 # ---------------------------------------------------------------- actions (cancel / release)
+log = logging.getLogger("cj.jobs")
 _sync_mod = None
+_ids_mod = None
 _audit_lock = threading.Lock()
-_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="cj-jobs-act")
-CTRL = re.compile(r"[\x00-\x1f\x7f]")
-JOB_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,120}$")
+_job_locks: dict = {}
+_job_locks_guard = threading.Lock()
+POOL_SIZE = 16
+_pool = concurrent.futures.ThreadPoolExecutor(max_workers=POOL_SIZE, thread_name_prefix="cj-jobs-act")
+_slots = threading.BoundedSemaphore(POOL_SIZE)        # a request that finds none free is told "busy", not queued
+CTRL = re.compile(r"[\x00-\x1f\x7f\u0085\u2028\u2029]")
+MAX_JOB_ID = 120
+MAX_BODY = 8192
+UNC = re.compile(r"^\\\\[^\\/]+\\[^\\/]+")
+LOCAL_SHARES = tuple(x for x in os.environ.get("CJ_JOBS_LOCAL_SHARES", "").split(os.pathsep) if x)
 
 
 def sync_module():
@@ -845,24 +869,42 @@ def sync_module():
     return _sync_mod
 
 
+def valid_job_id(job) -> bool:
+    """registry/ids.py is_id("job", ...): job_<yyyymmdd>_<name>, so no slash, dot or '..'."""
+    global _ids_mod
+    if _ids_mod is None:
+        spec = importlib.util.spec_from_file_location("cj_jobs_ids", REPO / "registry" / "ids.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _ids_mod = mod
+    return isinstance(job, str) and len(job) <= MAX_JOB_ID and _ids_mod.is_id("job", job)
+
+
+def share_ok(share) -> bool:
+    """live.json's share must look like a UNC path (\\\\host\\share), or be one of $CJ_JOBS_LOCAL_SHARES (a local
+    queue folder, e.g. the laptop's own queue)."""
+    return bool(UNC.match(share)) or share in LOCAL_SHARES
+
+
 def audit_path(cfg) -> Path:
     return Path(cfg.state_dir) / "audit" / "portal.jsonl"
 
 
 def audit(cfg, actor, action, job, reason, result):
-    """One JSON line per action. Raises OSError if it can't be written (callers check first with audit_ready)."""
+    """One JSON line. Raises OSError if it can't be written. A request writes "requested" BEFORE the share is
+    touched, then a second line with the outcome."""
     line = json.dumps({"time": datetime.now(timezone.utc).isoformat(timespec="seconds"), "actor": actor,
                        "action": action, "job": job, "reason": reason, "result": result}, ensure_ascii=False)
-    with _audit_lock, open(audit_path(cfg), "a", encoding="utf-8", newline="\n") as f:
-        f.write(line + "\n")
+    p = audit_path(cfg)
+    with _audit_lock:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8", newline="\n") as f:
+            f.write(line + "\n")
 
 
-def audit_ready(cfg) -> bool:
-    try:
-        audit_path(cfg).parent.mkdir(parents=True, exist_ok=True)
-        return True
-    except (OSError, TypeError, AttributeError):
-        return False
+def job_lock(job) -> threading.Lock:
+    with _job_locks_guard:
+        return _job_locks.setdefault(job, threading.Lock())
 
 
 def act(cfg, user: dict, can_see, action: str, job, reason, now=None) -> tuple:
@@ -874,14 +916,13 @@ def act(cfg, user: dict, can_see, action: str, job, reason, now=None) -> tuple:
 
     def no(code, msg):
         return code, {"ok": False, "message": msg}
-    if not isinstance(job, str) or not JOB_RE.match(job):
+    if not valid_job_id(job):
         return no(400, "That job id is not valid.")
     if action == "release" and not admin:
         return no(403, "Only an admin can release a held job.")
     if action == "cancel":
         reg, reg_err, _ = registry_jobs(getattr(cfg, "registry", None))
-        owner = reg_err is None and bool(uid) and can_see(user, _d(reg.get(job)).get("who"))
-        if not (admin or owner):
+        if not may_cancel(user, can_see, reg, reg_err, job):
             return no(403, "You can only cancel your own jobs.")
         reason = CTRL.sub(" ", reason).strip() if isinstance(reason, str) else ""
         if not reason:
@@ -892,25 +933,32 @@ def act(cfg, user: dict, can_see, action: str, job, reason, now=None) -> tuple:
         reason = None
     live, err = read_live(getattr(cfg, "registry", None))
     snap = snapshot_info(live, err, now)
-    if not snap["present"] or snap["stale"]:
-        return no(409, "The GPU computer's status is out of date, so this was not sent. Wait for the page to "
-                       "update, then try again.")
-    found = None
+    if not snap["present"]:
+        return no(409, "There is no status from the GPU computer, so this was not sent.")
+    if snap["stale"]:
+        age = f"{dur(snap['age_s'])} ago" if snap["age_s"] is not None else "at an unknown time"
+        return no(409, f"The GPU computer's status updates have stopped (the last one came {age}), so this was "
+                       "not sent. Ask an admin to check the monitor.")
+    matches = []
     for q in _l(live.get("queues")):
         q = _d(q)
         for j in _l(q.get("jobs")):
             if _d(j).get("job") == job:
-                found = (q, _d(j))
-        if found is None and _d(q.get("running")).get("job") == job:
-            found = (q, {"job": job, "state": "running", "cancel_requested": _d(q.get("running")).get("cancel_requested")})
-        if found:
-            break
-    if found is None:
+                matches.append((q, _d(j)))
+                break
+        else:
+            r = _d(q.get("running"))
+            if r.get("job") == job:
+                matches.append((q, {"job": job, "state": "running", "cancel_requested": r.get("cancel_requested")}))
+    if not matches:
         return no(404, "That job is not on a GPU computer's list (it may have finished). Refresh the page.")
-    q, j = found
+    q, j = matches[0]
+    note = " (This job id is on more than one GPU computer's list; the first was used.)" if len(matches) > 1 else ""
     share, state = _s(q.get("share")), j.get("state")
     if _s(q.get("reach")) != "ok" or not share:
         return no(409, "The laptop can't reach that GPU computer right now, so this was not sent.")
+    if not share_ok(share):
+        return no(409, "That GPU computer's address is not one this page may write to, so this was not sent.")
     if action == "cancel":
         if state not in CANCELLABLE:
             return no(409, "That job is not waiting or running any more.")
@@ -918,24 +966,48 @@ def act(cfg, user: dict, can_see, action: str, job, reason, now=None) -> tuple:
             return no(409, "A cancel was already requested for this job.")
     elif state != "held":
         return no(409, "That job is not on hold.")
-    if not audit_ready(cfg):
-        return no(500, "The audit log can't be written, so nothing was done.")
+    with job_lock(job):                                  # two cancels of one job: the second sees the first's file
+        if action == "cancel" and (Path(share) / "q" / job / "CANCEL").exists():
+            return no(409, "A cancel was already requested for this job.")
+        try:
+            audit(cfg, uid, action, job, reason, "requested")     # write-ahead: no line, no write to the share
+        except (OSError, TypeError, AttributeError) as e:
+            log.error("jobs audit not writable (%s): %s not done", type(e).__name__, action)
+            return no(500, "The audit log can't be written, so nothing was done.")
+        try:
+            S = sync_module()
+            if action == "cancel":
+                S.cancel(job, share, who=uid, reason=reason)
+                msg = ("Cancel requested. The GPU computer stops it within about 10 s." if state == "running" else
+                       "Cancel requested. It will not be started.")
+            else:
+                S.release(job, share)
+                msg = "Released. It starts when its turn comes."
+            result, out = "ok", (200, {"ok": True, "message": msg + note})
+        except Exception as e:                           # SyncError, or the share failing mid-write
+            result = f"error: {type(e).__name__}"
+            why = f" ({e})" if admin else ""
+            out = no(502, f"It was not {'cancelled' if action == 'cancel' else 'released'}: the job may have just "
+                          f"finished or the GPU computer's share is not answering. Refresh and try again.{why}")
+        try:
+            audit(cfg, uid, action, job, reason, result)
+        except (OSError, TypeError, AttributeError) as e:
+            log.warning("jobs audit result line not written (%s): %s %s %s", type(e).__name__, action, job, result)
+        return out
+
+
+async def read_body(request: Request):
+    """The JSON body, read in chunks and refused past MAX_BODY bytes. -> dict, or None when unusable."""
+    buf = b""
+    async for chunk in request.stream():
+        buf += chunk
+        if len(buf) > MAX_BODY:
+            return None
     try:
-        S = sync_module()
-        if action == "cancel":
-            S.cancel(job, share, who=uid, reason=reason)
-            msg = ("Cancel requested. The GPU computer stops it within about 10 s." if state == "running" else
-                   "Cancel requested. It will not be started.")
-        else:
-            S.release(job, share)
-            msg = "Released. It starts when its turn comes."
-    except Exception as e:                               # SyncError, or the share failing mid-write
-        audit(cfg, uid, action, job, reason, f"error: {type(e).__name__}")
-        why = f" ({e})" if admin else ""
-        return no(502, f"It was not {'cancelled' if action == 'cancel' else 'released'}: the job may have just "
-                       f"finished or the GPU computer's share is not answering. Refresh and try again.{why}")
-    audit(cfg, uid, action, job, reason, "ok")
-    return 200, {"ok": True, "message": msg}
+        body = json.loads(buf or b"{}")
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) else None
 
 
 # ---------------------------------------------------------------- routes
@@ -958,15 +1030,24 @@ def routes(ctx) -> list:
         return r
 
     async def api_action(request: Request, action: str):
-        try:
-            body = json.loads((await request.body())[:8192] or b"{}")
-        except ValueError:
-            body = None
-        if not isinstance(body, dict):
+        body = await read_body(request)
+        if body is None:
             return ctx.json({"ok": False, "message": "That request was not understood."}, 400)
         user = ctx.user(request)       # a "share" / "path" in the body is never read
-        fut = asyncio.get_running_loop().run_in_executor(
-            _pool, lambda: act(ctx.cfg, user, ctx.can_see, action, body.get("job"), body.get("reason")))
+        if not _slots.acquire(blocking=False):
+            return ctx.json({"ok": False, "message": "The page is busy with other requests. Try again in a moment."},
+                            503)
+
+        def work():
+            try:
+                return act(ctx.cfg, user, ctx.can_see, action, body.get("job"), body.get("reason"))
+            finally:
+                _slots.release()
+        try:
+            fut = asyncio.get_running_loop().run_in_executor(_pool, work)
+        except Exception:
+            _slots.release()
+            raise
         try:
             code, out = await asyncio.wait_for(asyncio.shield(fut), ACTION_TIMEOUT_S)
         except asyncio.TimeoutError:
