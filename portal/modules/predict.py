@@ -19,6 +19,8 @@ Predict module (CryoEV portal, journey J1): a person runs the production model o
     POST /predict/convert/<id>/stop       admin: kill a running converter (or drop a queued one) -> failed "stopped"
     POST /predict/convert/<id>/retry      admin: a failed conversion whose inputs are still there is queued again
     POST /predict/convert/<id>/inputs     admin: delete its uploaded raw files now
+    POST /predict/convert/<id>/details    owner / admin: the upload's Session details (portal/upload_sessions.py);
+                                            the raw form's "Sample on each grid" becomes input/sample_key.csv
     GET  /predict/<ps>/                   the set: status (auto-refresh), Review / Results, spot-check list
     POST /predict/<ps>/review             build the prediction review package in a thread (if missing)
     POST /predict/<ps>/results            compute results/results.json in a thread (if missing or older than edits)
@@ -148,6 +150,7 @@ from jobs import predict_local as PL
 from jobs import predict_set as PS
 from portal import predict_sources as PSRC
 from portal import names as NM
+from portal import upload_sessions as US
 
 PREFIX = "/predict"
 ROLES = ("admin", "advanced", "basic")
@@ -2096,9 +2099,11 @@ def raw_fields(cfg, user, f: dict, session=None) -> dict:
     recipe = str(f.get("recipe") or "default").strip()
     if recipe != "default" and recipe not in recipes(repo):
         problems.append("Recipe: pick one from the list.")
+    samples, bad = US.form_samples(f)                  # the upload form's sample per grid (blank: none)
+    problems += bad
     if problems:
         raise Refusal(f"Please fix ({len(problems)}):\n" + "\n".join(problems))
-    return {"session": sid, "recipe": recipe, "gpu": f.get("gpu") == "yes", "repo": repo}
+    return {"session": sid, "recipe": recipe, "gpu": f.get("gpu") == "yes", "repo": repo, "samples": samples}
 
 
 def gpu_check() -> tuple:
@@ -2962,6 +2967,25 @@ def clean_fields(raw) -> dict:
     return out
 
 
+NOJS_REFILL_BYTES = 1024 ** 2                 # a no-JavaScript raw post this small is read to refill the form
+SAMPLE_KEY_NAME = "sample_key.csv"            # the upload form's samples, written into input/ before conversion
+
+
+def check_sample_source(raw: dict, names) -> None:
+    """The sample table and an uploaded sample key .csv are either / or (the converter reads one key)."""
+    if raw.get("samples") and any(str(n).lower().endswith(".csv") for n in names):
+        raise Refusal("Give the samples either in the table or as a sample_key.csv file, not both. Nothing was kept.")
+
+
+def write_sample_key(files_dir: Path, raw: dict) -> None:
+    """The form's {grid: label} -> <files>/sample_key.csv (`#,Label`, as cryoem_core's load_sample_key reads it).
+    new_conversion moves it into input/ and passes it to the converter (its one .csv)."""
+    if raw.get("samples"):
+        tmp = files_dir / (SAMPLE_KEY_NAME + PART)
+        tmp.write_text(US.sample_key_text(raw["samples"]), encoding="ascii", newline="")
+        os.replace(tmp, files_dir / SAMPLE_KEY_NAME)
+
+
 def check_upload_fields(cfg, user, kind, fields, has_files=True) -> dict:
     """Tiles: the label / nm / tick / model checks of the plain form (+ the basic user's limit). Raw: raw_fields."""
     if kind == "tiles":
@@ -2987,6 +3011,7 @@ def upload_start(cfg, user, body) -> dict:
     decl = declared_files(kind, body.get("files"))
     raw = check_upload_fields(cfg, user, kind, fields)
     if raw:
+        check_sample_source(raw, decl)
         check_conv_cap(cfg, user)
         check_gpu(raw)
     resume = body.get("resume")
@@ -3216,6 +3241,7 @@ def upload_create(cfg, user, d: Path, meta: dict) -> str:
             start_create(uid, user["id"], run, back="/predict/new/upload/", upload=uid)
         return f"/predict/preparing/{uid}/"
     raw = raw_fields(cfg, user, fields)
+    check_sample_source(raw, meta["declared"])
     check_conv_cap(cfg, user)
     # every sidecar's [Image = ...]: a bare name, and one of the uploaded files (else cryoem_core would open whatever
     # path it names on the server: an absolute path, a UNC share, ../)
@@ -3227,6 +3253,7 @@ def upload_create(cfg, user, d: Path, meta: dict) -> str:
         raise Refusal(f"Not converted ({len(problems)} problem(s)). Nothing was kept:\n" + "\n".join(problems[:12]))
     check_disk_for(raw_root(cfg), sum(meta["declared"].values()))
     check_gpu(raw)
+    write_sample_key(d / UPLOAD_FILES, raw)          # before conversion: labels are baked into tile names
     conv = new_conversion(cfg, user, raw, upload_files=d / UPLOAD_FILES,
                           source={"kind": "upload", "files": list(meta["declared"])},
                           nbytes=sum(meta["declared"].values()))
@@ -3269,7 +3296,8 @@ def conv_paths(d: Path, meta: dict) -> list:
     return list(dict.fromkeys(out))
 
 
-def conv_fragments(cfg, user, can_see, d: Path, meta: dict, st: dict) -> dict:
+def conv_fragments(cfg, user, can_see, d: Path, meta: dict, st: dict, details=None) -> dict:
+    """details: {"error": text} or {"saved": True} for the Session details form (upload_sessions)."""
     admin = user.get("role") == "admin"
     paths = conv_paths(d, meta)
     v = conv_status_view(meta, st, admin, paths)
@@ -3295,6 +3323,7 @@ def conv_fragments(cfg, user, can_see, d: Path, meta: dict, st: dict) -> dict:
                      f'<div><dt>nm per pixel</dt><dd>{esc(nm or "?")}</dd></div>'
                      f'<div><dt>Montages</dt><dd>{esc(", ".join(res.get("montages") or []))}</dd></div>'
                      f'<div><dt>Computed on</dt><dd>{esc(res.get("compute") or "?")}</dd></div></dl></div>')
+        parts.append(US.conversion_details_html(cfg, user, d, meta, st, **(details or {})))
     if warns:
         parts.append('<h2 class="cj-sec">Warnings</h2><div class="cj-card"><ul class="cj-predict-warns">'
                      + "".join(f"<li>{esc(w)}</li>" for w in warns) + '</ul></div>')
@@ -3324,9 +3353,9 @@ def conv_fragments(cfg, user, can_see, d: Path, meta: dict, st: dict) -> dict:
     return {"status": status, "result": "".join(parts), "live": not v["final"], "state": st.get("state")}
 
 
-def page_convert(cfg, user, can_see, d: Path, meta: dict, st: dict) -> str:
+def page_convert(cfg, user, can_see, d: Path, meta: dict, st: dict, details=None) -> str:
     admin = user.get("role") == "admin"
-    fr = conv_fragments(cfg, user, can_see, d, meta, st)
+    fr = conv_fragments(cfg, user, can_see, d, meta, st, details)
     src = meta.get("source") or {}
     what = ("Uploaded files" if src.get("kind") == "upload" else
             f"Raw session folder {src.get('folder') or '?'}")
@@ -3374,8 +3403,10 @@ def not_set_up(cfg, user) -> str:
                    extra=tech(why) if user.get("role") == "admin" else "<p>Ask the admin.</p>")
 
 
-def page_raw_upload(cfg, user, error=None) -> str:
+def page_raw_upload(cfg, user, error=None, form=None) -> str:
+    """form: the fields to show again after a refusal (the no-JavaScript post)."""
     repo, _ = processing_repo(cfg)
+    form = form or {}
     head = '<div class="cj-predict"><p class="cj-mut"><a href="/predict/new/">← Back</a></p><h1>Convert raw images</h1>'
     if repo is None:
         return wrap(head + not_set_up(cfg, user) + '</div>')
@@ -3386,7 +3417,10 @@ def page_raw_upload(cfg, user, error=None) -> str:
         '<li>Your raw montages are made into model-ready tiles by the lab’s own processing (the same code that made '
         'the delivered “3d” tile folders), then you analyse them as a session.</li>'
         '<li>Upload whole montages: each <b>.mrc</b> with its <b>.mrc.mdoc</b>, or an <b>.idoc</b> with all its '
-        '<b>.tif</b> tiles. Add the session’s <b>sample_key.csv</b> if you have it (else samples are “Grid n”).</li>'
+        '<b>.tif</b> tiles. Name the sample on each grid below, or add the session’s <b>sample_key.csv</b> (else '
+        'samples are “Grid n”).</li>'
+        + ('<li>When it is done, the upload is listed under Data → Sessions and you can add the session details '
+           '(grid ids, prep notes).</li>' if US.enabled(cfg) else '') +
         '<li>The pixel size comes from the .mdoc / .idoc; it is never guessed.</li></ul></div>'
         f'<form method="post" action="/predict/new/raw/" enctype="multipart/form-data" class="cj-predict-form" '
         f'id="cj-predict-raw" data-cj-upload="raw" data-max-files="{RAW_MAX_FILES}" '
@@ -3397,8 +3431,10 @@ def page_raw_upload(cfg, user, error=None) -> str:
         f'<fieldset class="cj-card cj-predict-fs"><legend>Session and recipe</legend>'
         f'<label class="cj-predict-field"><span>Session id (the imaging date, YYYYMMDD; YYYYMMDD-n for a later '
         f'session that day)</span><input name="session" required maxlength="12" '
-        f'pattern="[0-9]{{8}}(-[0-9]+)?" inputmode="numeric" placeholder="20261027"></label>'
-        f'{recipe_select(repo)}{gpu_box()}</fieldset>'
+        f'pattern="[0-9]{{8}}(-[0-9]+)?" inputmode="numeric" placeholder="20261027" '
+        f'value="{esc(str(form.get("session") or "")[:12], quote=True)}"></label>'
+        f'{recipe_select(repo, form.get("recipe"))}{gpu_box(form.get("gpu") == "yes")}</fieldset>'
+        f'{US.samples_fieldset(form)}'
         f'<fieldset class="cj-card cj-predict-fs"><legend>Raw files</legend>'
         f'<label class="cj-predict-field"><span>.mrc + .mrc.mdoc, or .idoc + .tif tiles (+ sample_key.csv)</span>'
         f'<input type="file" name="files" multiple required accept=".mrc,.mdoc,.idoc,.tif,.tiff,.csv"></label>'
@@ -3640,14 +3676,24 @@ def routes(ctx) -> list:
             return forbidden(request, "Converting raw images is for advanced users and the admin.")
         return ctx.page(request, "Convert raw images", page_raw_upload(cfg, user), active="predict")
 
-    def raw_post(request: Request):
-        """The raw form without JavaScript: refused (raw files go one per request, which needs the page's script)."""
+    async def raw_post(request: Request):
+        """The raw form without JavaScript: refused (raw files go one per request, which needs the page's script).
+        A small post (no files to speak of) gets its typed fields back; a big one is not read."""
         user = ctx.user(request)
         if user.get("role") not in RAW_ROLES:
-            return forbidden(request, "Converting raw images is for advanced users and the admin.")
-        return refused_page(request, "Convert raw images", page_raw_upload(
+            return await run_in_threadpool(forbidden, request,
+                                           "Converting raw images is for advanced users and the admin.")
+        form = {}
+        try:
+            if int(request.headers.get("content-length") or 0) <= NOJS_REFILL_BYTES:
+                fd = await request.form(max_files=RAW_MAX_FILES, max_fields=MAX_FIELDS)
+                form = {k: v for k, v in fd.items() if isinstance(v, str) and len(v) <= MAX_FIELD_BYTES}
+                await fd.close()                         # the posted files are not kept
+        except Exception:                                # noqa: BLE001 - a bad body just gets an empty form
+            form = {}
+        return await run_in_threadpool(lambda: refused_page(request, "Convert raw images", page_raw_upload(
             cfg, user, "Raw files are sent one at a time, which needs JavaScript. Turn JavaScript on and try again "
-                       "(nothing was kept)."), 400)
+                       "(nothing was kept).", form), 400))
 
     def raw_sessions_page(request: Request):
         user = ctx.user(request)
@@ -3694,8 +3740,25 @@ def routes(ctx) -> list:
             kick(cfg)
             ensure_watcher(cfg)
             st = _read_json(d / PS.STATUS) or st
-        return ctx.page(request, "Raw conversion", page_convert(cfg, user, ctx.can_see, d, meta, st),
+        saved = {"saved": True} if request.query_params.get("saved") == "1" else None
+        return ctx.page(request, "Raw conversion", page_convert(cfg, user, ctx.can_see, d, meta, st, saved),
                         active="predict")
+
+    async def convert_details(request: Request):
+        """The Session details form on the conversion page (its owner or the admin: load_conversion's can_see)."""
+        user = ctx.user(request)
+        d, meta, st = await run_in_threadpool(load_conversion, cfg, user, ctx.can_see, request.path_params["cid"])
+        if d is None:
+            return await run_in_threadpool(not_found, request)
+        fd = await request.form(max_files=0, max_fields=4 * US.MAX_GRIDS + 10)
+        form = {k: v for k, v in fd.items() if isinstance(v, str)}
+        res = await run_in_threadpool(US.save_conversion_details, cfg, user, d, meta, form)
+        if res.get("ok"):
+            return RedirectResponse(f"/predict/convert/{d.name}/?saved=1#cj-us-details", status_code=303)
+        err = res["error"] + (f"\n(admin) {res['tech']}" if res.get("tech") and user.get("role") == "admin" else "")
+        return await run_in_threadpool(lambda: refused_page(
+            request, "Raw conversion", page_convert(cfg, user, ctx.can_see, d, meta, st, {"error": err}),
+            res.get("status", 400)))
 
     def convert_action(kind):
         def act(request: Request):            # sync: a kill or a few file changes under the runner lock
@@ -3961,6 +4024,7 @@ def routes(ctx) -> list:
             Route(PREFIX + "/convert/{cid}/stop", convert_action("stop"), methods=["POST"]),
             Route(PREFIX + "/convert/{cid}/retry", convert_action("retry"), methods=["POST"]),
             Route(PREFIX + "/convert/{cid}/inputs", convert_action("inputs"), methods=["POST"]),
+            Route(PREFIX + "/convert/{cid}/details", convert_details, methods=["POST"]),
             Route(PREFIX + "/preparing/{tid}/", prep_page, methods=["GET"]),
             Route(PREFIX + "/preparing/{tid}/retry", prep_retry, methods=["POST"]),
             Route(PREFIX + "/api/preparing/{tid}", api_prep, methods=["GET"]),

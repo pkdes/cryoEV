@@ -48,6 +48,7 @@ POINTER = {"inference_check", "label_version"}
 ENVELOPE = {"schema", "id", "logged", "recorded_by", "note", "owner", "status_by"}
 PRODUCTION_WHO = "pujan"
 LOCK, LOCK_WAIT = ".registry.lock", 30.0          # OS write lock in the registry folder (append holds it per line)
+UPLOAD_LOCK = ".upload_session.lock"              # session read -> merge -> append (= importers / upload_sessions)
 _SCHEMAS = None
 
 
@@ -267,6 +268,23 @@ def set_status(id, status, who, note=None, root=None, reason=None):
     reason: `reason` or `note`) / cancelled; leaving `blocked` drops blocked_reason."""
     if who not in roster():
         raise RegistryError(f"refused: --who {who!r} is not in people.json")
+    if current("session", root).get(id) is not None:
+        # a session line may carry the portal's upload keys: read + append under its lock, so a portal
+        # registration can't land in between and be dropped (portal/upload_sessions.py, importers.UPLOAD_LOCK)
+        r = Path(root or default_root())
+        _guard(r)
+        r.mkdir(parents=True, exist_ok=True)
+        lk = acquire_lock(r / UPLOAD_LOCK, LOCK_WAIT)
+        if lk is None:
+            raise RegistryError(f"registry busy: {r / UPLOAD_LOCK} held for {LOCK_WAIT:.0f} s")
+        try:
+            return _set_status(id, status, who, note, root, reason)
+        finally:
+            lk.close()
+    return _set_status(id, status, who, note, root, reason)
+
+
+def _set_status(id, status, who, note=None, root=None, reason=None):
     cur = current(root=root).get(id)
     if cur is None:
         raise RegistryError(f"unknown id {id}")
