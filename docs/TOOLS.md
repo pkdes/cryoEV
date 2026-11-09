@@ -54,6 +54,28 @@ schtasks /Create /SC DAILY /ST 21:00 /TN cryoai-state-backup /TR "\"<path>\backu
 
 Here `backup_state.bat` contains `"<python.exe>" "<repo>\tools\backup_state.py" --source "<laptop data dir>" --repo "<backup clone>" --push >> "<backup clone>\..\backup_state.log" 2>&1`. If a run fails, Task Scheduler shows the non-zero "Last Run Result".
 
+### Conversion state in the text backup
+`INCLUDE` also lists, under `predict/raw_tiles/<cid>/`: `convert.json`, `status.json`, `acquisition.json`, `mirror.json`, `montages/layout.json`, `montages/stitch.json`, `gallery/**/*.jsonl` and `input/sample_key.csv` (exempted from the `*key*` name rule, since it is a lab table, not a secret). Tiles, montage and gallery images, `*.html`, raw uploads and any other file stay out. Paths are relative to `--source`, so **if `CJ_RAW_ROOT` ever moves outside `--source`, these files are silently missed**: point `--source` at a parent of it or add a second run.
+
+## Nightly conversion mirror: `tools/mirror_conversions.py`
+Copies each **finished** conversion (`status.json` state `done`) from `<raw_tiles>` to the desktop share ("queue-share"), verified, and never deletes anything there:
+
+```
+python tools/mirror_conversions.py --source <raw_tiles dir> --dest <share conversions dir> [--min-free-gb 20] [--dry-run] [--json]
+```
+
+- **`--dest` comes from the caller** (the scheduled `.bat`, outside the repo), never from the repo.
+- **Copied:** everything in the conversion folder (tiles, montages, gallery, `MANIFEST.csv`, `convert.json`, `status.json`, `acquisition.json`, logs). **Not copied: `input/`**, because raw uploads are large and temporary (the portal deletes them after the retention period).
+- **Copy-only:** `jobs.common.robocopy_argv` on a UNC path (never `/MIR`, `/PURGE`, `/MOV`), `shutil` otherwise. Files only on the share survive.
+- **Verified:** each tile's md5 against the `MANIFEST` md5 column, and each copied file's md5 against its source. The result is written atomically to `<conv>/mirror.json` (`dest_rel`, `mirrored_at`, `n_files`, `bytes`, `md5_ok`, `error`; plus `fingerprint`, `previous`). `dest_rel` is a folder name only.
+- **Changed since the last mirror** (retried conversion: different tile md5s or `convert.json`): the whole conversion goes to a new folder `<cid>__<YYYYMMDD-HHMMSS>` and the old one is untouched. Exempt: `gallery/**/*.jsonl` (append only, updated in place when the share copy is a prefix) and `status.json` (copied once).
+- **Unchanged conversions** are skipped from a size+mtime fingerprint (no reads on the share).
+- **Free space:** below `--min-free-gb` (default 20) on the share it stops and records the error.
+- Exit 0 on success or nothing to do, 1 on any failure; one summary line per conversion.
+
+Add it to the nightly `.bat` after the backup line (a failure here must not hide a backup failure, so log both):
+`"<python.exe>" "<repo>\tools\mirror_conversions.py" --source "<laptop data dir>\predict\raw_tiles" --dest "<share conversions dir>" >> "<backup clone>\..\mirror_conversions.log" 2>&1`
+
 ## Laptop services: `tools/services.py` + `tools/register_services_task.ps1`
 
 The review server, review sandbox, history server and job monitor (and later the portal) used to run as children of a shell session and died with it. `services.py` starts them detached, keeps pid files and logs, and a logon task starts them after a reboot.

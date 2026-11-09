@@ -225,5 +225,26 @@ class BackupTests(unittest.TestCase):
         self.assertIn("portal_audit/ps/portal.jsonl", self.mirrored())
 
 
+class ConversionStateTests(unittest.TestCase):
+    """predict/raw_tiles/<cid>/ text state is included; tiles, montage images, html, input/ uploads are not."""
+
+    def test_select_conversion_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d)
+            c = "predict/raw_tiles/20261106-1_abc"
+            want = ["convert.json", "status.json", "acquisition.json", "mirror.json", "montages/layout.json",
+                    "montages/stitch.json", "gallery/events.jsonl", "gallery/sub/more.jsonl", "input/sample_key.csv"]
+            skip = ["tiles/t1.png", "tiles/MANIFEST.csv", "montages/m_stitched.jpg", "gallery/index.html",
+                    "gallery/thumb.jpg", "input/a.mrc", "input/a.mrc.mdoc", "input/other.csv", "convert.log",
+                    "input/api_key.csv", "gallery/key.jsonl", "montages/other.json"]
+            for rel in want + skip:
+                p = src / c / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(b"x")
+            chosen, _ = B.select(src, 20, portal_dirs=())
+            got = sorted(r[len(c) + 1:] for r in chosen if r.startswith(c))
+            self.assertEqual(got, sorted(want))
+
+
 if __name__ == "__main__":
     unittest.main()
