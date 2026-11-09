@@ -37,6 +37,8 @@ Sandbox: NOT under the shell. It stays on its own origin (:8443); the nav links 
 | `static/live.js` | `CJLive`: the History Live-tab charts as a small library (see below) |
 | `static/review.js` | The review shell: mirrors the frame's URL into the address bar; links out of the tool open in the window |
 | `static/predict.js` | Predict's script (served by the module as `/predict/predict.js`): status refresh, form counts, one-file-per-request uploads |
+| `static/gallery.js` | Gallery's script (served as `/gallery/gallery.js`): marks, filters, full-size viewer with keys and scalebar |
+| `zipstream.py` | `stream_zip(entries)`: streamed zip files for the portal (Gallery downloads) |
 | `static/brand.json` | `{"name": "CryoEV", ...}`: renaming the portal = editing this one file |
 | `templates/base.html` | The page every shell page uses (`{{title}} {{active}} {{body}}`; the bar placeholder) |
 | `templates/home.html` | Home's body (plain `{{name}}` placeholders, filled by `app.render_home`) |
@@ -176,6 +178,19 @@ The full contract is the module docstring in `modules/predict.py`. In short:
     `.portal`: move them first, or set it back. On Windows keep `CJ_RAW_ROOT` short (long paths can fail) or enable
     LongPathsEnabled. **Admin > Health** shows free GB for both drives and warns under 20 GB.
 - Basic users get 403 on everything raw. Everything shown is escaped; paths and raw errors are on admin-only lines.
+
+## Gallery (`/gallery/`, admin + advanced)
+The full contract is the module docstring in `modules/gallery.py`. In short:
+- Opens the person's own raw conversions (admin: Mine / All; owner or admin only, a foreign cid is the same 404 as a
+  missing one): montages by grid and sample (from `montages/layout.json`, else grouped from `tiles/MANIFEST.csv`) with
+  clickable tile boxes, a tile strip, a full-size viewer (keys: arrows, K/M/R, 0-5, T, N, Esc), filters, and
+  `/gallery/compare?c=<cid>&c=<cid>` side by side. Page images are thumbnails; full size loads on click.
+- Marks (keep / maybe / reject, reasons, stars, note) append to `raw_tiles/<cid>/gallery/events.jsonl` under an OS lock;
+  the latest value per (key, field) wins. The POST needs the Gate's Origin check and `X-Requested-With: gallery`.
+- `/gallery/<cid>/report` summarizes the run (acquisition, samples per grid, counts and reject reasons, starred images,
+  notes). `report.zip` is a standalone offline HTML page with its images; `images.zip` is tiles + montages + MANIFEST
+  + acquisition.json. Both stream through `portal/zipstream.py` (no temp files, ZIP_STORED images, zip64); at most 2
+  per person at once (429 otherwise).
 
 ## Live charts (`/cj/live.js`)
 `CJLive.render(el, liveJson, {compact})` draws a `live.json` snapshot (jobs/monitor.py): `compact: false` = every queue

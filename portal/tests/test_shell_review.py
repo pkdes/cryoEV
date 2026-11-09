@@ -237,7 +237,7 @@ class ShellRoles(unittest.TestCase):
         self.assertIn(("/history", ("admin",)), rules)
 
     def test_modules_json_filtered_by_role(self):
-        want = {"admin": None, "advanced": {"home", "data", "jobs", "predict", "results", "reviews", "train"},
+        want = {"admin": None, "advanced": {"home", "data", "jobs", "predict", "gallery", "results", "reviews", "train"},
                 "basic": {"home", "predict", "results", "reviews"}}
         every = {m["id"] for m in APP.load_manifest()}
         for role, ids in want.items():
