@@ -394,7 +394,7 @@ class StubRepo(unittest.TestCase):
         self.assertFalse(any((self.tmp / f"o{i}").exists() for i in range(1, 7)))
 
     def test_memory_estimate_refuses(self):
-        mrc = self.stub_mdoc("grid1-pos1")                     # 16 x 12 x 1 piece x 17 B x 2 (float64) = 6528 B
+        mrc = self.stub_mdoc("grid1-pos1")                     # 16 x 12 x 1 piece x 20 B x 2 (float64) = 7680 B
         with unittest.mock.patch.object(CR, "available_ram", return_value=2000):
             with self.assertRaisesRegex(CR.ConvertError, "GB free now"):
                 self.convert([mrc], self.tmp / "out")

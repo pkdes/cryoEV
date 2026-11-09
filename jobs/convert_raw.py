@@ -33,7 +33,7 @@ non-session recipe; an input that is not a montage; a sidecar without a finite, 
 defaulted: cryoem_core's own fallback is never reached); an MRC stack or idoc missing; a sidecar whose [Image = ...]
 names a tile that is not a plain file name inside its own folder (an absolute, UNC or '..' name; checked before any
 tile is opened); two montages that would get the
-same name; <out> not empty; a montage whose estimated peak memory (~17 bytes per montage pixel, x2 for a float64 recipe) exceeds the RAM free
+same name; <out> not empty; a montage whose estimated peak memory (~20 bytes per montage pixel, x2 for a float64 recipe) exceeds the RAM free
 now; --gpu with the GPU busy or missing (the same check as jobs/predict_local.py); with the default recipe, a sampling
 outside 0.5x-2x of the recipe session's own (name --recipe to override); no tile written. Montages coarser than
 14.724 A/px are dropped before rendering (no upsampling) and listed in warnings. Any other error: CLI exit 1,
@@ -57,9 +57,11 @@ cleanup that empties <out> on a failure, so neither can fail the conversion or t
   the denoised variant with those levels when denoise_match_contrast; the last variant not in skip_variants is the
   one written; downsample_and_save at min(max_long_edge, 2000) px and the recipe's JPEG quality; stitch_composite
   draws the composite scalebar from the pieces' magnification). Placement is the montage's own (yflip for idoc
-  stage coordinates, direct for MRC). It never writes into the tiles folder; it builds in <dir>/../.stitch_work and
-  swaps it in. A montage that fails is listed in stitch.json (state "failed") and in `warnings`; the others are
-  still written. layout.json boxes each tile in montage-JPG pixels, keyed by its MANIFEST output_name (the same
+  stage coordinates, direct for MRC). It never writes into the tiles folder; it builds in .<dir>.stitch_work beside
+  <dir> and swaps it in by rename. A montage that fails is listed in stitch.json (state "failed") and in `warnings`;
+  the others are still written -- unless <dir> already holds a finished set (stitch.json done): a pass with any
+  failure then leaves it untouched (the result's stitch doc says kept_previous). stitch.json and the result carry
+  "processing" {commit, recipe, recipe_md5}; --stitch-only warns when they differ from the conversion's. layout.json boxes each tile in montage-JPG pixels, keyed by its MANIFEST output_name (the same
   geometry as assemble_canvas: tile_offset with the loaded tile's own size). acquisition.json comes from the cryoEV
   registry importer's file_summary / session_acquisition / scope_model (scope model only: never the raw header,
   a serial, a site or a path).
@@ -74,6 +76,7 @@ import ast
 import contextlib
 import csv
 import dataclasses
+import hashlib
 import importlib.util
 import io
 import json
@@ -97,8 +100,9 @@ RECIPE_RE = re.compile(r"^[A-Za-z0-9_]+$")
 # Peak working set per montage piece pixel (tile w x h x pieces), float32 recipes; float64 ones x2. Measured
 # 2026-11-09 on 20261012 grid1-pos1 (9 x 5760x4092, composite 16128x11124, CPU): tile export 3.52 GB (16.6 B/px),
 # the stitch pass 5.06 GB (25.6 B/px), one after the other in one process.
-BYTES_PER_MONTAGE_PX = 17            # the tile export: a montage above the RAM free now refuses the conversion
-STITCH_BYTES_PER_PX = 26             # the stitch pass: a montage above the RAM free now is not stitched (warning)
+# With a margin over the measurement:
+BYTES_PER_MONTAGE_PX = 20            # the tile export: a montage above the RAM free now refuses the conversion
+STITCH_BYTES_PER_PX = 30             # the stitch pass: a montage above the RAM free now is not stitched (warning)
 SAMPLING_RANGE = (0.5, 2.0)          # default recipe: A/px allowed relative to the recipe session's own
 SESSION_LAYOUTS = {"FlatGridPositionMrcLayout", "FlatGridPositionLayout", "FlatGridRegionLayout",
                    "FlatGridSquareHoleLayout", "GridSubfolderLayout", "GridSubfolderAreaLayout"}
@@ -177,6 +181,41 @@ def import_pipeline(repo: Path):
         if not hasattr(edt, name):
             raise ConvertError(f"processing repo has no export_detector_tiles.{name}")
     return edt, sys.modules["cryoem_core"]
+
+
+def repo_commit(repo: Path) -> str | None:
+    """The processing repo's HEAD commit, read from its .git files (no git is run); None when it can't be read."""
+    try:
+        git = Path(repo) / ".git"
+        if git.is_file():                                    # a worktree: "gitdir: <path>"
+            git = Path(git.read_text(encoding="utf-8").split(":", 1)[1].strip())
+        head = (git / "HEAD").read_text(encoding="utf-8").strip()
+        if not head.startswith("ref:"):
+            return head[:40] or None
+        ref = head.split(":", 1)[1].strip()
+        common = git
+        if (git / "commondir").is_file():
+            common = (git / (git / "commondir").read_text(encoding="utf-8").strip()).resolve()
+        for base in (git, common):
+            if (base / ref).is_file():
+                return (base / ref).read_text(encoding="utf-8").strip()[:40] or None
+        for line in (common / "packed-refs").read_text(encoding="utf-8").splitlines():
+            if line.endswith(" " + ref):
+                return line.split()[0][:40]
+    except (OSError, IndexError, ValueError):
+        pass
+    return None
+
+
+def processing_info(repo: Path, recipe_name: str) -> dict:
+    """What rendered the pixels: {"commit": the repo's HEAD or None, "recipe", "recipe_md5"} (recorded with the
+    tiles and in stitch.json, compared by --stitch-only)."""
+    p = Path(repo) / "datasets" / f"process_{recipe_name}.py"
+    try:
+        rmd5 = hashlib.md5(p.read_bytes()).hexdigest()
+    except OSError:
+        rmd5 = None
+    return {"commit": repo_commit(repo), "recipe": recipe_name, "recipe_md5": rmd5}
 
 
 def _call_name(node):
@@ -605,7 +644,8 @@ def _convert(inputs, out_dir, recipe, sample_key, gpu, processing_repo_dir, tee,
     # The tiles are final. Separate passes from here on: a failure is a warning, never a failed conversion.
     stitch = None
     if montages_out is not None:
-        stitch, w = stitch_pass(core, cfg, montages, rows, Path(montages_out), out_dir, tee, need=stitch_need(peak))
+        stitch, w = stitch_pass(core, cfg, montages, rows, Path(montages_out), out_dir, tee, need=stitch_need(peak),
+                                processing=processing_info(repo, recipe_name))
         warnings += w
     acq_written = False
     if acquisition_out is not None:
@@ -626,7 +666,7 @@ def _convert(inputs, out_dir, recipe, sample_key, gpu, processing_repo_dir, tee,
             "montages": [m.basename for m in montages], "a_px": {m.basename: a_px[m.basename] for m in montages},
             "n_tiles": len(tiles), "tiles": tiles,
             "nm_per_px": sorted({t["nm_per_px"] for t in tiles}), "warnings": warnings,
-            "stitch": stitch, "acquisition": acq_written}
+            "stitch": stitch, "acquisition": acq_written, "processing": processing_info(repo, recipe_name)}
 
 
 # ---------------------------------------------------------------- montages (after the tiles are final)
@@ -635,10 +675,16 @@ def _now():
 
 
 def _write_json(path: Path, doc):
-    """Atomic: a reader never sees half a file."""
-    tmp = path.with_name(path.name + ".tmp")
+    """Atomic: a reader never sees half a file (os.replace retried: on Windows a reader may hold the target)."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(doc, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    for i in range(6):
+        try:
+            return os.replace(tmp, path)
+        except PermissionError:
+            if i == 5:
+                raise
+            time.sleep(0.1 * 2 ** i)
 
 
 def _overlaps(a: Path, b: Path) -> bool:
@@ -728,15 +774,34 @@ def stitch_montage(cfg, m, mrows, dest_dir: Path) -> dict:
             "grid": int(m.grid), "sample_label": label, "tiles": boxes}
 
 
-def stitch_pass(core, cfg, montages, rows, dest: Path, tiles_dir: Path, log, need=None):
-    """Every montage's composite + layout.json + stitch.json into `dest`, built in dest/../.stitch_work and swapped
-    in. Never raises: -> (stitch.json doc, warnings). A montage whose estimated peak memory exceeds the RAM free now
-    is not attempted (a failed montage); the others still are."""
-    warns, t_start = [], time.time()
-    work = dest.parent / STITCH_WORK
+def _stitch_done(dest: Path) -> bool:
+    """dest holds a finished montage set (its stitch.json says done)."""
     try:
-        if _overlaps(dest, tiles_dir) or _overlaps(work, tiles_dir):
+        return json.loads((dest / STITCH_JSON).read_text(encoding="utf-8")).get("state") == "done"
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def stitch_dirs(dest: Path) -> tuple:
+    """(work, old) beside dest: .<dest>.stitch_work (built here) and .<dest>_old (the set being replaced)."""
+    return dest.parent / f".{dest.name}{STITCH_WORK}", dest.parent / f".{dest.name}_old"
+
+
+def stitch_pass(core, cfg, montages, rows, dest: Path, tiles_dir: Path, log, need=None, processing=None):
+    """Every montage's composite + layout.json + stitch.json into `dest`, built in .<dest>.stitch_work beside it and
+    swapped in by rename (dest -> .<dest>_old, work -> dest, the old one removed). Never raises: -> (stitch doc,
+    warnings). A montage whose estimated peak memory exceeds the RAM free now is not attempted (a failed montage);
+    the others still are. A good set is never destroyed: when this pass has any failure and dest already holds a
+    finished set (stitch.json done), dest is left untouched and the failure is only returned (doc kept_previous).
+    A swap cut short (dest missing, .<dest>_old there) is renamed back first."""
+    warns, t_start = [], time.time()
+    work, old = stitch_dirs(dest)
+    try:
+        if any(_overlaps(x, tiles_dir) for x in (dest, work, old)):
             raise RuntimeError("the montages folder must not be the tiles folder, inside it, or hold it")
+        if not dest.exists() and old.exists():
+            os.replace(old, dest)                # an earlier swap was cut short: the previous set comes back
+        shutil.rmtree(old, ignore_errors=True)
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir(parents=True)
         by_m = {}
@@ -747,6 +812,8 @@ def stitch_pass(core, cfg, montages, rows, dest: Path, tiles_dir: Path, log, nee
             print(f"stitch: {len(montages)} montage(s) -> {dest.name}/ (composite as run_convert: "
                   f"{composite_variant(cfg)} variant, clip levels from the clean pass, "
                   f"<= {min(cfg.max_long_edge, MONTAGE_MAX_EDGE)} px, JPEG q{cfg.jpeg_quality}, scalebar)", flush=True)
+            if available_ram() is None:
+                print("stitch: free RAM unreadable (psutil missing?): the memory guard is off", flush=True)
             for i, m in enumerate(montages, 1):
                 t0 = time.time()
                 try:
@@ -761,26 +828,38 @@ def stitch_pass(core, cfg, montages, rows, dest: Path, tiles_dir: Path, log, nee
                 except Exception as ex:          # one montage: recorded, the next one still runs
                     failed.append(f"{m.basename}: {type(ex).__name__}: {ex}")
                     print(f"stitch [{i}/{len(montages)}] {m.basename}: FAILED {type(ex).__name__}: {ex}", flush=True)
-        _write_json(work / LAYOUT_JSON, {"schema": LAYOUT_SCHEMA, "montages": entries})
         doc = {"state": "failed" if failed else "done", "error": "; ".join(failed)[:4000] or None,
-               "n": len(entries), "t": _now()}
-        _write_json(work / STITCH_JSON, doc)
-        if dest.exists():
-            shutil.rmtree(dest)
-        os.replace(work, dest)
-    except Exception as ex:                      # the pass itself: montages/ holds only stitch.json (failed)
+               "n": len(entries), "t": _now(), "processing": processing}
+        if failed and _stitch_done(dest):
+            shutil.rmtree(work, ignore_errors=True)
+            doc["kept_previous"] = True          # the finished set in dest stays exactly as it was
+        else:
+            _write_json(work / LAYOUT_JSON, {"schema": LAYOUT_SCHEMA, "montages": entries})
+            _write_json(work / STITCH_JSON, doc)
+            if dest.exists():
+                os.replace(dest, old)
+            os.replace(work, dest)
+            shutil.rmtree(old, ignore_errors=True)
+    except Exception as ex:                      # the pass itself; a finished set in dest is never touched
         shutil.rmtree(work, ignore_errors=True)
-        doc = {"state": "failed", "error": f"{type(ex).__name__}: {ex}"[:4000], "n": 0, "t": _now()}
+        doc = {"state": "failed", "error": f"{type(ex).__name__}: {ex}"[:4000], "n": 0, "t": _now(),
+               "processing": processing}
         try:
-            if dest.exists() and not _overlaps(dest, tiles_dir):
-                shutil.rmtree(dest)
             if not _overlaps(dest, tiles_dir):
-                dest.mkdir(parents=True, exist_ok=True)
-                _write_json(dest / STITCH_JSON, doc)
+                if not dest.exists() and old.exists():
+                    os.replace(old, dest)
+                if _stitch_done(dest):
+                    doc["kept_previous"] = True
+                else:                            # not a finished set: replaced by this failure's record
+                    shutil.rmtree(dest, ignore_errors=True)
+                    dest.mkdir(parents=True, exist_ok=True)
+                    _write_json(dest / STITCH_JSON, doc)
         except OSError:
             pass
     if doc["state"] == "failed":
-        warns.append(f"montages: stitching failed for some or all ({doc['error']}); the tiles are not affected")
+        kept = "; the previous montages are kept" if doc.get("kept_previous") else ""
+        warns.append(f"montages: stitching failed for some or all ({doc['error']}){kept}; "
+                     f"the tiles are not affected")
     print(f"stitch: {doc['state']}, {doc['n']} montage(s), {time.time() - t_start:.1f} s", file=log, flush=True)
     return doc, warns
 
@@ -910,7 +989,18 @@ def _stitch_only(conv, processing_repo_dir, tee, warnings):
             gpu = False
             warnings.append(f"the conversion used the GPU, which is not free now ({note}); stitched on the CPU")
     cfg = dataclasses.replace(base_cfg, use_gpu=gpu, name=f"convert_raw[{recipe_name}] stitch-only")
-    stitch, w = stitch_pass(core, cfg, montages, rows, conv / CONV_MONTAGES, tiles, tee, need=stitch_need(peak))
+    info = processing_info(repo, recipe_name)
+    try:                                         # what made the tiles (the portal keeps convert_raw's result)
+        before = (json.loads((conv / "status.json").read_text(encoding="utf-8")).get("result") or {}).get("processing")
+    except (OSError, ValueError, AttributeError):
+        before = None
+    if isinstance(before, dict):
+        diff = [k for k in ("commit", "recipe", "recipe_md5") if before.get(k) and info.get(k) != before.get(k)]
+        if diff:
+            warnings.append("the processing repo changed since the tiles were made (" + ", ".join(
+                f"{k} {before.get(k)} -> {info.get(k)}" for k in diff) + "): the montages may not match them")
+    stitch, w = stitch_pass(core, cfg, montages, rows, conv / CONV_MONTAGES, tiles, tee, need=stitch_need(peak),
+                            processing=info)
     warnings += w
     acq, w = acquisition_pass(core, found, montages, conv / ACQ_JSON)
     warnings += w
@@ -918,7 +1008,8 @@ def _stitch_only(conv, processing_repo_dir, tee, warnings):
     warnings[:] = list(dict.fromkeys(warnings + tee.caught))
     return {"mode": "stitch", "out_dir": str(conv / CONV_MONTAGES), "recipe": recipe_name,
             "compute": "GPU" if device.startswith("GPU") else "CPU", "device": device,
-            "montages": [m.basename for m in montages], "stitch": stitch, "acquisition": acq, "warnings": warnings}
+            "montages": [m.basename for m in montages], "stitch": stitch, "acquisition": acq, "processing": info,
+            "warnings": warnings}
 
 
 def main(argv=None) -> int:

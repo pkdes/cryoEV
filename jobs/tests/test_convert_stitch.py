@@ -139,6 +139,56 @@ class Stub(unittest.TestCase):
         with self.assertRaisesRegex(CR.ConvertError, "raw inputs are gone"):
             CR.stitch_only(conv, processing_repo_dir=self.repo, log=io.StringIO())
 
+    def stitched_conv(self):
+        """A finished conversion folder whose montages/ is a done set (the stub core cannot stitch, so it is made
+        by hand), with convert.json and a status.json result naming what made the tiles."""
+        conv = self.tmp / "conv"
+        self.convert(conv / "tiles")
+        (conv / "convert.json").write_text(json.dumps({"inputs": [str(self.raw / "grid1-pos1.mrc.mdoc")],
+                                                       "recipe": "default"}), encoding="utf-8")
+        good = conv / "montages"
+        good.mkdir()
+        (good / "grid1_1_stitched.jpg").write_bytes(b"good jpg")
+        (good / "layout.json").write_text('{"schema": "montage_layout/1", "montages": []}', encoding="utf-8")
+        (good / "stitch.json").write_text('{"state": "done", "error": null, "n": 1}', encoding="utf-8")
+        return conv
+
+    def test_a_failed_pass_never_destroys_a_done_set(self):
+        conv = self.stitched_conv()
+        before = tree_md5(conv / "montages")
+        res = CR.stitch_only(conv, processing_repo_dir=self.repo, log=io.StringIO())   # stub: every montage fails
+        self.assertEqual((res["stitch"]["state"], res["stitch"].get("kept_previous")), ("failed", True))
+        self.assertEqual(tree_md5(conv / "montages"), before)
+        self.assertTrue(any("previous montages are kept" in w for w in res["warnings"]), res["warnings"])
+        self.assertEqual(sorted(p.name for p in conv.iterdir() if p.name.startswith(".")), [])
+        # a swap cut short (montages/ renamed away, the new set never moved in): put back, then kept
+        os.replace(conv / "montages", conv / ".montages_old")
+        res = CR.stitch_only(conv, processing_repo_dir=self.repo, log=io.StringIO())
+        self.assertTrue(res["stitch"].get("kept_previous"))
+        self.assertEqual(tree_md5(conv / "montages"), before)
+        self.assertFalse((conv / ".montages_old").exists())
+        # control: a set that is not done is replaced by the failed pass's own record
+        (conv / "montages" / "stitch.json").write_text('{"state": "failed"}', encoding="utf-8")
+        res = CR.stitch_only(conv, processing_repo_dir=self.repo, log=io.StringIO())
+        self.assertFalse(res["stitch"].get("kept_previous"))
+        self.assertEqual(sorted(p.name for p in (conv / "montages").iterdir()), ["stitch.json"])
+
+    def test_processing_recorded_and_a_change_warned(self):
+        conv = self.stitched_conv()
+        res = CR.stitch_only(conv, processing_repo_dir=self.repo, log=io.StringIO())
+        self.assertEqual(res["processing"]["recipe"], "20261012")
+        self.assertEqual(res["processing"]["recipe_md5"],
+                         md5(self.repo / "datasets" / "process_20261012.py"))
+        self.assertEqual(res["stitch"]["processing"], res["processing"])
+        self.assertFalse(any("processing repo changed" in w for w in res["warnings"]))
+        (conv / "status.json").write_text(json.dumps({"result": {"processing": {
+            "commit": "0" * 40, "recipe": "20261012", "recipe_md5": "f" * 32}}}), encoding="utf-8")
+        res = CR.stitch_only(conv, processing_repo_dir=self.repo, log=io.StringIO())
+        w = [x for x in res["warnings"] if "processing repo changed" in x]
+        self.assertTrue(w and "recipe_md5" in w[0], res["warnings"])
+        plain = self.convert(self.tmp / "p")
+        self.assertEqual(plain["processing"]["recipe"], "20261012")
+
     def test_cli_json(self):
         env = {**os.environ, CR.REPO_ENV: str(self.repo)}
         run = lambda *a: subprocess.run([sys.executable, "-m", "jobs.convert_raw", *map(str, a)], cwd=REPO,  # noqa
@@ -258,6 +308,12 @@ class Real(unittest.TestCase):
             self.assertEqual(now[k], first[k], k)
         self.assertEqual(json.loads((conv / "acquisition.json").read_bytes()), json.loads(acq))
         self.assertEqual(tree_md5(conv / "tiles"), tiles)
+        # a later backfill short of RAM (every montage refused by the guard) leaves the done set as it was
+        with mock.patch.object(CR, "available_ram", return_value=1):
+            low = CR.stitch_only(conv, log=io.StringIO())
+        self.assertEqual((low["stitch"]["state"], low["stitch"].get("kept_previous")), ("failed", True))
+        self.assertIn("MemoryError", low["stitch"]["error"])
+        self.assertEqual(tree_md5(conv / "montages"), now)
 
 
 if __name__ == "__main__":
