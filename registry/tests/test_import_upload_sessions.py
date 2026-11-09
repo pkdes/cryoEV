@@ -132,6 +132,21 @@ class UploadKeys(unittest.TestCase):
             held.close()
         self.assertEqual(self.importer_writes(lab_record())["session"], 1)
 
+    def test_set_status_on_a_session_takes_the_upload_lock(self):
+        registry.append(portal_record(), self.root)
+        who = sorted(registry.roster())[0]
+        held = registry.acquire_lock(self.root / registry.UPLOAD_LOCK)
+        try:
+            with mock.patch.object(registry, "LOCK_WAIT", 0.2):
+                with self.assertRaises(registry.RegistryError) as cm:
+                    registry.set_status(SID, "excluded", who, root=self.root)
+            self.assertIn("registry busy", str(cm.exception))
+        finally:
+            held.close()
+        line = registry.set_status(SID, "excluded", who, root=self.root)
+        self.assertEqual((line["status"], line["conversions"], line["details"]), ("excluded", [CONV], DETAILS))
+        self.assertEqual(importers.UPLOAD_LOCK, registry.UPLOAD_LOCK)
+
     def test_records_validate(self):
         registry.append(portal_record(), self.root)
         self.importer_writes(lab_record())

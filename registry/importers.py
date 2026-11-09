@@ -100,7 +100,7 @@ DEFAULT_LAYOUT = {"dir": RAW_DIR, "recursive": True}
 GRID_FIELDS = ("sample_label", "project", "prep_date", "grid_type", "replicate", "glow_discharge", "storage")
 HEADER_TIME = re.compile(r"\s+\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}(:\d{2})?\s*$")
 UPLOAD_KEYS = ("conversions", "details")  # session keys the portal owns (= portal/upload_sessions.py UPLOAD_KEYS)
-UPLOAD_LOCK, UPLOAD_LOCK_WAIT = ".upload_session.lock", 60.0   # = portal/upload_sessions.py LOCK
+UPLOAD_LOCK, UPLOAD_LOCK_WAIT = registry.UPLOAD_LOCK, 60.0   # = portal/upload_sessions.py LOCK
 
 
 def split_membership(csv_path):

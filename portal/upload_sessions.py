@@ -3,16 +3,20 @@ Upload sessions (round 7 S, BUILD_CONTRACTS.md section 13): a raw upload's conve
 `session/1` record of its imaging session, so Data -> Sessions shows it (the registry is the one store).
 
     register_conversion(conv_dir, cfg) -> dict      jobs side: CX's finalize calls it after the runner lock is released
-    save_details(session_id, fields, who, cfg) -> dict      the "Session details" form (conversion page, Data page)
+    save_details(session_id, fields, who, cfg, admin) -> dict    the "Session details" form (conversion page, Data)
+    enabled(cfg) -> bool                            THE switch (CX calls it too)
+    python -m portal.upload_sessions unregister ... admin fix for a mistyped imaging date (below)
 
 Registration
-  - Only when CJ_UPLOAD_SESSIONS=on (env, or cfg.upload_sessions) and only for a conversion whose convert.json says
-    source.kind == "upload" and whose status.json says done. Nothing is written otherwise (no registry line, no file).
+  - Only when enabled(cfg) (cfg.upload_sessions / cfg.cj_upload_sessions, else env CJ_UPLOAD_SESSIONS; on / 1 / yes /
+    true) and only for a conversion whose convert.json says source.kind == "upload" and whose status.json says done.
+    Nothing is written otherwise (no registry line, no file).
   - The session id is the conversion's session (the imaging date the uploader typed), so it WILL match a lab session:
     read the current line -> merge -> append, under <registry>/.upload_session.lock (registry/importers.py takes the
     same lock while it writes, and carries `conversions` and `details` forward). Lab fields are never replaced:
     status, local_folder, sample_labels, the acquisition summary and grid ids stay as the lab recorded them. A new
-    record gets status "processed", its date, the sample labels and the acquisition summary of this upload.
+    record gets status "processed", its date, the sample labels and the acquisition summary of this upload. Where the
+    lab labelled a grid, an upload's other name is shown as "Lab label (upload: X)" (effective_labels).
   - Upload-owned keys (UPLOAD_KEYS): `conversions` [{id, uploaded_by, grids, sample_labels, tiles_per_grid, n_tiles,
     n_montages, acquisition}] (one entry per conversion id; `owner` is NOT used: in the registry it names an owner
     file) and `details` (below).
@@ -21,13 +25,20 @@ Registration
     schema, never a raw header, serial or path. A missing file registers without it.
   - Idempotent: a merged record equal to the current one (logged / recorded_by aside) appends nothing.
   - A refusal (an excluded session, a bad record) is returned as {"ok": False, "error"} and written to
-    <conv>/session.json; a busy lock or an unreadable registry also says "retry": True. Never raises for those.
+    <conv>/session.json. The lock is waited for LOCK_WAIT_S (2 s) only: then {"ok": False, "busy": True, "retry":
+    True} and nothing is appended (save_details: "Registry busy, try again in a minute."). Never raises for those.
+  - Known limit, a mistyped imaging date: the upload lands in that date's session (perhaps a lab one). Admin fix:
+    re-upload under the right date, then `python -m portal.upload_sessions unregister --registry <dir> --session
+    <wrong id> --conversion <cid> --who <id>` appends the line without it (a portal-made session left empty becomes
+    "excluded"; append-only, nothing deleted).
 
 Session details
   - grid ids (inventory Grid#, free text up to 40 characters), prep notes (up to 2000 characters) and a display
     sample name per grid (the labels baked into tile names and MANIFEST are not changed). Merge-append under the
     same lock; an audit line (portal/audit.py, no user text in it). Who may edit: the admin, and whoever uploaded
-    one of the session's conversions (may_edit); the conversion page also lets its owner (can_see) edit.
+    one of the session's conversions (may_edit); the conversion page also lets its owner (can_see) edit. A display
+    name: the admin on any grid, an uploader only on the grids of their own conversions. Grid ids and names lose
+    control characters and a leading = + - @.
 
 The upload form asks for the sample per grid BEFORE conversion (form_samples / sample_key_text): the labels are baked
 into tile names and MANIFEST.csv, so they are written as input/sample_key.csv in the lab's `#,Label` format (what
@@ -38,6 +49,7 @@ All text that reaches a page goes through html.escape here.
 """
 from __future__ import annotations
 
+import contextlib
 import csv
 import html
 import io
@@ -45,6 +57,7 @@ import json
 import os
 import re
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -75,6 +88,12 @@ MAX_GRIDS = 48                           # grid rows one details form may carry
 LABEL_MAX = 200                          # a label read back from MANIFEST.csv (an uploaded key may be anything)
 FORMULA_START = ("=", "+", "-", "@")
 MANIFEST = "MANIFEST.csv"
+FLAG_ON = ("on", "1", "yes", "true")
+LOCK_WAIT_S = 2.0                        # the upload-session lock: a short wait, then "busy" (the caller retries)
+SCOPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 ._-]{0,39}$")   # acquisition.json scope_model: a model name only
+BUSY_TEXT = "Registry busy, try again in a minute."
+_THREAD_LOCKS: dict = {}
+_THREAD_LOCKS_LOCK = threading.Lock()
 
 esc = html.escape
 
@@ -85,9 +104,46 @@ class DetailsError(ValueError):
 
 # ---------------------------------------------------------------- settings
 def enabled(cfg) -> bool:
-    v = getattr(cfg, "upload_sessions", None)
-    v = v if v not in (None, "") else os.environ.get(FLAG, "")
-    return str(v).strip().lower() == "on"
+    """THE switch (CX's finalize / kick call this too): cfg.upload_sessions or cfg.cj_upload_sessions when set,
+    else env CJ_UPLOAD_SESSIONS; on / 1 / yes / true (any case) = on, anything else = off."""
+    v = None
+    for name in ("upload_sessions", "cj_upload_sessions"):
+        v = getattr(cfg, name, None)
+        if v not in (None, ""):
+            break
+    if v in (None, ""):
+        v = os.environ.get(FLAG, "")
+    return str(v).strip().lower() in FLAG_ON
+
+
+class Busy(Exception):
+    """The upload-session lock (or the registry's own) could not be had in time."""
+
+
+@contextlib.contextmanager
+def upload_lock(reg: Path, wait: float = None):
+    """<registry>/.upload_session.lock for read -> merge -> append: a per-process thread lock, then the OS lock,
+    each waited for at most LOCK_WAIT_S (never the 30 s of a registry write). Raises Busy on timeout. The registry
+    folder goes through the registry's path guard before the lock file is made."""
+    wait = LOCK_WAIT_S if wait is None else wait
+    regm = _regm()
+    regm._guard(reg)
+    reg.mkdir(parents=True, exist_ok=True)
+    key = os.path.normcase(os.path.abspath(reg))
+    with _THREAD_LOCKS_LOCK:
+        tl = _THREAD_LOCKS.setdefault(key, threading.Lock())
+    if not tl.acquire(timeout=wait):
+        raise Busy("another request is writing this registry")
+    try:
+        f = regm.acquire_lock(reg / LOCK, wait)
+        if f is None:
+            raise Busy(f"{LOCK} is held by another process")
+        try:
+            yield
+        finally:
+            f.close()
+    finally:
+        tl.release()
 
 
 def registry_root(cfg):
@@ -209,8 +265,9 @@ def acquisition_of(conv_dir: Path, sid: str) -> tuple:
         probe = {"schema": "session/1", "id": sid, "logged": now_iso(), "status": "processed", k: v}
         if not regm.check_record(probe, regm.schemas()):
             out[k] = v
-    if "instrument" not in out and isinstance(doc.get("scope_model"), str) and doc["scope_model"].strip():
-        out["instrument"] = doc["scope_model"].strip()[:80]
+    scope = " ".join(str(doc.get("scope_model") or "").split())
+    if "instrument" not in out and SCOPE_RE.match(scope):          # a model name only (allow-list)
+        out["instrument"] = scope
     mons = doc.get("montages")
     return out, (len(mons) if isinstance(mons, list) else None)
 
@@ -237,7 +294,7 @@ def merge_session(cur: dict | None, sid: str, entry: dict) -> dict:
     rec["conversions"] = sorted(convs + [entry], key=lambda c: str(c.get("id")))
     if not rec.get("status"):
         rec["status"] = "processed"
-    if not rec.get("sample_labels") and entry.get("sample_labels"):
+    if not cur and entry.get("sample_labels"):        # a session the portal makes; a lab record's labels stay its own
         rec["sample_labels"] = dict(entry["sample_labels"])
     rec["recorded_by"] = RECORDED_BY
     return rec
@@ -265,8 +322,10 @@ def _write_local(conv_dir: Path, doc: dict):
 
 def register_conversion(conv_dir: Path, cfg) -> dict:
     """A finished upload conversion -> its session/1 record (read -> merge -> append). -> {"ok": bool, "session",
-    "appended": bool} | {"ok": False, "skipped": why} | {"ok": False, "error": text, "retry": bool}.
-    ok True = nothing left to do. Never raises for a refusal, a busy lock or an unreadable folder."""
+    "appended": bool} | {"ok": False, "skipped": why, "retry": bool} | {"ok": False, "error": text, "retry": bool}
+    | {"ok": False, "busy": True, "retry": True, "error": text} (the lock was not had in LOCK_WAIT_S, or the
+    registry's own write lock was busy: nothing appended; not a failure to count). ok True = nothing left to do.
+    Never raises for a refusal, a busy lock or an unreadable folder."""
     conv_dir = Path(conv_dir)
     if not enabled(cfg):
         return {"ok": False, "skipped": f"{FLAG} is not on", "retry": False}
@@ -288,7 +347,7 @@ def register_conversion(conv_dir: Path, cfg) -> dict:
     regm = _regm()
     try:
         entry = conversion_entry(conv_dir, meta, sid)
-        with PS.locked(reg / LOCK):
+        with upload_lock(reg):
             cur = _latest(regm, reg, sid)
             rec = merge_session(cur, sid, entry)
             if _same(rec, cur):
@@ -296,13 +355,18 @@ def register_conversion(conv_dir: Path, cfg) -> dict:
             else:
                 regm.append(rec, reg)
                 out = {"ok": True, "session": sid, "appended": True}
+    except Busy as e:
+        out = {"ok": False, "session": sid, "busy": True, "retry": True, "error": f"busy: {e}"}
     except regm.RegistryError as e:
-        busy = str(e).startswith("registry busy")
-        out = {"ok": False, "session": sid, "error": str(e)[:300], "retry": busy}
-    except (PS.PredictSetError, OSError) as e:
+        if str(e).startswith("registry busy"):
+            out = {"ok": False, "session": sid, "busy": True, "retry": True, "error": str(e)[:300]}
+        else:
+            out = {"ok": False, "session": sid, "error": str(e)[:300], "retry": False}
+    except OSError as e:
         out = {"ok": False, "session": sid, "error": f"{type(e).__name__}: {str(e)[:250]}", "retry": True}
     _write_local(conv_dir, {"session": sid, "conversion": conv_dir.name, "registered": out.get("ok", False),
-                            "appended": out.get("appended", False), "error": out.get("error")})
+                            "appended": out.get("appended", False), "busy": bool(out.get("busy")),
+                            "error": out.get("error")})
     if out.get("error"):
         print(f"[upload_sessions] {conv_dir.name}: not registered: {out['error']}", file=sys.stderr, flush=True)
     return out
@@ -343,23 +407,53 @@ def session_slots(record: dict) -> list:
     return sorted((str(s) for s in slots if SLOT_RE.match(str(s))), key=_slot_key)
 
 
+def _labels(d) -> dict:
+    return {str(k): v for k, v in _dict(d).items() if isinstance(v, str) and v}
+
+
+def lab_labels(record: dict) -> dict:
+    """{slot: label} the lab recorded (its sample_key.csv): a record with a lab session folder. A session the portal
+    made has no local_folder; its top-level labels are the upload's."""
+    rec = _dict(record)
+    return _labels(rec.get("sample_labels")) if rec.get("local_folder") else {}
+
+
+def upload_labels(record: dict) -> dict:
+    """{slot: label} from the uploads: the details' display name, else the upload's own label."""
+    rec = _dict(record)
+    out = {} if rec.get("local_folder") else _labels(rec.get("sample_labels"))
+    for c in conversions_of(rec):
+        for k, v in _labels(c.get("sample_labels")).items():
+            out.setdefault(k, v)
+    out.update(_labels(_dict(rec.get("details")).get("sample_display")))
+    return out
+
+
 def recorded_labels(record: dict) -> dict:
-    """{slot: label} as recorded (lab sample_labels, else an upload's), before display edits."""
-    out = {}
-    for c in conversions_of(record):
-        for k, v in _dict(c.get("sample_labels")).items():
-            if isinstance(v, str) and v:
-                out.setdefault(str(k), v)
-    out.update({str(k): v for k, v in _dict(_dict(record).get("sample_labels")).items() if isinstance(v, str) and v})
+    """{slot: label} as recorded (the lab's, else an upload's), before display edits."""
+    rec = _dict(record)
+    out = {} if rec.get("local_folder") else _labels(rec.get("sample_labels"))
+    for c in conversions_of(rec):
+        for k, v in _labels(c.get("sample_labels")).items():
+            out.setdefault(k, v)
+    out.update(lab_labels(rec))
     return out
 
 
 def effective_labels(record: dict) -> dict:
-    """{slot: label} as shown: the details' display name, else the recorded label."""
-    out = recorded_labels(record)
-    out.update({str(k): v for k, v in _dict(_dict(_dict(record).get("details")).get("sample_display")).items()
-                if isinstance(v, str) and v})
+    """{slot: label} as shown. A slot the lab labelled keeps the lab's label; an upload that names it otherwise is
+    added as "Lab label (upload: X)", never in its place. Other slots: the display name, else the upload's label."""
+    lab, up = lab_labels(record), upload_labels(record)
+    out = dict(up)
+    for slot, v in lab.items():
+        out[slot] = v if up.get(slot) in (None, v) else f"{v} (upload: {up[slot]})"
     return out
+
+
+def own_grids(record: dict, who) -> set:
+    """Grid slots in the conversions `who` uploaded (where an uploader may set a display name)."""
+    return {str(g) for c in conversions_of(record) if c.get("uploaded_by") == who
+            for g in _list(c.get("grids")) if isinstance(g, int)}
 
 
 def upload_acquisition(record: dict) -> dict:
@@ -377,16 +471,19 @@ def has_acquisition(record: dict) -> bool:
 
 # ---------------------------------------------------------------- session details
 def _clean_line(v, cap: int, what: str, problems: list) -> str:
-    s = " ".join(str(v or "").split())
+    """One line: control characters out, spaces collapsed, no leading = + - @ (a spreadsheet formula)."""
+    s = " ".join("".join(c for c in str(v or "") if ord(c) >= 32 and ord(c) != 127).split())
+    s = s.lstrip("".join(FORMULA_START)).strip()
     if len(s) > cap:
         problems.append(f"{what}: at most {cap} characters.")
         return ""
     return s
 
 
-def clean_details(fields: dict, slots: list) -> dict:
+def clean_details(fields: dict, slots: list, display_slots=None) -> dict:
     """The details form -> {"grid_ids": {slot: id}, "sample_display": {slot: name}, "prep_notes": text}. A blank
-    value removes the entry. Raises DetailsError listing every problem."""
+    value removes the entry. display_slots: where a display name may be set (None = every slot: the admin).
+    Raises DetailsError listing every problem."""
     problems, grid_ids, display = [], {}, {}
     allowed = set(slots)
     seen = 0
@@ -401,6 +498,10 @@ def clean_details(fields: dict, slots: list) -> dict:
         seen += 1
         if m.group(1) == "grid_id":
             grid_ids[slot] = _clean_line(fields[k], GRID_ID_MAX, f"Grid {slot} id", problems)
+        elif display_slots is not None and slot not in display_slots:
+            if str(fields[k] or "").strip():
+                problems.append(f"Grid {slot}: only the person who uploaded that grid (or the admin) can rename "
+                                f"its sample.")
         else:
             display[slot] = _clean_line(fields[k], DISPLAY_MAX, f"Grid {slot} sample name", problems)
     if seen > 2 * MAX_GRIDS:
@@ -432,10 +533,11 @@ def merge_details(cur: dict, upd: dict, who: str) -> dict:
     return out
 
 
-def save_details(session_id: str, fields: dict, who: str, cfg) -> dict:
+def save_details(session_id: str, fields: dict, who: str, cfg, admin: bool = False) -> dict:
     """Merge the form into the session record's `details` and append (under the upload lock). -> {"ok": True,
-    "appended": bool} | {"ok": False, "error": text}. The caller has checked who may edit (may_edit / can_see).
-    Only a session that is already an upload session (has `conversions`) takes details."""
+    "appended": bool} | {"ok": False, "error": text, "busy"?: True}. The caller has checked who may edit (may_edit
+    / can_see). A display name: the admin anywhere, an uploader only on the grids of their own conversions. Only a
+    session that is already an upload session (has `conversions`) takes details."""
     if not enabled(cfg):
         return {"ok": False, "error": "Session details are not switched on on this server.", "status": 403}
     if not isinstance(session_id, str) or not SESSION_RE.match(session_id):
@@ -445,11 +547,11 @@ def save_details(session_id: str, fields: dict, who: str, cfg) -> dict:
         return {"ok": False, "error": "The registry is not set up on this server. Ask the admin."}
     regm = _regm()
     try:
-        with PS.locked(reg / LOCK):
+        with upload_lock(reg):
             cur = _latest(regm, reg, session_id)
             if not cur or not is_upload_session(cur):
                 return {"ok": False, "error": "This session has no uploaded conversion yet, so it takes no details."}
-            upd = clean_details(fields, session_slots(cur))
+            upd = clean_details(fields, session_slots(cur), None if admin else own_grids(cur, who))
             rec = {k: v for k, v in cur.items() if k != "logged"}
             new = merge_details(cur, upd, who)
             base = merge_details(cur, {"grid_ids": {}, "sample_display": {}, "prep_notes": None}, who)
@@ -462,10 +564,14 @@ def save_details(session_id: str, fields: dict, who: str, cfg) -> dict:
             regm.append(rec, reg)
     except DetailsError as e:
         return {"ok": False, "error": str(e)}
+    except Busy as e:
+        return {"ok": False, "busy": True, "error": BUSY_TEXT, "tech": str(e), "status": 503}
     except regm.RegistryError as e:
+        if str(e).startswith("registry busy"):
+            return {"ok": False, "busy": True, "error": BUSY_TEXT, "tech": str(e)[:300], "status": 503}
         return {"ok": False, "error": "Not saved: the registry refused it.", "tech": str(e)[:300]}
-    except (PS.PredictSetError, OSError) as e:
-        return {"ok": False, "error": "Not saved: the registry is busy. Try again in a minute.",
+    except OSError as e:
+        return {"ok": False, "error": "Not saved: the registry could not be written. Ask the admin.",
                 "tech": f"{type(e).__name__}: {str(e)[:250]}"}
     state = getattr(cfg, "state_dir", None)
     try:
@@ -501,7 +607,31 @@ def save_conversion_details(cfg, user: dict, conv_dir: Path, meta: dict, fields:
     if not rec or Path(conv_dir).name not in {c["id"] for c in conversions_of(rec)}:
         return {"ok": False, "error": "This upload is not in Data → Sessions yet, so it takes no details. Try again "
                                       "in a minute.", "status": 409}
-    return save_details(sid, fields, user.get("id"), cfg)
+    return save_details(sid, fields, user.get("id"), cfg, admin=user.get("role") == "admin")
+
+
+def unregister_conversion(session_id: str, cid: str, root, who: str) -> dict:
+    """Admin fix for an upload filed under the wrong session (a mistyped imaging date): append the session line
+    without that conversion. A session the portal made (no lab folder) and left with no upload is marked
+    "excluded". Nothing is deleted (append-only); details stay in the history. Re-upload under the right date.
+    -> {"ok", "appended"} | {"ok": False, "error"}."""
+    reg = Path(root)
+    regm = _regm()
+    try:
+        with upload_lock(reg, wait=30.0):
+            cur = _latest(regm, reg, session_id)
+            if not cur or cid not in {c["id"] for c in conversions_of(cur)}:
+                return {"ok": False, "error": f"session {session_id} lists no conversion {cid}"}
+            rec = {k: v for k, v in cur.items() if k != "logged"}
+            rec["conversions"] = [c for c in conversions_of(cur) if c["id"] != cid]
+            if not rec["conversions"] and not cur.get("local_folder"):
+                rec["status"] = "excluded"
+            rec["note"] = f"upload {cid} removed from this session by {who} (filed under the wrong date)"
+            rec["recorded_by"] = RECORDED_BY + " unregister"
+            regm.append(rec, reg)
+    except (Busy, regm.RegistryError, OSError) as e:
+        return {"ok": False, "error": str(e)[:300]}
+    return {"ok": True, "appended": True}
 
 
 # ---------------------------------------------------------------- HTML (escaped here)
@@ -515,16 +645,19 @@ def conversion_details_html(cfg, user: dict, conv_dir: Path, meta: dict, st: dic
     if rec and cid in {c["id"] for c in conversions_of(rec)}:
         link = (f'<p class="cj-mut">This upload is listed as <a href="/data/session/{esc(sid)}">session '
                 f'{esc(sid)}</a> under Data → Sessions.</p>')
-        return link + details_form(rec, f"/predict/convert/{cid}/details", error, saved)
+        return link + details_form(rec, f"/predict/convert/{cid}/details", error, saved, user)
     reg = st.get("registered")
     local = _dict(_read_json(Path(conv_dir) / SESSION_JSON))
-    why = reg[len("error:"):].strip() if isinstance(reg, str) and reg.startswith("error") else local.get("error")
+    why = reg[len("error:"):].strip() if isinstance(reg, str) and reg.startswith("error") else \
+        (local.get("error") if not local.get("busy") else None)
     if why:
         tech = (f'<p class="cj-mut cj-wrap">(admin) {esc(str(why))}</p>' if user.get("role") == "admin" else "")
         return (f'<div class="cj-card"><b>Not added to Data → Sessions.</b> <span class="cj-mut">Ask the admin if you '
                 f'need it there.</span>{tech}</div>')
-    return ('<div class="cj-card"><p class="cj-mut">Adding this upload to Data → Sessions… Reload this page in a '
-            'minute to fill in the session details.</p></div>')
+    if reg is False or local.get("busy"):                 # waiting for (or retrying) the registration
+        return ('<div class="cj-card"><p class="cj-mut">Adding this upload to Data → Sessions… Reload this page in a '
+                'minute to fill in the session details.</p></div>')
+    return ""
 
 
 def details_view(record: dict) -> str:
@@ -532,14 +665,23 @@ def details_view(record: dict) -> str:
     det = _dict(_dict(record).get("details"))
     notes = det.get("prep_notes") if isinstance(det.get("prep_notes"), str) else ""
     who = (f'<p class="cj-mut">Last edited {esc(str(det.get("at") or "?")[:16].replace("T", " "))} by '
-           f'{esc(str(det.get("by") or "?"))}.</p>' if det.get("at") else "")
+           f'{esc(person_name(det.get("by")))}.</p>' if det.get("at") else "")
     body = (f'<p class="cj-us-notes">{esc(notes)}</p>' if notes else '<p class="cj-mut">No prep notes yet.</p>')
     return f'<div class="cj-card"><h3 class="cj-us-h">Prep notes</h3>{body}{who}</div>'
 
 
-def details_form(record: dict, action: str, error: str | None = None, saved: bool = False) -> str:
-    """The "Session details" form for one session record (posted to `action`)."""
+def person_name(pid) -> str:
+    """A person's name for the page (portal/names.person_name: annotation/people.json), else the id."""
+    from portal import names as NM
+    return NM.person_name(pid)
+
+
+def details_form(record: dict, action: str, error: str | None = None, saved: bool = False, user=None) -> str:
+    """The "Session details" form for one session record (posted to `action`). `user`: who sees it; a non-admin
+    gets a "Show as" box only on the grids of their own uploads (save_details checks the same)."""
     rec = _dict(record)
+    user = _dict(user)
+    own = None if user.get("role") == "admin" else own_grids(rec, user.get("id"))
     det = _dict(rec.get("details"))
     gids, disp = _dict(det.get("grid_ids")), _dict(det.get("sample_display"))
     labels = recorded_labels(rec)
@@ -548,13 +690,16 @@ def details_form(record: dict, action: str, error: str | None = None, saved: boo
     for slot in session_slots(rec)[:MAX_GRIDS]:
         lab = labels.get(slot) or f"Grid {slot}"
         lab_id = lab_grids.get(slot)
+        show = (f'<input name="display_{esc(slot)}" maxlength="{DISPLAY_MAX}" autocomplete="off" '
+                f'value="{esc(str(disp.get(slot) or ""), quote=True)}" aria-label="Grid {esc(slot)} sample name">'
+                if own is None or slot in own else
+                f'<span class="cj-mut">{esc(str(disp.get(slot) or "")) or "(not your upload)"}</span>')
         rows.append(
             f'<tr><td data-l="Grid">Grid {esc(slot)}<br><span class="cj-mut">{esc(lab)}</span></td>'
             f'<td data-l="Grid id"><input name="grid_id_{esc(slot)}" maxlength="{GRID_ID_MAX}" autocomplete="off" '
             f'placeholder="{esc(str(lab_id) if lab_id else "e.g. 2602", quote=True)}" '
             f'value="{esc(str(gids.get(slot) or ""), quote=True)}" aria-label="Grid {esc(slot)} id"></td>'
-            f'<td data-l="Show as"><input name="display_{esc(slot)}" maxlength="{DISPLAY_MAX}" autocomplete="off" '
-            f'value="{esc(str(disp.get(slot) or ""), quote=True)}" aria-label="Grid {esc(slot)} sample name"></td></tr>')
+            f'<td data-l="Show as">{show}</td></tr>')
     table = ('<table class="cj-us-table"><thead><tr><th>Grid</th><th>Grid id (inventory #)</th><th>Show sample as'
              '</th></tr></thead><tbody>' + "".join(rows) + '</tbody></table>') if rows else \
         '<p class="cj-mut">No grids are known for this session yet.</p>'
@@ -567,7 +712,8 @@ def details_form(record: dict, action: str, error: str | None = None, saved: boo
     return (f'<form method="post" action="{esc(action, quote=True)}" class="cj-card cj-us-form" '
             f'id="cj-us-details"><h2 class="cj-us-h">Session details</h2>{msg}'
             '<p class="cj-mut">What the microscope files don’t say. “Show sample as” changes how a grid’s sample is '
-            'shown here, not the tile names. Visible to admins and advanced users.</p>'
+            'shown here, not the tile names; where the lab already named the sample, both are shown. Visible to '
+            'admins and advanced users.</p>'
             f'{table}<label class="cj-us-field"><span>Prep notes (up to {NOTES_MAX} characters)</span>'
             f'<textarea name="prep_notes" maxlength="{NOTES_MAX}" rows="5">{esc(notes)}</textarea></label>'
             '<p><button class="cj-us-btn" type="submit">Save details</button></p></form>')
@@ -620,3 +766,24 @@ def conversion_images(cfg, record: dict, user: dict, can_see) -> list:
                 continue
             files += [Path(e.path) for e in names]
     return files
+
+
+# ---------------------------------------------------------------- admin CLI
+def main(argv=None) -> int:
+    """python -m portal.upload_sessions unregister --registry <dir> --session <id> --conversion <cid> --who <id>"""
+    import argparse
+    ap = argparse.ArgumentParser(description="Upload sessions: admin fixes (see the module docstring).")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    un = sub.add_parser("unregister", help="take an upload off a session it was filed under by mistake")
+    un.add_argument("--registry", required=True, type=Path)
+    un.add_argument("--session", required=True)
+    un.add_argument("--conversion", required=True)
+    un.add_argument("--who", required=True, help="your portal id (recorded in the line's note)")
+    a = ap.parse_args(argv)
+    res = unregister_conversion(a.session, a.conversion, a.registry, a.who)
+    print(json.dumps(res))
+    return 0 if res.get("ok") else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

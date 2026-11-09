@@ -2967,6 +2967,7 @@ def clean_fields(raw) -> dict:
     return out
 
 
+NOJS_REFILL_BYTES = 1024 ** 2                 # a no-JavaScript raw post this small is read to refill the form
 SAMPLE_KEY_NAME = "sample_key.csv"            # the upload form's samples, written into input/ before conversion
 
 
@@ -3402,8 +3403,10 @@ def not_set_up(cfg, user) -> str:
                    extra=tech(why) if user.get("role") == "admin" else "<p>Ask the admin.</p>")
 
 
-def page_raw_upload(cfg, user, error=None) -> str:
+def page_raw_upload(cfg, user, error=None, form=None) -> str:
+    """form: the fields to show again after a refusal (the no-JavaScript post)."""
     repo, _ = processing_repo(cfg)
+    form = form or {}
     head = '<div class="cj-predict"><p class="cj-mut"><a href="/predict/new/">← Back</a></p><h1>Convert raw images</h1>'
     if repo is None:
         return wrap(head + not_set_up(cfg, user) + '</div>')
@@ -3428,9 +3431,10 @@ def page_raw_upload(cfg, user, error=None) -> str:
         f'<fieldset class="cj-card cj-predict-fs"><legend>Session and recipe</legend>'
         f'<label class="cj-predict-field"><span>Session id (the imaging date, YYYYMMDD; YYYYMMDD-n for a later '
         f'session that day)</span><input name="session" required maxlength="12" '
-        f'pattern="[0-9]{{8}}(-[0-9]+)?" inputmode="numeric" placeholder="20261027"></label>'
-        f'{recipe_select(repo)}{gpu_box()}</fieldset>'
-        f'{US.samples_fieldset()}'
+        f'pattern="[0-9]{{8}}(-[0-9]+)?" inputmode="numeric" placeholder="20261027" '
+        f'value="{esc(str(form.get("session") or "")[:12], quote=True)}"></label>'
+        f'{recipe_select(repo, form.get("recipe"))}{gpu_box(form.get("gpu") == "yes")}</fieldset>'
+        f'{US.samples_fieldset(form)}'
         f'<fieldset class="cj-card cj-predict-fs"><legend>Raw files</legend>'
         f'<label class="cj-predict-field"><span>.mrc + .mrc.mdoc, or .idoc + .tif tiles (+ sample_key.csv)</span>'
         f'<input type="file" name="files" multiple required accept=".mrc,.mdoc,.idoc,.tif,.tiff,.csv"></label>'
@@ -3672,14 +3676,24 @@ def routes(ctx) -> list:
             return forbidden(request, "Converting raw images is for advanced users and the admin.")
         return ctx.page(request, "Convert raw images", page_raw_upload(cfg, user), active="predict")
 
-    def raw_post(request: Request):
-        """The raw form without JavaScript: refused (raw files go one per request, which needs the page's script)."""
+    async def raw_post(request: Request):
+        """The raw form without JavaScript: refused (raw files go one per request, which needs the page's script).
+        A small post (no files to speak of) gets its typed fields back; a big one is not read."""
         user = ctx.user(request)
         if user.get("role") not in RAW_ROLES:
-            return forbidden(request, "Converting raw images is for advanced users and the admin.")
-        return refused_page(request, "Convert raw images", page_raw_upload(
+            return await run_in_threadpool(forbidden, request,
+                                           "Converting raw images is for advanced users and the admin.")
+        form = {}
+        try:
+            if int(request.headers.get("content-length") or 0) <= NOJS_REFILL_BYTES:
+                fd = await request.form(max_files=RAW_MAX_FILES, max_fields=MAX_FIELDS)
+                form = {k: v for k, v in fd.items() if isinstance(v, str) and len(v) <= MAX_FIELD_BYTES}
+                await fd.close()                         # the posted files are not kept
+        except Exception:                                # noqa: BLE001 - a bad body just gets an empty form
+            form = {}
+        return await run_in_threadpool(lambda: refused_page(request, "Convert raw images", page_raw_upload(
             cfg, user, "Raw files are sent one at a time, which needs JavaScript. Turn JavaScript on and try again "
-                       "(nothing was kept)."), 400)
+                       "(nothing was kept).", form), 400))
 
     def raw_sessions_page(request: Request):
         user = ctx.user(request)

@@ -10,7 +10,9 @@ Every caller still escapes the result for HTML: a name is free text.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime
+from pathlib import Path
 
 
 def when(s) -> str:
@@ -41,3 +43,25 @@ def display_name(req: dict, label=None) -> str:
     if isinstance(name, str) and name.strip():
         return name
     return default_name(req, label)
+
+
+PEOPLE = Path(__file__).resolve().parent.parent / "annotation" / "people.json"
+_people: dict = {}
+
+
+def person_name(pid, path=PEOPLE) -> str:
+    """A portal / people id -> its `name` in annotation/people.json (re-read when the file changes), else the id
+    itself ('?' for none). Callers escape it."""
+    if not isinstance(pid, str) or not pid:
+        return "?"
+    try:
+        stamp = Path(path).stat().st_mtime_ns
+        if _people.get("stamp") != (str(path), stamp):
+            doc = json.loads(Path(path).read_text(encoding="utf-8"))
+            names = {p["id"]: p["name"] for p in doc.get("people", [])
+                     if isinstance(p, dict) and isinstance(p.get("id"), str) and isinstance(p.get("name"), str)}
+            _people.clear()
+            _people.update(stamp=(str(path), stamp), names=names)
+    except (OSError, ValueError, AttributeError):
+        return pid
+    return _people.get("names", {}).get(pid) or pid

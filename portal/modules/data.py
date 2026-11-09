@@ -2286,7 +2286,8 @@ def routes(ctx) -> list:
         if not up or not up["can_edit"]:
             return ""
         record = records["session"].get(d["id"]) or {}
-        return US.details_form(record, f'{PREFIX}/session/{quote(d["id"], safe="")}/details', problem, saved)
+        return US.details_form(record, f'{PREFIX}/session/{quote(d["id"], safe="")}/details', problem, saved,
+                               viewer.user)
 
     def item(kind):
         def handler(request: Request):
@@ -2308,7 +2309,8 @@ def routes(ctx) -> list:
             return await run_in_threadpool(missing, request)
         fd = await request.form(max_files=0, max_fields=4 * US.MAX_GRIDS + 10)
         form = {k: v for k, v in fd.items() if isinstance(v, str)}
-        res = await run_in_threadpool(US.save_details, sid, form, user.get("id"), ctx.cfg)
+        res = await run_in_threadpool(US.save_details, sid, form, user.get("id"), ctx.cfg,
+                                      user.get("role") == "admin")
         root = getattr(ctx.cfg, "registry", None)
         with _lock:
             _registry_cache.pop(str(root), None)              # the page after the redirect shows the new line

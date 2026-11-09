@@ -25,7 +25,9 @@ import json
 import os
 import shutil
 import sys
+import re
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,7 +38,9 @@ sys.path.insert(0, str(HERE))
 import cjtest as T  # noqa: E402
 import test_predict_convert as TPC  # noqa: E402
 from portal import upload_sessions as US  # noqa: E402
+from portal import names as NM  # noqa: E402
 from portal.modules import data as D  # noqa: E402
+from portal.modules import predict as P  # noqa: E402
 
 REPO = T.REPO
 sys.path.insert(0, str(REPO / "registry"))
@@ -57,13 +61,14 @@ LAB = {"schema": "session/1", "id": LAB_SID, "logged": "2099-11-06T10:00:00", "d
        "magnification": [11000, 45000], "n_mdoc": 4, "recorded_by": "backfill:importers abc"}
 
 
-def make_conv(base: Path, cid: str, owner="adv", kind="upload", state="done", labels=None, acq=None) -> Path:
+def make_conv(base: Path, cid: str, owner="adv", kind="upload", state="done", labels=None, acq=None,
+              grids=(1, 1, 2)) -> Path:
     """A finished conversion folder as predict.py + jobs/convert_raw.py leave it (tiles + MANIFEST, json files)."""
     d = base / "raw_tiles" / cid
     (d / "tiles").mkdir(parents=True)
     labels = labels or {1: "Up A", 2: XSS}
     rows = []
-    for i, g in enumerate((1, 1, 2)):
+    for i, g in enumerate(grids):
         name = f"g{g}_x__grid{g}_1_r0c{i}_t00.png"
         T_IMG.save(d / "tiles" / name)
         rows.append({"output_name": name, "grid": g, "sample_label": labels.get(g, f"Grid {g}"), "montage": f"grid{g}_1"})
@@ -88,6 +93,18 @@ class _Img:
 
 
 T_IMG = _Img()
+
+
+def multipart(fields: dict, files) -> tuple:
+    """A multipart/form-data body (no JavaScript: what a browser posts). -> (bytes, content type)."""
+    b = "cjtestboundary7f3a"
+    out = b""
+    for k, v in fields.items():
+        out += f'--{b}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+    for k, name, data in files:
+        out += (f'--{b}\r\nContent-Disposition: form-data; name="{k}"; filename="{name}"\r\n'
+                f'Content-Type: application/octet-stream\r\n\r\n').encode() + data + b"\r\n"
+    return out + f"--{b}--\r\n".encode(), f"multipart/form-data; boundary={b}"
 
 
 def snap(reg: Path) -> dict:
@@ -305,6 +322,162 @@ class Unit(unittest.TestCase):
         self.assertIn(html.escape(XSS), out)
         self.assertIn(html.escape(NOTE_XSS), out)
 
+    def test_busy_lock_returns_at_once(self):
+        """The upload-session lock held elsewhere: busy + retry after about LOCK_WAIT_S, nothing appended."""
+        self.add_lab()
+        d = make_conv(self.base, f"{LAB_SID}_aaaaaa")
+        before = snap(self.reg)
+        regm = US._regm()
+        held = regm.acquire_lock(self.reg / US.LOCK)                   # another process's hold (a second handle)
+        try:
+            import time
+            t0 = time.monotonic()
+            res = US.register_conversion(d, self.cfg)
+            took = time.monotonic() - t0
+            self.assertEqual((res["ok"], res["busy"], res["retry"]), (False, True, True))
+            self.assertLess(took, US.LOCK_WAIT_S + 3)
+            self.assertTrue(json.loads((d / US.SESSION_JSON).read_text(encoding="utf-8"))["busy"])
+            self.assertIn("Adding this upload", US.conversion_details_html(
+                self.cfg, {"id": "adv"}, d, {"session": LAB_SID, "source": {"kind": "upload"}}, {"state": "done"}))
+            US.register_conversion(make_conv(self.base, f"{LAB_SID}_bbbbbb"), self.cfg)
+        finally:
+            held.close()
+        self.assertEqual(snap(self.reg)["session.jsonl"], before["session.jsonl"])
+        self.assertTrue(US.register_conversion(d, self.cfg)["appended"])        # free again: it goes through
+        held = regm.acquire_lock(self.reg / US.LOCK)
+        try:
+            res = US.save_details(LAB_SID, {"prep_notes": "x"}, "adv", self.cfg)
+        finally:
+            held.close()
+        self.assertEqual((res["ok"], res["busy"], res["error"], res["status"]), (False, True, US.BUSY_TEXT, 503))
+        # the same process: a second thread waits on the thread lock, not 30 s
+        gate, done = threading.Event(), {"t": threading.Event()}
+
+        def other():
+            with US.upload_lock(self.reg):
+                gate.set()
+                done["t"].wait(10)
+        th = threading.Thread(target=other)
+        th.start()
+        gate.wait(5)
+        try:
+            self.assertTrue(US.register_conversion(make_conv(self.base, f"{LAB_SID}_cccccc"), self.cfg)["busy"])
+        finally:
+            done["t"].set()
+            th.join()
+
+    def test_flag_values(self):
+        for v, on in (("on", True), ("ON", True), ("1", True), ("yes", True), ("True", True), (" true ", True),
+                      ("off", False), ("0", False), ("no", False), ("", False), ("onn", False)):
+            self.assertEqual(US.enabled(SimpleNamespace(upload_sessions=v)), on, v)
+            self.assertEqual(US.enabled(SimpleNamespace(cj_upload_sessions=v)), on, v)
+            with mock.patch.dict(os.environ, {US.FLAG: v}):
+                self.assertEqual(US.enabled(SimpleNamespace()), on, v)
+                self.assertEqual(US.enabled(None), on, v)
+        with mock.patch.dict(os.environ, {US.FLAG: "on"}):
+            self.assertFalse(US.enabled(SimpleNamespace(upload_sessions="off")))       # cfg beats env
+
+    def test_lab_labels_never_replaced(self):
+        self.add_lab()                                                    # lab: 1 Lab A, 2 Lab B
+        mine = make_conv(self.base, f"{LAB_SID}_aaaaaa", labels={1: "Up one", 2: "Lab B"})
+        other = make_conv(self.base, f"{LAB_SID}_bbbbbb", owner="adv2", labels={3: "Theirs"}, grids=(3,))
+        for d in (mine, other):
+            US.register_conversion(d, self.cfg)
+        rec = self.cur(LAB_SID)
+        self.assertEqual(rec["sample_labels"], LAB["sample_labels"])
+        self.assertEqual(US.effective_labels(rec), {"1": "Lab A (upload: Up one)", "2": "Lab B", "3": "Theirs"})
+        # adv may rename only grids of adv's uploads (1, 2); grid 3 is adv2's; the admin may rename any
+        bad = US.save_details(LAB_SID, {"display_3": "Mine now"}, "adv", self.cfg)
+        self.assertIn("only the person who uploaded that grid", bad["error"])
+        self.assertTrue(US.save_details(LAB_SID, {"display_3": ""}, "adv", self.cfg)["ok"])   # a blank box is fine
+        self.assertTrue(US.save_details(LAB_SID, {"display_2": "B shown"}, "adv", self.cfg)["ok"])
+        self.assertTrue(US.save_details(LAB_SID, {"display_3": "Admin's"}, "boss", self.cfg, admin=True)["ok"])
+        self.assertEqual(US.effective_labels(self.cur(LAB_SID)),
+                         {"1": "Lab A (upload: Up one)", "2": "Lab B (upload: B shown)", "3": "Admin's"})
+        form = US.details_form(self.cur(LAB_SID), "/x", user={"id": "adv", "role": "advanced"})
+        self.assertIn('name="display_1"', form)
+        self.assertNotIn('name="display_3"', form)
+        self.assertIn('name="display_3"', US.details_form(self.cur(LAB_SID), "/x", user={"id": "a", "role": "admin"}))
+        # control characters and a leading formula character are dropped from ids and names
+        US.save_details(LAB_SID, {"grid_id_1": "=2602\x07", "display_1": "@+Name\x1b"}, "adv", self.cfg)
+        det = self.cur(LAB_SID)["details"]
+        self.assertEqual((det["grid_ids"]["1"], det["sample_display"]["1"]), ("2602", "Name"))
+
+    def test_scope_model_allow_list_and_closed_schema(self):
+        for scope, kept in (("Krios G4", True), ("Glacios 9950123 at Some Lab, Room 1", False),
+                            ("C:\\scope", False), ("x" * 41, False)):
+            d = make_conv(self.base, f"{NEW_SID}_{'abcdef'}", acq={"session": {"n_mdoc": 1}, "scope_model": scope})
+            US.register_conversion(d, self.cfg)
+            acq = self.cur(NEW_SID)["conversions"][0]["acquisition"]
+            self.assertEqual(acq.get("instrument") == scope, kept, scope)
+            shutil.rmtree(self.tmp / "registry")
+            shutil.rmtree(d)
+        regm = US._regm()
+        good = {"schema": "session/1", "id": NEW_SID, "logged": "2099-11-06T10:00:00", "status": "processed",
+                "conversions": [{"id": f"{NEW_SID}_abcdef", "uploaded_by": "adv", "acquisition": {"n_mdoc": 1}}]}
+        self.assertEqual(regm.check_record(good, regm.schemas()), [])
+        for bad in ({"id": f"{NEW_SID}_abcdef", "uploaded_by": "adv", "path": "C:\\x"},
+                    {"id": f"{NEW_SID}_abcdef", "uploaded_by": "adv", "acquisition": {"raw_header": "x"}},
+                    {"id": f"{NEW_SID}_abcdef", "uploaded_by": "adv", "acquisition": {"n_mdoc": "two"}}):
+            self.assertTrue(regm.check_record(dict(good, conversions=[bad]), regm.schemas()), bad)
+
+    def test_unregister_a_mistyped_date(self):
+        self.add_lab()
+        lab = make_conv(self.base, f"{LAB_SID}_aaaaaa")
+        new = make_conv(self.base, f"{NEW_SID}_bbbbbb")
+        for d in (lab, new):
+            US.register_conversion(d, self.cfg)
+        before = snap(self.reg)["session.jsonl"]
+        self.assertEqual(US.main(["unregister", "--registry", str(self.reg), "--session", LAB_SID,
+                                  "--conversion", lab.name, "--who", "boss"]), 0)
+        rec = self.cur(LAB_SID)
+        self.assertEqual((rec["conversions"], rec["status"], rec["local_folder"]), ([], "processed", LAB["local_folder"]))
+        self.assertIn("wrong date", rec["note"])
+        US.unregister_conversion(NEW_SID, new.name, self.reg, "boss")
+        self.assertEqual(self.cur(NEW_SID)["status"], "excluded")              # a portal-made session left empty
+        self.assertFalse(US.unregister_conversion(NEW_SID, new.name, self.reg, "boss")["ok"])
+        self.assertTrue(snap(self.reg)["session.jsonl"].startswith(before))
+
+    def test_session_analyses_visibility(self):
+        """Analyses of a session: request.json source.session must match; owner and admin see a set, an advanced
+        non-owner does not (the admin is the control)."""
+        root = self.tmp / "predict"
+        for ps, owner, src in (("ps_20991105_aaaaaa", "adv", {"kind": "session", "session": LAB_SID}),
+                               ("ps_20991105_bbbbbb", "adv2", {"kind": "session", "session": LAB_SID}),
+                               ("ps_20991105_cccccc", "adv", {"kind": "session", "session": NEW_SID}),
+                               ("ps_20991105_dddddd", "adv", {"kind": "upload"})):
+            (root / ps).mkdir(parents=True)
+            (root / ps / "request.json").write_text(json.dumps({"ps": ps, "owner": owner, "source": src,
+                                                                "name": f"{XSS} {ps[-6:]}"}), encoding="utf-8")
+        records = {e: {} for e in D.ENTITIES}
+        records["prediction_set"]["ps_20991105_eeeeee"] = {
+            "id": "ps_20991105_eeeeee", "owner": "adv2", "status": "done", "source": {"kind": "session",
+                                                                                   "session": LAB_SID}}
+        can_see = __import__("portal.modules", fromlist=["Ctx"]).Ctx.can_see
+        seen = {}
+        for who, role in (("adv", "advanced"), ("adv2", "advanced"), ("boss", "admin"), ("nobody", "advanced")):
+            D._files_cache.clear()
+            v = D.Viewer(can_see, {"id": who, "role": role}, self.cfg)
+            seen[who] = [a["id"] for a in D.session_analyses(records, LAB_SID, v)]
+        self.assertEqual(seen["adv"], ["ps_20991105_aaaaaa"])
+        self.assertEqual(seen["adv2"], ["ps_20991105_eeeeee", "ps_20991105_bbbbbb"])
+        self.assertEqual(seen["boss"], ["ps_20991105_eeeeee", "ps_20991105_bbbbbb", "ps_20991105_aaaaaa"])
+        self.assertEqual(seen["nobody"], [])
+        D._files_cache.clear()
+        v = D.Viewer(can_see, {"id": "adv", "role": "advanced"}, self.cfg)
+        (a,) = D.session_analyses(records, LAB_SID, v)
+        self.assertEqual((a["url"], a["title"]), ("/predict/ps_20991105_aaaaaa/", f"{XSS} aaaaaa"))
+        self.assertEqual(D.session_analyses(records, LAB_SID, D.Viewer(can_see, {"id": "adv", "role": "advanced"})),
+                         [])                                              # no cfg: the registry's only (none visible)
+
+    def test_person_name(self):
+        people = self.tmp / "people.json"
+        people.write_text(json.dumps({"people": [{"id": "adv", "name": "Ada V"}]}), encoding="utf-8")
+        self.assertEqual(NM.person_name("adv", people), "Ada V")
+        self.assertEqual(NM.person_name("zed", people), "zed")
+        self.assertEqual(NM.person_name(None, people), "?")
+        self.assertEqual(NM.person_name("adv", self.tmp / "missing.json"), "adv")
+
     # ---- the upload form's samples
     def test_form_samples_and_key(self):
         samples, bad = US.form_samples({"sample_1": "  EV  prep A ", "sample_2": "", "sample_10": "=cmd()",
@@ -367,12 +540,24 @@ class Portal(TPC.Base):
                             for ln in self.argv_lines()))
         with open(d / "tiles" / "MANIFEST.csv", newline="", encoding="utf-8") as f:
             self.assertEqual({r["sample_label"] for r in csv.DictReader(f)}, {"EV prep form", XSS})
-        # blank table: today's behaviour (no key, "Grid n")
+        # blank table: today's behaviour (no key, "Grid n"); convert.json is exactly the base shape
         cid0, d0 = self.upload_with_samples("20991103", {})
         self.assertFalse((d0 / "input" / "sample_key.csv").exists())
         self.assertNotIn("--sample-key", self.argv_lines()[-1]["argv"])
+        meta0 = json.loads((d0 / "convert.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(meta0), {"schema", "id", "owner", "session", "recipe", "gpu", "source", "inputs",
+                                      "sample_key", "created", "input_bytes"})
+        self.assertIsNone(meta0["sample_key"])
+        self.assertEqual(set(meta0["source"]), {"kind", "files"})
+        meta = json.loads((d / "convert.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(meta), set(meta0))                       # the form adds no key, only the file
 
-        # the conversion page before registration: no form yet, a plain note
+        # the conversion page before registration: nothing until the runner says registered: false (waiting)
+        conv_page = self.page(f"/predict/convert/{cid}/", "advanced")
+        self.assertNotIn("Adding this upload to Data", conv_page)
+        st_path = d / "status.json"
+        st = json.loads(st_path.read_text(encoding="utf-8"))
+        st_path.write_text(json.dumps(dict(st, registered=False)), encoding="utf-8")
         conv_page = self.page(f"/predict/convert/{cid}/", "advanced")
         self.assertIn("Adding this upload to Data", conv_page)
         self.assertNotIn('id="cj-us-details"', conv_page)
@@ -380,6 +565,29 @@ class Portal(TPC.Base):
         self.assertEqual(US.register_conversion(d, self.w.cfg)["appended"], True)
         self.check_conversion_page(cid, d)
         self.check_data_pages(cid, d)
+
+    def test_all_samples_and_gpu_fit_the_field_cap(self):
+        """The raw form's fields (session, recipe, gpu, 12 samples) are under MAX_FIELDS: the JS start takes them
+        all, and the no-JavaScript post gets every typed value back with its refusal."""
+        fields = {"session": "20991104", "recipe": "default", "gpu": "yes",
+                  **{f"sample_{g}": f"S{g}" for g in range(1, US.FORM_SLOTS + 1)}}
+        self.assertLessEqual(len(fields), P.MAX_FIELDS)
+        page = self.page("/predict/new/raw/", "advanced")
+        names = set(re.findall(r'<input[^>]*name="([^"]+)"', page)) | set(re.findall(r'<select[^>]*name="([^"]+)"',
+                                                                                  page))
+        self.assertLessEqual(len(names - {"files"}), P.MAX_FIELDS)
+        with mock.patch.object(P, "gpu_check", lambda: (True, "free")):
+            st, _ = self.upload("advanced", "raw", fields, self.raw_files(key=False), create=False)
+        self.assertTrue(st["upload"].startswith("us_"))
+        self.assertEqual(self.jpost(f"/predict/api/upload/{st['upload']}/cancel", {}, "advanced").status_code, 200)
+        body, ctype = multipart(fields, [("files", "grid1-pos1.mrc.mdoc", TPC.MDOC.encode())])
+        r = self.tc.post("/predict/new/raw/", content=body, headers=self.h("advanced", **{"Content-Type": ctype}))
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("needs JavaScript", r.text)
+        for g in range(1, US.FORM_SLOTS + 1):
+            self.assertIn(f'name="sample_{g}" maxlength="{US.SAMPLE_MAX}" autocomplete="off" value="S{g}"', r.text)
+        self.assertIn('value="20991104"', r.text)
+        self.assertIn('name="gpu" value="yes" checked', r.text)
 
     def check_conversion_page(self, cid, d):
         conv_page = self.page(f"/predict/convert/{cid}/", "advanced")

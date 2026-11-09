@@ -318,13 +318,172 @@
       "type": [
        "object",
        "null"
-      ]
+      ],
+      "properties": {
+       "instrument": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "magnification": {
+        "type": [
+         "array",
+         "null"
+        ],
+        "items": {
+         "type": "integer"
+        },
+        "uniqueItems": true
+       },
+       "pixel_size_a": {
+        "type": [
+         "array",
+         "null"
+        ],
+        "items": {
+         "type": "number"
+        },
+        "uniqueItems": true
+       },
+       "defocus_um": {
+        "type": [
+         "object",
+         "null"
+        ],
+        "properties": {
+         "min": {
+          "type": "number"
+         },
+         "median": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         }
+        },
+        "required": [
+         "min",
+         "median",
+         "max"
+        ],
+        "additionalProperties": false
+       },
+       "target_defocus_um": {
+        "type": [
+         "array",
+         "null"
+        ],
+        "items": {
+         "type": "number"
+        },
+        "uniqueItems": true
+       },
+       "dose": {
+        "type": [
+         "object",
+         "null"
+        ],
+        "properties": {
+         "min": {
+          "type": "number"
+         },
+         "median": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         }
+        },
+        "required": [
+         "min",
+         "median",
+         "max"
+        ],
+        "additionalProperties": false
+       },
+       "voltage_kv": {
+        "type": [
+         "array",
+         "null"
+        ],
+        "items": {
+         "type": "number"
+        },
+        "uniqueItems": true
+       },
+       "binning": {
+        "type": [
+         "array",
+         "null"
+        ],
+        "items": {
+         "type": "number"
+        },
+        "uniqueItems": true
+       },
+       "acq_dates": {
+        "type": [
+         "object",
+         "null"
+        ],
+        "properties": {
+         "first": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2})?$"
+         },
+         "last": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2})?$"
+         }
+        },
+        "required": [
+         "first",
+         "last"
+        ],
+        "additionalProperties": false
+       },
+       "n_mdoc": {
+        "type": [
+         "integer",
+         "null"
+        ],
+        "minimum": 0
+       },
+       "n_imaging": {
+        "type": [
+         "integer",
+         "null"
+        ],
+        "minimum": 0
+       },
+       "n_other": {
+        "type": [
+         "integer",
+         "null"
+        ],
+        "minimum": 0
+       },
+       "other_magnification": {
+        "type": [
+         "array",
+         "null"
+        ],
+        "items": {
+         "type": "integer"
+        },
+        "uniqueItems": true
+       }
+      },
+      "additionalProperties": false,
+      "description": "The session/1 acquisition keys (same types as the top-level ones) read from the conversion's acquisition.json; nothing else (never a raw header, serial or path)"
      }
     },
     "required": [
      "id",
      "uploaded_by"
-    ]
+    ],
+    "additionalProperties": false
    },
    "description": "Portal raw-upload conversions of this session (portal/upload_sessions.py; upload-owned: the importer carries it forward). id = predict/raw_tiles/<id>; uploaded_by = portal user id (not `owner`, which names an owner file); grids / sample_labels / tiles_per_grid / n_tiles from its MANIFEST.csv; acquisition = the session/1 acquisition keys from its acquisition.json"
   },
