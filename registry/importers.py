@@ -42,6 +42,13 @@ Raw imaging (2026-11-05, additive; nothing in Cryo-image-processing is written):
   sample_labels (sample_key.csv). No raw folder / no parser -> `acquisition_gap` says why.
 - image: montage and source_file from the session MANIFEST row. A `YYYYMMDD-N` session's master rows are the ones
   whose key_source names that folder (validate.master_folder); they belong to that session only.
+
+Upload sessions (round 7, portal/upload_sessions.py): the portal appends session lines for raw uploads (same id as
+a lab session of that date) with the upload-owned keys UPLOAD_KEYS (`conversions`, `details`). When this importer
+rebuilds a session record it carries them forward from the current line, as it carries `status_by`; everything else
+on the record stays the lab's. write() holds <registry>/.upload_session.lock (UPLOAD_LOCK, the portal's
+read-merge-append lock) from reading the current records to its last append, so a portal registration can't land in
+between and be dropped.
 """
 import hashlib
 import importlib.util
@@ -92,6 +99,8 @@ RAW_LAYOUT = {
 DEFAULT_LAYOUT = {"dir": RAW_DIR, "recursive": True}
 GRID_FIELDS = ("sample_label", "project", "prep_date", "grid_type", "replicate", "glow_discharge", "storage")
 HEADER_TIME = re.compile(r"\s+\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}(:\d{2})?\s*$")
+UPLOAD_KEYS = ("conversions", "details")  # session keys the portal owns (= portal/upload_sessions.py UPLOAD_KEYS)
+UPLOAD_LOCK, UPLOAD_LOCK_WAIT = ".upload_session.lock", 60.0   # = portal/upload_sessions.py LOCK
 
 
 def split_membership(csv_path):
@@ -964,6 +973,22 @@ class Importer:
         return True
 
     def write(self, dry_run=False):
+        """_write() holding UPLOAD_LOCK (not on a dry run): the portal's upload-session lines are read and carried
+        forward with nothing appended in between."""
+        if dry_run:
+            return self._write(dry_run)
+        registry._guard(self.root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        lock = registry.acquire_lock(self.root / UPLOAD_LOCK, UPLOAD_LOCK_WAIT)
+        if lock is None:
+            raise registry.RegistryError(f"registry busy: {self.root / UPLOAD_LOCK} held for {UPLOAD_LOCK_WAIT:.0f} s "
+                                         "(the portal is registering an upload session)")
+        try:
+            return self._write(dry_run)
+        finally:
+            lock.close()
+
+    def _write(self, dry_run=False):
         """Append new / changed records. A record's image list is written with its line under the registry lock
         (nothing for a refused line); a list whose record is unchanged is repaired afterwards if missing or changed."""
         lists_written, repair = 0, set()
@@ -994,6 +1019,8 @@ class Importer:
                     rec["note"] = old["note"]
                 if old.get("blocked_reason") and not rec.get("blocked_reason"):     # job: blocked by hand
                     rec["blocked_reason"] = old["blocked_reason"]
+            if entity == "session" and old:                       # the portal's upload keys (upload_sessions.py)
+                rec = dict(rec, **{k: old[k] for k in UPLOAD_KEYS if old.get(k) is not None and rec.get(k) is None})
             files = self.list_files(rec)
             if old is not None:
                 full = registry.derive(entity, rec)

@@ -124,6 +124,7 @@ Registry style follows `batches.jsonl` ([INFERENCE_CHECK.md](INFERENCE_CHECK.md)
   `inference_check` and `label_version` lines are pointers (`owner` = `<batches.jsonl>#<batch_id>` / `<version.json>`) plus status lines.
   The rest of the record is derived from the owner file at read time.
 - **Explicit beats derived.** A `set-status` line (with `status_by`, a `people.json` id) wins over any derived status, and the importers keep it.
+- **Upload sessions (round 7).** The portal (`portal/upload_sessions.py`, only with `CJ_UPLOAD_SESSIONS=on`) turns a finished raw-upload conversion into its session's `session/1` line: read → merge → append under `<registry>/.upload_session.lock`. It owns `conversions` ([{`id`, `uploaded_by`, grids, labels, tile counts, acquisition}]) and `details` (grid ids, display sample names, prep notes); lab fields are never replaced. The importer holds the same lock while it writes and carries those two keys forward, as it keeps `status_by`.
 - Model `production` is set only by `registry.py set-status <id> production --who pujan`.
 - **Image keys.** Legacy keys (in a pull or `tracking/v2`) stay as they are. New session tiles (only in a session MANIFEST) are `<session>__<key>`.
   Generic upload/labeling copies (`blind_NN`) are `<session>_<key>` (e.g. `20261027_blind_03_png`), with `copy_of` from `*selection_PRIVATE.csv` when it names a registered tile. Files are not renamed.

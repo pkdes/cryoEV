@@ -260,6 +260,113 @@
    ],
    "pattern": "^[a-z0-9_]+$",
    "description": "people.json id of whoever set this status explicitly (registry.py set-status); explicit beats derived"
+  },
+  "conversions": {
+   "type": [
+    "array",
+    "null"
+   ],
+   "items": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string",
+      "pattern": "^\\d{8}(-\\d+)?_[0-9a-f]{6}$"
+     },
+     "uploaded_by": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "grids": {
+      "type": "array",
+      "items": {
+       "type": "integer"
+      }
+     },
+     "sample_labels": {
+      "type": [
+       "object",
+       "null"
+      ],
+      "additionalProperties": {
+       "type": "string"
+      }
+     },
+     "tiles_per_grid": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "integer"
+      }
+     },
+     "n_tiles": {
+      "type": [
+       "integer",
+       "null"
+      ],
+      "minimum": 0
+     },
+     "n_montages": {
+      "type": [
+       "integer",
+       "null"
+      ],
+      "minimum": 0
+     },
+     "acquisition": {
+      "type": [
+       "object",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "id",
+     "uploaded_by"
+    ]
+   },
+   "description": "Portal raw-upload conversions of this session (portal/upload_sessions.py; upload-owned: the importer carries it forward). id = predict/raw_tiles/<id>; uploaded_by = portal user id (not `owner`, which names an owner file); grids / sample_labels / tiles_per_grid / n_tiles from its MANIFEST.csv; acquisition = the session/1 acquisition keys from its acquisition.json"
+  },
+  "details": {
+   "type": [
+    "object",
+    "null"
+   ],
+   "properties": {
+    "grid_ids": {
+     "type": "object",
+     "additionalProperties": {
+      "type": "string"
+     }
+    },
+    "sample_display": {
+     "type": "object",
+     "additionalProperties": {
+      "type": "string"
+     }
+    },
+    "prep_notes": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "by": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "at": {
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "additionalProperties": false,
+   "description": "Session details typed in the portal for an uploaded session (upload-owned: the importer carries it forward): scope slot -> grid id as typed, scope slot -> sample name shown (tile names unchanged), prep notes, who and when"
   }
  },
  "required": [

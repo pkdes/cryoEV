@@ -103,6 +103,38 @@ a.cj-predict-src:hover,a.cj-predict-src:focus-visible{border-color:var(--acc);ou
   .cj-predict-table td::before{content:attr(data-l);flex:0 0 6.5em;font:600 .72rem/1.4 var(--cj-font);color:var(--mut);
     text-transform:uppercase;letter-spacing:.03em}
   .cj-predict-head .cj-predict-btn{width:100%}}
+/* Upload sessions (portal/upload_sessions.py: the upload form's samples, the Session details form). cj-us-*. */
+.cj-us-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,240px),1fr));gap:6px 14px}
+.cj-us-row{display:flex;align-items:center;gap:8px;min-width:0}
+.cj-us-row span{flex:0 0 4.5em;font-size:.9rem}
+.cj-us-row input,.cj-us-table input,.cj-us-field textarea{flex:1 1 auto;min-width:0;max-width:100%;font:inherit;
+  color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-height:38px;
+  box-sizing:border-box}
+.cj-us-table input{width:100%}
+.cj-us-row input:focus-visible,.cj-us-table input:focus-visible,.cj-us-field textarea:focus-visible{
+  outline:2px solid var(--acc);outline-offset:1px}
+.cj-us-form{margin:0 0 10px;min-width:0}
+.cj-us-h{margin:0 0 6px;font-size:1rem}
+.cj-us-table{width:100%;border-collapse:collapse;font-size:.92rem}
+.cj-us-table th{text-align:left;font-size:.75rem;color:var(--mut);font-weight:600;text-transform:uppercase;
+  letter-spacing:.03em;padding:4px 8px 4px 0;border-bottom:1px solid var(--line)}
+.cj-us-table td{padding:6px 8px 6px 0;border-bottom:1px solid var(--line);vertical-align:middle;overflow-wrap:anywhere}
+.cj-us-field{display:flex;flex-direction:column;gap:4px;margin:10px 0 8px}
+.cj-us-field span{font-size:.9rem}
+.cj-us-field textarea{width:100%;resize:vertical}
+.cj-us-btn{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:6px 16px;
+  border:1px solid var(--acc);border-radius:8px;background:var(--acc);color:var(--card);font:inherit;font-weight:600;
+  cursor:pointer}
+.cj-us-btn:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.cj-us-msg{margin:0 0 10px;padding:8px 12px;border:1px solid var(--warn);border-left-width:4px;border-radius:8px;
+  background:var(--warnbg);color:var(--fg);overflow-wrap:anywhere}
+.cj-us-ok{margin:0 0 8px;font-weight:600;color:var(--prod)}
+.cj-us-notes{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
+@media (max-width:640px){
+  .cj-us-table thead{display:none}
+  .cj-us-table,.cj-us-table tbody,.cj-us-table tr,.cj-us-table td{display:block;width:100%}
+  .cj-us-table tr{padding:6px 0;border-bottom:1px solid var(--line)}
+  .cj-us-table td{border:0;padding:2px 0}}
 </style>
 {{body}}
 <script src="/predict/predict.js" defer></script>
