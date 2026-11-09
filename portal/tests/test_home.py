@@ -35,7 +35,7 @@ class Manifests(unittest.TestCase):
         for i in on:                                                         # anything on has a real route
             self.assertTrue(by[i]["route"] or by[i].get("external"), i)
         self.assertEqual([by[i]["name"] for i in ids if by[i].get("nav")],     # the nav, in order
-                         ["Home", "Data", "Jobs", "Review", "Predict", "Results", "My reviews", "Train", "Admin", "Sandbox"])
+                         ["Home", "Data", "Jobs", "Review", "Predict", "Gallery", "Results", "My reviews", "Train", "Admin", "Sandbox"])
         self.assertFalse(by["history"]["nav"])                               # History: hidden "classic" page
         self.assertEqual((by["home"]["route"], by["history"]["route"], by["review"]["route"]), ("/", "/history/", "/review/"))
         for m in mods:
@@ -164,14 +164,14 @@ class Home(unittest.TestCase):
         self.assertEqual(page.count('class="cj-mod off"'), coming)
         self.assertEqual(page.count(">coming<"), coming)
         order = re.findall(r'class="cj-mod[^"]*" data-id="([a-z]+)"', page)
-        self.assertEqual(order, ["data", "jobs", "review", "predict", "results", "reviews", "train", "admin", "sandbox"])
+        self.assertEqual(order, ["data", "jobs", "review", "predict", "gallery", "results", "reviews", "train", "admin", "sandbox"])
         page = self.home("box.example.ts.net:8446")
         self.assertIn('href="https://box.example.ts.net:8443/"', page)
 
     def test_roles_see_their_modules_only(self):
         keys = {r: A.add_key(self.env.roster, f"user-{r}", r) for r in ("advanced", "basic")}
         try:
-            want = {"advanced": ["data", "jobs", "predict", "results", "reviews", "train"],
+            want = {"advanced": ["data", "jobs", "predict", "gallery", "results", "reviews", "train"],
                     "basic": ["predict", "results", "reviews"]}
             for role, key in keys.items():
                 tok = T.login(self.p.port, key)
