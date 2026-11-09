@@ -190,7 +190,8 @@ The full contract is the module docstring in `modules/gallery.py`. In short:
 - `/gallery/<cid>/report` summarizes the run (acquisition, samples per grid, counts and reject reasons, starred images,
   notes). `report.zip` is a standalone offline HTML page with its images; `images.zip` is tiles + montages + MANIFEST
   + acquisition.json. Both stream through `portal/zipstream.py` (no temp files, ZIP_STORED images, zip64); at most 2
-  per person at once (429 otherwise).
+  per person at once (429 otherwise). The count is per portal process (each service has its own); a slot is freed when
+  the response ends or the client disconnects, and ignored after 120 s without a pulled chunk.
 
 ## Live charts (`/cj/live.js`)
 `CJLive.render(el, liveJson, {compact})` draws a `live.json` snapshot (jobs/monitor.py): `compact: false` = every queue

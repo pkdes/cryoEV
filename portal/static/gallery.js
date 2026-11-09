@@ -124,15 +124,22 @@
       });
     });
   }
-  function set(cid, k, f, v) {
-    var s = S[cid] || (S[cid] = {}), old = entry(cid, k), prev = JSON.parse(JSON.stringify(old));
-    var e = s[k] = JSON.parse(JSON.stringify(old)); e[f] = v;
+  // Only the field that was changed is applied, confirmed or reverted: a slow save of one field never overwrites a
+  // newer change to another (stars, a reason, the note) on the same image.
+  function setField(cid, k, f, v) {
+    var s = S[cid] || (S[cid] = {}), e = s[k];
+    if (!e) e = s[k] = {flag: '', stars: 0, tags: [], note: ''};
+    e[f] = v;
     paint(cid, k); recount(); applyFilters(); refresh();
+  }
+  function set(cid, k, f, v) {
+    var prev = JSON.parse(JSON.stringify(entry(cid, k)[f]));
+    setField(cid, k, f, v);
     say('');
     return post(cid, k, f, v).then(function (j) {
-      if (j.entry) { s[k] = j.entry; paint(cid, k); recount(); applyFilters(); refresh(); }
+      if (j.entry && j.entry[f] !== undefined) setField(cid, k, f, j.entry[f]);
     }).catch(function (err) {
-      s[k] = prev; paint(cid, k); recount(); applyFilters(); refresh();
+      setField(cid, k, f, prev);
       say(err.message || 'Not saved.');
     });
   }
@@ -194,10 +201,15 @@
     return {root: v, img: img, bar: bar, title: title, pos: pos, flags: flags, stars: stars, tags: tags, note: note,
             open: open, msg: vmsg};
   }
+  function findItem(cid, k) {                           // by comparison, not a selector: k is data from a file
+    var all = root.querySelectorAll('[data-item]');
+    for (var i = 0; i < all.length; i++) if (all[i].dataset.cid === cid && all[i].dataset.k === k) return all[i];
+    return null;
+  }
   function bar_() {
     if (!view || view.root.hidden || !cur) return;
     var nm = parseFloat(cur.dataset.nm), w = view.img.clientWidth, nw = view.img.naturalWidth, b = view.bar;
-    if (!nm || !w || !nw) { b.hidden = true; return; }
+    if (!nm || !w || !nw || cur.hasAttribute('data-sb')) { b.hidden = true; return; }   // data-sb: the montage JPG has its own
     var per = nm * nw / w, best = 0;                  // nm per shown pixel
     NICE.forEach(function (n) { if (n / per <= w * 0.25) best = n; });
     if (!best) { b.hidden = true; return; }
@@ -240,7 +252,7 @@
     view.root.hidden = true; view.img.removeAttribute('src');
     document.body.classList.remove('cj-gallery-lock');
     var back = cur; cur = null;
-    if (back) { var t = root.querySelector('[data-item][data-cid="' + back.dataset.cid + '"][data-k="' + back.dataset.k + '"]'); if (t) t.focus(); }
+    if (back) { var t = findItem(back.dataset.cid, back.dataset.k); if (t) t.focus(); }
   }
   function step(d) {
     var list = items(), i = list.indexOf(cur);
@@ -271,9 +283,9 @@
     var a = e.target.closest ? e.target.closest('a[data-k]') : null;
     if (!a || !root.contains(a)) return;
     var n = a;
-    if (!a.hasAttribute('data-item')) {                 // a box on a montage: open that tile's strip entry
-      n = root.querySelector('.cj-gallery-tile[data-cid="' + a.dataset.cid + '"][data-k="' + a.dataset.k + '"]');
-      if (!n || n.hidden) { n = a; n.dataset.kind = 't'; n.dataset.nm = (n.dataset.nm || ''); }
+    if (!a.hasAttribute('data-item')) {                 // a box / the montage image: open the matching list entry
+      n = findItem(a.dataset.cid, a.dataset.k);
+      if (!n || n.hidden || n.closest('[hidden]')) n = a;     // filtered out: still opens, just not in the next / prev list
     }
     e.preventDefault();
     show(n);

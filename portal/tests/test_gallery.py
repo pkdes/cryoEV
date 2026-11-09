@@ -55,13 +55,14 @@ def montage_jpg() -> bytes:
     return b.getvalue()
 
 
-def make_conv(raw: Path, cid: str, owner: str, *, montage=True, sample="Sample one", n=9, mname="m1") -> Path:
+def make_conv(raw: Path, cid: str, owner: str, *, montage=True, sample="Sample one", n=9, mname="m1", names=None) -> Path:
+    names = names or NAMES
     d = raw / "raw_tiles" / cid
     (d / "tiles").mkdir(parents=True)
     rows = ["output_name,source_file,grid,sample_label,montage,source_size,output_size,factor,source_a_px,output_a_px,"
             "nm_per_px,compute,md5"]
     csvq = lambda s: '"' + s.replace('"', '""') + '"'  # noqa: E731
-    for i, name in enumerate(NAMES[:n]):
+    for i, name in enumerate(names[:n]):
         (d / "tiles" / name).write_bytes(tile_png(i))
         rows.append(f"{name},src{i}.jpg,1,{csvq(sample)},{mname},2880x2046,120x90,2.0,7.362,14.724,1.4724,GPU,0")
     (d / "tiles" / "MANIFEST.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
@@ -77,7 +78,7 @@ def make_conv(raw: Path, cid: str, owner: str, *, montage=True, sample="Sample o
         (d / "montages").mkdir()
         (d / "montages" / f"{mname}_stitched.jpg").write_bytes(montage_jpg())
         tiles = [{"output_name": name, "row": r, "col": c, "x": c * 120, "y": r * 90, "w": 120, "h": 90}
-                 for i, name in enumerate(NAMES[:n]) for r, c in [divmod(i, 3)]]
+                 for i, name in enumerate(names[:n]) for r, c in [divmod(i, 3)]]
         (d / "montages" / "layout.json").write_text(json.dumps({"schema": "montage_layout/1", "montages": [{
             "name": mname, "file": f"{mname}_stitched.jpg", "width": 360, "height": 270, "nm_per_px": 4.4, "scalebar_nm": 200,
             "grid": "1", "sample_label": sample, "tiles": tiles}]}), encoding="utf-8")
@@ -380,7 +381,7 @@ class Pages(Base):
 
     def test_with_montages_boxes_link_the_right_tile(self):
         page = self.page("owner", f"/gallery/{CID_A}/")
-        boxes = re.findall(r'<a class="cj-gallery-box" data-cid="[^"]+" data-k="([^"]+)" href="([^"]+)" style="([^"]+)"', page)
+        boxes = re.findall(r'<a class="cj-gallery-box" data-kind="t" data-cid="[^"]+" data-k="([^"]+)" href="([^"]+)"[^>]*? style="([^"]+)"', page)
         self.assertEqual(len(boxes), 9)
         for i, (k, href, style) in enumerate(boxes):
             self.assertEqual(k, NAMES[i])
@@ -533,6 +534,266 @@ class Report(Base):
 
 
 # ---------------------------------------------------------------- browser
+def _appender(args):                                              # runs in a spawned process (test_multiprocess_appends)
+    d, wid, n = args
+    c = G.Conv(Path(d), json.loads((Path(d) / "convert.json").read_text()), {})
+    for i in range(n):
+        G.append_event(c, f"p{wid}", NAMES[wid % 9], "note", f"p{wid}-{i}-" + "y" * 900)
+    return wid
+
+
+def raw_get(port, path, cookie, read=0):
+    """A raw-socket GET; reads `read` bytes of the answer (0: none) and hangs up."""
+    import socket
+    s = socket.create_connection(("127.0.0.1", port), timeout=20)
+    s.sendall((f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {cookie}\r\n\r\n").encode())
+    got = 0
+    while got < read:
+        b = s.recv(65536)
+        if not b:
+            break
+        got += len(b)
+    s.close()
+    return got
+
+
+class Hardening(Base):
+    """QC round: slots under disconnects, crafted names, multi-process appends, headers, CSV, backup text, caps."""
+
+    def wait_slots(self, who="alyssia", n=0, secs=10):
+        import time
+        t0 = time.time()
+        while time.time() - t0 < secs:
+            if len([s for s in G._ZIPS.get(who, []) if not s.done]) <= n:
+                return True
+            time.sleep(0.1)
+        return False
+
+    def test_disconnect_frees_the_slot(self):
+        cid = "20261112_ffffff"
+        d = make_conv(self.w.raw, cid, "alyssia", montage=False, n=2)
+        blk = os.urandom(1 << 20)
+        for n in NAMES[:2]:
+            with open(d / "tiles" / n, "wb") as f:
+                for _ in range(40):
+                    f.write(blk)
+        try:
+            ck = T.cookie(self.w.tok["owner"])["Cookie"]
+            for _ in range(2):                                              # mid-stream
+                self.assertGreater(raw_get(self.w.portal.port, f"/gallery/{cid}/images.zip", ck, read=2_000_000), 1_000_000)
+            for _ in range(2):                                              # before a byte is read
+                raw_get(self.w.portal.port, f"/gallery/{cid}/images.zip", ck, read=0)
+            import time
+            time.sleep(1.5)                                                 # the hung-up requests may still be arriving
+            self.assertTrue(self.wait_slots(), {k: [(s.done, s.t) for s in v] for k, v in G._ZIPS.items()})
+            st, _, body = self.w.get("owner", f"/gallery/{cid}/images.zip")                    # the 3rd is not refused
+            self.assertEqual(st, 200)
+            self.assertIsNone(zipfile.ZipFile(io.BytesIO(body)).testzip())
+            self.assertTrue(self.wait_slots())
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_slot_staleness_is_progress_based_and_gc_cannot_deadlock(self):
+        import time
+        a, b = G.take_slot("zed"), G.take_slot("zed")
+        self.assertIsNone(G.take_slot("zed"))
+        a.t = time.time() - G.ZIP_STALE_S - 1                               # no chunk pulled for too long
+        self.assertIsNotNone(G.take_slot("zed"))
+        it = G.Progress(iter([b"x", b"y"]), b)
+        b.t = 0
+        next(it)
+        self.assertGreater(b.t, time.time() - 5)                            # a pulled chunk keeps it alive
+        import gc
+
+        def run():                                                          # a Slot freed by the collector inside take_slot
+            s = G.take_slot("gc")
+            s.cycle = s
+            del s
+            with G._ZIPS_LOCK:
+                gc.collect()
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(5)
+        self.assertFalse(t.is_alive(), "deadlock")
+
+    def test_crafted_names_are_refused(self):
+        tmp = Path(tempfile.mkdtemp(prefix="cj_names_"))
+        try:
+            d = tmp / "raw_tiles" / CID_A
+            (d / "tiles").mkdir(parents=True)
+            (d / "montages").mkdir()
+            (tmp / "secret.txt").write_text("SECRET")
+            bs = chr(92)
+            bad = ["../convert.json", ".." + bs + "convert.json", "..", ".", "C:" + bs + "Windows" + bs + "win.ini", "C:secret.txt",
+                   "/etc/passwd", bs * 2 + "server" + bs + "share" + bs + "x.png", "jn" + bs + "x.png", "jn/x.png", ".hidden.png",
+                   "a" + chr(0) + "b.png", "CON", "con.txt", "nul.tar.gz", "Aux.png", "x.png:ads", "trail.png.",
+                   'q"uote.png', "a|b.png", "a?b.png", "x" * 300 + ".png"]
+            rows = "output_name,montage\n" + "".join('"%s",m\n' % b.replace('"', '""') for b in bad) + "ok.png,m\n"
+            (d / "tiles" / "MANIFEST.csv").write_text(rows, encoding="utf-8")
+            (d / "tiles" / "ok.png").write_bytes(tile_png(0))
+            (d / "montages" / "ok.jpg").write_bytes(montage_jpg())
+            (d / "montages" / "layout.json").write_text(json.dumps({"montages": [
+                {"name": f"m{i}", "file": b, "width": 1, "height": 1, "tiles": []} for i, b in enumerate(bad)]
+                + [{"name": "good", "file": "ok.jpg", "width": 360, "height": 270, "tiles": []}]}))
+            c = G.Conv(d, {}, {})
+            self.assertEqual(list(c.tiles), ["ok.png"])
+            self.assertEqual([m["file"] for m in c.montages if m["file"]], ["ok.jpg"])
+            for kind in ("tile", "montage"):
+                p = c.tile_path("ok.png") if kind == "tile" else c.montage_path("good")
+                self.assertTrue(p.is_file() and G.D.is_contained(p, c.dir))
+            for b in bad:
+                self.assertIsNone(c.tile_path(b))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_multiprocess_appends(self):
+        import multiprocessing as mp
+        d = self.w.b
+        ev = d / "gallery" / "events.jsonl"
+        if ev.exists():
+            ev.unlink()
+        with mp.get_context("spawn").Pool(4) as pool:
+            pool.map(_appender, [(str(d), i, 40) for i in range(4)])
+        lines = [x for x in ev.read_bytes().split(b"\n") if x]
+        self.assertEqual(len(lines), 160)
+        recs = [json.loads(x) for x in lines]                                # no line cut or interleaved
+        for i in range(4):
+            self.assertEqual([r["v"].split("-")[1] for r in recs if r["who"] == f"p{i}"], [str(j) for j in range(40)])
+        ev.unlink()
+
+    def test_cache_headers(self):
+        n = NAMES[0]
+        for path, want in ((f"/gallery/{CID_A}/t/{n}", "private"), (f"/gallery/{CID_A}/ts/{n}", "private"),
+                           (f"/gallery/{CID_A}/mp/m1", "private"), (f"/gallery/{CID_A}/rep/{n}", "private"),
+                           (f"/gallery/{CID_A}/", "no-store"), (f"/gallery/{CID_A}/api/state", "no-store"),
+                           (f"/gallery/{CID_A}/images.zip", "no-store"), ("/gallery/gallery.js", "no-cache")):
+            st, h, _ = self.w.get("owner", path)
+            self.assertEqual(st, 200, path)
+            self.assertIn(want, T.hget(h, "cache-control") or "", path)
+        st, h, _ = self.w.get("other", f"/gallery/{CID_A}/ts/{n}")               # a refusal is never cached either
+        self.assertEqual(st, 404)
+        self.assertIn("no-store", T.hget(h, "cache-control") or "")
+
+    def test_csv_formula_guard_and_names(self):
+        c = G.Conv(self.w.b, json.loads((self.w.b / "convert.json").read_text()), {})
+        G.append_event(c, "alyssia", NAMES[0], "note", '=HYPERLINK("http://evil","x")')
+        G.append_event(c, "alyssia", NAMES[1], "note", "+cmd|' /C calc'!A0")
+        G.append_event(c, "alyssia", NAMES[2], "note", "@SUM(1)")
+        G.append_event(c, "alyssia", NAMES[3], "note", "-2+3")
+        G.append_event(c, "alyssia", NAMES[4], "note", "fine = text")
+        st, _, body = self.w.get("owner", f"/gallery/{CID_B}/images.zip")
+        txt = zipfile.ZipFile(io.BytesIO(body)).read("gallery_verdicts.csv").decode("utf-8-sig")
+        import csv as _csv
+        notes = [r["note"] for r in _csv.DictReader(io.StringIO(txt))]
+        self.assertEqual(sorted(notes), sorted(["'=HYPERLINK(\"http://evil\",\"x\")", "'+cmd|' /C calc'!A0", "'@SUM(1)", "'-2+3",
+                                                "fine = text"]))
+        (self.w.b / "gallery" / "events.jsonl").unlink()
+
+    def test_backup_text(self):
+        d = self.w.b
+        cases = [(None, ("Not backed up yet", "mut")),
+                 ({"dest_rel": "x", "mirrored_at": "2026-11-09T21:00:05", "md5_ok": True, "error": None,
+                   "last_ok_at": "2026-11-09T21:00:05", "last_ok_dest_rel": "x", "fingerprint": "f"},
+                  ("Backed up ✓ 2026-11-09 21:00", "ok")),
+                 ({"dest_rel": "x", "mirrored_at": "2026-11-09T21:00:05", "md5_ok": True, "error": None,
+                   "last_ok_at": "2026-11-09T21:00:05", "tiles_unverified": True},
+                  ("Backed up ✓ 2026-11-09 21:00 (tiles not md5-checked)", "ok")),
+                 ({"dest_rel": "x", "mirrored_at": "2026-11-10T21:00:05", "md5_ok": False, "error": "share full",
+                   "last_ok_at": "2026-11-09T21:00:05"}, ("Backup problem (last OK 2026-11-09 21:00)", "warn")),
+                 ({"md5_ok": False, "error": "x", "last_ok_at": None}, ("Backup problem", "warn"))]
+        try:
+            for doc, want in cases:
+                with self.subTest(doc=doc):
+                    if doc is None:
+                        (d / "mirror.json").unlink(missing_ok=True)
+                    else:
+                        (d / "mirror.json").write_text(json.dumps(doc), encoding="utf-8")
+                    G.cached.__globals__["_CACHE"].clear()
+                    c = G.Conv(d, json.loads((d / "convert.json").read_text()), {})
+                    self.assertEqual(c.backup(), want)
+            page = self.w.get("owner", "/gallery/")[2].decode()
+            self.assertIn("Backup problem", page)                                          # the last case is on disk
+        finally:
+            (d / "mirror.json").unlink(missing_ok=True)
+
+    def test_report_session_block(self):
+        d = self.w.a
+        old = (d / "acquisition.json").read_text(encoding="utf-8")
+        doc = json.loads(old)
+        doc["session"] = {"instrument": "Test scope", "magnification": [1900, 2600], "pixel_size_a": [7.362],
+                          "defocus_um": {"min": -60.0, "median": -50.0, "max": -40.0}, "dose": None, "voltage_kv": [200],
+                          "acq_dates": {"first": "2026-11-06T09:00:00", "last": "2026-11-06T17:30:00"}, "n_mdoc": 4,
+                          "other_magnification": [155]}
+        (d / "acquisition.json").write_text(json.dumps(doc), encoding="utf-8")
+        try:
+            G.cached.__globals__["_CACHE"].clear()
+            page = self.w.get("owner", f"/gallery/{CID_A}/report")[2].decode()
+            sess = page[page.index('<dl class="cj-gallery-kv">'):page.index("</dl>")]
+            self.assertEqual(sess.count("Test scope"), 1)                                  # instrument once
+            for want in ("Magnification</dt><dd>1900×, 2600×", "Pixel size (Å/px)</dt><dd>7.362",
+                         "-60 to -40 (median -50)", "Voltage (kV)</dt><dd>200", "2026-11-06 09:00 to 2026-11-06 17:30",
+                         "Montage / mdoc files</dt><dd>4"):
+                self.assertIn(want, sess)
+            self.assertNotIn("{", sess)
+            self.assertNotIn("Dose", sess)                                                  # null: not shown
+        finally:
+            (d / "acquisition.json").write_text(old, encoding="utf-8")
+            G.cached.__globals__["_CACHE"].clear()
+
+    def test_caps_and_limits(self):
+        cids = [f"2026111{i}_{i}{i}{i}{i}{i}{i}" for i in range(7)]
+        q = "&".join(f"c={x}" for x in cids)
+        for path in (f"/gallery/compare?{q}", f"/gallery/compare/report?{q}", f"/gallery/compare/images.zip?{q}"):
+            st, _, body = self.w.get("owner", path)
+            self.assertEqual(st, 400, path)
+            self.assertIn(b"at most 6", body)
+        # the events file stops growing at its cap (507) and the page keeps working
+        old = G.EVENTS_MAX
+        G.EVENTS_MAX = 200
+        try:
+            codes = [self.w.post("owner", CID_B, {"k": NAMES[5], "f": "note", "v": "n" * 50 + str(i)})[0] for i in range(8)]
+            self.assertIn(507, codes)
+            self.assertEqual(codes[0], 200)
+            self.assertEqual(self.w.get("owner", f"/gallery/{CID_B}/")[0], 200)
+        finally:
+            G.EVENTS_MAX = old
+            (self.w.b / "gallery" / "events.jsonl").unlink(missing_ok=True)
+        # Content-Length is checked before the body is read
+        st, _, _ = self.w.req("owner", "POST", f"/gallery/{CID_B}/api/event", b"{}",
+                              extra={"X-Requested-With": "gallery", "Content-Type": "application/json",
+                                     "Content-Length": "999999"})
+        self.assertIn(st, (400, 413))
+
+    def test_report_zip_quotes_and_dedupes_image_names(self):
+        cid = "20261113_aabbcc"
+        names = ["Case.png", "case.png", "sp ace.png"]
+        d = make_conv(self.w.raw, cid, "alyssia", montage=False, n=3, names=names)
+        try:
+            c = G.Conv(d, json.loads((d / "convert.json").read_text()), {})
+            for n in names:
+                G.append_event(c, "alyssia", n, "stars", 3)
+            st, _, body = self.w.get("owner", f"/gallery/{cid}/report.zip")
+            z = zipfile.ZipFile(io.BytesIO(body))
+            doc = z.read("report.html").decode("utf-8")
+            from urllib.parse import unquote
+            refs = re.findall(r'<img src="([^"]+)"', doc)
+            self.assertEqual(len(refs), 3)
+            self.assertEqual(len({unquote(r).lower() for r in refs}), 3)                   # distinct, case-insensitively
+            for r in refs:
+                self.assertIn(unquote(r), z.namelist())
+                self.assertNotIn(" ", r)                                                    # quoted for a URL
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_montage_markup(self):
+        page = self.w.get("owner", f"/gallery/{CID_A}/")[2].decode()
+        self.assertEqual(len(re.findall(r'class="cj-gallery-full" data-item data-kind="m"', page)), 1)       # full size link
+        self.assertIn(" data-sb", page)                                                     # the montage JPG has its own bar
+        self.assertEqual(len(re.findall(r'data-item', page)), 10)                           # 9 tiles + the montage, boxes aren't items
+        b = self.w.get("owner", f"/gallery/{CID_B}/")[2].decode()                           # no montages: no full-size link
+        self.assertNotIn("cj-gallery-full", b)
+
+
 def launch(p):
     for kw in ({"channel": "msedge"}, {"channel": "chrome"}, {}):
         try:
@@ -623,6 +884,13 @@ class Browser(Base):
                     page.select_option('[data-filter="flag"]', "")
                     page.select_option('[data-filter="tag"]', "thick ice")
                     self.assertEqual(page.locator(".cj-gallery-tile:visible").count(), 2)                  # NAMES[1] and NAMES[4]
+                    page.select_option('[data-filter="tag"]', "")
+                    page.locator(".cj-gallery-full").first.click()                                          # full-size montage
+                    self.assertTrue(view.is_visible())
+                    self.assertIn("Montage m1", page.locator(".cj-gallery-vtitle").inner_text())
+                    page.wait_for_function("document.querySelector('.cj-gallery-vwrap img').naturalWidth > 0")
+                    self.assertFalse(page.locator(".cj-gallery-sbar").is_visible())                         # CX burns one in
+                    page.keyboard.press("Escape")
                     # undo for the next round
                     for f, v in (("flag", "keep"), ("stars", 0), ("tags", []), ("note", "")):
                         self.w.post("owner", CID_A, {"k": NAMES[1], "f": f, "v": v})

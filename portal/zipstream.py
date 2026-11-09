@@ -35,8 +35,7 @@ def _part(p: str) -> str:
     p = BAD.sub("_", p).strip(" .")
     if not p:
         return ""
-    stem, dot, ext = p.rpartition(".")
-    if dot and stem.lower() in RESERVED or p.lower() in RESERVED:
+    if p.split(".", 1)[0].strip().lower() in RESERVED:           # CON, con.txt, nul.tar.gz: the part before the FIRST dot
         p = "_" + p
     if len(p) > MAX_PART:
         base, ext = os.path.splitext(p)

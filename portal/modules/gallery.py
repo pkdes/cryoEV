@@ -32,6 +32,7 @@ html.escape; the standalone report is plain HTML with no script at all.
 from __future__ import annotations
 
 import csv
+import errno
 import html
 import io
 import json
@@ -72,7 +73,9 @@ MAX_REP = 60                      # starred images drawn in one report
 SIZES = {"ms": 480, "mp": 1000}   # montage copies: report / gallery
 REP_PX = 960
 MAX_ZIPS = 2                      # concurrent downloads per person
-ZIP_STALE_S = 4 * 3600            # a slot whose stream never ended (client gone) frees itself after this
+ZIP_STALE_S = 120                 # a slot whose stream pulled no chunk for this long is dead (client gone) and is ignored
+BODY_ERR = 413
+EVENTS_MAX = 20 * 1024 * 1024     # events.jsonl stops growing here (507)
 NICE_NM = (5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000)
 GONE_TEXT = "There is no gallery here that you can open."
 esc = lambda s: html.escape("" if s is None else str(s), quote=True)  # noqa: E731
@@ -106,9 +109,16 @@ def natkey(s):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", str(s))]
 
 
+BAD_NAME = re.compile(r'[\x00-\x1f<>:"|?*/\\]')
+RESERVED = frozenset({"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))})
+
+
 def plain_name(name) -> bool:
-    return isinstance(name, str) and bool(name) and name == os.path.basename(name.replace("\\", "/")) \
-        and not name.startswith(".") and "\x00" not in name
+    """A file name that is only a name: no separator, drive or stream colon, control or Windows-reserved character,
+    no leading dot, no trailing dot / space, no device name (checked on the part before the FIRST dot)."""
+    return (isinstance(name, str) and 0 < len(name) <= 200 and not BAD_NAME.search(name)
+            and not name.startswith(".") and name == name.rstrip(" .")
+            and name.split(".", 1)[0].strip().lower() not in RESERVED)
 
 
 _CACHE: dict = {}
@@ -191,14 +201,14 @@ class Conv:
             boxes.sort(key=lambda b: (b["row"], b["col"]))
             nm = _num(m.get("nm_per_px"))
             out[m["name"]] = {"name": m["name"], "file": f, "w": w if w and w > 0 else None,
-                              "h": h if h and h > 0 else None, "nm": nm if nm and nm > 0 else None,
+                              "h": h if h and h > 0 else None, "nm": nm if nm and nm > 0 else None, "sb": bool(_num(m.get("scalebar_nm"))),
                               "grid": _text(m.get("grid"), 40).strip(), "sample": _text(m.get("sample_label"), 120).strip(),
                               "boxes": boxes, "tiles": [b["k"] for b in boxes]}
         for t in self.tiles.values():
             m = out.get(t["montage"])
             if m is None:
                 m = out[t["montage"]] = {"name": t["montage"], "file": None, "w": None, "h": None, "nm": None,
-                                         "grid": t["grid"], "sample": t["sample"], "boxes": [], "tiles": []}
+                                         "sb": False, "grid": t["grid"], "sample": t["sample"], "boxes": [], "tiles": []}
             if t["name"] not in m["tiles"]:
                 m["tiles"].append(t["name"])
             m["grid"] = m["grid"] or t["grid"]
@@ -230,10 +240,14 @@ class Conv:
         m = self.mirror
         if not m:
             return "Not backed up yet", "mut"
-        if m.get("error") or m.get("md5_ok") is False:
-            return "Backup problem", "warn"
-        return "Backed up " + chr(0x2713) + (" " + _text(m.get("mirrored_at"), 19).replace("T", " ")[:16]
-                                              if m.get("mirrored_at") else ""), "ok"
+        when = lambda v: _text(v, 19).replace("T", " ")[:16]  # noqa: E731
+        if m.get("error") or m.get("md5_ok") is not True:
+            ok = when(m.get("last_ok_at"))
+            return "Backup problem" + (f" (last OK {ok})" if ok else ""), "warn"
+        txt = "Backed up " + chr(0x2713) + (" " + when(m.get("mirrored_at")) if m.get("mirrored_at") else "")
+        if m.get("tiles_unverified"):
+            return txt + " (tiles not md5-checked)", "ok"
+        return txt, "ok"
 
 
 def load_conv(cfg, user, can_see, cid):
@@ -330,6 +344,11 @@ def append_event(c: Conv, who, k, f, v) -> dict:
            "t": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     line = (json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8")
     path = events_path(c.dir)
+    try:
+        if path.stat().st_size > EVENTS_MAX:
+            raise OSError(errno.ENOSPC, "the gallery file is full")
+    except FileNotFoundError:
+        pass
     with _EV_LOCK:
         path.parent.mkdir(parents=True, exist_ok=True)
         lk = acquire_lock(path.with_name(path.name + ".lock"), wait=LOCK_WAIT_S)
@@ -427,7 +446,7 @@ def rep_jpeg(path: Path, nm_per_px, px=REP_PX):
                     font = ImageFont.load_default(size=max(12, w // 55))
                 except TypeError:
                     font = ImageFont.load_default()
-                label = f"{nm} nm" if nm < 1000 else f"{nm / 1000:g} um"
+                label = f"{nm} nm" if nm < 1000 else f"{nm / 1000:g} \u00b5m"
                 dr.text((x0 + 1, y0 - 4), label, fill=(255, 255, 255), font=font, anchor="ls",
                         stroke_width=2, stroke_fill=(0, 0, 0))
         buf = io.BytesIO()
@@ -535,12 +554,51 @@ def fmt(v, unit="") -> str:
     return esc(v) + unit
 
 
-def scalar_items(d, limit=24):
-    out = []
-    for k, v in list(d.items())[:limit]:
-        if isinstance(v, (dict, list)):
-            v = json.dumps(v, ensure_ascii=False)[:200]
-        out.append((str(k).replace("_", " ")[:60], v))
+SESSION_LABELS = {"instrument": "Instrument", "magnification": "Magnification", "pixel_size_a": "Pixel size (\u00c5/px)",
+                  "defocus_um": "Defocus (\u00b5m)", "target_defocus_um": "Target defocus (\u00b5m)",
+                  "dose": "Dose (e\u207b/\u00c5\u00b2)", "voltage_kv": "Voltage (kV)", "binning": "Binning",
+                  "acq_dates": "Acquired", "n_mdoc": "Montage / mdoc files", "n_imaging": "Files with imaging images",
+                  "n_other": "Files without", "other_magnification": "Other magnifications (search / overview)"}
+
+
+def nice(v) -> str:
+    if isinstance(v, float):
+        return f"{v:.4g}"
+    return str(v)
+
+
+def day(t) -> str:
+    return _text(t, 40).replace("T", " ")[:16]
+
+
+def session_value(k, v) -> str:
+    """One session_acquisition value as plain text: lists joined, {min, median, max} as a range, dates as 'a to b'."""
+    if v is None:
+        return ""
+    if isinstance(v, list):
+        return ", ".join(nice(x) + ("\u00d7" if k in ("magnification", "other_magnification") else "") for x in v)
+    if isinstance(v, dict):
+        if k == "acq_dates":
+            a, b = day(v.get("first")), day(v.get("last"))
+            return a if a == b or not b else f"{a} to {b}"
+        if {"min", "median", "max"} <= set(v):
+            return f"{nice(v['min'])} to {nice(v['max'])} (median {nice(v['median'])})"
+        return json.dumps(v, ensure_ascii=False)[:200]
+    return nice(v)
+
+
+def session_items(c: Conv) -> list:
+    """[(label, text)]: what the report's first block says about the session. The instrument appears once."""
+    ses = c.acq.get("session") if isinstance(c.acq.get("session"), dict) else {}
+    out = [("Converted", c.created.replace("T", " ")[:16]), ("Recipe", _text(c.meta.get("recipe"), 60)),
+           ("Grids", str(c.n_grids())), ("Montages", str(len(c.montages))), ("Tiles", str(len(c.tiles)))]
+    scope = c.acq.get("scope_model") or ses.get("instrument")
+    if scope:
+        out.insert(1, ("Instrument", str(scope)))
+    for k, v in list(ses.items())[:30]:
+        if k == "instrument" or v is None or v == []:
+            continue
+        out.append((SESSION_LABELS.get(k) or str(k).replace("_", " ")[:60], session_value(k, v)))
     return out
 
 
@@ -554,12 +612,7 @@ def render_report(data, url, standalone=False, generated="", who="") -> str:
         h.append(f'<section class="cj-gallery-rconv"><h2>Session {esc(c.session or c.cid)} '
                  f'<small class="cj-mut">{esc(c.cid)}</small></h2>')
         # session and acquisition
-        kv = [("Converted", c.created.replace("T", " ")[:16]), ("Instrument", c.acq.get("scope_model")),
-              ("Recipe", c.meta.get("recipe")), ("Grids", c.n_grids()), ("Montages", len(c.montages)),
-              ("Tiles", len(c.tiles))]
-        ses = c.acq.get("session")
-        if isinstance(ses, dict):
-            kv += scalar_items(ses)
+        kv = session_items(c)
         h.append('<h3>Session and acquisition</h3><dl class="cj-gallery-kv">'
                  + "".join(f"<dt>{esc(k)}</dt><dd>{fmt(v)}</dd>" for k, v in kv) + "</dl>")
         if not c.acq:
@@ -667,14 +720,15 @@ main{max-width:1100px;margin:0 auto;padding:20px 24px 32px}
 def standalone_css() -> str:
     try:
         css = CSS_FILE.read_text(encoding="utf-8")
-        return STANDALONE_TOKENS + css[css.index(CSS_MARK):]
+        return STANDALONE_TOKENS + css[css.index(CSS_MARK):css.index("/* cj-gallery:end */")]
     except (OSError, ValueError):
         return STANDALONE_TOKENS
 
 
 def standalone_html(data, images: dict, generated: str, who: str) -> bytes:
     """report.html: plain HTML + inline CSS, no script, images by relative path (images: (kind, cid, name) -> arcname)."""
-    body = render_report(data, lambda kind, cid, name: images.get((kind, cid, name)), True, generated, who)
+    body = render_report(data, lambda kind, cid, name: (lambda a: quote(a, safe="/") if a else None)(images.get((kind, cid, name))),
+                         True, generated, who)
     title = "Imaging run report " + ", ".join(d["conv"].session or d["conv"].cid for d in data)
     doc = ('<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
            '<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark">'
@@ -686,19 +740,23 @@ def standalone_html(data, images: dict, generated: str, who: str) -> bytes:
 def verdicts_csv(c: Conv, state) -> bytes:
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
+    def cell(v):                                              # a spreadsheet must not run a note as a formula
+        v = str(v)
+        return "'" + v if v[:1] in ("=", "+", "-", "@", "\t", "\r") else v
     w.writerow(["key", "kind", "montage", "flag", "stars", "reasons", "note"])
     for k in list(c.tiles) + [m["name"] for m in c.montages]:
         e = state.get(k)
         if e:
-            w.writerow([k, "tile" if k in c.tiles else "montage", c.tiles[k]["montage"] if k in c.tiles else k,
-                        e["flag"], e["stars"], "; ".join(e["tags"]), e["note"].replace("\n", " ")])
+            w.writerow([cell(x) for x in (k, "tile" if k in c.tiles else "montage",
+                                          c.tiles[k]["montage"] if k in c.tiles else k, e["flag"], e["stars"],
+                                          "; ".join(e["tags"]), e["note"].replace("\n", " "))])
     return ("﻿" + buf.getvalue()).encode("utf-8")
 
 
 def report_entries(cfg, data, who: str):
     """[(arcname, bytes)] for the standalone report zip."""
     cache = Path(cfg.state_dir) / "gallery_thumbs"
-    images, entries = {}, []
+    images, entries, used = {}, [], set()
     for d in data:
         c = d["conv"]
         need = [("rep", s["k"]) for s in d["stars"][:MAX_REP] if s["kind"] == "tile"] \
@@ -714,7 +772,11 @@ def report_entries(cfg, data, who: str):
                 p = c.montage_path(name)
                 b = small_jpeg(p, cache, SIZES["ms"]) if p and D.is_contained(p, c.dir) else None
             if b:
-                arc = f"images/{c.cid}/{kind}_{zipstream.safe_arcname(name)}.jpg"
+                arc, n = f"images/{c.cid}/{kind}_{zipstream.safe_arcname(name)}.jpg", 1
+                while arc.lower() in used:                     # two names can sanitise to one: keep every reference true
+                    n += 1
+                    arc = f"images/{c.cid}/{kind}_{zipstream.safe_arcname(name)}_{n}.jpg"
+                used.add(arc.lower())
                 images[(kind, c.cid, name)] = arc
                 entries.append((arc, b))
     when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -766,24 +828,27 @@ def montage_html(c: Conv, m: dict, state) -> str:
     tl = tally([n for n in m["tiles"] if n in c.tiles], state)
     out = [f'<div class="cj-gallery-mont" data-cid="{c.cid}" data-m="{esc(m["name"])}">'
            f'<h4 class="cj-gallery-mh"><span class="cj-wrap">{esc(m["name"])}</span> '
-           f'<span class="cj-gallery-counts">{counts_line(tl)}</span></h4>']
+           f'<span class="cj-gallery-counts">{counts_line(tl)}</span>']
+    if m["file"]:                      # the tile boxes cover the image, so full size is a link of its own
+        nm = f' data-nm="{m["nm"]:.6g}"' if m["nm"] else ""
+        out.append(f' <a class="cj-gallery-full" data-item data-kind="m" data-cid="{c.cid}" data-k="{esc(m["name"])}" '
+                   f'href="{base}/m/{u(m["name"])}"{nm}{" data-sb" if m["sb"] else ""}'
+                   f'{flag_attrs(state.get(m["name"]))} title="Montage {esc(m["name"])}">Full size</a>')
+    out.append("</h4>")
     boxes = {b["k"]: b for b in m["boxes"]}
     if m["file"] and m["w"] and m["h"]:
-        nm = f' data-nm="{m["nm"]:.6g}"' if m["nm"] else ""
         out.append(f'<div class="cj-gallery-stage" style="aspect-ratio:{m["w"]:.0f}/{m["h"]:.0f}">'
-                   f'<a class="cj-gallery-mimg" data-item data-kind="m" data-cid="{c.cid}" data-k="{esc(m["name"])}" '
-                   f'href="{base}/m/{u(m["name"])}"{nm}{flag_attrs(state.get(m["name"]))} title="Montage {esc(m["name"])}">'
+                   f'<a class="cj-gallery-mimg" data-kind="m" data-cid="{c.cid}" data-k="{esc(m["name"])}" '
+                   f'href="{base}/m/{u(m["name"])}"{flag_attrs(state.get(m["name"]))} title="Montage {esc(m["name"])}">'
                    f'<img src="{base}/mp/{u(m["name"])}" alt="Montage {esc(m["name"])}" loading="lazy" decoding="async"></a>')
         for b in m["boxes"]:
             t = c.tiles[b["k"]]
-            out.append(f'<a class="cj-gallery-box" data-cid="{c.cid}" data-k="{esc(b["k"])}" href="{base}/t/{u(b["k"])}" '
+            tnm = f' data-nm="{t["nm"]:.6g}"' if t["nm"] else ""
+            out.append(f'<a class="cj-gallery-box" data-kind="t" data-cid="{c.cid}" data-k="{esc(b["k"])}" href="{base}/t/{u(b["k"])}"{tnm} '
                        f'style="left:{100 * b["x"] / m["w"]:.3f}%;top:{100 * b["y"] / m["h"]:.3f}%;'
                        f'width:{100 * b["w"] / m["w"]:.3f}%;height:{100 * b["h"] / m["h"]:.3f}%"'
                        f'{flag_attrs(state.get(b["k"]))} title="{esc(label_of(t, b))}" aria-label="Tile {esc(label_of(t, b))}"></a>')
         out.append("</div>")
-    elif m["file"]:
-        out.append(f'<p><a data-item data-kind="m" data-cid="{c.cid}" data-k="{esc(m["name"])}" href="{base}/m/{u(m["name"])}">'
-                   f'Open the montage</a></p>')
     out.append('<div class="cj-gallery-strip">')
     for n in m["tiles"]:
         if n in c.tiles:
@@ -893,29 +958,28 @@ def page_report(convs, data, who, convs_q: str) -> str:
             f'<script src="{PREFIX}/gallery.js" defer></script>')
 
 
-# ---------------------------------------------------------------- zip slots (2 per person)
+# ---------------------------------------------------------------- zip slots (2 per person, per portal process)
+# The counts live in this process: the portal runs as several services, each with its own limit, which is enough to
+# keep one person from tying up one service. A slot is released by SlotResponse when the response ends, fails or the
+# client goes away; a slot whose stream pulled no chunk for ZIP_STALE_S is ignored (the safety net, not the mechanism).
 _ZIPS: dict = {}
 _ZIPS_LOCK = threading.Lock()
 
 
 class Slot:
-    """One running download of a person. Freed when the stream ends, is closed, is collected, or goes stale."""
+    """One running download of a person."""
 
     def __init__(self, who):
         self.who, self.t, self.done = who, time.time(), False
 
     def release(self):
-        with _ZIPS_LOCK:
-            if not self.done:
-                self.done = True
-                if self in _ZIPS.get(self.who, []):
-                    _ZIPS[self.who].remove(self)
+        self.done = True              # lock-free on purpose: take_slot drops done slots, nothing here can deadlock
 
 
 def take_slot(who):
     now = time.time()
     with _ZIPS_LOCK:
-        live = [s for s in _ZIPS.get(who, []) if now - s.t < ZIP_STALE_S]
+        live = [s for s in _ZIPS.get(who, []) if not s.done and now - s.t < ZIP_STALE_S]
         if len(live) >= MAX_ZIPS:
             _ZIPS[who] = live
             return None
@@ -924,7 +988,9 @@ def take_slot(who):
         return s
 
 
-class Guarded:
+class Progress:
+    """Wraps the zip iterator: every pulled chunk shows the slot is alive."""
+
     def __init__(self, it, slot):
         self.it, self.slot = it, slot
 
@@ -932,20 +998,25 @@ class Guarded:
         return self
 
     def __next__(self):
-        try:
-            return next(self.it)
-        except BaseException:
-            self.slot.release()
-            raise
+        self.slot.t = time.time()
+        return next(self.it)
 
     def close(self):
+        getattr(self.it, "close", lambda: None)()
+
+
+class SlotResponse(StreamingResponse):
+    """A StreamingResponse that frees its slot when the response ends, however it ends (done, error, disconnect, cancel)."""
+
+    def __init__(self, content, slot, **kw):
+        super().__init__(content, **kw)
+        self.slot = slot
+
+    async def __call__(self, scope, receive, send):
         try:
-            getattr(self.it, "close", lambda: None)()
+            await super().__call__(scope, receive, send)
         finally:
             self.slot.release()
-
-    def __del__(self):
-        self.slot.release()
 
 
 # ---------------------------------------------------------------- routes
@@ -981,6 +1052,18 @@ def routes(ctx) -> list:
             out.append(c)
         return out if 1 <= len(out) <= MAX_COMPARE else None
 
+    def over(request):
+        return len(set(request.query_params.getlist("c"))) > MAX_COMPARE
+
+    def too_many(request, page=True):
+        text = f"Compare at most {MAX_COMPARE} conversions at a time."
+        if not page:
+            return ctx.no_store(PlainTextResponse(text, status_code=400))
+        r = ctx.page(request, "Too many", f'<div class="cj-gallery"><h1>Too many</h1><p>{esc(text)}</p>'
+                                          f'<p><a href="{PREFIX}/">My conversions</a></p></div>', active="gallery")
+        r.status_code = 400
+        return r
+
     def states_of(convs):
         return {c.cid: state_of(c) for c in convs}
 
@@ -1004,6 +1087,8 @@ def routes(ctx) -> list:
                         page_gallery(convs, states_of(convs), who_of(request), "", False), active="gallery")
 
     def compare(request: Request):
+        if over(request):
+            return too_many(request)
         convs = conv_set(request, request.query_params.getlist("c"))
         if convs is None:
             return gone(request)
@@ -1017,6 +1102,8 @@ def routes(ctx) -> list:
 
     def report(request: Request):
         cid = request.path_params.get("cid")
+        if not cid and over(request):
+            return too_many(request)
         convs, data = report_for(request, [cid] if cid else request.query_params.getlist("c"))
         if convs is None:
             return gone(request)
@@ -1032,11 +1119,11 @@ def routes(ctx) -> list:
             r.headers["Retry-After"] = "30"
             return r
         try:
-            stream = Guarded(zipstream.stream_zip(entries_fn()), slot)
+            stream = Progress(zipstream.stream_zip(entries_fn()), slot)
         except BaseException:
             slot.release()
             raise
-        r = StreamingResponse(stream, media_type="application/zip")
+        r = SlotResponse(stream, slot, media_type="application/zip")
         r.headers["Content-Disposition"] = f'attachment; filename="{name}"'
         r.headers["Cache-Control"] = "no-store"
         return r
@@ -1046,6 +1133,8 @@ def routes(ctx) -> list:
 
     def report_zip(request: Request):
         cid = request.path_params.get("cid")
+        if not cid and over(request):
+            return too_many(request, False)
         convs, data = report_for(request, [cid] if cid else request.query_params.getlist("c"))
         if convs is None:
             return gone_plain()
@@ -1054,6 +1143,8 @@ def routes(ctx) -> list:
 
     def images_zip(request: Request):
         cid = request.path_params.get("cid")
+        if not cid and over(request):
+            return too_many(request, False)
         convs = conv_set(request, [cid] if cid else request.query_params.getlist("c"))
         if convs is None:
             return gone_plain()
@@ -1107,9 +1198,17 @@ def routes(ctx) -> list:
         c = await run_in_threadpool(conv, request, request.path_params["cid"])
         if c is None:
             return gone_json()
-        body = await request.body()
-        if len(body) > BODY_MAX:
+        try:
+            declared = int(request.headers.get("content-length") or 0)
+        except ValueError:
+            declared = BODY_MAX + 1
+        if declared > BODY_MAX:                                  # refused before a byte of it is read
             return ctx.json({"error": "Too large"}, 413)
+        body = b""
+        async for part in request.stream():
+            body += part
+            if len(body) > BODY_MAX:
+                return ctx.json({"error": "Too large"}, 413)
         try:
             doc = json.loads(body.decode("utf-8"))
             k, f, v = doc["k"], doc["f"], doc.get("v")
@@ -1121,7 +1220,9 @@ def routes(ctx) -> list:
             entry = await run_in_threadpool(append_event, c, who_of(request), k, f, v)
         except ValueError as e:
             return ctx.json({"error": str(e)}, 400)
-        except OSError:
+        except OSError as e:
+            if e.errno == errno.ENOSPC:
+                return ctx.json({"error": "This gallery has reached its size limit; ask the admin."}, 507)
             return ctx.json({"error": "Could not save. Try again in a moment."}, 503)
         return ctx.json({"ok": True, "k": k, "entry": entry})
 
