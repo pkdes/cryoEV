@@ -54,6 +54,37 @@ schtasks /Create /SC DAILY /ST 21:00 /TN cryoai-state-backup /TR "\"<path>\backu
 
 Here `backup_state.bat` contains `"<python.exe>" "<repo>\tools\backup_state.py" --source "<laptop data dir>" --repo "<backup clone>" --push >> "<backup clone>\..\backup_state.log" 2>&1`. If a run fails, Task Scheduler shows the non-zero "Last Run Result".
 
+### Conversion state in the text backup
+`INCLUDE` also lists, under `predict/raw_tiles/<cid>/`: `convert.json`, `status.json`, `session.json`, `acquisition.json`, `mirror.json`, `montages/layout.json`, `montages/stitch.json`, `gallery/**/*.jsonl` and `input/sample_key.csv` (exempted from the `*key*` name rule, since it is a lab table, not a secret). Tiles, montage and gallery images, `*.html`, raw uploads and any other file stay out. Paths are relative to `--source`, so **if `CJ_RAW_ROOT` ever moves outside `--source`, these files are silently missed**: point `--source` at a parent of it or add a second run.
+
+## Nightly conversion mirror: `tools/mirror_conversions.py`
+Copies each **finished** conversion (`status.json` state `done`) from `<raw_tiles>` to the desktop share ("queue-share"), verified, and never deletes anything there:
+
+```
+python tools/mirror_conversions.py --source <raw_tiles dir> --dest <share conversions dir> [--min-free-gb 20] [--dry-run] [--json]
+```
+
+- **`--dest` comes from the caller** (the scheduled `.bat`, outside the repo), never from the repo.
+- **Copied:** everything in the conversion folder (tiles, montages, gallery, `MANIFEST.csv`, `convert.json`, `status.json`, `acquisition.json`, logs). **Not copied: `input/`**, because raw uploads are large and temporary (the portal deletes them after the retention period).
+- **No robocopy.** One copier for local and UNC paths (robocopy hit the command-line length limit above ~500 tiles and its file list acts as a filter over subfolders). Each file goes to `<name>.mirror-part`, the part's md5 is checked against the source, then `os.replace` puts it in place. Nothing on the share is ever deleted; files only there survive. `*.lock` files are skipped; long dest paths get the `\\?\` prefix.
+- **Verified:** each tile's md5 against the `MANIFEST` md5 column (if no row has an md5, `mirror.json` says `tiles_unverified: true`), and every file copied in this run against its source. `<dest_rel>/mirror_verified.json` on the share lists the md5 of every file. `<conv>/mirror.json` is written atomically: `dest_rel`, `mirrored_at`, `n_files`, `bytes`, `md5_ok`, `error`, `last_ok_at`, `last_ok_dest_rel` (kept on error records), `fingerprint`, `previous`. `dest_rel` is a folder name only. Limit: the read-back goes through the SMB client, which may serve cached data, so it proves the copy path, not the platters.
+- **Changed since the last mirror:** if any file differs from what the share holds (real triggers: a CX re-stitch changes `montages/stitch.json` and the montage images; a re-convert changes tiles), the whole conversion goes to a new folder `<cid>__<YYYYMMDD-HHMMSS>`, built as `<name>.partial` and renamed after verify; the old folder is untouched. Updated in place instead: `gallery/**/*.jsonl` (append only, when the share copy is a prefix) and the latest-wins files `status.json`, `session.json`, `convert.log`, `convert.out` (overwritten via part+rename, left out of the fingerprint, so S's re-registration never makes a dated folder). A crashed run leaves only `*.mirror-part` / `*.partial`, which the next run overwrites or resumes.
+- **Unchanged conversions** are skipped from a size+mtime fingerprint; inside a changed conversion, files with equal size and mtime (within 2 s) are not copied again.
+- **Guards:** the share must be reachable and writable (checked once, before any conversion, otherwise exit 1 and no `mirror.json` is touched); `<source>/.mirror.lock` stops two runs at once (exit 1, "already running"); an error in one conversion is recorded and the next one still runs; below `--min-free-gb` (default 20) on the share it stops that conversion and records the error.
+- Exit 0 on success or nothing to do, 1 on any failure; one summary line per conversion.
+
+Add it to the nightly `.bat` after the backup line. Keep the first failing exit code and write a dated header line to the log each run:
+
+```
+echo ==== %DATE% %TIME% >> "<backup clone>\..\mirror_conversions.log"
+"<python.exe>" "<repo>\tools\backup_state.py" --source "<laptop data dir>" --repo "<backup clone>" --push >> "<backup clone>\..\backup_state.log" 2>&1
+set RC1=%ERRORLEVEL%
+"<python.exe>" "<repo>\tools\mirror_conversions.py" --source "<laptop data dir>\predict\raw_tiles" --dest "<share conversions dir>" >> "<backup clone>\..\mirror_conversions.log" 2>&1
+set RC2=%ERRORLEVEL%
+if not %RC1%==0 exit /b %RC1%
+exit /b %RC2%
+```
+
 ## Laptop services: `tools/services.py` + `tools/register_services_task.ps1`
 
 The review server, review sandbox, history server and job monitor (and later the portal) used to run as children of a shell session and died with it. `services.py` starts them detached, keeps pid files and logs, and a logon task starts them after a reboot.
