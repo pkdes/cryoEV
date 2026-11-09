@@ -40,6 +40,7 @@ INCLUDE = [
     "logs/**",
     "predict/raw_tiles/*/convert.json",          # conversion state (small text only; tiles/montages/input are never listed)
     "predict/raw_tiles/*/status.json",
+    "predict/raw_tiles/*/session.json",
     "predict/raw_tiles/*/acquisition.json",
     "predict/raw_tiles/*/mirror.json",
     "predict/raw_tiles/*/montages/layout.json",
@@ -93,7 +94,8 @@ def classify(rel, size, max_bytes):
     if any(rx.match(rel) for rx in EXCLUDE_RX):
         return "excluded-path"
     name = rel.rsplit("/", 1)[-1].lower()
-    if any(fnmatch.fnmatchcase(name, p) for p in EXCLUDE_NAMES) and not any(rx.match(rel) for rx in KEY_OK_RX):
+    key_ok = any(rx.match(rel) for rx in KEY_OK_RX)
+    if any(fnmatch.fnmatchcase(name, p) for p in EXCLUDE_NAMES if not (key_ok and p == "*key*")):
         return "excluded-name"
     if size > max_bytes:
         return "too-big"

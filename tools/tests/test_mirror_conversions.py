@@ -48,7 +48,6 @@ class MirrorTests(unittest.TestCase):
         self.dest.mkdir()
 
     def run_m(self, **kw):
-        kw.setdefault("copier", "shutil")
         kw.setdefault("min_free_gb", 0)
         return M.run(self.src, self.dest, **kw)
 
@@ -69,7 +68,7 @@ class MirrorTests(unittest.TestCase):
     def test_idempotent_second_run_copies_nothing(self):
         make_conv(self.src)
         self.run_m()
-        with mock.patch.object(M.common, "copy_files") as cf:
+        with mock.patch.object(M, "copy_one") as cf:
             (res,) = self.run_m()
         cf.assert_not_called()
         self.assertIn("skipped", res["action"])
@@ -122,29 +121,28 @@ class MirrorTests(unittest.TestCase):
 
     def test_md5_mismatch_fails(self):
         conv = make_conv(self.src)
-        real = M.common.copy_files
+        real = M.shutil.copy2
 
-        def corrupt(src_dir, dst_dir, names, copier="auto"):
-            real(src_dir, dst_dir, names, copier)
-            for n in names:
-                if n == "t1.png":
-                    p = Path(dst_dir) / n
-                    b = bytearray(p.read_bytes())
-                    b[3] ^= 0xFF
-                    p.write_bytes(bytes(b))
-        with mock.patch.object(M.common, "copy_files", corrupt):
+        def corrupt(src, dst, *a, **k):
+            r = real(src, dst, *a, **k)
+            if Path(src).name == "t1.png":
+                b = bytearray(Path(dst).read_bytes())
+                b[3] ^= 0xFF
+                Path(dst).write_bytes(bytes(b))
+            return r
+        with mock.patch.object(M.shutil, "copy2", corrupt):
             (res,) = self.run_m()
         self.assertFalse(res["md5_ok"])
         self.assertIn("md5 mismatch", res["error"])
         mj = json.loads((conv / "mirror.json").read_text())
         self.assertFalse(mj["md5_ok"])
-        # next clean run: the corrupt dest t1 differs -> new dated folder, verified OK
-        (res2,) = self.run_m(now=datetime(2026, 11, 10, 1, 2, 3))
+        self.assertFalse(list(self.dest.rglob("t1.png")))      # corrupt part never put in place
+        (res2,) = self.run_m()                                  # next clean run completes
         self.assertTrue(res2["md5_ok"])
 
     def test_cli_exit_codes(self):
         make_conv(self.src)
-        args = ["--source", str(self.src), "--dest", str(self.dest), "--min-free-gb", "0", "--copier", "shutil"]
+        args = ["--source", str(self.src), "--dest", str(self.dest), "--min-free-gb", "0"]
         self.assertEqual(M.main(args), 0)
         self.assertEqual(M.main(args), 0)             # nothing to do
         make_conv(self.src, "bad_src", tiles={"t1.png": b"zzz"})
@@ -175,9 +173,118 @@ class MirrorTests(unittest.TestCase):
         self.assertEqual(list(self.dest.iterdir()), [])
         self.assertFalse((conv / "mirror.json").exists())
 
-    def test_robocopy_argv_is_copy_only(self):
-        argv = M.common.robocopy_argv("a", "b", ["x"])
-        self.assertFalse([a for a in argv if a.upper().startswith(("/MIR", "/PURGE", "/MOV"))])
+    def test_in_place_keeps_dest_only_and_jsonl_growth(self):
+        conv = make_conv(self.src, extra={"gallery/events.jsonl": b'{"a":1}\n'})
+        self.run_m()
+        keep = self.dest / conv.name / "gallery" / "dest_only.txt"
+        keep.write_bytes(b"mine")
+        (conv / "gallery" / "events.jsonl").write_bytes(b'{"a":1}\n{"a":2}\n')
+        (res,) = self.run_m()
+        self.assertEqual(res["dest_rel"], conv.name)
+        self.assertEqual(keep.read_bytes(), b"mine")
+        self.assertEqual((self.dest / conv.name / "gallery" / "events.jsonl").read_bytes(), b'{"a":1}\n{"a":2}\n')
+        vj = json.loads((self.dest / conv.name / "mirror_verified.json").read_text())
+        self.assertIn("tiles/t1.png", vj["files"])
+
+    def test_latest_wins_files_overwrite_in_place(self):
+        conv = make_conv(self.src, extra={"session.json": b"{}", "convert.log": b"a"})
+        self.run_m()
+        (conv / "status.json").write_text(json.dumps({"state": "done", "registered": True}))
+        (conv / "session.json").write_text('{"s": 1}')
+        (conv / "convert.log").write_text("a longer log")
+        (res,) = self.run_m()
+        self.assertIn("skipped", res["action"])        # not in the fingerprint: nothing to do
+        # a different run that does update (a gallery event) carries the latest-wins files along in place
+        (conv / "gallery").mkdir()
+        (conv / "gallery" / "events.jsonl").write_bytes(b"{}\n")
+        (res,) = self.run_m()
+        self.assertEqual(res["dest_rel"], conv.name)
+        d = self.dest / conv.name
+        self.assertEqual(json.loads((d / "session.json").read_text()), {"s": 1})
+        self.assertEqual((d / "convert.log").read_text(), "a longer log")
+        self.assertEqual([p.name for p in self.dest.iterdir()], [conv.name])
+
+    def test_crash_mid_copy_then_clean_completion(self):
+        conv = make_conv(self.src)
+        real = M.shutil.copy2
+        n = {"i": 0}
+
+        def crash(src, dst, *a, **k):
+            n["i"] += 1
+            if n["i"] == 3:
+                Path(dst).write_bytes(b"half")
+                raise OSError("share dropped")
+            return real(src, dst, *a, **k)
+        with mock.patch.object(M.shutil, "copy2", crash):
+            (res,) = self.run_m()
+        self.assertFalse(res["md5_ok"])
+        names = [p.name for p in self.dest.iterdir()]
+        self.assertEqual(names, [conv.name + ".partial"])              # never a half-built final folder
+        self.assertTrue(list((self.dest / names[0]).rglob("*.mirror-part")))
+        (res2,) = self.run_m()
+        self.assertTrue(res2["md5_ok"])
+        self.assertEqual([p.name for p in self.dest.iterdir()], [conv.name])
+        self.assertFalse(list(self.dest.rglob("*.mirror-part")))
+
+    def test_offline_share_exit_1_and_mirror_json_untouched(self):
+        conv = make_conv(self.src)
+        self.run_m()
+        before = (conv / "mirror.json").read_bytes()
+        gone = self.dest.parent / "offline"
+        args = ["--source", str(self.src), "--dest", str(gone), "--min-free-gb", "0"]
+        self.assertEqual(M.main(args), 1)
+        self.assertEqual((conv / "mirror.json").read_bytes(), before)
+
+    def test_dated_folder_already_exists(self):
+        conv = make_conv(self.src)
+        self.run_m()
+        make_conv(self.src, tiles={"t1.png": b"retried" * 40, "t2.png": TILES["t2.png"]})
+        (self.dest / f"{conv.name}__20261109-210005").mkdir()
+        (res,) = self.run_m(now=datetime(2026, 11, 9, 21, 0, 5))
+        self.assertFalse(res["md5_ok"])
+        self.assertIn("already exists", res["error"])
+        rec = json.loads((conv / "mirror.json").read_text())
+        self.assertEqual(rec["last_ok_dest_rel"], conv.name)
+        self.assertTrue(rec["last_ok_at"])
+
+    def test_one_failing_conversion_does_not_stop_the_next(self):
+        make_conv(self.src, "a_first")
+        make_conv(self.src, "b_second")
+        real = M.copy_one
+
+        def boom(src, dst):
+            if "a_first" in str(src):
+                raise ValueError("unexpected")
+            return real(src, dst)
+        with mock.patch.object(M, "copy_one", boom):
+            res = self.run_m()
+        self.assertEqual([r["md5_ok"] for r in res], [False, True])
+
+    def test_run_lock(self):
+        make_conv(self.src)
+        lock = M.acquire_lock(self.src / ".mirror.lock", wait=0)
+        try:
+            args = ["--source", str(self.src), "--dest", str(self.dest), "--min-free-gb", "0"]
+            self.assertEqual(M.main(args), 1)
+            self.assertEqual(list(self.dest.iterdir()), [])
+        finally:
+            lock.close()
+
+    def test_700_tiles(self):
+        tiles = {f"tile_{i:04d}.png": f"tile{i}".encode() * 5 for i in range(700)}
+        make_conv(self.src, tiles=tiles)
+        (res,) = self.run_m()
+        self.assertTrue(res["md5_ok"], res["error"])
+        self.assertEqual(len(list((self.dest / res["dest_rel"] / "tiles").glob("tile_*.png"))), 700)
+        self.assertFalse((self.dest / res["dest_rel"] / "input").exists())
+
+    def test_tiles_unverified_flagged_and_lock_files_skipped(self):
+        conv = make_conv(self.src, extra={"x.lock": b"l"})
+        (conv / "tiles" / "MANIFEST.csv").write_text("output_name,md5\nt1.png,\nt2.png,\n")
+        (res,) = self.run_m()
+        self.assertTrue(res["md5_ok"])
+        self.assertTrue(json.loads((conv / "mirror.json").read_text())["tiles_unverified"])
+        self.assertFalse((self.dest / conv.name / "x.lock").exists())
 
 
 if __name__ == "__main__":

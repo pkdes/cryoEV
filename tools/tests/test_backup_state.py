@@ -232,7 +232,7 @@ class ConversionStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             src = Path(d)
             c = "predict/raw_tiles/20261106-1_abc"
-            want = ["convert.json", "status.json", "acquisition.json", "mirror.json", "montages/layout.json",
+            want = ["convert.json", "status.json", "acquisition.json", "mirror.json", "session.json", "montages/layout.json",
                     "montages/stitch.json", "gallery/events.jsonl", "gallery/sub/more.jsonl", "input/sample_key.csv"]
             skip = ["tiles/t1.png", "tiles/MANIFEST.csv", "montages/m_stitched.jpg", "gallery/index.html",
                     "gallery/thumb.jpg", "input/a.mrc", "input/a.mrc.mdoc", "input/other.csv", "convert.log",
