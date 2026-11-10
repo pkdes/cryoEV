@@ -1258,6 +1258,45 @@ class Montages(Base):
         self.assertEqual(Path(job[job.index("--stitch-only") + 1]), d)
         self.assertIs(st["registered"], False)                       # an upload; registration is off here
 
+    def test_conversion_page_montages_and_registration(self):
+        cid = self.mine()
+        base = f"/predict/convert/{cid}"
+        page = self.page(base + "/")
+        self.assertIn('id="cj-predict-montages"', page)
+        self.assertIn("2 stitched montage(s) made.", page)
+        self.assertIn(f'action="{base}/stitch"', page)                       # admin: Make the montages
+        self.assertIn("upload sessions are off on this server", page)
+        self.assertNotIn(f'action="{base}/register"', page)
+        adv = self.page(base + "/", "advanced")
+        self.assertIn('id="cj-predict-montages"', adv)
+        self.assertNotIn(f'action="{base}/stitch"', adv)
+        self.assertNotIn("data-cj-registration", adv)
+        self.assertEqual(self.form(base + "/register", {}).status_code, 409)   # off: refused
+        # a failed backfill that kept the earlier set; its error is escaped
+        st = self.status(cid)
+        st["stitch"] = {**st["stitch"], "state": "failed", "error": XSS, "kept_previous": True, "job": "backfill"}
+        P.PS.write_json_atomic(self.d(cid) / "status.json", st)
+        page = self.page(base + "/")
+        self.assertIn("The montages made before are kept.", page)
+        self.assertIn(html.escape(XSS), page)
+        self.assertNotIn(XSS, page)
+        # registration on: the admin's "Register again", done by the watcher
+        os.environ["CJ_UPLOAD_SESSIONS"] = "on"
+        st["registered"] = "error: registry unreadable"
+        P.PS.write_json_atomic(self.d(cid) / "status.json", st)
+        page = self.page(base + "/")
+        self.assertIn("Not added to Data → Sessions (error: registry unreadable).", page)
+        self.assertIn(f'action="{base}/register"', page)
+        self.assertEqual(self.form(base + "/register", {}, "advanced").status_code, 403)
+        self.assertEqual(self.form(base + "/register", {}).status_code, 303)
+        wait_for(lambda: self.status(cid).get("registered") is True, 30, what="registered again")
+        self.assertIn("Listed under Data → Sessions.", self.page(base + "/"))
+        # a conversion made before round 7 (no stitch record) says the montages can be made
+        st = self.status(cid)
+        st.pop("stitch")
+        P.PS.write_json_atomic(self.d(cid) / "status.json", st)
+        self.assertIn("made before montages were stitched automatically", self.page(base + "/"))
+
     def test_a_failed_stitch_is_a_warning_the_conversion_is_done(self):
         os.environ["FAKE_STITCH_MODE"] = "fail"
         cid = self.mine()

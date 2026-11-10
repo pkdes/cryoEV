@@ -38,12 +38,22 @@ INCLUDE = [
     "jobs/**",
     "tracking/**",
     "logs/**",
+    "predict/raw_tiles/*/convert.json",          # conversion state (small text only; tiles/montages/input are never listed)
+    "predict/raw_tiles/*/status.json",
+    "predict/raw_tiles/*/session.json",
+    "predict/raw_tiles/*/acquisition.json",
+    "predict/raw_tiles/*/mirror.json",
+    "predict/raw_tiles/*/montages/layout.json",
+    "predict/raw_tiles/*/montages/stitch.json",
+    "predict/raw_tiles/*/gallery/**/*.jsonl",   # gallery flags / notes
+    "predict/raw_tiles/*/input/sample_key.csv", # the one small file in input/ (grid -> sample labels)
     "portal_audit/*/portal.jsonl",   # portal audit logs, copied from the portal state dir(s), not from --source
 ]
 EXCLUDE_PATHS = ["registry/live/**",                       # regenerated every 30 s
                  "registry/cache/**"]                      # derived parse caches (safe to delete, rebuilt on import)
 EXCLUDE_NAMES = [".review_key", "*key*", "*.html", "*.htm",  # secrets, generated pages
                  "*.png", "*.jpg", "*.jpeg", "*.tif", "*.tiff", "*.mrc", "*.pt", "*.lock"]
+KEY_NAME_OK = ["predict/raw_tiles/*/input/sample_key.csv"]   # "sample key" is a lab table, not a secret: exempt from *key*
 AUDIT_MAX_MB = 200                  # own cap for portal audit logs (append only, grow forever); ignores --max-mb
 MIRROR_DIR = "state"
 MANIFEST = "MANIFEST.md5"
@@ -74,6 +84,7 @@ def _glob_rx(pattern):
 
 INCLUDE_RX = [_glob_rx(p) for p in INCLUDE]
 EXCLUDE_RX = [_glob_rx(p) for p in EXCLUDE_PATHS]
+KEY_OK_RX = [_glob_rx(p) for p in KEY_NAME_OK]
 
 
 def classify(rel, size, max_bytes):
@@ -83,7 +94,8 @@ def classify(rel, size, max_bytes):
     if any(rx.match(rel) for rx in EXCLUDE_RX):
         return "excluded-path"
     name = rel.rsplit("/", 1)[-1].lower()
-    if any(fnmatch.fnmatchcase(name, p) for p in EXCLUDE_NAMES):
+    key_ok = any(rx.match(rel) for rx in KEY_OK_RX)
+    if any(fnmatch.fnmatchcase(name, p) for p in EXCLUDE_NAMES if not (key_ok and p == "*key*")):
         return "excluded-name"
     if size > max_bytes:
         return "too-big"

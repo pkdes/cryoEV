@@ -11,6 +11,8 @@
    "status": "on", "nav": true, "desc": "Accept, fix or delete outlines. Works on a phone.", "label": "eVHarmony"},
   {"id": "predict", "name": "Predict", "route": "/predict/", "icon": "predict", "roles": ["admin", "advanced", "basic"],
    "health": null, "status": "on", "nav": true, "desc": "Run a model on new images"},
+  {"id": "gallery", "name": "Gallery", "route": "/gallery/", "icon": "gallery", "roles": ["admin", "advanced"],
+   "health": null, "status": "on", "nav": true, "desc": "Browse your converted montages, mark tiles, make a report"},
   {"id": "results", "name": "Results", "route": "/results/", "icon": "results", "roles": ["admin", "advanced", "basic"],
    "health": null, "status": "on", "nav": true, "desc": "Counts, sizes and morphology"},
   {"id": "reviews", "name": "My reviews", "route": "/reviews/", "icon": "reviews", "roles": ["admin", "advanced", "basic"],

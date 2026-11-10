@@ -25,10 +25,19 @@ sets, label versions, datasets, models) and the processed images on disk.
                                         review / revise) for the whole lab, drawn by /data/data.js
     GET /data/api/lineage/graph[?focus=<entity>|<id>]   its data as JSON (schema cj_data/1)
     GET /data/data.js                   the Lab graph's script (portal/static/data.js; no inline script)
+    POST /data/session/<id>/details     the Session details form of an uploaded session (its uploader or the admin;
+                                        portal/upload_sessions.save_details, only when CJ_UPLOAD_SESSIONS=on)
 
 Rules:
-  - Nothing here writes to the registry or to a data folder. The only write is the thumbnail cache in the portal's
-    own state folder.
+  - Nothing here writes to a data folder. The only registry write is the Session details form above (a merge-append
+    through portal/upload_sessions.py); the other write is the thumbnail cache in the portal's own state folder.
+  - Upload sessions (registry `conversions`, round 7): the list shows an "Uploaded" chip; the session page shows the
+    acquisition summary (the record's own, else the newest upload's), sample per grid (display names from the
+    details first), grid ids and prep notes (every admin / advanced user), and links to the conversion page and its
+    Gallery (/gallery/<cid>/) ONLY for viewers who may see that conversion (ctx.can_see on its convert.json owner),
+    plus the analyses (prediction sets whose source session is this one) the viewer may see. Without lab images the
+    thumbnails come from those visible conversions' montages / tiles, through the same cache and containment checks
+    (the conversion folders' roots are added to the known roots for those files only).
   - A thumbnail file is resolved on the server from registry / package data only (the kind + id + index in the URL
     pick it); the client never sends a path. Each kind reads only its own folder: a session's
     `<processing>/<id>/3. Processed images`, `<laptop>/review` for packages, `<laptop>/predict` for prediction sets.
@@ -74,9 +83,12 @@ import time
 from pathlib import Path
 from urllib.parse import quote
 
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
+
+from portal import upload_sessions as US
 
 PREFIX = "/data"
 ROLES = ("admin", "advanced")
@@ -188,8 +200,8 @@ def slot_sort_key(slot):
 class Viewer:
     """Who is asking: may_see(owner) is ctx.can_see, so an unknown owner (None) is for admins only."""
 
-    def __init__(self, can_see, user):
-        self.can_see, self.user = can_see, user
+    def __init__(self, can_see, user, cfg=None):
+        self.can_see, self.user, self.cfg = can_see, user, cfg     # cfg: the portal's (conversions); None = none
 
     def may_see(self, owner) -> bool:
         return bool(self.can_see(self.user, owner))
@@ -353,6 +365,27 @@ def session_images(session_id: str, prefix=None) -> list:
         if found:
             return found
     return []
+
+
+def upload_images(record: dict, viewer) -> list:
+    """An upload session's images from the conversions this viewer may see (montages, then tiles); none without the
+    portal's cfg. Cached FILES_TTL_S per session and viewer."""
+    if viewer is None or getattr(viewer, "cfg", None) is None or not US.is_upload_session(record):
+        return []
+    user = viewer.user or {}
+    key = ("upload-images", str(record.get("id")), str(user.get("id")), str(user.get("role")),
+           json.dumps([c.get("id") for c in US.conversions_of(record)]))
+    return cached(_files_cache, key, lambda: US.conversion_images(viewer.cfg, record, user, viewer.can_see))
+
+
+def session_files(record: dict, viewer=None) -> list:
+    """The session's images: the lab's processed folders first, else (an upload session) its visible conversions'."""
+    return session_images(record["id"]) or upload_images(record, viewer)
+
+
+def upload_roots(cfg) -> list:
+    """The conversion roots as real paths in the OS's comparison case (thumbnails of upload sessions)."""
+    return [os.path.normcase(os.path.realpath(r)) for r in US.conversion_roots(cfg)] if cfg is not None else []
 
 
 def read_small_json(path: Path) -> dict:
@@ -572,7 +605,8 @@ def magnification_text(record) -> str:
 
 
 def sample_labels(record) -> list:
-    items = sorted(_dict(record.get("sample_labels")).items(), key=lambda kv: slot_sort_key(kv[0]))
+    """Sample labels in slot order: the details' display names, else the lab's, else an upload's."""
+    items = sorted(US.effective_labels(record).items(), key=lambda kv: slot_sort_key(kv[0]))
     return [v for _, v in items if _text(v)]
 
 
@@ -593,6 +627,11 @@ def status_tags(record) -> list:
     return [(status_word(record["status"]), "")] if _text(record.get("status")) else []
 
 
+def session_tags(record) -> list:
+    """Status, plus "Uploaded" for a session with a portal raw upload."""
+    return status_tags(record) + ([("Uploaded", "acc")] if US.is_upload_session(record) else [])
+
+
 def join_bits(*bits) -> str:
     return " · ".join(str(b) for b in bits if b)
 
@@ -603,9 +642,10 @@ def session_rows(records) -> list:
         n = record.get("n_imaging")
         labels = sample_labels(record)
         label_text = ", ".join(labels[:3]) + (f" +{len(labels) - 3} more" if len(labels) > 3 else "")
-        sub = join_bits(short_date(record.get("date")), record.get("instrument"), magnification_text(record),
+        acq = record if US.has_acquisition(record) else {**record, **US.upload_acquisition(record)}
+        sub = join_bits(short_date(record.get("date")), _text(acq.get("instrument")), magnification_text(acq),
                         plural(n, "imaging file") if _number(n) is not None else None, label_text)
-        rows.append(make_row("session", sid, f"Session {sid}", sub, status_tags(record)))
+        rows.append(make_row("session", sid, f"Session {sid}", sub, session_tags(record)))
     return rows
 
 
@@ -802,37 +842,95 @@ def acquisition_fields(record, files) -> list:
 
 def session_grid_cards(records, record, files) -> list:
     sid = record["id"]
-    slots = sorted(set(_dict(record.get("sample_labels"))) | set(_dict(record.get("session_grids"))),
-                   key=slot_sort_key)
+    slots = sorted(set(_dict(record.get("sample_labels"))) | set(_dict(record.get("session_grids")))
+                   | set(US.session_slots(record)), key=slot_sort_key)
+    labels = US.effective_labels(record)
+    typed = _dict(_dict(record.get("details")).get("grid_ids"))
     registry_counts: dict = {}
     for image in records["image"].values():
         if image.get("session") == sid and image.get("session_grid") is not None:
             slot = str(image["session_grid"])
             registry_counts[slot] = registry_counts.get(slot, 0) + 1
+    uploaded: dict = {}
+    for c in US.conversions_of(record):
+        for slot, n in _dict(c.get("tiles_per_grid")).items():
+            if _number(n) is not None:
+                uploaded[str(slot)] = uploaded.get(str(slot), 0) + int(n)
     cards = []
     for slot in slots:
         grid_id = _dict(record.get("session_grids")).get(slot)
         grid = records["grid"].get(grid_id) if grid_id else None
         processed = len(session_images(sid, f"grid{slot}_".lower())) if files else 0
-        cards.append({"slot": slot, "label": _text(_dict(record.get("sample_labels")).get(slot))
-                      or (grid or {}).get("sample_label"),
+        n, source = ((processed, "processed files") if processed else
+                     (registry_counts[slot], "registry records") if registry_counts.get(slot) else
+                     (uploaded[slot], "uploaded tiles") if uploaded.get(slot) else (0, "registry records"))
+        cards.append({"slot": slot, "label": _text(labels.get(slot)) or (grid or {}).get("sample_label"),
                       "grid": grid_id if grid else None, "grid_id_recorded": grid_id,
+                      "grid_id_typed": _text(typed.get(slot)),
                       "grid_type": (grid or {}).get("grid_type"),
-                      "n_images": processed or registry_counts.get(slot, 0),
-                      "count_source": "processed files" if processed else "registry records"})
+                      "n_images": n, "count_source": source})
     return cards
 
 
-def detail_session(records, record, page=None) -> dict:
+def session_analyses(records, sid, viewer) -> list:
+    """Analyses (prediction sets) whose source session is `sid` that the viewer may see: the registry's records,
+    plus the Predict folder's request.json files (cached FILES_TTL_S per viewer). [{id, title, url, status}]"""
+    found = {}
+    for record in records["prediction_set"].values():
+        if _dict(record.get("source")).get("session") == sid and set_is_visible(viewer, "prediction_set", record):
+            found[record["id"]] = {"id": record["id"], "title": _text(record.get("name")) or record["id"],
+                                   "url": f"/predict/{quote(record['id'], safe='')}/",
+                                   "status": status_word(record["status"]) if _text(record.get("status")) else None}
+    cfg = getattr(viewer, "cfg", None)
+    if cfg is not None:
+        user = viewer.user or {}
+
+        def scan():
+            try:
+                from portal.modules import predict as P
+                return [(d.name, req, st) for d, req, st in P.list_sets(cfg, user, viewer.can_see)]
+            except Exception:                            # noqa: BLE001 - no predict root: the registry's only
+                return []
+        for ps, req, st in cached(_files_cache, ("analyses", str(user.get("id")), str(user.get("role"))), scan):
+            src = _dict(req.get("source"))
+            if src.get("session") == sid and ps not in found:
+                found[ps] = {"id": ps, "title": _text(req.get("name")) or ps, "url": f"/predict/{quote(ps, safe='')}/",
+                             "status": status_word(st["state"]) if _text(_dict(st).get("state")) else None}
+    return sorted(found.values(), key=lambda a: a["id"], reverse=True)
+
+
+def detail_session(records, record, page=None, viewer=None) -> dict:
     sid = record["id"]
-    files = session_images(sid)
+    lab_files = session_images(sid)
+    files = lab_files or upload_images(record, viewer)
+    acq, from_upload = record, False
+    if not US.has_acquisition(record) and US.upload_acquisition(record):
+        acq, from_upload = {**record, **US.upload_acquisition(record)}, True
+    elif US.is_upload_session(record) and not record.get("local_folder") and US.has_acquisition(record):
+        from_upload = True                               # a session the portal made: its summary is the upload's
+    fields = acquisition_fields(acq, files)
+    if from_upload:
+        fields.append(("Acquisition read from", "the uploaded raw files", None))
+    upload = None
+    if US.is_upload_session(record):
+        det = _dict(record.get("details"))
+        convs = (US.visible_conversions(viewer.cfg, record, viewer.user or {}, viewer.can_see)
+                 if viewer is not None and viewer.cfg is not None else [])
+        upload = {"conversions": [{"id": c["id"], "url": c["href"], "gallery": c["gallery"], "n_tiles": c["n_tiles"]}
+                                  for c in convs],
+                  "details": {"grid_ids": _dict(det.get("grid_ids")), "sample_display": _dict(det.get("sample_display")),
+                              "prep_notes": _text(det.get("prep_notes")), "by": _text(det.get("by")),
+                              "at": _text(det.get("at"))},
+                  "can_edit": bool(viewer is not None and US.enabled(viewer.cfg) and US.may_edit(viewer.user, record))}
     detail = make_detail(
-        "session", sid, f"Session {sid}", status_tags(record), acquisition_fields(record, files),
+        "session", sid, f"Session {sid}", session_tags(record), fields,
         grids=session_grid_cards(records, record, files),
-        acquisition={k: record.get(k) for k in (
+        acquisition={k: acq.get(k) for k in (
             "instrument", "magnification", "pixel_size_a", "defocus_um", "dose", "voltage_kv", "binning",
             "acq_dates", "n_mdoc", "n_imaging", "n_other", "other_magnification")},
-        gap=_text(record.get("acquisition_gap")))
+        gap=None if from_upload else _text(record.get("acquisition_gap")), upload=upload,
+        images_word="processed" if lab_files or not files else "from the upload",
+        analyses=session_analyses(records, sid, viewer) if viewer is not None else [])
     if page is None:
         detail.update(thumbnails("session", sid, files, indexes=evenly_spaced(len(files), STRIP_N)))
         detail["view"] = "strip"
@@ -1029,7 +1127,7 @@ def detail(records, kind, entity_id, viewer, page=None):
     """-> detail dict, or None when unknown or hidden from this viewer."""
     if kind == "session":
         record = records["session"].get(entity_id)
-        return detail_session(records, record, page) if record else None
+        return detail_session(records, record, page, viewer) if record else None
     if kind == "grid":
         record = records["grid"].get(entity_id)
         return detail_grid(records, record, page) if record else None
@@ -1051,7 +1149,8 @@ def detail(records, kind, entity_id, viewer, page=None):
 def thumbnail_sources(records, kind, entity_id, viewer) -> list:
     """The ordered image files behind /data/thumb/<kind>/<id>/<n>.jpg, same order as the detail pages use."""
     if kind == "session":
-        return session_images(entity_id) if entity_id in records["session"] else []
+        record = records["session"].get(entity_id)
+        return session_files(record, viewer) if record else []
     if kind == "grid":
         return grid_images(records, entity_id) if entity_id in records["grid"] else []
     if kind == "images":
@@ -1902,7 +2001,8 @@ def render_overview(ov, error) -> str:
             f'their sessions. <a href="{lab_graph_href()}">Lab graph</a>: how label sets, datasets, models and '
             'reviews connect.</p>' + banner(error) + search_form()
             + '<div class="cj-data-cards">' + "".join(cards) + "</div>"
-            + '<p class="cj-mut cj-data-foot">Read only: nothing here changes any data.</p>')
+            + '<p class="cj-mut cj-data-foot">Read only: nothing here changes any data (except the session details '
+              'of an upload, which its uploader and the admin can edit).</p>')
 
 
 def render_search(result, error) -> str:
@@ -1963,7 +2063,8 @@ def render_metric_table(rows) -> str:
         f'<tr><th scope="row">{esc(name)}</th><td>{esc(value)}</td></tr>' for name, value in rows) + "</tbody></table>"
 
 
-def render_session_extras(d) -> str:
+def render_session_extras(d, extra="") -> str:
+    """extra: the Session details form (the page handler renders it from the record; never in the JSON)."""
     out = ['<h2 class="cj-sec">Grids</h2>']
     if d["grids"]:
         items = []
@@ -1973,17 +2074,40 @@ def render_session_extras(d) -> str:
                     else esc(slot_name))
             if g["grid"]:
                 where = slot_name
-            elif not g["grid_id_recorded"]:
-                where = "grid number not recorded"
-            else:
+            elif g["grid_id_recorded"]:
                 where = f'grid {g["grid_id_recorded"]} not in the list'
+            elif g.get("grid_id_typed"):
+                where = f'grid id {g["grid_id_typed"]} (session details)'
+            else:
+                where = "grid number not recorded"
             count = f'{plural(g["n_images"], "image")} ({g["count_source"]})' if g["n_images"] else None
             items.append(f'<li><span class="cj-data-top"><b>{head}</b></span>'
                          f'<span class="cj-mut">{esc(join_bits(g["label"], g["grid_type"], count, where))}</span></li>')
         out.append('<ul class="cj-data-grids">' + "".join(items) + "</ul>")
     else:
         out.append('<p class="cj-mut">No grids recorded for this session.</p>')
-    out.append(f'<h2 class="cj-sec">Images ({d["n_images"]} processed)</h2>'
+    up = d.get("upload")
+    if up is not None:
+        out.append('<h2 class="cj-sec">Uploaded raw files</h2>')
+        if up["conversions"]:
+            items = "".join(
+                f'<li class="cj-data-row"><span class="cj-data-top"><a href="{esc(c["url"])}">Conversion '
+                f'{esc(c["id"])}</a><a class="cj-data-lnk" href="{esc(c["gallery"])}">Gallery</a></span>'
+                + (f'<span class="cj-mut">{esc(plural(c["n_tiles"], "tile"))}</span>'
+                   if _number(c.get("n_tiles")) is not None else "") + "</li>"
+                for c in up["conversions"])
+            out.append(f'<div class="cj-card"><ul class="cj-data-rows">{items}</ul></div>')
+        else:
+            out.append('<p class="cj-mut">Converted from a portal upload. Its conversion and gallery are open to the '
+                       'person who uploaded it and the admin.</p>')
+        out.append(extra or US.details_view({"details": up["details"]}))
+    if d.get("analyses"):
+        items = "".join(f'<li class="cj-data-row"><span class="cj-data-top"><a href="{esc(a["url"])}">'
+                        f'{esc(a["title"])}</a>' + (chip(a["status"]) if a.get("status") else "") + "</span></li>"
+                        for a in d["analyses"])
+        out.append(f'<h2 class="cj-sec">Analyses of this session</h2><div class="cj-card"><ul class="cj-data-rows">'
+                   f'{items}</ul></div>')
+    out.append(f'<h2 class="cj-sec">Images ({d["n_images"]} {esc(d.get("images_word") or "processed")})</h2>'
                + render_thumbs(d, strip=d["view"] == "strip"))
     return "".join(out)
 
@@ -2012,7 +2136,7 @@ def link_list(heading, items) -> str:
             + ", ".join(f'<a href="{esc(m["url"])}">{esc(m["id"])}</a>' for m in items) + "</p>")
 
 
-def render_detail(d, error) -> str:
+def render_detail(d, error, extra="") -> str:
     kind = d["kind"]
     list_kind = DETAIL_LIST[kind]
     card_cls = "cj-card" + (" cj-data-hl" if d.get("production") else "")
@@ -2027,7 +2151,7 @@ def render_detail(d, error) -> str:
     if d.get("gap"):
         out.append(f'<p class="cj-mut">Acquisition details are not available: {esc(d["gap"])}</p>')
     if kind == "session":
-        out.append(render_session_extras(d))
+        out.append(render_session_extras(d, extra))
     elif kind == "model":
         out.append(render_model_extras(d))
     else:
@@ -2121,7 +2245,7 @@ def page_body(content: str) -> str:
 def routes(ctx) -> list:
     def state(request: Request):
         records, error = read_registry(getattr(ctx.cfg, "registry", None))
-        return with_disk_packages(records), error, Viewer(ctx.can_see, ctx.user(request))
+        return with_disk_packages(records), error, Viewer(ctx.can_see, ctx.user(request), ctx.cfg)
 
     def requested_page(request: Request, default=None):
         value = request.query_params.get("page")
@@ -2156,6 +2280,15 @@ def routes(ctx) -> list:
         return html_page(request, KIND_TITLES[kind], render_list(KIND_TITLES[kind], rows_for(records, kind, viewer),
                                                                  error))
 
+    def details_html(records, d, viewer, problem=None, saved=False) -> str:
+        """The Session details form for its uploader / the admin (when switched on); else the read-only view."""
+        up = d.get("upload")
+        if not up or not up["can_edit"]:
+            return ""
+        record = records["session"].get(d["id"]) or {}
+        return US.details_form(record, f'{PREFIX}/session/{quote(d["id"], safe="")}/details', problem, saved,
+                               viewer.user)
+
     def item(kind):
         def handler(request: Request):
             records, error, viewer = state(request)
@@ -2163,8 +2296,37 @@ def routes(ctx) -> list:
             d = detail(records, kind, request.path_params["eid"], viewer, page)
             if d is None:
                 return missing(request)
-            return html_page(request, d["title"], render_detail(d, error))
+            extra = details_html(records, d, viewer, saved=request.query_params.get("saved") == "1") \
+                if kind == "session" else ""
+            return html_page(request, d["title"], render_detail(d, error, extra))
         return handler
+
+    async def session_details(request: Request):
+        """POST the Session details form: the session's uploader or the admin, an upload session, switched on."""
+        user, sid = ctx.user(request), request.path_params["eid"]
+        record = await run_in_threadpool(US.current_record, ctx.cfg, sid)
+        if not record or not US.may_edit(user, record):
+            return await run_in_threadpool(missing, request)
+        fd = await request.form(max_files=0, max_fields=4 * US.MAX_GRIDS + 10)
+        form = {k: v for k, v in fd.items() if isinstance(v, str)}
+        res = await run_in_threadpool(US.save_details, sid, form, user.get("id"), ctx.cfg,
+                                      user.get("role") == "admin")
+        root = getattr(ctx.cfg, "registry", None)
+        with _lock:
+            _registry_cache.pop(str(root), None)              # the page after the redirect shows the new line
+        if res.get("ok"):
+            return RedirectResponse(f"{PREFIX}/session/{quote(sid, safe='')}?saved=1#cj-us-details", status_code=303)
+        problem = res["error"] + (f"\n(admin) {res['tech']}" if res.get("tech") and user.get("role") == "admin"
+                                  else "")
+
+        def again():
+            records, error, viewer = state(request)
+            d = detail(records, "session", sid, viewer)
+            if d is None:
+                return missing(request)
+            return html_page(request, d["title"], render_detail(d, error, details_html(records, d, viewer, problem)),
+                             res.get("status", 400))
+        return await run_in_threadpool(again)
 
     def not_found_text():
         return Response("not found", status_code=404, media_type="text/plain")
@@ -2176,7 +2338,8 @@ def routes(ctx) -> list:
         records, _, viewer = state(request)
         files = thumbnail_sources(records, kind, eid, viewer)
         index_ = int(n)
-        if index_ >= len(files) or not inside(files[index_], known_roots()):
+        roots = known_roots() + (upload_roots(ctx.cfg) if kind == "session" else [])
+        if index_ >= len(files) or not inside(files[index_], roots):
             return not_found_text()
         data = make_thumb(files[index_], Path(ctx.cfg.state_dir) / "data_thumbs")
         if data is None:
@@ -2248,6 +2411,7 @@ def routes(ctx) -> list:
              Route(PREFIX + "/search", find, methods=["GET"]),
              Route(PREFIX + "/list/{kind}", listing, methods=["GET"])]
     found += [Route(PREFIX + f"/{k}/{{eid}}", item(k), methods=["GET"]) for k in DETAIL_KINDS]
+    found += [Route(PREFIX + "/session/{eid}/details", session_details, methods=["POST"])]
     found += [Route(PREFIX + "/lineage/{kind}/{eid}/", lineage_page, methods=["GET"]),
               Route(PREFIX + "/lineage/{kind}/{eid}", lineage_page, methods=["GET"]),
               Route(PREFIX + "/api/lineage/{kind}/{eid}", api_lineage, methods=["GET"])]
