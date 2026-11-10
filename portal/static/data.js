@@ -1,7 +1,8 @@
 /* Data module's graphs (served as /data/data.js by portal/modules/data.py; no inline script on the page).
    Two pages use it: the Lab graph (endpoint /data/api/lineage/graph + this page's ?focus) and a Lineage item page's
    Tree | Graph toggle (endpoint with ?focus=..&scope=item: the item's ancestors and descendants only). Endpoint and
-   scope come from data-* attributes on #cj-data-graph-root. Draws History's lineage graph: the same layout as
+   scope come from data-* attributes on #cj-data-graph-root (a session's or grid's page uses the same item endpoint:
+   its grids, uploads and what was made from their images). Draws History's lineage graph: the same layout as
    registry/history_page.py drawGraph (columns, boxes over an SVG edge layer, bezier edges, same-column lanes on the
    left, back-edges routed over the top). Record text only ever goes in through textContent. */
 (function () {
@@ -188,6 +189,7 @@
       var n = G.nodes[G.focus];
       if (n.hist) histBox.checked = true;
       if (isAnalysis(n)) anBox.checked = true;
+      if (ITEM && (n.kind === 'session' || n.kind === 'grid')) anBox.checked = true;   // what came out of it
     }
     draw();
     focusBox();
@@ -233,7 +235,8 @@
     });
     var saved = null;
     try { saved = localStorage.getItem(KEY); } catch (e) { saved = null; }
-    if (saved === 'graph') show('graph', false);
+    // a session's / grid's page opens on the Graph (its tree is only itself) unless Tree was the last choice
+    if (saved === 'graph' || (saved !== 'tree' && toggle.getAttribute('data-default') === 'graph')) show('graph', false);
   } else {
     load();
   }

@@ -67,6 +67,12 @@ Rules:
     dataset built from a hidden set stays and only that edge goes. Each node sends only its id (History's box
     text), kind, column, faded flag, part-of, subtitle, status and its Data Lineage address; edges are
     [from, to, role]. ?focus names a node to highlight; a key the viewer may not see highlights nothing.
+  - Session / grid Graph (?focus=session|<id> or grid|<id> with scope=item; source_graph): the session, its grids,
+    its upload conversions (only those the viewer may open), and what used their images, read from the same filtered
+    registry (image records' session / grid; History's image lookup for datasets, label versions, review packages,
+    jobs and pulls; exports' image lists; prediction sets' source session, their packages, and the conversion a set
+    was run on), then the lab graph's own edges downstream through item_graph. A hidden item is not in the filtered
+    graph, so it is never linked or counted.
   - Plain words; every value is escaped; no script on the pages except the Lab graph's file /data/data.js.
 """
 from __future__ import annotations
@@ -1894,14 +1900,16 @@ def graph_url(walker: "Lineage", entity: str, rid: str):
     return lineage_href(kind, rid) if found and found[0] != "hidden" else None
 
 
-def lab_graph(records, viewer: Viewer, root, focus=None) -> dict:
+def lab_graph(records, viewer: Viewer, root, focus=None, extra=None) -> dict:
     """History's lineage graph for this viewer: {schema, cols, nodes: [{GRAPH_NODE_KEYS}], edges: [[from, to, role]],
     focus: node index or None, error}. The registry is filtered BEFORE graph_model runs (graph_hidden), with History's
     own read_registry / build_model, so an admin gets exactly History's graph.
     Cost: build_model also builds History's image lookup and model pages (about 0.4 s on the lab registry, 11-2026);
     the graph is kept per registry state (the files' mtime_ns + size) and per set of hidden records (a visibility
     group), so it is built again only when the registry changes or a new group asks. A subtitle, status or edge role
-    that quotes a hidden id is blanked."""
+    that quotes a hidden id is blanked.
+    extra: a dict that, when given, also receives {keys: History key per node, base, drop} for source_graph (never
+    sent to a client)."""
     base, error = history_registry(root)
     if base is None:
         return {"schema": SCHEMA, "cols": [], "nodes": [], "edges": [], "focus": None, "error": error}
@@ -1928,6 +1936,8 @@ def lab_graph(records, viewer: Viewer, root, focus=None) -> dict:
         if k == focus:
             focus_index = i
     edges = [[a, b, "input" if quotes(role) else role] for a, b, role in graph["edges"]]
+    if extra is not None:
+        extra.update(keys=[n[0] for n in graph["nodes"]], base=base, drop=drop)
     return {"schema": SCHEMA, "cols": list(graph["cols"]), "nodes": nodes, "edges": edges, "focus": focus_index,
             "error": error}
 
@@ -1994,16 +2004,216 @@ def item_graph(g: dict) -> dict:
 
 
 def graph_focus_key(records, kind, entity_id):
-    """The Lab graph key (History's '<entity>|<id>') of a catalog item, for the "Lab graph" link on its Lineage."""
+    """The graph key (History's '<entity>|<id>') of a catalog item, for its Lineage page's Graph and "Lab graph" link.
+    A session or grid gets 'session|<id>' / 'grid|<id>': not a lab graph node, its Graph is source_graph()."""
     if kind == "images":
         entity, _ = find_set(records, entity_id)
     else:
-        entity = {"labels": "label_version", "dataset": "dataset", "model": "model"}.get(kind)
+        entity = {"labels": "label_version", "dataset": "dataset", "model": "model", "session": "session",
+                  "grid": "grid"}.get(kind)
     return f"{entity}|{entity_id}" if entity else None
 
 
 def lab_graph_href(focus=None) -> str:
+    focus = None if source_focus(focus) else focus          # a session / grid is not in the lab graph
     return f"{PREFIX}/lineage/graph/" + (f"?focus={quote(focus, safe='')}" if focus else "")
+
+
+# ---------------------------------------------------------------- Session / grid graph (lab graph + its sources)
+SOURCE_COLS = ("Imaging sessions", "Grids and uploads")    # drawn left of the lab graph's columns
+SOURCE_ENTITIES = ("session", "grid")
+SOURCE_ROLES = {"grid": "grid", "images": "used its images", "upload": "upload", "analysed": "analysed"}
+
+
+def source_focus(focus):
+    """('session' | 'grid', id) for a session / grid graph key, else None."""
+    if not isinstance(focus, str):
+        return None
+    entity, sep, rid = focus.partition("|")
+    return (entity, rid) if sep and entity in SOURCE_ENTITIES and rid else None
+
+
+def source_links(root, base, drop) -> dict:
+    """What used the images of each session and grid, from the registry the viewer's lab graph was built from (the
+    hidden records already left out), so only visible lab-graph keys can appear:
+      links[(session, grid or None)] = {History key}: an image record names the session (its grid: the image's own,
+        else the session's session_grids slot; a grid the registry does not have counts as no grid), and an item
+        lists that image -- History's own image lookup (registry/history_page.py lookup_index: a dataset's image
+        list, a label version's change log and reviewed images, a review package's data.js, a revise / annotate
+        job's list, a Roboflow image -> the pull it was first seen in), plus a Roboflow export's image list;
+      grids[session] = its grids; sessions[grid] = its sessions; ps[session] = prediction sets whose source is that
+      session; pkgs[prediction set id] = its prediction packages.
+    Kept per registry state and visibility group, like the lab graph (built once, about the cost of History's image
+    lookup)."""
+    sig, current, _, _ = base
+    key = ("sources", str(root), sig, frozenset(drop))
+    hit = _recall(key)
+    if hit is not None:
+        return hit
+    hp = _history_module()
+    kept = {k: r for k, r in current.items() if k not in drop}
+    where = {}                                              # image id -> (session, grid or None)
+    for k, r in kept.items():
+        if not k.startswith("image|") or not _text(r.get("session")):
+            continue
+        sid, slot = r["session"], r.get("session_grid")
+        gid = _text(r.get("grid")) or _dict(_dict(kept.get("session|" + sid)).get("session_grids")).get(
+            str(slot) if slot is not None else "")
+        where[r["id"]] = (sid, str(gid) if gid and f"grid|{gid}" in kept else None)
+    links: dict = {}
+
+    def add(image, k):
+        w = where.get(image)
+        if w and k:
+            links.setdefault(w, set()).add(k)
+    lk = hp.lookup_index(kept, [Path(root)], [])
+    for name, refs in lk["i"]:
+        if name not in where:
+            continue
+        for ref in refs:
+            k = lk["e"][ref if isinstance(ref, int) else ref[0]]
+            if k.startswith("roboflow_image|"):
+                pull = _text(kept[k].get("first_seen_pull"))
+                k = f"pull|{pull}" if pull else None
+            add(name, k)
+    for k, r in kept.items():                               # History's lookup reads datasets' lists, not exports'
+        if k.startswith("roboflow_export|") and isinstance(r.get("image_list"), dict):
+            for stem, _ in hp.read_list_file(r["image_list"], [Path(root)])["rows"] or []:
+                add(stem, k)
+    grids, sessions = {}, {}
+    for k, r in kept.items():
+        if k.startswith("session|"):
+            for gid in _dict(r.get("session_grids")).values():
+                if f"grid|{gid}" in kept:
+                    grids.setdefault(r["id"], set()).add(str(gid))
+    for sid, gid in where.values():
+        if gid:
+            grids.setdefault(sid, set()).add(gid)
+    for sid, gs in grids.items():
+        for gid in gs:
+            sessions.setdefault(gid, set()).add(sid)
+    ps, pkgs = {}, {}
+    for k, r in kept.items():
+        if k.startswith("prediction_set|") and _text(_dict(r.get("source")).get("session")):
+            ps.setdefault(r["source"]["session"], []).append(k)
+        elif k.startswith("review_package|"):
+            set_id = _text(r.get("prediction_set")) or (_text(r.get("base")) if r.get("base_kind") == "prediction_set"
+                                                        else None)
+            if set_id:
+                pkgs.setdefault(set_id, []).append(k)
+    out = {"links": {w: frozenset(ks) for w, ks in links.items()},
+           "grids": {s: sorted(g, key=grid_sort_key) for s, g in grids.items()},
+           "sessions": {g: sorted(s) for g, s in sessions.items()},
+           "ps": {s: sorted(ks) for s, ks in ps.items()}, "pkgs": {p: sorted(ks) for p, ks in pkgs.items()}}
+    _remember(key, out)
+    return out
+
+
+def source_node(entity, rid, col, **kw) -> dict:
+    """A session / grid / upload box: exactly GRAPH_NODE_KEYS, never a path or a person."""
+    node = {"title": rid, "kind": entity, "col": SOURCE_COLS.index(col), "hist": 0, "part": -1, "sub": "",
+            "status": None, "url": None}
+    node.update(kw)
+    return node
+
+
+def session_box(records, sid) -> dict:
+    rec = records["session"].get(sid)
+    if not rec:                                             # named by images only: no page to open
+        return source_node("session", sid, "Imaging sessions")
+    return source_node("session", sid, "Imaging sessions", sub=short_date(rec.get("date")),
+                       status=str(rec["status"]) if rec.get("status") is not None else None,
+                       url=lineage_href("session", sid))
+
+
+def grid_box(records, gid) -> dict:
+    rec = records["grid"].get(gid)
+    return source_node("grid", gid, "Grids and uploads", sub=_text(_dict(rec).get("sample_label")) or "",
+                       url=lineage_href("grid", gid) if rec else None)
+
+
+def analysis_conversion(ps_id):
+    """The conversion a prediction set was run on (its request.json source folder is <raw_tiles>/<cid>/tiles), or
+    None. Only the folder NAME is read, compared with the session's conversions; the path is never sent."""
+    def compute():
+        root = predict_folder()
+        if root is None or not PREDICTION_SET_ID.match(str(ps_id)):
+            return None
+        folder = _text(_dict(read_small_json(root / ps_id / "request.json").get("source")).get("dir"))
+        if not folder:
+            return None
+        p = Path(folder)
+        return p.parent.name if p.name == "tiles" else None
+    return cached(_files_cache, ("ps-conversion", str(ps_id)), compute)
+
+
+def source_graph(records, viewer: Viewer, root, focus) -> dict:
+    """The Graph of a session's or grid's Lineage page, in item_graph's shape (scope item, cap and `more` included):
+    the session -> its grids -> what used their images (source_links), its upload conversions (only those the viewer
+    may open: the owner and the admin) -> the analyses run on them, and analyses of the session; then everything
+    downstream of those over the lab graph's own edges (item_graph's directed walk, never a second walker). A grid's
+    graph has its sessions as ancestors and only what used the grid's own images.
+    Built from the viewer's FILTERED lab graph: an item the viewer may not see is not a node there, so it is never
+    linked, counted or reached. Session / grid / upload boxes are added left of the lab columns (SOURCE_COLS).
+    An unknown session / grid (or any other key) gives the empty graph with focus None and no echo."""
+    extra: dict = {}
+    g = lab_graph(records, viewer, root, None, extra)
+    want = source_focus(focus)
+    if want is None or "keys" not in extra or want[1] not in records[want[0]]:
+        return item_graph(g)                                # focus None: the empty graph
+    entity, rid = want
+    sl = source_links(root, extra["base"], extra["drop"])
+    idx = {k: i for i, k in enumerate(extra["keys"])}
+    nodes = g["nodes"]                                      # fresh dicts per call: shifting the columns is safe
+    for n in nodes:
+        n["col"] += len(SOURCE_COLS)
+    added: dict = {}
+
+    def box(node) -> int:
+        nodes.append(node)
+        return len(nodes) - 1
+
+    def link(a, b, role):
+        if a is not None and b is not None and a != b:
+            added.setdefault((a, b), SOURCE_ROLES[role])
+
+    if entity == "session":
+        focus_i = box(session_box(records, rid))
+        for gid in sl["grids"].get(rid, []):
+            gi = box(grid_box(records, gid))
+            link(focus_i, gi, "grid")
+            for k in sorted(sl["links"].get((rid, gid), ())):
+                link(gi, idx.get(k), "images")
+        for k in sorted(sl["links"].get((rid, None), ())):
+            link(focus_i, idx.get(k), "images")
+        convs = {}
+        if viewer.cfg is not None and US.is_upload_session(records["session"][rid]):
+            for c in US.visible_conversions(viewer.cfg, records["session"][rid], viewer.user or {}, viewer.can_see):
+                n_tiles = _number(c.get("n_tiles"))
+                convs[c["id"]] = box(source_node("upload", c["id"], "Grids and uploads",
+                                                 sub=plural(int(n_tiles), "tile") if n_tiles is not None else "",
+                                                 url=c["href"]))
+                link(focus_i, convs[c["id"]], "upload")
+        for k in sl["ps"].get(rid, []):
+            if k not in idx:
+                continue
+            set_id = k.split("|", 1)[1]
+            src = convs.get(analysis_conversion(set_id), focus_i)
+            link(src, idx[k], "analysed")
+            for pk in sl["pkgs"].get(set_id, []):
+                link(src, idx.get(pk), "analysed")
+    else:
+        focus_i = box(grid_box(records, rid))
+        for sid in sl["sessions"].get(rid, []):
+            link(box(session_box(records, sid)), focus_i, "grid")
+        for (sid, gid), ks in sl["links"].items():
+            if gid == rid:
+                for k in sorted(ks):
+                    link(focus_i, idx.get(k), "images")
+    full = {"schema": g["schema"], "cols": list(SOURCE_COLS) + g["cols"], "nodes": nodes,
+            "edges": g["edges"] + [[a, b, role] for (a, b), role in added.items()], "focus": focus_i,
+            "error": g["error"]}
+    return item_graph(full)
 
 
 # ---------------------------------------------------------------- HTML
@@ -2208,7 +2418,8 @@ def render_detail(d, error, extra="") -> str:
     if d.get("review_url"):
         out.append(f'<p class="cj-data-more"><a href="{esc(d["review_url"])}">Open in review</a></p>')
     out.append(f'<p class="cj-data-more"><a class="cj-data-lnk" href="{esc(lineage_href(kind, d["id"]))}">'
-               'Lineage: where this came from</a></p>')
+               + ("Lineage: what was made from it" if kind in SOURCE_ENTITIES else "Lineage: where this came from")
+               + "</a></p>")
     if d.get("gap"):
         out.append(f'<p class="cj-mut">Acquisition details are not available: {esc(d["gap"])}</p>')
     if kind == "session":
@@ -2259,20 +2470,31 @@ def render_lineage_node(node) -> str:
 
 
 def view_toggle(focus) -> str:
-    """Tree | Graph, for an item that is a graph node (a session or grid is not, so it gets none). Hidden until
-    /data/data.js runs: without script the Tree is the page."""
+    """Tree | Graph, for an item with a graph (a lab graph node, or a session / grid: source_graph). Hidden until
+    /data/data.js runs: without script the Tree is the page. A session's or grid's tree is only itself (and a grid's
+    sessions), so its page opens on the Graph unless the person last chose Tree (data-default)."""
     if not focus:
         return ""
-    return ('<div class="cj-data-graph-toggle" id="cj-data-view-toggle" role="group" aria-label="View" hidden>'
+    default = ' data-default="graph"' if source_focus(focus) else ""
+    return ('<div class="cj-data-graph-toggle" id="cj-data-view-toggle" role="group" aria-label="View"'
+            f'{default} hidden>'
             '<button type="button" data-view="tree" aria-pressed="true">Tree</button>'
             '<button type="button" data-view="graph" aria-pressed="false">Graph</button></div>')
+
+
+SOURCE_NOTES = {"session": "This session, its grids and uploads, and everything made from their images. "
+                           "Arrows: parent → child (inputs).",
+                "grid": "This grid, the sessions that imaged it, and everything made from its images. "
+                        "Arrows: parent → child (inputs)."}
 
 
 def graph_panel(focus) -> str:
     if not focus:
         return ""
     ep = f"{PREFIX}/api/lineage/graph?focus={quote(focus, safe='')}&scope=item"
-    return ('<div id="cj-data-graph-panel" hidden>' + graph_frame(ep, True, lab_graph_href(focus)) + "</div>"
+    src = source_focus(focus)
+    return ('<div id="cj-data-graph-panel" hidden>'
+            + graph_frame(ep, True, lab_graph_href(focus), SOURCE_NOTES[src[0]] if src else None) + "</div>"
             f'<script src="{PREFIX}/data.js" defer></script>')
 
 
@@ -2285,25 +2507,29 @@ def render_lineage(tree, error, focus=None) -> str:
                 if s.get("untraced_images") else "")
     summary = (f'{plural(s["steps"], "step")}: {s["known"]} found, {s["unknown"]} unknown, '
                f'{s["hidden"]} not visible to you{cut}{loop}.{untraced}')
+    lab = (f'Graph: what was made from its images. <a href="{esc(lab_graph_href())}">Lab graph</a> shows how '
+           'everything connects.' if source_focus(focus) else
+           f'<a href="{esc(lab_graph_href(focus))}">Lab graph</a> shows it among everything else.')
     return (breadcrumb(("Data", PREFIX + "/"), (KIND_TITLES[DETAIL_LIST[kind]], f"{PREFIX}/list/{DETAIL_LIST[kind]}"),
                        (tree["title"], entity_href(kind, tree["id"])))
             + f'<h1 class="cj-wrap">Lineage of {esc(tree["title"])}</h1>'
             + '<p class="cj-mut cj-data-sub">The chain back to the raw imaging sessions, read from the registry. '
-              'A step the registry does not record is shown as unknown, never guessed. '
-              f'<a href="{esc(lab_graph_href(focus))}">Lab graph</a> shows it among everything else.</p>'
+              f'A step the registry does not record is shown as unknown, never guessed. {lab}</p>'
             + banner(error) + view_toggle(focus)
             + '<div id="cj-data-tree-panel">' + f'<p class="cj-data-lsum">{esc(summary)}</p>'
             + '<ol class="cj-data-lroot">' + render_lineage_node(root) + "</ol></div>"
             + graph_panel(focus))
 
 
-def graph_frame(endpoint: str, item: bool = False, lab_href: str = "") -> str:
+def graph_frame(endpoint: str, item: bool = False, lab_href: str = "", note=None) -> str:
     """The graph's controls and empty canvas. /data/data.js finds the frame by id cj-data-graph-root and takes its
-    endpoint (and, on the lab page, the page's own ?focus) from data-* attributes; no record text is in this HTML."""
+    endpoint (and, on the lab page, the page's own ?focus) from data-* attributes; no record text is in this HTML.
+    note: the line beside the controls (a session's / grid's own; default: the lab's or an item's)."""
     attrs = (f'data-endpoint="{esc(endpoint)}"' + (' data-scope="item"' if item else ' data-focus-from-url="1"'))
-    note = ("Arrows: parent \u2192 child (inputs). Dashed: model predictions \u2192 review / revise \u2192 label "
-            "version. \u2605 = production." if not item else
-            "This item, what it was built from, and what was built from it. Arrows: parent \u2192 child (inputs).")
+    note = note or ("Arrows: parent \u2192 child (inputs). Dashed: model predictions \u2192 review / revise \u2192 "
+                    "label version. \u2605 = production." if not item else
+                    "This item, what it was built from, and what was built from it. Arrows: parent \u2192 child "
+                    "(inputs).")
     return ('<div class="cj-data-graph-bar">'
             '<label><input type="checkbox" id="cj-data-graph-hist"> <span id="cj-data-graph-histl">Show history'
             '</span></label>'
@@ -2488,8 +2714,11 @@ def routes(ctx) -> list:
     def api_graph(request: Request):
         records, _, viewer = state(request)
         focus = request.query_params.get("focus")
-        g = lab_graph(records, viewer, getattr(ctx.cfg, "registry", None),
-                      focus if focus and len(focus) <= 300 else None)
+        focus = focus if focus and len(focus) <= 300 else None
+        root = getattr(ctx.cfg, "registry", None)
+        if request.query_params.get("scope") == "item" and source_focus(focus):
+            return ctx.json(source_graph(records, viewer, root, focus))     # a session / grid
+        g = lab_graph(records, viewer, root, focus)
         return ctx.json(item_graph(g) if request.query_params.get("scope") == "item" else g)
 
     def script(request: Request):

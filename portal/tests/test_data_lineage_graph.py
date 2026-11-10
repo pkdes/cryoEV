@@ -12,7 +12,8 @@ Data module, Lineage item pages: the Tree | Graph toggle and the item graph (por
   - leaks: the visibility tests of test_data_graph rerun with scope=item, admin as the control; a hidden or unknown
     focus gives an empty graph, focus null and no echo;
   - the page in a browser (Playwright, Edge channel): Tree default, toggle, remembered choice, blocked storage,
-    390 and 1280 px, light and dark; no toggle on a session page. Screenshots go to $CJ_SHOT_DIR when set.
+    390 and 1280 px, light and dark; a session / grid page has its own Graph (test_data_session_graph). Screenshots
+    go to $CJ_SHOT_DIR when set.
 
 Temp registry from registry/samples plus fixture rows (cjtest.Env); never the real one.
 
@@ -377,15 +378,17 @@ class Http(Served):
         self.assertIn("data-focus-from-url", lab)
         self.assertNotIn("cj-data-view-toggle", lab)
 
-    def test_no_toggle_on_session_or_grid_pages(self):
+    def test_session_and_grid_pages_get_their_own_graph(self):
+        # wave B (SG) gave sessions and grids a Graph (source_graph; tests in test_data_session_graph): the toggle is
+        # there, with a session / grid key, and the lab graph link focuses nothing (they are not lab graph nodes)
         for kind, eid in (("session", "20261027"), ("grid", "2602")):
             st, _, body = self.get(f"/data/lineage/{kind}/{eid}/")
             page = body.decode("utf-8")
             with self.subTest(kind=kind):
                 self.assertEqual(st, 200)
-                self.assertNotIn("cj-data-view-toggle", page)
-                self.assertNotIn("cj-data-graph-panel", page)
-        # control: an item page has it (guards against the loop above never running)
+                self.assertIn("cj-data-view-toggle", page)
+                self.assertIn(f"focus={kind}%7C{eid}&amp;scope=item", page)
+                self.assertNotIn("/data/lineage/graph/?focus=", page)
         self.assertIn("cj-data-view-toggle", self.get("/data/lineage/model/" + M_MID + "/")[2].decode("utf-8"))
 
     def test_session_page_exists_for_the_toggle_check(self):
@@ -394,7 +397,7 @@ class Http(Served):
         self.assertIsNotNone(sid)
         st, _, body = self.get("/data/lineage/session/" + quote(str(sid)) + "/")
         self.assertEqual(st, 200)
-        self.assertNotIn(b"cj-data-view-toggle", body)
+        self.assertIn(b"cj-data-view-toggle", body)
 
 
 def launch(p):
