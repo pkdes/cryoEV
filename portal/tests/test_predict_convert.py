@@ -498,6 +498,8 @@ class Base(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text[:600])
         cid = CID_RE.match(r.json()["href"]).group(1)
         self.assertEqual(self.wait_conv(cid)["state"], "done", self.status(cid))
+        # and the stitch job it queued (round 7) has ended: nothing changes its status.json after this
+        wait_for(lambda: not P.stitch_busy(self.status(cid)), 60, what=f"{cid}'s stitch job")
         return cid
 
     def src_key(self, cid) -> str:
@@ -1168,6 +1170,7 @@ class Retention(Base):
         st, r = self.upload(who, "raw", {"session": "20261101", "recipe": "20261101"}, self.raw_files())
         cid = CID_RE.match(r.json()["href"]).group(1)
         self.wait_conv(cid)
+        wait_for(lambda: not P.stitch_busy(self.status(cid)), 60, what=f"{cid}'s stitch job")
         return cid
 
     def test_keep_zero_removes_at_the_end(self):
