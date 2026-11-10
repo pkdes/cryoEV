@@ -7,15 +7,24 @@
       - no --params = byte-identical tiles to --params {} and to --params holding the recipe's own values; a
         changed value changes the bytes (so the comparison can fail);
       - params_effective / params_overrides land in a portal conversion's convert.json (read -> merge -> write,
-        other keys kept), and only there; denoise false still writes a tile when skip_variants names "clean";
+        other keys kept), and only there; overrides that can't be recorded fail the conversion (no overrides: a
+        warning); denoise false still writes a tile when skip_variants names "clean", variant "clean";
+      - bandpass_nm needs denoise on after the overrides, and is reported null with denoise off;
       - describe --recipe: the shape and values, read-only (the processing repo is unchanged); describe --conv:
         recorded vs not, a warning when the recipe now differs;
-      - preview refusals; --stitch-only refuses --params.
-  * Real (needs CJ_PROCESSING_REPO): a synthetic MRC montage through the real pipeline. Known answer: preview with
-    --params equal to the recipe's own values gives an after.png (and before.png) byte-identical to the tile the
-    conversion wrote; clip_hi_pct 99.5 gives a different after.png, byte-identical to the tile of a conversion run
-    with that --params; no --params = recipe-valued --params, byte for byte.
+      - preview refusals (an --out that is a file too), stale .preview_work_<pid> cleanup; --stitch-only refuses
+        --params.
+  * Real (needs CJ_PROCESSING_REPO): a synthetic MRC montage through the real pipeline.
+      - golden md5s made by MAIN's code (hard-coded below): no --params reproduces them;
+      - preview known answers: before.png = the conversion's own tile (its own overrides included); --params equal
+        to the base reuses it; clip_hi_pct changed gives a different after.png, byte-identical to the tile of a
+        conversion run with that --params; params are absolute over the conversion's base;
+      - denoise false differs from the default and equals the clean variant of a normal run (export_dataset called
+        directly); bandpass_nm 4 differs from both.
 """
+import argparse
+import contextlib
+import dataclasses
 import hashlib
 import io
 import json
@@ -26,6 +35,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import unittest.mock
 from pathlib import Path
 
 TESTS = Path(__file__).resolve().parent
@@ -237,6 +247,25 @@ class Stub(unittest.TestCase):
             self.assertFalse((d / "tiles").exists())
         self.convert(d, {"bandpass_nm": 2.5}, recipe="band")               # below max: fine
 
+    def test_bandpass_needs_denoise_on_after_the_overrides(self):
+        d = self.conv_folder()
+        # 20261012 (stub) has denoise off; dn has it on
+        for recipe, params in (("20261012", {"bandpass_nm": 3}), ("dn", {"denoise": False, "bandpass_nm": 3})):
+            with self.subTest(recipe=recipe), self.assertRaisesRegex(CR.ConvertError, "needs denoise on"):
+                self.convert(d, params, recipe=recipe)
+            self.assertFalse((d / "tiles").exists())
+        res = self.convert(d, {"denoise": True, "bandpass_nm": 3}, recipe="20261012", out=self.tmp / "on")
+        self.assertEqual(res["params_effective"]["bandpass_nm"], 3.0)
+        res = self.convert(d, None, recipe="20261012", out=self.tmp / "off")
+        self.assertEqual(res["params_effective"], {"clip_lo_pct": 1.0, "clip_hi_pct": 99.0, "bandpass_nm": None,
+                                                   "denoise": False})
+        res = self.convert(d, {"denoise": False}, recipe="dn", out=self.tmp / "dnoff")
+        self.assertIsNone(res["params_effective"]["bandpass_nm"])
+        desc = CR.describe_recipe("20261012", processing_repo_dir=self.repo, log=io.StringIO())
+        self.assertIsNone(desc["denoise"]["bandpass_nm"])
+        self.assertIsNone(desc["params"]["bandpass_nm"])
+        self.assertEqual(desc["variant"], "clean")
+
     # ------------------------------------------------------------ no --params = the recipe, byte for byte
     def test_no_params_is_byte_identical(self):
         d = self.conv_folder()
@@ -259,6 +288,11 @@ class Stub(unittest.TestCase):
         res = self.convert(d, {"denoise": False})           # dn skips "clean": without the fix, no variant is left
         self.assertEqual(res["n_tiles"], 1)
         self.assertFalse(res["params_effective"]["denoise"])
+        self.assertEqual([t["variant"] for t in res["tiles"]], ["clean"])
+        self.assertEqual(json.loads((d / "convert.json").read_text(encoding="utf-8"))["variant"], "clean")
+        self.assertIn("denoised_nobar", res["tiles"][0]["file"])     # names stay the processing repo's
+        res = self.convert(d, None, out=self.tmp / "plain")
+        self.assertEqual([t["variant"] for t in res["tiles"]], ["denoised"])
         cfg = CR.apply_params(CR.load_recipe(self.repo, "dn", CR.import_pipeline(self.repo)[1], io.StringIO())[2],
                               {"denoise": False})
         self.assertEqual(cfg.skip_variants, ())
@@ -274,6 +308,7 @@ class Stub(unittest.TestCase):
         self.assertEqual(meta["params_effective"], want)
         self.assertEqual(meta["params_overrides"], {"clip_hi_pct": 99.5, "bandpass_nm": 3.0})
         self.assertEqual(res["params_effective"], want)
+        self.assertEqual(meta["variant"], "denoised")
         self.assertEqual({k: meta[k] for k in before}, before)        # merged: every other key kept as it was
         # no --params: the recipe's values are recorded, overrides {}
         d2 = self.conv_folder("20261106-1_def456")
@@ -286,6 +321,34 @@ class Stub(unittest.TestCase):
         res = self.convert(d2, {"clip_hi_pct": 99.5}, out=loose / "out")
         self.assertEqual(res["params_overrides"], {"clip_hi_pct": 99.5})
         self.assertEqual(sorted(p.name for p in loose.iterdir()), ["out"])
+
+    def test_overrides_that_cant_be_recorded_fail_the_conversion(self):
+        held = unittest.mock.patch.object(CR, "_write_json", side_effect=PermissionError("held open"))
+        d = self.conv_folder()
+        with held, self.assertRaisesRegex(RuntimeError, "could not be recorded.*PermissionError"):
+            self.convert(d, {"clip_hi_pct": 99.5})
+        self.assertFalse((d / "tiles").exists())                   # failed: no tiles left behind
+        with held:                                                 # no overrides: a warning only
+            res = self.convert(d, None)
+        self.assertTrue(any("params_effective not recorded" in w for w in res["warnings"]), res["warnings"])
+        d2 = self.conv_folder("20261106-1_bad000")
+        (d2 / "convert.json").write_text("{not json", encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "could not be recorded.*unreadable"):
+            self.convert(d2, {"denoise": False})
+        self.assertFalse((d2 / "tiles").exists())
+        res = self.convert(d2, None)
+        self.assertTrue(any("params_effective not recorded" in w for w in res["warnings"]), res["warnings"])
+        code, res, _ = self.cli("--in", d / "input", "--out", self.tmp / "x" / "tiles", "--recipe", "dn")
+        self.assertEqual(code, 0)                                  # not a portal folder: nothing to record
+
+    def test_clear_stale_preview_work(self):
+        out = self.tmp / "pv"
+        dead, live, mine = (out / f"{CR.PREVIEW_WORK}_{n}" for n in (999999999, os.getppid(), os.getpid()))
+        for x in (dead, live, mine):
+            x.mkdir(parents=True)
+        (out / "before.png").write_bytes(b"x")
+        CR.clear_stale_preview_work(out)
+        self.assertEqual(sorted(p.name for p in out.iterdir()), sorted(["before.png", live.name, mine.name]))
 
     def test_cli_params_round_trip(self):
         d = self.conv_folder()
@@ -361,7 +424,9 @@ class Stub(unittest.TestCase):
                  ((d, "../x.png", self.tmp / "pv"), "not a path"),
                  ((d, tile, d / "preview"), "outside the conversion folder"),
                  ((d, tile, d / "tiles"), "outside the conversion folder"),
-                 ((self.tmp / "nowhere", tile, self.tmp / "pv"), "not a conversion folder")]
+                 ((self.tmp / "nowhere", tile, self.tmp / "pv"), "not a conversion folder"),
+                 ((d, tile, self.tmp / "afile"), "is a file")]
+        (self.tmp / "afile").write_bytes(b"x")
         for (conv, t, out), msg in cases:
             with self.subTest(msg=msg), self.assertRaisesRegex(CR.ConvertError, msg):
                 CR.preview(conv, t, out, processing_repo_dir=self.repo, log=io.StringIO())
@@ -398,6 +463,35 @@ class Real(unittest.TestCase):
                          log=io.StringIO())
         return d, res
 
+    def clean_variant_md5(self, d) -> dict:
+        """source_file -> md5 of the CLEAN variant of a normal run of the recipe (denoise on, both variants
+        rendered, the denoised one skipped): export_dataset called directly, outside convert_raw."""
+        repo = Path(os.environ[CR.REPO_ENV])
+        edt, core = CR.import_pipeline(repo)
+        _n, _df, base = CR.load_recipe(repo, self.RECIPE, core, io.StringIO())
+        self.assertTrue(base.denoise, "the recipe must denoise for this control")
+        ms, _w = CR.find_montages([d / "input" / "grid1-pos1.mrc.mdoc"], core, base.layout)
+        for m in ms:
+            CR.check_montage(m, core)                     # sets the placement, as the conversion does
+        work = self.tmp / "clean_ref"
+        cfg = dataclasses.replace(CR.run_cfg(base, work, ms, False, "clean ref"), skip_variants=("denoised",))
+        args = argparse.Namespace(out=str(work / "native"), grids=None, limit=0, gpu=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            edt.export_dataset(args, cfg)
+        small = work / (edt.SMALL_DIR % ("%.1f" % float(edt.TARGET_A_PX)))
+        return {r["source_file"]: md5(small / r["output_name"]) for r in T.read_manifest(small)}
+
+    def test_no_params_matches_main_golden(self):
+        """Tiles of the synthetic montage as MAIN's code (00a1921, before --params existed) wrote them."""
+        repo = Path(os.environ[CR.REPO_ENV])
+        if CR.processing_info(repo, self.RECIPE)["recipe_md5"] != GOLDEN_RECIPE_MD5:
+            self.skipTest(f"recipe {self.RECIPE} changed since the goldens were made: regenerate them")
+        d, res = self.conv("c_golden")
+        self.assertEqual(res["compute"], "CPU")
+        got = {r["output_name"]: md5(d / "tiles" / r["output_name"]) for r in T.read_manifest(d / "tiles")}
+        self.assertEqual(got, GOLDEN_TILES)
+        self.assertEqual(md5(d / "tiles" / "MANIFEST.csv"), GOLDEN_MANIFEST)
+
     def test_preview_known_answer_and_params_identity(self):
         d, res = self.conv("c_plain")
         own = res["params_effective"]                         # the recipe's own values
@@ -408,22 +502,68 @@ class Real(unittest.TestCase):
 
         pv = CR.preview(d, tile, self.tmp / "pv_same", params=json.dumps(own), log=io.StringIO())
         self.assertEqual(pv["params_effective"], own)
-        self.assertEqual(md5(pv["after"]), want, "preview with the recipe's own values != the conversion's tile")
-        self.assertEqual(md5(pv["before"]), want)
+        self.assertTrue(pv["after_reused"])                   # the same settings as the base: one render
+        self.assertEqual(md5(pv["before"]), want, "preview of the conversion's own settings != its tile")
+        self.assertEqual(md5(pv["after"]), want)
         self.assertEqual(sorted(p.name for p in (self.tmp / "pv_same").iterdir()), ["after.png", "before.png"])
 
         changed = {"clip_hi_pct": 99.5 if own["clip_hi_pct"] != 99.5 else 99.0}
         pv2 = CR.preview(d, tile, self.tmp / "pv_hi", params=changed, log=io.StringIO())
+        self.assertFalse(pv2["after_reused"])
         self.assertEqual(md5(pv2["before"]), want)
         self.assertNotEqual(md5(pv2["after"]), want)          # the control: the comparison can fail
 
         d2, res2 = self.conv("c_hi", params=changed)          # the real conversion with the same override
-        self.assertEqual(md5(pv2["after"]), md5(d2 / "tiles" / tile))
+        hi = md5(d2 / "tiles" / tile)
+        self.assertEqual(md5(pv2["after"]), hi)
         self.assertEqual(json.loads((d2 / "convert.json").read_text(encoding="utf-8"))["params_overrides"],
                          {"clip_hi_pct": float(changed["clip_hi_pct"])})
 
+        # S2: the base is the conversion's own settings. No params: before = its own (overridden) tile.
+        pv3 = CR.preview(d2, tile, self.tmp / "pv_base", log=io.StringIO())
+        self.assertEqual(md5(pv3["before"]), hi)
+        self.assertEqual(md5(pv3["after"]), hi)
+        self.assertEqual(pv3["params_conversion"]["clip_hi_pct"], float(changed["clip_hi_pct"]))
+        self.assertEqual(pv3["params_recipe"], own)
+        self.assertEqual(pv3["params_conversion_overrides"], {"clip_hi_pct": float(changed["clip_hi_pct"])})
+        # params are absolute over that base: the recipe's value again renders the plain conversion's tile
+        pv4 = CR.preview(d2, tile, self.tmp / "pv_back", params={"clip_hi_pct": own["clip_hi_pct"]},
+                         log=io.StringIO())
+        self.assertFalse(pv4["after_reused"])
+        self.assertEqual((md5(pv4["before"]), md5(pv4["after"])), (hi, want))
+
         d3, _ = self.conv("c_own", params=own)                # recipe-valued --params = no --params, byte for byte
         self.assertEqual(tree_md5(d3 / "tiles"), tree_md5(d / "tiles"))
+
+    def test_denoise_off_and_bandpass_change_the_pixels(self):
+        d, res = self.conv("c_plain")
+        plain = {r["source_file"]: md5(d / "tiles" / r["output_name"]) for r in T.read_manifest(d / "tiles")}
+        self.assertEqual({t["variant"] for t in res["tiles"]}, {"denoised"})
+
+        dn, res_dn = self.conv("c_nodn", params={"denoise": False})
+        nodn = {r["source_file"]: md5(dn / "tiles" / r["output_name"]) for r in T.read_manifest(dn / "tiles")}
+        self.assertEqual({t["variant"] for t in res_dn["tiles"]}, {"clean"})
+        self.assertIsNone(res_dn["params_effective"]["bandpass_nm"])
+        self.assertTrue(all(nodn[k] != plain[k] for k in plain), "denoise off left a tile unchanged")
+        self.assertEqual(nodn, self.clean_variant_md5(d))     # = the clean variant of a normal run
+
+        bp, res_bp = self.conv("c_bp4", params={"bandpass_nm": 4})
+        bp4 = {r["source_file"]: md5(bp / "tiles" / r["output_name"]) for r in T.read_manifest(bp / "tiles")}
+        self.assertEqual(res_bp["params_effective"]["bandpass_nm"], 4.0)
+        self.assertTrue(all(bp4[k] != plain[k] and bp4[k] != nodn[k] for k in plain))
+
+
+# Made by MAIN's convert_raw (00a1921) on test_convert_raw.write_mrc_montage()'s defaults, recipe 20261012, CPU,
+# processing repo 199dfe65 (2026-11-09). They pin pre-change output: compare against these, never regenerate them
+# from this branch's code. Other numpy / OpenCV / mrcfile builds may differ; the test skips when the recipe changed.
+GOLDEN_RECIPE_MD5 = "21915787bb97fafe5a5a27dc92fcde4b"
+GOLDEN_TILES = {
+    "g1_Grid_1__grid1_1_r0c0_t00__denoised_nobar_14p72Apx.png": "ca27b3da0153c8214265ab3ef402ebf3",
+    "g1_Grid_1__grid1_1_r0c1_t02__denoised_nobar_14p72Apx.png": "ce45dc7c110a918922eeeec8dab219da",
+    "g1_Grid_1__grid1_1_r1c0_t01__denoised_nobar_14p72Apx.png": "e412c752708f8643b2c3ec631cd7a532",
+    "g1_Grid_1__grid1_1_r1c1_t03__denoised_nobar_14p72Apx.png": "c6f4ed76f65d9f352a6c2b22c2cbf0d4",
+}
+GOLDEN_MANIFEST = "2586ca91b5cb0704e9d2ff29217afded"
 
 
 if __name__ == "__main__":
