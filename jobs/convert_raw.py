@@ -68,6 +68,27 @@ cleanup that empties <out> on a failure, so neither can fail the conversion or t
     --stitch-only <conv dir> backfill for a finished portal conversion (<dir>/convert.json + tiles/MANIFEST.csv and
                              its raw inputs still there): writes <dir>/montages and <dir>/acquisition.json only.
   Each montage prints a progress line ("stitch [i/n] ...") to stderr.
+
+CONVERSION SETTINGS (round 7 phase 2, BUILD_CONTRACTS.md section 14): read, preview, override.
+    describe --recipe <session> [--json]         the recipe's real values (read-only): denoise (describe_denoise),
+                                                  clip lo/hi %, level sampling, pixel targets, where it came from
+    describe --conv <raw_tiles/cid> [--json]      what a finished conversion used: convert.json params_effective
+                                                  (recorded by the conversion), else the recipe's values now
+    preview --conv <raw_tiles/cid> --tile <output_name> [--params JSON] --out <dir> [--gpu] [--json]
+        before.png (the recipe) and after.png (the recipe + params) of one tile, rendered from the kept raw input
+        by the conversion's own entry point (export_dataset -> render_ref: the clean pass first, its clip levels
+        handed to the denoised pass, the INTER_AREA downsample, the PNG save), with load_tiles narrowed to that one
+        tile (tiles are rendered independently: per-tile levels, per-tile denoise). Writes only into --out. CPU
+        unless --gpu (a GPU conversion's tiles differ by +-1 grey level from a CPU preview: gotcha 31).
+    --params JSON  (on a conversion) overrides the recipe by dataclasses.replace; absent = the recipe untouched,
+        byte for byte. Keys (anything else, or out of range: refused, exit 2):
+            clip_lo_pct 0-5 -> contrast_lo_pct     clip_hi_pct 95-100 -> contrast_hi_pct
+            bandpass_nm 0.5-10 -> denoise_min_nm (bandpass recipes only; below denoise_max_nm)
+            denoise true|false -> denoise (false also renders the clean variant even when skip_variants names it:
+                                  otherwise no variant would be left to write)
+        The result carries params_effective (all four, after the overrides) and params_overrides; a portal
+        conversion (--out <dir>/tiles beside <dir>/convert.json) also records both in convert.json, and
+        --stitch-only re-applies convert.json params_overrides so the montages match the tiles.
 """
 from __future__ import annotations
 
@@ -114,6 +135,12 @@ STITCH_JSON, LAYOUT_JSON, ACQ_JSON = "stitch.json", "layout.json", "acquisition.
 LAYOUT_SCHEMA, ACQ_SCHEMA = "montage_layout/1", "acquisition/1"
 STITCH_WORK = ".stitch_work"
 CONVERT_JSON, CONV_TILES, CONV_MONTAGES = "convert.json", "tiles", "montages"   # a portal conversion folder
+CONV_INPUT = "input"
+# --params: key -> (DatasetConfig field, lo, hi); "denoise" is a bool (BUILD_CONTRACTS.md section 14)
+PARAM_RANGES = {"clip_lo_pct": ("contrast_lo_pct", 0.0, 5.0), "clip_hi_pct": ("contrast_hi_pct", 95.0, 100.0),
+                "bandpass_nm": ("denoise_min_nm", 0.5, 10.0)}
+PARAM_KEYS = (*PARAM_RANGES, "denoise")
+PREVIEW_WORK = ".preview_work"
 
 
 class ConvertError(Exception):
@@ -280,6 +307,88 @@ def load_recipe(repo: Path, recipe: str, core, log):
     if not isinstance(cfg, core.DatasetConfig):
         raise ConvertError(f"recipe {name}: DATASET is not a cryoem_core DatasetConfig")
     return name, defaulted, cfg
+
+
+# ---------------------------------------------------------------- --params (overrides on the recipe)
+def parse_params(raw) -> dict | None:
+    """--params JSON (a str, or an already-parsed dict) -> the validated overrides, or None when absent.
+    ConvertError (exit 2) for bad JSON, a non-object, an unknown key, a wrong type or a value out of range."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError as e:
+            raise ConvertError(f"--params: not valid JSON ({e})") from None
+    if not isinstance(raw, dict):
+        raise ConvertError("--params: must be a JSON object, e.g. {\"clip_hi_pct\": 99.5}")
+    unknown = sorted(str(k) for k in raw if k not in PARAM_KEYS)
+    if unknown:
+        raise ConvertError(f"--params: unknown key(s) {', '.join(unknown)[:200]}; allowed: {', '.join(PARAM_KEYS)}")
+    out = {}
+    for k, v in raw.items():
+        if k == "denoise":
+            if not isinstance(v, bool):
+                raise ConvertError("--params: denoise must be true or false")
+            out[k] = v
+            continue
+        _field, lo, hi = PARAM_RANGES[k]
+        # (a range comparison is False for NaN and +-inf, and safe for an int too big for a float)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
+            raise ConvertError(f"--params: {k} must be a number from {lo:g} to {hi:g} (got {str(v)[:40]})")
+        out[k] = float(v)
+    return out
+
+
+def apply_params(cfg, params):
+    """The recipe with the overrides, by dataclasses.replace. No params: cfg itself, untouched."""
+    if not params:
+        return cfg
+    ch = {PARAM_RANGES[k][0]: v for k, v in params.items() if k in PARAM_RANGES}
+    if "bandpass_nm" in params:
+        if cfg.denoise_method != "bandpass":
+            raise ConvertError(f"--params: bandpass_nm needs a bandpass recipe; this one denoises with "
+                               f"{cfg.denoise_method}")
+        if cfg.denoise_max_nm and params["bandpass_nm"] >= cfg.denoise_max_nm:
+            raise ConvertError(f"--params: bandpass_nm must be below the recipe's denoise_max_nm "
+                               f"({cfg.denoise_max_nm:g} nm)")
+    if "denoise" in params:
+        ch["denoise"] = params["denoise"]
+        if not params["denoise"]:            # only the clean variant is left: it must be written
+            ch["skip_variants"] = tuple(v for v in cfg.skip_variants if v != "clean")
+    return dataclasses.replace(cfg, **ch)
+
+
+def effective_params(cfg) -> dict:
+    """The four tunable values as the recipe (+ overrides) will render them; bandpass_nm is None for a median
+    recipe (and a field a config does not have is None)."""
+    def num(name):
+        v = getattr(cfg, name, None)
+        return None if v is None else float(v)
+    return {"clip_lo_pct": num("contrast_lo_pct"), "clip_hi_pct": num("contrast_hi_pct"),
+            "bandpass_nm": num("denoise_min_nm") if getattr(cfg, "denoise_method", None) == "bandpass" else None,
+            "denoise": bool(getattr(cfg, "denoise", False))}
+
+
+def record_params(conv_json: Path, params, effective) -> bool:
+    """Read -> merge -> atomic write of params_effective / params_overrides into a portal conversion's
+    convert.json. -> written."""
+    try:
+        meta = json.loads(conv_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(meta, dict):
+        return False
+    meta["params_effective"] = effective
+    meta["params_overrides"] = dict(params or {})
+    _write_json(conv_json, meta)
+    return True
+
+
+def _portal_convert_json(out_dir: Path):
+    """<dir>/convert.json when out_dir is a portal conversion's <dir>/tiles, else None."""
+    p = out_dir.parent / CONVERT_JSON
+    return p if out_dir.name == CONV_TILES and p.is_file() else None
 
 
 # ---------------------------------------------------------------- montages
@@ -516,11 +625,13 @@ def _read_manifest(path: Path):
 
 
 def convert(inputs, out_dir, *, recipe="default", sample_key=None, gpu=False, processing_repo_dir=None,
-            log=None, montages_out=None, acquisition_out=None) -> dict:
+            log=None, montages_out=None, acquisition_out=None, params=None) -> dict:
     """Raw montages -> <out_dir>/*.png + MANIFEST.csv. Returns {"out_dir", "recipe", "recipe_defaulted",
     "entry_point", "compute", "device", "montages", "a_px": {montage: A/px}, "n_tiles", "tiles": [{"file",
     "nm_per_px", "source_file", "montage", "sample_label", "size"}], "nm_per_px": [distinct], "warnings",
-    "stitch": stitch.json | None, "acquisition": written}.
+    "stitch": stitch.json | None, "acquisition": written, "params_effective", "params_overrides"}.
+    params: the --params overrides (JSON text or dict; validated first, before anything is touched); None = the
+    recipe as-is, byte for byte.
     Raises ConvertError on a refusal (out_dir left as it was, .warnings carries what was found so far).
     montages_out / acquisition_out: the stitch pass and acquisition.json, after the tiles are final (module
     docstring); their failures are warnings, never a failed conversion.
@@ -528,15 +639,16 @@ def convert(inputs, out_dir, *, recipe="default", sample_key=None, gpu=False, pr
     tee = _Tee(log or sys.stderr)
     warnings = []
     try:
+        params = parse_params(params)
         return _convert(inputs, Path(out_dir), recipe, sample_key, bool(gpu), processing_repo_dir, tee, warnings,
-                        montages_out, acquisition_out)
+                        montages_out, acquisition_out, params)
     except ConvertError as e:
         e.warnings = list(dict.fromkeys(warnings + e.warnings + tee.caught))
         raise
 
 
 def _convert(inputs, out_dir, recipe, sample_key, gpu, processing_repo_dir, tee, warnings, montages_out=None,
-             acquisition_out=None):
+             acquisition_out=None, params=None):
     if out_dir.exists() and (not out_dir.is_dir() or any(out_dir.iterdir())):
         raise ConvertError(f"output folder is not empty: {out_dir}")
     if not inputs:
@@ -544,6 +656,7 @@ def _convert(inputs, out_dir, recipe, sample_key, gpu, processing_repo_dir, tee,
     repo = processing_repo(processing_repo_dir)
     edt, core = import_pipeline(repo)
     recipe_name, defaulted, base_cfg = load_recipe(repo, recipe, core, tee)
+    apply_params(base_cfg, params)               # an override the recipe can't take is refused before any work
     if sample_key is not None and not Path(sample_key).is_file():
         raise ConvertError(f"sample key not found: {sample_key}")
 
@@ -603,10 +716,8 @@ def _convert(inputs, out_dir, recipe, sample_key, gpu, processing_repo_dir, tee,
 
     made_out = not out_dir.exists()
     work = out_dir / WORK
-    # The recipe as-is; only where it reads from and writes to changes. Outputs land in <out>/.convert_work.
-    cfg = dataclasses.replace(base_cfg, dataset_dir=work, raw_subdir=None, notes_subdir=None,
-                              layout=_FixedLayout(montages), use_gpu=gpu,
-                              name=f"convert_raw[{recipe_name}]")
+    cfg = apply_params(run_cfg(base_cfg, work, montages, gpu, f"convert_raw[{recipe_name}]"), params)
+    effective = effective_params(cfg)
     out_dir.mkdir(parents=True, exist_ok=True)
     try:
         work.mkdir()
@@ -616,6 +727,8 @@ def _convert(inputs, out_dir, recipe, sample_key, gpu, processing_repo_dir, tee,
         small = work / (edt.SMALL_DIR % ("%.1f" % target))
         with contextlib.redirect_stdout(tee):
             print(f"convert_raw: {len(montages)} montage(s), recipe {recipe_name}, via {ENTRY_POINT}")
+            if params:
+                print(f"convert_raw: --params {json.dumps(params)} -> {json.dumps(effective)}")
             try:
                 rc = edt.export_dataset(args, cfg)
             except SystemExit as e:          # render_ref stops the run with SystemExit(message)
@@ -640,6 +753,12 @@ def _convert(inputs, out_dir, recipe, sample_key, gpu, processing_repo_dir, tee,
                 (shutil.rmtree if p.is_dir() else os.remove)(p)
         raise
     shutil.rmtree(work, ignore_errors=True)
+    conv_json = _portal_convert_json(out_dir)
+    if conv_json is not None:
+        try:
+            record_params(conv_json, params, effective)
+        except OSError as ex:
+            warnings.append(f"convert.json: params_effective not recorded ({type(ex).__name__}: {ex})")
 
     # The tiles are final. Separate passes from here on: a failure is a warning, never a failed conversion.
     stitch = None
@@ -666,7 +785,14 @@ def _convert(inputs, out_dir, recipe, sample_key, gpu, processing_repo_dir, tee,
             "montages": [m.basename for m in montages], "a_px": {m.basename: a_px[m.basename] for m in montages},
             "n_tiles": len(tiles), "tiles": tiles,
             "nm_per_px": sorted({t["nm_per_px"] for t in tiles}), "warnings": warnings,
-            "stitch": stitch, "acquisition": acq_written, "processing": processing_info(repo, recipe_name)}
+            "stitch": stitch, "acquisition": acq_written, "processing": processing_info(repo, recipe_name),
+            "params_effective": effective, "params_overrides": dict(params or {})}
+
+
+def run_cfg(base_cfg, work: Path, montages, gpu, name):
+    """The recipe as-is; only where it reads from and writes to changes (outputs land in `work`)."""
+    return dataclasses.replace(base_cfg, dataset_dir=work, raw_subdir=None, notes_subdir=None,
+                               layout=_FixedLayout(montages), use_gpu=gpu, name=name)
 
 
 # ---------------------------------------------------------------- montages (after the tiles are final)
@@ -1011,7 +1137,10 @@ def _stitch_only(conv, processing_repo_dir, tee, warnings):
         if not ok:
             gpu = False
             warnings.append(f"the conversion used the GPU, which is not free now ({note}); stitched on the CPU")
-    cfg = dataclasses.replace(base_cfg, use_gpu=gpu, name=f"convert_raw[{recipe_name}] stitch-only")
+    # the overrides the tiles were made with (convert.json params_overrides): the montages must match them
+    overrides = parse_params(meta.get("params_overrides") or None)
+    cfg = apply_params(dataclasses.replace(base_cfg, use_gpu=gpu, name=f"convert_raw[{recipe_name}] stitch-only"),
+                       overrides)
     info = processing_info(repo, recipe_name)
     try:                                         # what made the tiles (the portal keeps convert_raw's result)
         before = (json.loads((conv / "status.json").read_text(encoding="utf-8")).get("result") or {}).get("processing")
@@ -1032,10 +1161,345 @@ def _stitch_only(conv, processing_repo_dir, tee, warnings):
     return {"mode": "stitch", "out_dir": str(conv / CONV_MONTAGES), "recipe": recipe_name,
             "compute": "GPU" if device.startswith("GPU") else "CPU", "device": device,
             "montages": [m.basename for m in montages], "stitch": stitch, "acquisition": acq, "processing": info,
+            "params_effective": effective_params(cfg), "params_overrides": dict(overrides or {}),
             "warnings": warnings}
 
 
+# ---------------------------------------------------------------- describe (read-only)
+def session_pixel(cfg, core) -> tuple:
+    """(A/px values, camera binnings) of the recipe's own session, from its sidecars (read-only); empty sets when
+    the session folder is not here."""
+    a_px, binning = set(), set()
+    try:
+        raw = Path(cfg.raw_dir)
+        if raw.is_dir():
+            with contextlib.redirect_stdout(io.StringIO()):
+                for m in cfg.layout.find(raw):
+                    gp, pieces = core.metadata.parse_metadata(Path(m.idoc_path))
+                    try:
+                        ps = float(gp.get("PixelSpacing"))
+                        if math.isfinite(ps) and ps > 0:
+                            a_px.add(round(ps, 4))
+                    except (TypeError, ValueError):
+                        pass
+                    for pc in [gp, *pieces]:
+                        try:
+                            binning.add(int(float(pc.get("Binning"))))
+                            break
+                        except (TypeError, ValueError):
+                            continue
+    except Exception:
+        return set(), set()
+    return a_px, binning
+
+
+def describe_cfg(cfg, core, edt, name, defaulted, repo) -> dict:
+    """The shape `describe` returns for one (recipe + overrides) config."""
+    import numpy as np
+    pipeline = sys.modules.get("cryoem_core.pipeline")
+    a_px, binning = session_pixel(cfg, core)
+    if not a_px and getattr(cfg, "contrast_level_sampling_A", None):
+        a_px = {float(cfg.contrast_level_sampling_A)}
+    ps_ref = min(a_px) if a_px else None
+    text = None
+    if pipeline is not None and hasattr(pipeline, "describe_denoise"):
+        try:
+            text = pipeline.describe_denoise(cfg, ps_ref)
+        except Exception:                        # a median recipe needs the sampling to size its kernel
+            text = None
+    band = cfg.denoise_method == "bandpass"
+    sampling = getattr(cfg, "contrast_level_sampling_A", None)
+    target = float(edt.TARGET_A_PX)
+    variant = [v for v, _m, _p in cfg.output_dirs() if v not in cfg.skip_variants]
+    info = processing_info(repo, name)
+    return {
+        "recipe": name,
+        "denoise": {"on": bool(cfg.denoise), "method": cfg.denoise_method,
+                    "bandpass_nm": float(cfg.denoise_min_nm) if band else None,
+                    "max_nm": float(cfg.denoise_max_nm) if band and cfg.denoise_max_nm else None,
+                    "median_target_nm": None if band else float(cfg.denoise_target_nm),
+                    "match_contrast": bool(cfg.denoise_match_contrast), "text": text},
+        "contrast": {"clip_lo_pct": float(cfg.contrast_lo_pct), "clip_hi_pct": float(cfg.contrast_hi_pct),
+                     "sampling": float(sampling) if sampling else None,
+                     "sampling_text": (f"clip levels measured at {float(sampling):g} A/px (finer data block-averaged"
+                                       f" first)" if sampling else "clip levels measured on the data as acquired"),
+                     "levels_from": ("the clean pass (denoise_match_contrast)"
+                                     if cfg.denoise and cfg.denoise_match_contrast else "its own pass")},
+        "pixel": {"target_A_px": target, "target_nm_px": round(target * 0.1, 5),
+                  "session_A_px": sorted(a_px), "binning": sorted(binning),
+                  "downsample": {f"{a:g}": round(target / a, 4) for a in sorted(a_px)}, "resample": "INTER_AREA",
+                  "dtype": np.dtype(cfg.dtype or np.float64).name},
+        "variant": variant[-1] if variant else None,
+        "params": effective_params(cfg),
+        "params_allowed": {**{k: [lo, hi] for k, (_f, lo, hi) in PARAM_RANGES.items()}, "denoise": "bool"},
+        "source": {"recipe_file": f"datasets/process_{name}.py", "recipe_md5": info["recipe_md5"],
+                   "commit": info["commit"], "defaulted": bool(defaulted), "layout": type(cfg.layout).__name__,
+                   "checked_by": "check_recipe_source (static, never executed unchecked) + load_recipe",
+                   "entry_point": ENTRY_POINT},
+    }
+
+
+def describe_recipe(recipe="default", *, params=None, processing_repo_dir=None, log=None) -> dict:
+    """`describe --recipe`: the recipe's real values (+ params, when given). Read-only: the recipe file is checked
+    statically, then loaded; no bytecode is written; nothing else is opened but its session's sidecars."""
+    tee = _Tee(log or sys.stderr)
+    params = parse_params(params)
+    repo = processing_repo(processing_repo_dir)
+    edt, core = import_pipeline(repo)
+    name, defaulted, cfg = load_recipe(repo, recipe, core, tee)
+    return describe_cfg(apply_params(cfg, params), core, edt, name, defaulted, repo)
+
+
+def _read_conv(conv: Path) -> dict:
+    try:
+        meta = json.loads((conv / CONVERT_JSON).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise ConvertError(f"not a conversion folder (no readable {CONVERT_JSON})") from e
+    if not isinstance(meta, dict):
+        raise ConvertError(f"not a conversion folder ({CONVERT_JSON} is not an object)")
+    return meta
+
+
+def describe_conv(conv_dir, *, processing_repo_dir=None, log=None) -> dict:
+    """`describe --conv`: the settings a conversion used. convert.json params_effective when the conversion
+    recorded it ("recorded": true); else the recipe's values now ("recorded": false). The recipe blocks are the
+    recipe now + the recorded overrides; a warning says when that no longer gives the recorded values."""
+    conv = Path(conv_dir)
+    meta = _read_conv(conv)
+    recorded = meta.get("params_effective") if isinstance(meta.get("params_effective"), dict) else None
+    overrides = meta.get("params_overrides") if isinstance(meta.get("params_overrides"), dict) else {}
+    try:
+        result = (json.loads((conv / "status.json").read_text(encoding="utf-8")).get("result") or {})
+    except (OSError, ValueError, AttributeError):
+        result = {}
+    result = result if isinstance(result, dict) else {}
+    warnings = []
+    try:
+        d = describe_recipe(meta.get("recipe") or "default", params=overrides or None,
+                            processing_repo_dir=processing_repo_dir, log=log)
+    except ConvertError as e:
+        if recorded is None:
+            raise
+        d = {"recipe": meta.get("recipe"), "denoise": None, "contrast": None, "pixel": None, "variant": None,
+             "params": None, "source": None}
+        warnings.append(f"the recipe can't be read now ({e}); only the recorded values are shown")
+    if recorded is not None and d.get("params") is not None and d["params"] != recorded:
+        warnings.append("the recipe now gives other values than the conversion recorded: params_effective is what "
+                        "the tiles were made with")
+    before = result.get("processing") if isinstance(result.get("processing"), dict) else {}
+    now = d.get("source") or {}
+    if before.get("recipe_md5") and now.get("recipe_md5") and before["recipe_md5"] != now["recipe_md5"]:
+        warnings.append("the recipe file changed since this conversion")
+    d.update({"conv": meta.get("id") or conv.name, "recorded": recorded is not None,
+              "params_effective": recorded if recorded is not None else d.get("params"),
+              "params_overrides": overrides, "gpu": bool(meta.get("gpu")), "compute": result.get("compute"),
+              "processing": before or None, "warnings": warnings})
+    return d
+
+
+# ---------------------------------------------------------------- preview (one tile, before / after)
+@contextlib.contextmanager
+def _only_tile(edt, mont, source_file):
+    """export_detector_tiles' load_tiles narrowed to one tile of `mont` (its MANIFEST source_file). Each tile is
+    rendered on its own (its own clip levels, its own denoise), so the narrowed render is the same pixels."""
+    from cryoem_core import pipeline
+    orig = edt.load_tiles
+
+    def load_one(m, *a, **kw):
+        g, tiles, params = orig(m, *a, **kw)
+        if getattr(m, "basename", None) == mont.basename:
+            tiles = [t for t in tiles if pipeline._tile_filename(m, t) == source_file]
+        return g, tiles, params
+    edt.load_tiles = load_one
+    try:
+        yield
+    finally:
+        edt.load_tiles = orig
+
+
+def _kept(conv: Path, p) -> Path:
+    """A recorded input path -> its kept copy in <conv>/input when there (the folder may have moved), else as is."""
+    p = Path(p)
+    k = conv / CONV_INPUT / p.name
+    return k if k.is_file() else p
+
+
+def render_tile(edt, cfg, mont, source_file, work: Path, sample_key, gpu, log) -> tuple:
+    """One tile through the conversion's own entry point (export_dataset, as _convert calls it) into `work`.
+    -> (PNG path, its MANIFEST row)."""
+    work.mkdir(parents=True)
+    if sample_key is not None:
+        shutil.copyfile(sample_key, work / "sample_key.csv")
+    args = argparse.Namespace(out=str(work / "native"), grids=None, limit=0, gpu=gpu)
+    small = work / (edt.SMALL_DIR % ("%.1f" % float(edt.TARGET_A_PX)))
+    with contextlib.redirect_stdout(log), _only_tile(edt, mont, source_file):
+        try:
+            rc = edt.export_dataset(args, cfg)
+        except SystemExit as e:
+            raise ConvertError(f"pipeline stopped: {e}") from e
+    rows = _read_manifest(small / MANIFEST) if (small / MANIFEST).is_file() else []
+    hit = [r for r in rows if r.get("source_file") == source_file]
+    if rc not in (0, None) or len(hit) != 1 or not (small / hit[0]["output_name"]).is_file():
+        raise ConvertError(f"the pipeline did not render {source_file} (returned {rc})")
+    return small / hit[0]["output_name"], hit[0]
+
+
+def preview(conv_dir, tile, out_dir, *, params=None, gpu=False, processing_repo_dir=None, log=None) -> dict:
+    """`preview`: before.png (the recipe) and after.png (the recipe + params) of one tile of a conversion, from
+    its kept raw input, into out_dir only (module docstring). -> {"before", "after", "params_effective",
+    "params_recipe", "params_overrides", "tile", "montage", "source_file", "recipe", "compute", "device",
+    "warnings", "seconds"}. ConvertError on a refusal (nothing written)."""
+    tee = _Tee(log or sys.stderr)
+    warnings = []
+    try:
+        params = parse_params(params)
+        return _preview(Path(conv_dir), str(tile), Path(out_dir), params, bool(gpu), processing_repo_dir, tee,
+                        warnings)
+    except ConvertError as e:
+        e.warnings = list(dict.fromkeys(warnings + e.warnings + tee.caught))
+        raise
+
+
+def _preview(conv, tile, out, params, gpu, processing_repo_dir, tee, warnings):
+    t0 = time.time()
+    meta = _read_conv(conv)
+    if not tile or any(c in tile for c in "\\/:") or tile in (".", ".."):
+        raise ConvertError("--tile: a MANIFEST output_name, not a path")
+    if not (conv / CONV_TILES / MANIFEST).is_file():
+        raise ConvertError(f"no {CONV_TILES}/{MANIFEST}: the conversion has not finished")
+    row = next((r for r in _read_manifest(conv / CONV_TILES / MANIFEST) if r.get("output_name") == tile), None)
+    if row is None:
+        raise ConvertError(f"no tile {tile[:120]!r} in this conversion's {MANIFEST}")
+    if _overlaps(out, conv):
+        raise ConvertError("--out must be outside the conversion folder (a preview never writes into it)")
+    inputs = [_kept(conv, p) for p in meta.get("inputs") or []]
+    if not inputs or not all(p.is_file() for p in inputs):
+        raise ConvertError("the raw inputs are gone (removed after the keep time?): nothing to preview from")
+    repo = processing_repo(processing_repo_dir)
+    edt, core = import_pipeline(repo)
+    recipe_name, _defaulted, base_cfg = load_recipe(repo, meta.get("recipe") or "default", core, tee)
+    apply_params(base_cfg, params)               # refused before any work
+    with contextlib.redirect_stdout(tee):
+        found, w = find_montages(inputs, core, base_cfg.layout)
+    mont = next((m for m in found if m.basename == row.get("montage")), None)
+    if mont is None:
+        raise ConvertError(f"montage {row.get('montage')!r} is not in the raw inputs", w)
+    _ps, need, w = check_montage(mont, core)
+    warnings += w
+    need = int(need * dtype_factor(base_cfg))
+    free = available_ram()
+    if free is not None and need > free:
+        raise ConvertError(f"{mont.basename}: needs about {need / 2**30:.1f} GB, {free / 2**30:.1f} GB free now")
+    if gpu:
+        ok, note = gpu_check()
+        if not ok:
+            raise ConvertError(f"--gpu: {note}")
+    sk = meta.get("sample_key")
+    sk = _kept(conv, sk) if sk else None
+    if sk is not None and not sk.is_file():
+        warnings.append("the conversion's sample key is gone")
+        sk = None
+    used = "GPU" if gpu else "CPU"
+    if row.get("compute") and row["compute"] != used:
+        warnings.append(f"the tile was rendered on the {row['compute']}, the preview on the {used}: +-1 grey level "
+                        f"on a few pixels (gotcha 31)")
+    out.mkdir(parents=True, exist_ok=True)
+    work = out / f"{PREVIEW_WORK}_{os.getpid()}"
+    name = f"convert_raw[{recipe_name}] preview"
+    shutil.rmtree(work, ignore_errors=True)
+    try:
+        work.mkdir()
+        cfgs = {"before": run_cfg(base_cfg, work / "before", [mont], gpu, name),
+                "after": apply_params(run_cfg(base_cfg, work / "after", [mont], gpu, name), params)}
+        with contextlib.redirect_stdout(tee):
+            print(f"preview: {tile} ({mont.basename} {row.get('source_file')}), recipe {recipe_name}, "
+                  f"params {json.dumps(params or {})}, via {ENTRY_POINT} ({used})", flush=True)
+        made = {}
+        for label, c in cfgs.items():
+            png, _r = render_tile(edt, c, mont, row.get("source_file"), Path(c.dataset_dir), sk, gpu, tee)
+            made[label] = png
+        for label, png in made.items():
+            if not _rename_retry(png, out / f"{label}.png", waits=(0.2, 0.5, 1)):
+                raise ConvertError(f"{label}.png is held open by another program; try again")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    device = core.device.describe_device(True) if gpu else "CPU (NumPy)"
+    if sk is None:
+        warnings.append("no sample key: labels are 'Grid <n>' (the pixels are the same)")
+    # the pipeline's lines about its own (deleted) work folder say nothing to the caller
+    warnings[:] = list(dict.fromkeys(warnings + [w for w in tee.caught if PREVIEW_WORK not in w]))
+    return {"conv": meta.get("id") or conv.name, "tile": tile, "montage": mont.basename,
+            "source_file": row.get("source_file"), "before": str(out / "before.png"),
+            "after": str(out / "after.png"), "params_effective": effective_params(cfgs["after"]),
+            "params_recipe": effective_params(cfgs["before"]), "params_overrides": dict(params or {}),
+            "recipe": recipe_name, "compute": "GPU" if device.startswith("GPU") else "CPU", "device": device,
+            "processing": processing_info(repo, recipe_name), "warnings": warnings,
+            "seconds": round(time.time() - t0, 1)}
+
+
+# ---------------------------------------------------------------- CLI
+def _emit(res, as_json) -> int:
+    for w in res.get("warnings") or []:
+        print(f"warning: {w}", file=sys.stderr)
+    print(json.dumps({"ok": True, **res}) if as_json else json.dumps({"ok": True, **res}, indent=1))
+    return 0
+
+
+def _refused(e) -> int:
+    print(json.dumps({"ok": False, "kind": "refused", "error": str(e), "warnings": getattr(e, "warnings", [])}))
+    print(f"REFUSED: {e}", file=sys.stderr)
+    return 2
+
+
+def _failed(e) -> int:
+    traceback.print_exc(file=sys.stderr)
+    print(json.dumps({"ok": False, "kind": "failed", "error": f"{type(e).__name__}: {e}", "warnings": []}))
+    return 1
+
+
+class _JsonArgs(argparse.ArgumentParser):
+    """A usage error is a refusal in JSON on stdout (exit 2), like every other refusal."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        raise SystemExit(_refused(ConvertError(f"{self.prog}: {message}")))
+
+
+def main_sub(argv) -> int:
+    """`describe ...` / `preview ...` (module docstring)."""
+    cmd = argv[0]
+    ap = _JsonArgs(prog=f"convert_raw {cmd}")
+    ap.add_argument("--processing-repo", type=Path, help=f"overrides ${REPO_ENV}")
+    ap.add_argument("--json", action="store_true", help="one JSON object on one line (default: indented)")
+    if cmd == "describe":
+        g = ap.add_mutually_exclusive_group(required=True)
+        g.add_argument("--recipe", help="default or a session name")
+        g.add_argument("--conv", type=Path, help="a conversion folder raw_tiles/<cid>")
+    else:
+        ap.add_argument("--conv", type=Path, required=True, help="a conversion folder raw_tiles/<cid>")
+        ap.add_argument("--tile", required=True, help="the tile's MANIFEST output_name")
+        ap.add_argument("--params", help="JSON overrides for after.png (keys: " + ", ".join(PARAM_KEYS) + ")")
+        ap.add_argument("--out", type=Path, required=True, help="where before.png / after.png go (outside --conv)")
+        ap.add_argument("--gpu", action="store_true", help="render on the GPU (default CPU)")
+    a = ap.parse_args(argv[1:])
+    try:
+        if cmd == "describe" and a.recipe is not None:
+            res = describe_recipe(a.recipe, processing_repo_dir=a.processing_repo)
+        elif cmd == "describe":
+            res = describe_conv(a.conv, processing_repo_dir=a.processing_repo)
+        else:
+            res = preview(a.conv, a.tile, a.out, params=a.params, gpu=a.gpu, processing_repo_dir=a.processing_repo)
+    except ConvertError as e:
+        return _refused(e)
+    except Exception as e:
+        return _failed(e)
+    return _emit({"mode": cmd, **res}, a.json)
+
+
 def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in ("describe", "preview"):
+        return main_sub(argv)
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--in", dest="inputs", nargs="+", type=Path,
@@ -1050,24 +1514,25 @@ def main(argv=None) -> int:
     ap.add_argument("--acquisition-out", type=Path, help="also write acquisition.json here")
     ap.add_argument("--stitch-only", type=Path, metavar="CONV_DIR",
                     help="backfill a finished portal conversion: <dir>/montages + <dir>/acquisition.json only")
+    ap.add_argument("--params", help="JSON overrides on the recipe (keys: " + ", ".join(PARAM_KEYS) + "); "
+                                     "absent = the recipe as-is")
     a = ap.parse_args(argv)
     if a.stitch_only is None and (not a.inputs or a.out is None):
         ap.error("--in and --out are required (or --stitch-only <conversion folder>)")
     try:
         if a.stitch_only is not None:
+            if a.params is not None:
+                raise ConvertError("--stitch-only takes the conversion's own overrides (convert.json "
+                                   "params_overrides); --params is refused")
             res = stitch_only(a.stitch_only, processing_repo_dir=a.processing_repo)
         else:
             res = convert(a.inputs, a.out, recipe=a.recipe, sample_key=a.sample_key, gpu=a.gpu,
                           processing_repo_dir=a.processing_repo, montages_out=a.montages_out,
-                          acquisition_out=a.acquisition_out)
+                          acquisition_out=a.acquisition_out, params=a.params)
     except ConvertError as e:
-        print(json.dumps({"ok": False, "kind": "refused", "error": str(e), "warnings": e.warnings}))
-        print(f"REFUSED: {e}", file=sys.stderr)
-        return 2
+        return _refused(e)
     except Exception as e:
-        traceback.print_exc(file=sys.stderr)
-        print(json.dumps({"ok": False, "kind": "failed", "error": f"{type(e).__name__}: {e}", "warnings": []}))
-        return 1
+        return _failed(e)
     for w in res["warnings"]:
         print(f"warning: {w}", file=sys.stderr)
     print(json.dumps({"ok": True, **res}))
