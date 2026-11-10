@@ -67,7 +67,7 @@
     for (var c = 0; c < ncol; c++) cols.push([]);
     G.nodes.forEach(function (n, i) {
       if (!vis[i]) return;
-      if (n.part >= 0 && vis[n.part]) { (kids[n.part] = kids[n.part] || []).push(i); return; }
+      if (n.part >= 0 && n.part !== i && vis[n.part]) { (kids[n.part] = kids[n.part] || []).push(i); return; }
       cols[n.col].push(i);
     });
     G.edges.forEach(function (e) { (parents[e[1]] = parents[e[1]] || []).push(e[0]); });
@@ -171,7 +171,19 @@
     if (more) more.hidden = !G.more;
     if (!G.cols.length) return;
     labels();
-    if (ITEM) histBox.checked = true;      // a superseded ancestor must not leave the focus looking orphaned
+    if (ITEM) {
+      histBox.checked = true;              // a superseded ancestor must not leave the focus looking orphaned
+      if (G.focus != null) {               // likewise an analysis ancestor (a part of a prediction package)
+        var up = {}, todo = [G.focus], seenA = {};
+        G.edges.forEach(function (e) { (up[e[1]] = up[e[1]] || []).push(e[0]); });
+        seenA[G.focus] = true;
+        for (var q = 0; q < todo.length; q++) {
+          var ps = (up[todo[q]] || []).concat(G.nodes[todo[q]].part >= 0 ? [G.nodes[todo[q]].part] : []);
+          ps.forEach(function (p) { if (!seenA[p]) { seenA[p] = true; todo.push(p); } });
+        }
+        todo.forEach(function (k) { if (isAnalysis(G.nodes[k])) anBox.checked = true; });
+      }
+    }
     if (G.focus != null) {               // show the item asked for even when it starts hidden
       var n = G.nodes[G.focus];
       if (n.hist) histBox.checked = true;

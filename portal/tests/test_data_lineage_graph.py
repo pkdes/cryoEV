@@ -213,6 +213,40 @@ class Function(TG.Roots, unittest.TestCase):
                          for i in range(n + 1)], "edges": [[i, n, "input"] for i in range(n)]}
         self.assertEqual(len(D.item_graph(anc)["nodes"]), n + 1)
 
+    def test_cycle_through_the_focus_still_expands_downstream(self):
+        def node(t):
+            return dict(title=t, kind="job", col=0, hist=0, part=-1, sub="", status="x", url=None)
+        full = {"schema": "s", "cols": ["a"], "error": None, "focus": 0, "nodes": [node("a"), node("b"), node("c")],
+                "edges": [[0, 1, "r"], [1, 0, "r"], [1, 2, "r"]]}
+        self.assertEqual([n["title"] for n in D.item_graph(full)["nodes"]], ["a", "b", "c"])
+
+    def test_cap_counts_only_new_descendants_when_some_are_also_ancestors(self):
+        def node(t):
+            return dict(title=t, kind="job", col=0, hist=0, part=-1, sub="", status="x", url=None)
+        n = D.ITEM_DOWNSTREAM_MAX
+        # focus 0; 5 nodes that are both ancestors and descendants (0 -> a -> 0), then n+10 pure descendants
+        nodes = [node("f")] + [node(f"c{i}") for i in range(5)] + [node(f"d{i}") for i in range(n + 10)]
+        edges = [[0, i, "r"] for i in range(1, 6)] + [[i, 0, "r"] for i in range(1, 6)] \
+            + [[0, i, "r"] for i in range(6, len(nodes))]
+        g = D.item_graph({"schema": "s", "cols": ["a"], "error": None, "focus": 0, "nodes": nodes, "edges": edges})
+        self.assertEqual(len(g["nodes"]), 1 + 5 + n)            # the 5 cycle nodes do not eat the cap
+        self.assertTrue(g["more"])
+        edges = edges[:10 + n - 1]              # fewer than the cap of pure descendants
+        g = D.item_graph({"schema": "s", "cols": ["a"], "error": None, "focus": 0,
+                          "nodes": nodes[:6 + n - 1], "edges": edges})
+        self.assertFalse(g["more"])
+
+    def test_part_pointing_at_itself_is_no_part(self):
+        def node(t, part=-1):
+            return dict(title=t, kind="package", col=0, hist=0, part=part, sub="", status="x", url=None)
+        full = {"schema": "s", "cols": ["a"], "error": None, "focus": 1,
+                "nodes": [node("x"), node("self", part=1)], "edges": [[0, 1, "r"]]}
+        g = D.item_graph(full)
+        self.assertEqual([n["title"] for n in g["nodes"]], ["x", "self"])
+        self.assertEqual([n["part"] for n in g["nodes"]], [-1, -1])
+        g = D.item_graph(dict(full, focus=0))
+        self.assertEqual([n["part"] for n in g["nodes"]], [-1, -1])
+
     def test_loop_in_the_registry_terminates(self):
         full = {"schema": "s", "cols": ["a"], "error": None, "focus": 0,
                 "nodes": [dict(title=t, kind="job", col=0, hist=0, part=-1, sub="", status="x", url=None)
@@ -292,7 +326,6 @@ class Http(Served):
         g = json.loads(body)
         self.assertEqual(g["scope"], "item")
         self.assertEqual(g["nodes"][g["focus"]]["title"], DS_MID)
-        self.assertEqual(titles(g), {LS, DS_MID, M_MID} | (titles(g) & {x["title"] for x in g["nodes"]}))
         self.assertTrue({LS, DS_MID, M_MID} <= titles(g))
         self.assertTrue({DS_SIB, M_SIB, M_OTHER}.isdisjoint(titles(g)))
         records, _ = D.read_registry(self.env.registry)
@@ -345,12 +378,11 @@ class Http(Served):
         self.assertNotIn("cj-data-view-toggle", lab)
 
     def test_no_toggle_on_session_or_grid_pages(self):
-        for kind, eid in (("session", "20260126"), ("grid", "20260126_2")):
+        for kind, eid in (("session", "20261027"), ("grid", "2602")):
             st, _, body = self.get(f"/data/lineage/{kind}/{eid}/")
-            if st != 200:
-                continue
             page = body.decode("utf-8")
             with self.subTest(kind=kind):
+                self.assertEqual(st, 200)
                 self.assertNotIn("cj-data-view-toggle", page)
                 self.assertNotIn("cj-data-graph-panel", page)
         # control: an item page has it (guards against the loop above never running)
@@ -474,6 +506,15 @@ class Browser(Served):
             page.wait_for_selector(".cj-data-graph-node")
             self.assertIn(TG.OWN_PKG, " ".join(page.locator(".cj-data-graph-id").all_text_contents()))
             self.assertNotIn("aaaa11", page.content())
+            # a part's package is an analysis ancestor: "Show analyses" starts checked so the focus has its parents
+            page.goto(self.p.origin + "/data/lineage/images/" + TG.OWN_PART + "/")
+            page.wait_for_selector(".cj-data-graph-node")
+            self.assertTrue(page.is_checked("#cj-data-graph-an"))
+            self.assertEqual(page.locator(f'.cj-data-graph-node[title$="{TG.OWN_PKG}"]').count(), 1)
+            # ... and stays unchecked when no ancestor is an analysis
+            page.goto(self.p.origin + "/data/lineage/dataset/" + DS_MID + "/")
+            page.wait_for_selector(".cj-data-graph-node")
+            self.assertFalse(page.is_checked("#cj-data-graph-an"))
             page.evaluate("localStorage.removeItem('cj-data-lineage-view')")
             # the lab page is unchanged by the new attributes
             page.goto(self.p.origin + "/data/lineage/graph/?focus=" + quote("model|" + TG.MODEL, safe=""))

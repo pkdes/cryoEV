@@ -1951,13 +1951,16 @@ def item_graph(g: dict) -> dict:
     for a, b, _ in edges:
         up.setdefault(b, []).append(a)
         down.setdefault(a, []).append(b)
-    for i, n in enumerate(nodes):
-        if n["part"] is not None and n["part"] >= 0:
-            kids.setdefault(n["part"], []).append(i)
+    def pof(i):                                             # the package a part belongs to, else -1 (never itself)
+        p = nodes[i]["part"]
+        return p if p is not None and p >= 0 and p != i else -1
+
+    for i in range(len(nodes)):
+        if pof(i) >= 0:
+            kids.setdefault(pof(i), []).append(i)
 
     def parents(i):
-        p = nodes[i]["part"]
-        return up.get(i, []) + ([p] if p is not None and p >= 0 else [])
+        return up.get(i, []) + ([pof(i)] if pof(i) >= 0 else [])
 
     def children(i):
         return down.get(i, []) + kids.get(i, [])
@@ -1968,23 +1971,23 @@ def item_graph(g: dict) -> dict:
             if j not in keep:
                 keep.add(j)
                 queue.append(j)
-    seen, queue, n_down = set(keep), [f], 0
-    for i in queue:                                         # descendants: breadth first, capped
-        for j in children(i):
+    seen, queue, n_down = {f}, [f], 0
+    for i in queue:                                         # descendants: breadth first, capped; an ancestor that
+        for j in children(i):                               # is also downstream (a cycle) is still expanded
             if j in seen:
                 continue
-            if n_down >= ITEM_DOWNSTREAM_MAX:
-                out["more"] = True
-                continue
+            if j not in keep:
+                if n_down >= ITEM_DOWNSTREAM_MAX:
+                    out["more"] = True
+                    continue
+                n_down += 1
+                keep.add(j)
             seen.add(j)
-            keep.add(j)
-            n_down += 1
             queue.append(j)
     order = sorted(keep)
     new = {old: k for k, old in enumerate(order)}
     out["cols"] = list(g["cols"])
-    out["nodes"] = [dict(nodes[i], part=new.get(nodes[i]["part"], -1) if nodes[i]["part"] is not None else -1)
-                    for i in order]
+    out["nodes"] = [dict(nodes[i], part=new.get(pof(i), -1)) for i in order]
     out["edges"] = [[new[a], new[b], role] for a, b, role in edges if a in new and b in new]
     out["focus"] = new[f]
     return out
