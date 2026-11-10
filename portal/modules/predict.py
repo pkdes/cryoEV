@@ -2228,9 +2228,9 @@ def recipe_select(repo, chosen=None, session=None) -> str:
     def summ(n):                      # the values, once known (cached; the page script fills the others in)
         t = settings_summary(CS.peek_recipe(repo, n, recipe_file_name(n))) if repo else ""
         return f" · {t}" if t else ""
-    opts = (f'<option value="default" data-cj-sum="{esc(summ("default"))}"{" selected" if chosen == "default" else ""}>'
+    opts = (f'<option value="default"{" selected" if chosen == "default" else ""}>'
             f'default ({esc(CR.DEFAULT_RECIPE)}, the lab’s template){esc(summ("default"))}</option>' +
-            "".join(f'<option value="{esc(n)}" data-cj-sum="{esc(summ(n))}"{" selected" if n == chosen else ""}>'
+            "".join(f'<option value="{esc(n)}"{" selected" if n == chosen else ""}>'
                     f'{esc(n)}{esc(summ(n))}</option>' for n in names))
     own = session_recipe(session, names) if session else None
     hint = (f' This session has its own recipe: <b>{esc(own)}</b>.' if own else

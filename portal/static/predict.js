@@ -314,8 +314,7 @@
   if (rsel && rbox) {
     var rvals = rbox.querySelector('[data-cj-recipe-values]'), rcache = {}, rchain = Promise.resolve();
     Array.prototype.forEach.call(rsel.options, function (o) {
-      var sum = o.getAttribute('data-cj-sum') || '', txt = o.textContent;
-      o.dataset.base = sum && txt.slice(-sum.length) === sum ? txt.slice(0, -sum.length) : txt;
+      o.dataset.base = o.textContent.split(' · ')[0];   // the label before any ' · summary' the server put there
     });
     var rload = function (name) {
       if (rcache[name]) return Promise.resolve(rcache[name]);
@@ -341,7 +340,7 @@
     if (rvals.querySelector('[data-cj-convset-wait]')) rshow();
     // fill in the other options' summaries, one recipe at a time (each is a child process on the server)
     Array.prototype.slice.call(rsel.options, 0, 12).forEach(function (o) {
-      if (o.getAttribute('data-cj-sum')) return;
+      if (o.textContent.indexOf(' · ') > -1) return;
       rchain = rchain.then(function () { return rload(o.value); }).catch(function () {});
     });
   }
