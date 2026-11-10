@@ -165,7 +165,9 @@
     G = data;
     if (ITEM && G.nodes && G.nodes.length) compact(G);
     if (G.error) status.textContent = 'The registry could not be read just now (' + G.error + ').';
-    else if (ITEM && G.focus == null) status.textContent = 'This item is not in the lab graph.';
+    else if (ITEM && G.focus == null) {
+      status.textContent = root.getAttribute('data-empty') || 'This item is not in the lab graph.';
+    }
     else if (!G.nodes.length) status.textContent = 'Nothing in the registry to draw yet.';
     else status.textContent = G.nodes.length + ' items, ' + G.edges.length + ' links.';
     var more = document.getElementById('cj-data-graph-more');
@@ -189,7 +191,9 @@
       var n = G.nodes[G.focus];
       if (n.hist) histBox.checked = true;
       if (isAnalysis(n)) anBox.checked = true;
-      if (ITEM && (n.kind === 'session' || n.kind === 'grid')) anBox.checked = true;   // what came out of it
+      // a session / grid with its OWN analyses in the slice (linked "analysed" from it or its upload): show them
+      if (ITEM && (n.kind === 'session' || n.kind === 'grid')
+          && G.edges.some(function (e) { return e[2] === 'analysed'; })) anBox.checked = true;
     }
     draw();
     focusBox();

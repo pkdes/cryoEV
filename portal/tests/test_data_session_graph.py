@@ -2,22 +2,30 @@
 Data module, the Graph of a session's and a grid's Lineage page (portal/modules/data.py source_graph, source_links;
 /data/api/lineage/graph?focus=session|<id> or grid|<id>&scope=item; /data/data.js).
 
-Known answers on a fixture registry: session S has grids G1 and G2 and one upload conversion C (owner A);
-  G1's images -> label version LV (its change log) -> dataset D -> model M -> prediction set P (owner A);
-  S's image with no grid -> Roboflow export EXS (its image list); prediction set P2 (owner A) of S, run on C, and its
-  package PKG2; another person's prediction set HP of S and their package HPKG listing a G1 image (hidden from A and B);
-  G2's images are used by nothing; an unrelated session T with grid GT and its own dataset DT (image list).
-  - S's graph has S, G1, G2, LV, D, M, EXS; P, P2, PKG2 and C only for A and the admin; HP / HPKG only for the admin
-    (the control); nothing of T. G2's graph is G2 and S, no LV. G1's graph has no EXS, no P2, no G2.
+Known answers on a fixture registry: session S has grids G1, G2 and GS (GS is shared with session V) and two upload
+conversions, C (owner A) and C2 (owner C);
+  G1's images -> label version LV (its change log) -> dataset D -> model M -> prediction set P (owner A, an analysis
+  OF S); M also made prediction set Q (owner A) and its package QPKG for an unrelated session U;
+  S's image with no grid -> Roboflow export EXS (its image list); S's image on a grid the registry lacks -> dataset DU;
+  prediction set P2 (owner A) of S, run on C, and its package PKG2; P3 (owner A) of S, run on C2 (A can't see C2);
+  another person's prediction set HP of S, their package HPKG listing a G1 image, and a revise job JOBH on HPKG whose
+  list names a G1 image (all hidden from A and B); G2's images are used by nothing; V's image on GS -> dataset DV;
+  an unrelated session T whose only grid GT (its sample label quotes HP's id) has dataset DT and analysis PT (owner A).
+  - S's graph: S, G1, G2, GS, LV, D, M, EXS, DU; P, P2, PKG2, P3 and C for A and the admin; C2, HP, HPKG, JOBH only for
+    the admin (the control); never Q / QPKG (another session's analyses through M), nothing of T, U or V.
+  - U's graph has Q and QPKG; a grid of a one-grid session (GT) shows the session's analysis PT; G1 (S has 3 grids)
+    shows none of S's analyses; GS's graph has S and V as ancestors and DV, S's graph does not have DV;
   - every node except a grid's sessions is directed-reachable from the focus over the new edges plus the lab graph's
     (part links included), and the sessions reach the grid;
-  - user B (advanced): no trace of P, P2, PKG2, HP, HPKG or C -- B's graph is byte-identical to B's graph on the same
-    registry WITHOUT those records (the strongest "not even a count or edge" check), admin as the control;
+  - user B (advanced): no trace of any private record -- B's graph is byte-identical to B's graph on the same
+    registry WITHOUT those records, admin as the control;
+  - the per-group link index taken from the whole-registry build equals a build on the group's filtered registry
+    (admin, A, B); hidden-id blanking of session / grid subtitles;
   - node whitelist, no path or uploader in the JSON; unknown / hidden focus -> empty, focus null, no echo;
-  - descendants capped at 150 with `more` and no count; the link index is built once per registry state and group;
-  - through the portal: basic 403, the API equals the function, the page has the toggle (Graph by default), no inline
-    script; in a browser (Playwright, Edge channel) at 390 and 1280 px, light and dark. Screenshots go to
-    $CJ_SHOT_DIR when set.
+  - descendants capped at 150 with `more` and no count; the link index is built once per registry state;
+  - through the portal: basic 403, the API equals the function, the page has the toggle (Graph by default), its
+    empty-state text, no inline script; in a browser (Playwright, Edge channel) at 390 and 1280 px, light and dark.
+    Screenshots go to $CJ_SHOT_DIR when set.
 
 Temp folders only; never the real registry.
 
@@ -45,15 +53,17 @@ try:
 except ImportError:  # pragma: no cover
     sync_playwright = None
 
-S, T_SID = "20991201", "20991202"
-G1, G2, GT = "29901", "29902", "29903"
+S, T_SID, U, V = "20991201", "20991202", "20991204", "20991205"
+G1, G2, GT, GS = "29901", "29902", "29903", "29905"
 LV, DS, MOD = "lv_20991201_sg", "ds_20991201_sg", "m_20991201_sg"
-EXS, DT = "rf_20991201_sgexport", "ds_20991202_other"
-P, P2, PKG2 = "ps_20991201_aaaa01", "ps_20991201_aaaa02", "pred_ps_20991201_aaaa02"
-HP, HPKG = "ps_20991201_cccc03", "pred_ps_20991201_cccc03"
-CID = "20991201_abc123"
-PRIVATE = (P, P2, PKG2, HP, HPKG, CID, "aaaa01", "aaaa02", "cccc03", "abc123")
-OF_T = (T_SID, GT, DT)
+EXS, DT, DU, DV = "rf_20991201_sgexport", "ds_20991202_other", "ds_20991201_unreg", "ds_20991205_shared"
+P, P2, PKG2, P3 = "ps_20991201_aaaa01", "ps_20991201_aaaa02", "pred_ps_20991201_aaaa02", "ps_20991201_aaaa05"
+Q, QPKG = "ps_20991204_aaaa04", "pred_ps_20991204_aaaa04"
+PT = "ps_20991202_aaaa06"
+HP, HPKG, JOBH = "ps_20991201_cccc03", "pred_ps_20991201_cccc03", "job_20991201_revise_cccc03"
+CID, CID2 = "20991201_abc123", "20991201_def456"
+PRIVATE = (P, P2, PKG2, P3, Q, QPKG, PT, HP, HPKG, JOBH, CID, CID2, "aaaa0", "cccc03", "abc123", "def456")
+OF_T = (T_SID, GT, DT, PT)
 
 
 def rec(entity, rid, **kw):
@@ -64,50 +74,67 @@ def ins(*triples):
     return [{"entity": e, "id": i, "role": r} for e, i, r in triples]
 
 
+def ps(rid, owner, session=None, **kw):
+    return rec("prediction_set", rid, owner=owner, model=MOD, status="done",
+               source={"kind": "session", "session": session} if session else {"kind": "upload"}, **kw)
+
+
 def rows(tmp: Path, private=True) -> dict:
     lv_dir = tmp / "labels" / LV
     out = {
-        "session": [rec("session", S, date="2099-12-01", status="processed", session_grids={"1": G1, "2": G2},
-                        conversions=[{"id": CID, "uploaded_by": "usera", "n_tiles": 9}]),
-                    rec("session", T_SID, date="2099-12-02", status="processed", session_grids={"1": GT})],
+        "session": [rec("session", S, date="2099-12-01", status="processed",
+                        session_grids={"1": G1, "2": G2, "3": GS},
+                        conversions=[{"id": CID, "uploaded_by": "usera", "n_tiles": 9},
+                                     {"id": CID2, "uploaded_by": "userc", "n_tiles": 4}]),
+                    rec("session", T_SID, date="2099-12-02", status="processed", session_grids={"1": GT}),
+                    rec("session", U, date="2099-12-04", status="processed"),
+                    rec("session", V, date="2099-12-05", status="processed", session_grids={"1": GS})],
         "grid": [rec("grid", G1, sample_label="EV prep one"), rec("grid", G2, sample_label="EV prep two"),
-                 rec("grid", GT, sample_label="Other prep")],
+                 rec("grid", GT, sample_label="Other prep, see " + HP), rec("grid", GS, sample_label="Shared")],
         "image": [rec("image", "img_s1_a_png", session=S, grid=G1, session_grid="1"),
                   rec("image", "img_s1_b_png", session=S, grid=G1, session_grid="1"),
                   rec("image", "img_s2_a_png", session=S, session_grid="2"),       # grid from the session's slot
+                  rec("image", "img_s3_a_png", session=S, grid=GS, session_grid="3"),
                   rec("image", "img_s_x_png", session=S),                          # no grid
+                  rec("image", "img_s_unreg_png", session=S, grid="29999"),        # a grid the registry lacks
+                  rec("image", "img_v_a_png", session=V, grid=GS, session_grid="1"),
                   rec("image", "img_t_a_png", session=T_SID, grid=GT, session_grid="1")],
         "label_version": [rec("label_version", LV, owner=str(lv_dir / "version.json"), status="active")],
         "dataset": [rec("dataset", DS, status="built", inputs=ins(("label_version", LV, "source"))),
-                    rec("dataset", DT, status="built", image_list={"file": "lists/dt.tsv"})],
+                    rec("dataset", DT, status="built", image_list={"file": "lists/dt.tsv"}),
+                    rec("dataset", DU, status="built", image_list={"file": "lists/du.tsv"}),
+                    rec("dataset", DV, status="built", image_list={"file": "lists/dv.tsv"})],
         "model": [rec("model", MOD, status="candidate", inputs=ins(("dataset", DS, "train_data")))],
         "roboflow_export": [rec("roboflow_export", EXS, status="imported", image_list={"file": "lists/exs.tsv"})],
     }
     if private:
         out["prediction_set"] = [
-            rec("prediction_set", P, owner="usera", model=MOD, status="done", source={"kind": "upload"},
-                inputs=ins(("model", MOD, "model"))),
-            rec("prediction_set", P2, owner="usera", model=MOD, status="done",
-                source={"kind": "session", "session": S}),
-            rec("prediction_set", HP, owner="userc", model=MOD, status="done",
-                source={"kind": "session", "session": S})]
+            ps(P, "usera", S, inputs=ins(("model", MOD, "model"))),
+            ps(P2, "usera", S), ps(P3, "usera", S), ps(PT, "usera", T_SID),
+            ps(Q, "usera", U, inputs=ins(("model", MOD, "model"))),
+            ps(HP, "userc", S)]
         out["review_package"] = [
             rec("review_package", PKG2, kind="prediction", owner="usera", prediction_set=P2, model=MOD, n_images=2,
                 status="built"),
+            rec("review_package", QPKG, kind="prediction", owner="usera", prediction_set=Q, model=MOD, n_images=2,
+                status="built"),
             rec("review_package", HPKG, kind="prediction", owner="userc", prediction_set=HP, n_images=1,
                 status="built", path=str(tmp / "ext_review" / HPKG))]
+        out["job"] = [rec("job", JOBH, type="revise", status="ready", image_list={"file": "lists/jobh.txt"},
+                          inputs=ins(("review_package", HPKG, "predictions")), outputs=[])]
     return out
 
 
 def write_fixture(tmp: Path, reg: Path, private=True):
     """The registry (only these rows), its lists, the label version's change log, the hidden package's data.js, the
-    conversion folder and P2's request.json (the conversion it ran on)."""
+    conversion folders and the request.json of the analyses run on them."""
     reg.mkdir(parents=True, exist_ok=True)
     for ent, recs in rows(tmp, private).items():
         (reg / f"{ent}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
     (reg / "lists").mkdir(exist_ok=True)
-    (reg / "lists" / "exs.tsv").write_text("img_s_x_png\ttrain\n", encoding="utf-8")
-    (reg / "lists" / "dt.tsv").write_text("img_t_a_png\ttrain\n", encoding="utf-8")
+    for name, stem in (("exs.tsv", "img_s_x_png"), ("dt.tsv", "img_t_a_png"), ("du.tsv", "img_s_unreg_png"),
+                       ("dv.tsv", "img_v_a_png"), ("jobh.txt", "img_s1_a_png")):
+        (reg / "lists" / name).write_text(f"{stem}\ttrain\n", encoding="utf-8")
     lv_dir = tmp / "labels" / LV
     lv_dir.mkdir(parents=True, exist_ok=True)
     (lv_dir / "version.json").write_text(json.dumps({"n_images_applied": 1}), encoding="utf-8")
@@ -115,14 +142,15 @@ def write_fixture(tmp: Path, reg: Path, private=True):
     pk = tmp / "ext_review" / HPKG
     pk.mkdir(parents=True, exist_ok=True)
     (pk / "data.js").write_text('window.REVIEW_DATA = {"images": [{"file": "img_s1_b.png"}]};', encoding="utf-8")
-    conv = tmp / "raw" / "raw_tiles" / CID
-    (conv / "tiles").mkdir(parents=True, exist_ok=True)
-    (conv / "convert.json").write_text(json.dumps({"schema": "cj_convert/1", "id": CID, "owner": "usera"}),
-                                       encoding="utf-8")
-    req = tmp / "CryoAI-laptop" / "predict" / P2 / "request.json"
-    req.parent.mkdir(parents=True, exist_ok=True)
-    req.write_text(json.dumps({"owner": "usera", "source": {"kind": "session", "session": S,
-                                                            "dir": str(conv / "tiles")}}), encoding="utf-8")
+    for cid, owner, set_id in ((CID, "usera", P2), (CID2, "userc", P3)):
+        conv = tmp / "raw" / "raw_tiles" / cid
+        (conv / "tiles").mkdir(parents=True, exist_ok=True)
+        (conv / "convert.json").write_text(json.dumps({"schema": "cj_convert/1", "id": cid, "owner": owner}),
+                                           encoding="utf-8")
+        req = tmp / "CryoAI-laptop" / "predict" / set_id / "request.json"
+        req.parent.mkdir(parents=True, exist_ok=True)
+        req.write_text(json.dumps({"owner": "usera", "source": {"kind": "session", "session": S,
+                                                                "dir": str(conv / "tiles")}}), encoding="utf-8")
     TG.clear_caches()
 
 
@@ -134,6 +162,11 @@ def cfg_for(tmp: Path):
 
 def titles(g):
     return {n["title"] for n in g["nodes"]}
+
+
+def pairs_of(g):
+    t = [n["title"] for n in g["nodes"]]
+    return {(t[a], t[b]) for a, b, _ in g["edges"]}
 
 
 def reachable(g, start, reverse=False):
@@ -173,62 +206,109 @@ class Function(TG.Roots, unittest.TestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
         TG.clear_caches()
 
-    def graph(self, v, focus, reg=None):
-        reg = reg or self.reg
-        records, err = D.read_registry(reg)
+    def records(self, reg=None):
+        records, err = D.read_registry(reg or self.reg)
         self.assertIsNone(err)
-        return D.source_graph(D.with_disk_packages(records), v, reg, focus)
+        return D.with_disk_packages(records)
+
+    def graph(self, v, focus, reg=None):
+        return D.source_graph(self.records(reg), v, reg or self.reg, focus)
 
     # ------------------------------------------------------------ known answers
     def test_session_graph_per_viewer(self):
-        mine = {S, G1, G2, LV, DS, MOD, EXS}
-        want = {"admin": mine | {P, P2, PKG2, CID, HP, HPKG}, "A": mine | {P, P2, PKG2, CID}, "B": mine}
+        mine = {S, G1, G2, GS, LV, DS, MOD, EXS, DU}
+        own_a = {P, P2, PKG2, P3, CID}
+        want = {"admin": mine | own_a | {CID2, HP, HPKG, JOBH}, "A": mine | own_a, "B": mine}
         for name, v in (("admin", self.ADMIN), ("A", self.A), ("B", self.B)):
             g = self.graph(v, "session|" + S)
             with self.subTest(viewer=name):
                 self.assertEqual(titles(g), want[name])
                 self.assertEqual(g["nodes"][g["focus"]]["title"], S)
                 self.assertEqual(g["nodes"][g["focus"]]["kind"], "session")
-                self.assertTrue(titles(g).isdisjoint(OF_T))
+                self.assertTrue(titles(g).isdisjoint(OF_T + (U, V, DV, Q, QPKG, "29999")))
                 self.assertEqual(g["scope"], "item")
                 self.assertFalse(g["more"])
                 self.assertEqual(g["cols"][:len(D.SOURCE_COLS)], list(D.SOURCE_COLS))
 
     def test_edges_are_the_recorded_links(self):
+        e = pairs_of(self.graph(self.A, "session|" + S))
+        for pair in ((S, G1), (S, G2), (S, GS), (G1, LV), (LV, DS), (DS, MOD), (MOD, P), (S, P), (S, EXS), (S, DU),
+                     (S, CID), (CID, P2), (CID, PKG2), (S, P3)):
+            self.assertIn(pair, e)
+        self.assertFalse({p for p in e if p[0] in (G2, GS)})      # G2's and S's GS images are used by nothing
+        self.assertNotIn((S, P2), e)                              # P2 hangs off the conversion it ran on
         g = self.graph(self.A, "session|" + S)
         t = [n["title"] for n in g["nodes"]]
-        e = {(t[a], t[b]) for a, b, _ in g["edges"]}
-        for pair in ((S, G1), (S, G2), (G1, LV), (LV, DS), (DS, MOD), (MOD, P), (S, EXS), (S, CID), (CID, P2),
-                     (CID, PKG2)):
-            self.assertIn(pair, e)
-        self.assertFalse({p for p in e if p[0] == G2})            # G2's images are used by nothing
-        self.assertNotIn((S, P2), e)                              # P2 hangs off the conversion it ran on
         roles = {(t[a], t[b]): r for a, b, r in g["edges"]}
         self.assertEqual(roles[(G1, LV)], "used its images")
         self.assertEqual(roles[(S, CID)], "upload")
-        # admin control: the hidden package is linked from G1 (its data.js lists a G1 image), HP from the session
-        ga = self.graph(self.ADMIN, "session|" + S)
-        ta = [n["title"] for n in ga["nodes"]]
-        ea = {(ta[a], ta[b]) for a, b, _ in ga["edges"]}
-        self.assertIn((G1, HPKG), ea)
-        self.assertIn((S, HP), ea)
-        self.assertIn((CID, P2), ea)
+        self.assertEqual(roles[(CID, P2)], "analysed")
+        # admin control: the hidden package is linked from G1 (its data.js lists a G1 image), HP from the session,
+        # the hidden job from G1 (its list), P3 from the conversion the admin can see
+        ea = pairs_of(self.graph(self.ADMIN, "session|" + S))
+        for pair in ((G1, HPKG), (S, HP), (CID, P2), (G1, JOBH), (CID2, P3)):
+            self.assertIn(pair, ea)
+        self.assertNotIn((S, P3), ea)
+
+    def test_another_sessions_analyses_stay_out(self):
+        # S1: M (trained on S's images) made Q / QPKG for session U: not in S's graph, in U's graph
+        for v in (self.ADMIN, self.A):
+            with self.subTest(user=v.user["id"]):
+                self.assertTrue(titles(self.graph(v, "session|" + S)).isdisjoint({Q, QPKG}))
+                gu = self.graph(v, "session|" + U)
+                self.assertEqual(titles(gu), {U, Q, QPKG})
+                self.assertTrue({(U, Q), (U, QPKG)} <= pairs_of(gu))
+        # control: the lab graph does lead from M to Q and QPKG
+        item = D.item_graph(D.lab_graph(self.records(), self.ADMIN, self.reg, "model|" + MOD))
+        self.assertTrue({Q, QPKG, P, PKG2} <= titles(item))
+        self.assertTrue(titles(self.graph(self.B, "session|" + U)) == {U})
 
     def test_grid_graphs(self):
         g2 = self.graph(self.ADMIN, "grid|" + G2)
         self.assertEqual(titles(g2), {G2, S})
         self.assertEqual(g2["nodes"][g2["focus"]]["title"], G2)
         g1 = self.graph(self.ADMIN, "grid|" + G1)
-        # PKG2 is here through the lab graph's own model -> package edge (it names MOD), not through the session
-        self.assertEqual(titles(g1), {G1, S, LV, DS, MOD, P, PKG2, HPKG})
-        self.assertTrue(titles(g1).isdisjoint({EXS, P2, CID, G2, HP}))           # the session's other branches
+        # S has three grids: none of S's analyses here (only those of a one-grid session); the hidden package and job
+        # are here for the admin because they list G1 images
+        self.assertEqual(titles(g1), {G1, S, LV, DS, MOD, HPKG, JOBH})
+        self.assertTrue(titles(g1).isdisjoint({EXS, P, P2, PKG2, P3, Q, QPKG, CID, G2, HP}))
         self.assertEqual(titles(self.graph(self.B, "grid|" + G1)), {G1, S, LV, DS, MOD})
+        self.assertEqual(titles(self.graph(self.A, "grid|" + G1)), {G1, S, LV, DS, MOD})
         gt = self.graph(self.ADMIN, "session|" + T_SID)
-        self.assertEqual(titles(gt), {T_SID, GT, DT})                              # the unrelated session's own
+        self.assertEqual(titles(gt), {T_SID, GT, DT, PT})                          # the unrelated session's own
+
+    def test_one_grid_session_gives_its_grid_its_analyses(self):
+        # N1: T imaged only GT, so GT's graph has T's analysis PT, linked from the grid
+        for v, has in ((self.ADMIN, True), (self.A, True), (self.B, False)):
+            g = self.graph(v, "grid|" + GT)
+            with self.subTest(user=v.user["id"]):
+                self.assertEqual(titles(g), {GT, T_SID, DT} | ({PT} if has else set()))
+                self.assertEqual((GT, PT) in pairs_of(g), has)
+
+    def test_shared_grid_does_not_cross_link(self):
+        # S3: GS is imaged in S and V; V's image is in DV. DV is on V's and GS's graph, never on S's
+        self.assertNotIn(DV, titles(self.graph(self.ADMIN, "session|" + S)))
+        self.assertEqual(titles(self.graph(self.ADMIN, "session|" + V)), {V, GS, DV})
+        gs = self.graph(self.ADMIN, "grid|" + GS)
+        self.assertEqual(titles(gs), {GS, S, V, DV})
+        self.assertTrue({(S, GS), (V, GS), (GS, DV)} <= pairs_of(gs))
+
+    def test_image_on_an_unregistered_grid_counts_for_the_session(self):
+        g = self.graph(self.ADMIN, "session|" + S)
+        self.assertIn((S, DU), pairs_of(g))
+        self.assertNotIn("29999", json.dumps(g))
+        self.assertEqual(self.graph(self.ADMIN, "grid|29999")["nodes"], [])
+
+    def test_own_set_on_a_conversion_the_viewer_cannot_see_falls_back_to_the_session(self):
+        a = self.graph(self.A, "session|" + S)
+        self.assertIn((S, P3), pairs_of(a))
+        self.assertNotIn(CID2, json.dumps(a))
+        self.assertIn((CID2, P3), pairs_of(self.graph(self.ADMIN, "session|" + S)))          # control
 
     def test_every_node_is_directed_reachable(self):
         for v in (self.ADMIN, self.A, self.B):
-            for focus in ("session|" + S, "grid|" + G1, "grid|" + G2, "session|" + T_SID):
+            for focus in ("session|" + S, "grid|" + G1, "grid|" + G2, "grid|" + GS, "grid|" + GT,
+                          "session|" + T_SID, "session|" + U):
                 g = self.graph(v, focus)
                 f = g["focus"]
                 down = reachable(g, f)
@@ -238,24 +318,24 @@ class Function(TG.Roots, unittest.TestCase):
                     self.assertEqual(up - {f}, {i for i, n in enumerate(g["nodes"]) if n["kind"] == "session"
                                                 and i != f})        # ancestors: only a grid's sessions
                     for s in up - {f}:
-                        self.assertTrue(set(range(len(g["nodes"]))) <= reachable(g, s) | {s})
+                        self.assertTrue(set(range(len(g["nodes"]))) - (up - {f}) <= reachable(g, s))
 
-    def test_lab_part_is_the_lab_graphs_descendants(self):
-        # the lab-graph nodes in S's slice are exactly the descendants (lab edges, item_graph) of the first-level items
+    def test_lab_part_is_the_lab_graphs_descendants_less_other_sessions_analyses(self):
         g = self.graph(self.ADMIN, "session|" + S)
         lab = {n["title"] for n in g["nodes"] if n["kind"] not in ("session", "grid", "upload")}
-        records = D.with_disk_packages(D.read_registry(self.reg)[0])
+        records = self.records()
         union = set()
-        for key in ("label_version|" + LV, "roboflow_export|" + EXS, "prediction_set|" + P2,
-                    "review_package|" + PKG2, "prediction_set|" + HP, "review_package|" + HPKG):
+        for key in ("label_version|" + LV, "roboflow_export|" + EXS, "dataset|" + DU, "prediction_set|" + P,
+                    "prediction_set|" + P2, "review_package|" + PKG2, "prediction_set|" + P3, "prediction_set|" + HP,
+                    "review_package|" + HPKG, "job|" + JOBH):
             item = D.item_graph(D.lab_graph(records, self.ADMIN, self.reg, key))
-            f = item["focus"]
-            union |= {item["nodes"][i]["title"] for i in reachable(item, f)}
-        self.assertEqual(lab, union)
+            union |= {item["nodes"][i]["title"] for i in reachable(item, item["focus"])}
+        self.assertTrue(lab <= union)
+        self.assertEqual(union - lab, {Q, QPKG})            # exactly U's analyses, reached only through M
 
     # ------------------------------------------------------------ visibility
     def test_b_has_no_trace_of_private_items(self):
-        for focus in ("session|" + S, "grid|" + G1, "grid|" + G2):
+        for focus in ("session|" + S, "grid|" + G1, "grid|" + G2, "grid|" + GS, "session|" + U):
             b = json.dumps(self.graph(self.B, focus))
             with self.subTest(focus=focus):
                 for s in PRIVATE + ("usera", "userc"):
@@ -263,24 +343,44 @@ class Function(TG.Roots, unittest.TestCase):
                 # byte-identical to B's graph on a registry where the private records never existed
                 self.assertEqual(b, json.dumps(self.graph(self.B, focus, self.reg_absent)))
         admin = json.dumps(self.graph(self.ADMIN, "session|" + S))
-        for s in (P, P2, PKG2, HP, HPKG, CID):
+        for s in (P, P2, PKG2, P3, HP, HPKG, JOBH, CID, CID2):
             self.assertIn(s, admin)                                         # control
         a = json.dumps(self.graph(self.A, "session|" + S))
-        for s in (HP, HPKG, "cccc03", "userc"):
+        for s in (HP, HPKG, JOBH, CID2, "cccc03", "userc"):
             self.assertNotIn(s, a)                                          # A sees only A's own
         self.assertNotEqual(json.dumps(self.graph(self.A, "session|" + S)),
                             json.dumps(self.graph(self.A, "session|" + S, self.reg_absent)))   # the check can fail
 
-    def test_conversion_only_for_owner_and_admin(self):
-        for v, has in ((self.ADMIN, True), (self.A, True), (self.B, False)):
-            g = self.graph(v, "session|" + S)
-            up = [n for n in g["nodes"] if n["kind"] == "upload"]
+    def test_group_index_from_the_whole_registry_equals_a_filtered_build(self):
+        # S2: source_links = build_source_links(whole registry) minus the group's hidden keys; QC's claim that this
+        # equals building on the group's filtered registry, checked for each viewer (the hidden job and package
+        # are in the whole-registry links, so the subtraction is doing work for A and B)
+        records = self.records()
+        whole = None
+        for v in (self.ADMIN, self.A, self.B):
+            extra = {}
+            D.lab_graph(records, v, self.reg, None, extra)
+            current = extra["base"][1]
+            kept = {k: r for k, r in current.items() if k not in extra["drop"]}
             with self.subTest(user=v.user["id"]):
-                if has:
-                    self.assertEqual(up, [{"title": CID, "kind": "upload", "col": 1, "hist": 0, "part": -1,
-                                           "sub": "9 tiles", "status": None, "url": f"/predict/convert/{CID}/"}])
+                self.assertEqual(D.source_links(self.reg, extra["base"], extra["drop"]),
+                                 D.build_source_links(kept, self.reg))
+                if v is self.ADMIN:
+                    whole = D.build_source_links(current, self.reg)
+                    self.assertFalse(extra["drop"])
                 else:
-                    self.assertEqual(up, [])
+                    self.assertIn("job|" + JOBH, extra["drop"])
+                    self.assertNotEqual(D.source_links(self.reg, extra["base"], extra["drop"]), whole)
+
+    def test_conversion_only_for_owner_and_admin(self):
+        for v, want in ((self.ADMIN, {CID, CID2}), (self.A, {CID}), (self.B, set())):
+            g = self.graph(v, "session|" + S)
+            up = {n["title"]: n for n in g["nodes"] if n["kind"] == "upload"}
+            with self.subTest(user=v.user["id"]):
+                self.assertEqual(set(up), want)
+                if CID in up:
+                    self.assertEqual(up[CID], {"title": CID, "kind": "upload", "col": 1, "hist": 0, "part": -1,
+                                               "sub": "9 tiles", "status": None, "url": f"/predict/convert/{CID}/"})
         no_cfg = D.Viewer(Ctx.can_see, {"id": "tester", "role": "admin"})       # no portal cfg: no conversions
         self.assertNotIn(CID, titles(self.graph(no_cfg, "session|" + S)))
 
@@ -302,6 +402,14 @@ class Function(TG.Roots, unittest.TestCase):
                                     "sub": "EV prep one", "status": None, "url": f"/data/lineage/grid/{G1}/"})
         self.assertEqual(node[LV]["col"], 1 + len(D.SOURCE_COLS))           # lab columns moved right
 
+    def test_box_text_quoting_a_hidden_id_is_blanked(self):
+        # N4: GT's sample label quotes HP's id: blank for A and B (they can't see HP), shown to the admin
+        for v, sub in ((self.A, ""), (self.B, ""), (self.ADMIN, "Other prep, see " + HP)):
+            for focus in ("grid|" + GT, "session|" + T_SID):
+                g = self.graph(v, focus)
+                with self.subTest(user=v.user["id"], focus=focus):
+                    self.assertEqual({n["title"]: n for n in g["nodes"]}[GT]["sub"], sub)
+
     def test_unknown_or_bad_focus_is_empty_and_not_echoed(self):
         for focus in ("session|20991299", "grid|99999", "session|", "grid|", "session", "image|img_s1_a_png",
                       None, "session|" + HP):
@@ -322,7 +430,7 @@ class Function(TG.Roots, unittest.TestCase):
         self.assertIsNone(D.source_focus("model|x"))
         self.assertEqual(D.source_focus("grid|" + G1), ("grid", G1))
 
-    def test_links_built_once_per_registry_state_and_group(self):
+    def test_links_built_once_per_registry_state(self):
         TG.clear_caches()
         hpm = D._history_module()
         real, calls = hpm.lookup_index, []
@@ -331,14 +439,24 @@ class Function(TG.Roots, unittest.TestCase):
             self.graph(self.B, "session|" + S)
             self.graph(self.B, "grid|" + G1)
             self.graph(D.Viewer(Ctx.can_see, {"id": "userd", "role": "advanced"}), "session|" + S)   # same group
-            n_build = len(calls)
-            self.assertEqual(n_build, 2)       # lab_graph's build_model runs lookup_index once, source_links once
+            self.assertEqual(len(calls), 2)     # lab_graph's build_model runs lookup_index once, the index once
             self.graph(self.ADMIN, "session|" + S)
-            self.assertEqual(len(calls), n_build + 2)                       # a new group
-            self.graph(self.ADMIN, "grid|" + G2)
-            self.assertEqual(len(calls), n_build + 2)
+            self.assertEqual(len(calls), 3)     # a new group: only its lab graph; the index is per registry state
+            self.graph(self.A, "grid|" + G2)
+            self.assertEqual(len(calls), 4)
         finally:
             hpm.lookup_index = real
+
+    def test_recall_makes_an_entry_the_newest(self):
+        TG.clear_caches()
+        D._remember("first", 1)
+        for i in range(D.GRAPH_CACHE_N - 1):
+            D._remember(("x", i), i)
+        self.assertEqual(D._recall("first"), 1)            # used: now the newest
+        D._remember("one more", 2)                         # evicts the oldest, ("x", 0), not "first"
+        self.assertEqual(D._recall("first"), 1)
+        self.assertIsNone(D._recall(("x", 0)))
+        TG.clear_caches()
 
     def test_descendant_cap(self):
         tmp = self.tmp / "big"
@@ -419,6 +537,7 @@ class Http(Served):
                 self.assertTrue({S, G1, G2, LV, DS, MOD, EXS} <= titles(g))
                 self.assertEqual(P in titles(g), has)
                 self.assertEqual(CID in titles(g), has)
+                self.assertNotIn(Q, titles(g))
                 if not has:
                     for s in PRIVATE + ("usera",):
                         self.assertNotIn(s, body.decode("utf-8"))
@@ -452,14 +571,18 @@ class Http(Served):
                 self.assertIn('id="cj-data-view-toggle"', main)
                 self.assertIn('data-default="graph"', main)
                 self.assertIn(f'data-endpoint="/data/api/lineage/graph?focus={kind}%7C{eid}&amp;scope=item"', main)
+                self.assertIn('data-empty="Not found or not visible to you."', main)
                 self.assertIn('<script src="/data/data.js" defer></script>', main)
                 self.assertNotRegex(main, r"<script(?![^>]*\bsrc=)")
                 self.assertNotIn("/data/lineage/graph/?focus=", main)       # the lab graph link focuses nothing
                 for s in PRIVATE:
                     self.assertNotIn(s, page)
+        grid = self.get(f"/data/lineage/grid/{G1}/", "userb")[2].decode("utf-8")
+        self.assertIn("Analyses appear on the session's graph", grid)
         item = self.get(f"/data/lineage/model/{MOD}/", "userb")[2].decode("utf-8")
         self.assertIn('id="cj-data-view-toggle"', item)                      # control: an item page, no default
         self.assertNotIn('data-default="graph"', item)
+        self.assertNotIn(' data-empty="', item)
         detail = self.get(f"/data/session/{S}", "userb")[2].decode("utf-8")
         self.assertIn("Lineage: what was made from it", detail)
 
@@ -526,8 +649,9 @@ class Browser(Served):
                         page.wait_for_load_state("networkidle")
                         self.assertTrue(page.is_visible("#cj-data-graph-panel"))
                         self.assertFalse(page.is_visible("#cj-data-tree-panel"))
-                        self.assertTrue(page.is_checked("#cj-data-graph-an"))          # analyses shown
-                        self.assertTrue({S, G1, G2, LV, DS, MOD, EXS, CID, P, P2, PKG2} <= self.names(page))
+                        self.assertTrue(page.is_checked("#cj-data-graph-an"))          # its own analyses shown
+                        self.assertTrue({S, G1, G2, LV, DS, MOD, EXS, CID, P, P2, PKG2, P3} <= self.names(page))
+                        self.assertTrue(self.names(page).isdisjoint({Q, QPKG}))
                         self.assertEqual(page.locator(".cj-data-graph-focus").count(), 1)
                         sw, iw = page.evaluate("[document.documentElement.scrollWidth, window.innerWidth]")
                         self.assertLessEqual(sw, iw, "the page scrolls sideways")
@@ -550,7 +674,8 @@ class Browser(Served):
             page.wait_for_load_state("networkidle")
             got = self.names(page)
             self.assertTrue({S, G1, G2, LV, DS, MOD, EXS} <= got)
-            self.assertTrue(got.isdisjoint({P, P2, PKG2, CID, HP, HPKG}))
+            self.assertTrue(got.isdisjoint({P, P2, PKG2, P3, CID, CID2, HP, HPKG, JOBH}))
+            self.assertFalse(page.is_checked("#cj-data-graph-an"))         # none of its analyses are B's
             html_ = page.content()
             for s in PRIVATE:
                 self.assertNotIn(s, html_)
@@ -559,7 +684,40 @@ class Browser(Served):
             page.wait_for_selector(".cj-data-graph-node")
             self.assertEqual(self.names(page), {G1, S, LV, DS, MOD})
             page.screenshot(path=str(self.shots / "sg_grid_userb_1280_light.png"), full_page=True)
+            # a one-grid session's grid: B sees none of its analyses
+            page.goto(self.p.origin + f"/data/lineage/grid/{GT}/")
+            page.wait_for_selector(".cj-data-graph-node")
+            self.assertEqual(self.names(page), {GT, T_SID, DT})
             self.assertEqual((rec_["foreign"], rec_["errors"], rec_["console"]), ([], [], []))
+        finally:
+            ctx.close()
+
+    def test_grid_with_its_sessions_analysis_in_a_browser(self):
+        ctx, page, rec_ = self.session(1280, "light", "usera")
+        try:
+            page.goto(self.p.origin + f"/data/lineage/grid/{GT}/")
+            page.wait_for_selector(".cj-data-graph-node")
+            page.wait_for_load_state("networkidle")
+            self.assertEqual(self.names(page), {GT, T_SID, DT, PT})
+            self.assertTrue(page.is_checked("#cj-data-graph-an"))
+            page.screenshot(path=str(self.shots / "sg_grid_onegrid_usera_1280_light.png"), full_page=True)
+            self.assertEqual((rec_["foreign"], rec_["errors"], rec_["console"]), ([], [], []))
+        finally:
+            ctx.close()
+
+    def test_empty_state_wording(self):
+        # N3: a focus that comes back null on a session page reads "Not found or not visible to you."
+        ctx, page, rec_ = self.session(1280, "light", "userb")
+        try:
+            page.route("**/data/api/lineage/graph*", lambda r: r.fulfill(
+                status=200, content_type="application/json",
+                body=json.dumps({"schema": "cj_data/1", "scope": "item", "cols": [], "nodes": [], "edges": [],
+                                 "focus": None, "more": False, "error": None})))
+            page.goto(self.p.origin + f"/data/lineage/session/{S}/")
+            page.wait_for_function("document.getElementById('cj-data-graph-status').textContent.indexOf('Loading')"
+                                   " < 0")
+            self.assertEqual(page.text_content("#cj-data-graph-status"), "Not found or not visible to you.")
+            self.assertEqual((rec_["foreign"], rec_["errors"]), ([], []))
         finally:
             ctx.close()
 
