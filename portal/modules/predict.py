@@ -890,6 +890,8 @@ def actions_html(cfg, d: Path, req: dict, st: dict, admin: bool, rows) -> str:
             out = (f'{err}<form method="post" action="/predict/{esc(ps)}/results" class="cj-predict-inline">'
                    f'<button class="cj-predict-btn" type="submit">Results</button></form>'
                    f'<p class="cj-mut">Counts EVs per sample (model only until images are reviewed).</p>')
+        out += (f'<p class="cj-mut"><a href="/results/{esc(ps)}/#cj-results-zips">Downloads</a>: '
+                f'images, model outlines, reviewed labels.</p>')
     parts.append(f'<div class="cj-predict-acts"><div class="cj-card">{rev}</div><div class="cj-card">{out}</div>'
                  f'</div>')
     # spot check
