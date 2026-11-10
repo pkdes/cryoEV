@@ -115,6 +115,11 @@ Rules:
     portal audit log (predict.nm_override). Over the tolerance: refused, as before.
   - Model: the registry's production model (also in models/models.yaml) by default; basic users get only that one.
   - Raw upload: admin and advanced. Raw session pick: admin. Basic users get 403 on both.
+  - Raw upload files that can't be converted are left out, not fatal: atlas files (named *atlas*, also left out by
+    the page) at the start; a file failing its content check, or a sidecar naming a path or a file not uploaded,
+    is deleted on arrival / before conversion (never read by the converter) with its .mrc / .mrc.mdoc partner.
+    The upload meta and convert.json keep skipped [{name, why}]; the conversion page lists them. Nothing
+    convertible left: refused with the reasons. Sizes, disk and the piece protocol stay hard refusals.
   - Long work (create(), uploads to disk, the review package, results) runs in worker threads, never on the event
     loop. The predictor and the converter are detached processes; status.json says the rest.
   - Plain words for scientists: paths, ids of folders and raw errors only on admin-only lines.
@@ -2355,7 +2360,7 @@ def move_tree(src: Path, dst: Path):
 
 
 def new_conversion(cfg, user, fields: dict, *, source: dict, inputs=None, upload_files: Path | None = None,
-                   sample_key=None, nbytes=None) -> Path:
+                   sample_key=None, nbytes=None, skipped=None) -> Path:
     """Make <root>/raw_tiles/<session>_<6 hex>/ with convert.json + status queued (uploaded files moved into
     input/), then start it when nothing else runs. -> the folder."""
     root = raw_root(cfg)
@@ -2387,6 +2392,8 @@ def new_conversion(cfg, user, fields: dict, *, source: dict, inputs=None, upload
                 "inputs": [str(x) for x in inputs or []], "sample_key": str(sample_key) if sample_key else None,
                 "created": now_iso()}
         meta["input_bytes"] = int(nbytes) if nbytes is not None else input_bytes(meta)
+        if skipped:                                      # upload files left out: [{name, why}] (the page lists them)
+            meta["skipped"] = [{"name": str(x.get("name"))[:200], "why": str(x.get("why"))[:300]} for x in skipped]
         PS.write_json_atomic(d / CONVERT_JSON, meta)
         write_conv_status(d, state="queued", pid=None, pid_created=None, started=None, finished=None, error=None,
                           kind=None, warnings=[], result=None, n_tiles=None)
@@ -3255,7 +3262,40 @@ def upload_received(d: Path, meta: dict) -> dict:
 def upload_state(d: Path, meta: dict) -> dict:
     return {"schema": SCHEMA_UPLOAD, "upload": meta["id"], "kind": meta["kind"], "chunk": CHUNK_BYTES,
             "received": upload_received(d, meta), "done": list(meta.get("done") or []),
+            "skipped": list(meta.get("skipped") or []),
             "total": sum(meta["declared"].values())}
+
+
+def skipped_names(meta: dict) -> set:
+    return {x.get("name") for x in meta.get("skipped") or [] if isinstance(x, dict)}
+
+
+def skip_raw_file(d: Path, meta: dict, name: str, why: str) -> None:
+    """Leave one raw upload file out (it must never reach the converter): its staged copy (or partial) deleted, the
+    name in skipped {name, why} and in done. An .mrc.mdoc takes its .mrc with it. Callers write meta."""
+    why = why.replace(f"{name}: ", "")               # the checks start with the file name: listed once
+    names = [(name, why)]
+    lo = name.lower()
+    if lo.endswith(".mrc.mdoc"):
+        mrc = next((n for n in meta["declared"] if n.lower() == lo[:-len(".mdoc")]), None)
+        if mrc:
+            names.append((mrc, f"its {name} was left out"))
+    elif lo.endswith(".mrc"):
+        side = next((n for n in meta["declared"] if n.lower() == lo + ".mdoc"), None)
+        if side:
+            names.append((side, f"its {name} was left out"))
+    have = skipped_names(meta)
+    for n, w in names:
+        for p in (d / UPLOAD_FILES / n, d / UPLOAD_FILES / (n + PART)):
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+        if n not in have:
+            meta["skipped"] = list(meta.get("skipped") or []) + [{"name": n, "why": w[:300]}]
+            have.add(n)
+        if n not in (meta.get("done") or []):
+            meta["done"] = list(meta.get("done") or []) + [n]
 
 
 def is_sidecar(name: str) -> bool:
@@ -3284,8 +3324,9 @@ def raw_pairing(names) -> list:
     return problems
 
 
-def declared_files(kind: str, files) -> dict:
-    """The file list a page declares at the start -> {name: size}. Raises Refusal on a cap (413) or a bad list."""
+def declared_files(kind: str, files, skipped=None) -> dict:
+    """The file list a page declares at the start -> {name: size}. Raises Refusal on a cap (413) or a bad list.
+    Raw: atlas files are left out of it (raw_leave_out), appended to `skipped` when given."""
     if not isinstance(files, list) or not files:
         raise Refusal("Choose at least one image." if kind == "tiles" else "Choose the raw files.")
     cap_n = MAX_FILES if kind == "tiles" else RAW_MAX_FILES
@@ -3324,10 +3365,31 @@ def declared_files(kind: str, files) -> dict:
         if sum(out.values()) > RAW_MAX_TOTAL_BYTES:
             raise Refusal(f"Over {RAW_MAX_TOTAL_BYTES // 2 ** 30} GB in one conversion. Convert fewer montages at "
                           f"once.", 413)
+        out, left = raw_leave_out(out)
+        if skipped is not None:
+            skipped += left
         problems = raw_pairing(out)
         if problems:
+            if left:
+                problems.append(f"{len(left)} atlas file(s) were left out (whole-grid overviews are never converted)")
             raise Refusal(f"Please fix ({len(problems)}):\n" + "\n".join(problems))
     return out
+
+
+ATLAS_WHY = "a whole-grid atlas (overview): never converted"
+
+
+def raw_leave_out(decl: dict) -> tuple:
+    """({name: size} kept, [{name, why}] left out) of a raw file list: names with "atlas" in them (whole-grid
+    overviews; cryoem_core's discovery never converts them), and an .mrc whose .mrc.mdoc is left out."""
+    left = {n: ATLAS_WHY for n in decl if "atlas" in n.lower()}
+    low = {n.lower(): n for n in decl}
+    for lo, n in low.items():
+        side = low.get(lo + ".mdoc")
+        if lo.endswith(".mrc") and side in left and n not in left:
+            left[n] = f"its {side} was left out"
+    return ({n: s for n, s in decl.items() if n not in left},
+            [{"name": n, "why": w} for n, w in left.items()])
 
 
 def clean_fields(raw) -> dict:
@@ -3387,7 +3449,8 @@ def upload_start(cfg, user, body) -> dict:
     fields = clean_fields(body.get("fields"))
     if kind == "tiles" and fields.get("confirm") != "yes":       # the plain form's first refusal, before the list
         raise Refusal("Tick “I confirm the pixel size”: nothing was started.")
-    decl = declared_files(kind, body.get("files"))
+    left = []
+    decl = declared_files(kind, body.get("files"), left)
     raw = check_upload_fields(cfg, user, kind, fields)
     if raw:
         check_sample_source(raw, decl)
@@ -3418,8 +3481,9 @@ def upload_start(cfg, user, body) -> dict:
     try:
         res.check()
         (d / UPLOAD_FILES).mkdir()
+        # left-out files count as done (an older page sends only what is not done) and are never received
         meta = {"schema": SCHEMA_UPLOAD, "id": uid, "owner": user["id"], "kind": kind, "fields": fields,
-                "declared": decl, "done": [], "created": now_iso()}
+                "declared": decl, "done": [x["name"] for x in left], "skipped": left, "created": now_iso()}
         PS.write_json_atomic(d / UPLOAD_META, meta)
     except BaseException:
         res.release()
@@ -3582,6 +3646,12 @@ async def receive_piece(request: Request, d: Path, uid: str) -> dict:
         final = d / UPLOAD_FILES / name
         await run_in_threadpool(os.replace, part, final)
         problem = await run_in_threadpool(file_problem, meta["kind"], final)
+        if problem and meta["kind"] == "raw":
+            # one odd raw file (an atlas mdoc, a sidecar naming a path) is left out, not the whole upload: deleted
+            # here, so the converter never sees it; upload_create refuses if nothing convertible is left
+            await run_in_threadpool(skip_raw_file, d, meta, name, problem)
+            await run_in_threadpool(PS.write_json_atomic, d / UPLOAD_META, meta)
+            return upload_state(d, meta)
         if problem:
             raise Refusal(f"{problem}. Nothing was kept.", 400, drop=True)
         meta["done"] = list(meta.get("done") or []) + [name]
@@ -3623,19 +3693,53 @@ def upload_create(cfg, user, d: Path, meta: dict) -> str:
     check_sample_source(raw, meta["declared"])
     check_conv_cap(cfg, user)
     # every sidecar's [Image = ...]: a bare name, and one of the uploaded files (else cryoem_core would open whatever
-    # path it names on the server: an absolute path, a UNC share, ../)
-    problems = []
-    for n in meta["declared"]:
-        if n.lower().endswith(SIDECAR_EXT):
-            problems += sidecar_problems(d / UPLOAD_FILES / n, set(meta["declared"]))
-    if problems:
-        raise Refusal(f"Not converted ({len(problems)} problem(s)). Nothing was kept:\n" + "\n".join(problems[:12]))
-    check_disk_for(raw_root(cfg), sum(meta["declared"].values()))
+    # path it names on the server: an absolute path, a UNC share, ../). One that fails is left out and DELETED here,
+    # before the conversion, so the converter never reads it; the rest still converts.
+    files = d / UPLOAD_FILES
+    sent = sorted(n for n in meta["declared"] if n not in skipped_names(meta) and (files / n).is_file())
+    for n in sent:
+        if n.lower().endswith(SIDECAR_EXT) and (files / n).is_file():
+            bad = sidecar_problems(files / n, set(meta["declared"]))
+            if bad:
+                skip_raw_file(d, meta, n, "; ".join(bad))
+                continue
+            gone = [t for t in sidecar_images(files / n) if t in skipped_names(meta)]
+            if gone:                                 # convert_raw refuses a montage with tiles missing: left out
+                skip_raw_file(d, meta, n, f"its tile {gone[0]} was left out"
+                              + (f" (and {len(gone) - 1} more)" if len(gone) > 1 else ""))
+    named = set()                                    # TIFF tiles go with a surviving .idoc, or not at all
+    for n in sent:
+        if n.lower().endswith(".idoc") and (files / n).is_file():
+            named |= set(sidecar_images(files / n))
+    for n in sent:
+        if n.lower().endswith((".tif", ".tiff")) and (files / n).is_file() and n not in named:
+            skip_raw_file(d, meta, n, "its .idoc was left out")
+    for n in sent:                                   # an MRC stack and its .mrc.mdoc go together
+        lo = n.lower()
+        if not (files / n).is_file():
+            continue
+        if lo.endswith(".mrc") and not any(p.lower() == lo + ".mdoc" and (files / p).is_file() for p in sent):
+            skip_raw_file(d, meta, n, "its .mrc.mdoc was left out")
+        elif lo.endswith(".mrc.mdoc") and not any(p.lower() == lo[:-len(".mdoc")] and (files / p).is_file()
+                                                  for p in sent):
+            skip_raw_file(d, meta, n, "its MRC stack was left out")
+    left = [x for x in meta.get("skipped") or [] if isinstance(x, dict)]
+    present = {p.name for p in files.iterdir() if p.is_file()} if files.is_dir() else set()
+    low = {n.lower() for n in present}
+    montages = [n for n in present if n.lower().endswith(".idoc")
+                or (n.lower().endswith(".mrc.mdoc") and n.lower()[:-len(".mdoc")] in low)]
+    PS.write_json_atomic(d / UPLOAD_META, meta)
+    if not montages:
+        why = [f"{x.get('name')}: {x.get('why')}" for x in left]
+        raise Refusal(f"Not converted: no montage is left to convert ({len(left)} file(s) left out):\n"
+                      + "\n".join(why[:12]) + ("\n…" if len(why) > 12 else ""))
+    nbytes = sum(s for n, s in meta["declared"].items() if n in present)
+    check_disk_for(raw_root(cfg), nbytes)
     check_gpu(raw)
-    write_sample_key(d / UPLOAD_FILES, raw)          # before conversion: labels are baked into tile names
-    conv = new_conversion(cfg, user, raw, upload_files=d / UPLOAD_FILES,
-                          source={"kind": "upload", "files": list(meta["declared"])},
-                          nbytes=sum(meta["declared"].values()))
+    write_sample_key(files, raw)                     # before conversion: labels are baked into tile names
+    conv = new_conversion(cfg, user, raw, upload_files=files,
+                          source={"kind": "upload", "files": [n for n in meta["declared"] if n in present]},
+                          nbytes=nbytes, skipped=left)
     return f"/predict/convert/{conv.name}/"
 
 
@@ -3707,6 +3811,14 @@ def conv_fragments(cfg, user, can_see, d: Path, meta: dict, st: dict, details=No
     if warns:
         parts.append('<h2 class="cj-sec">Warnings</h2><div class="cj-card"><ul class="cj-predict-warns">'
                      + "".join(f"<li>{esc(w)}</li>" for w in warns) + '</ul></div>')
+    left = [x for x in meta.get("skipped") or [] if isinstance(x, dict)]
+    if left:                                         # the upload's files left out (never converted)
+        parts.append(f'<div class="cj-card" id="cj-predict-skipped"><b>Left out {len(left)} file(s)</b>'
+                     f'<p class="cj-mut">These uploaded files were not converted (and were not kept):</p>'
+                     '<ul class="cj-predict-warns">'
+                     + "".join(f'<li>{esc(str(x.get("name")))}: {esc(_plain(str(x.get("why")), paths))}</li>'
+                               for x in left[:200])
+                     + (f"<li>… and {len(left) - 200} more</li>" if len(left) > 200 else "") + '</ul></div>')
     until = inputs_kept_until(cfg, d, st)
     if until is not None:
         parts.append(f'<p class="cj-mut">The uploaded raw files are kept until '

@@ -172,6 +172,16 @@
 
     function say(text) { if (box) { box.textContent = text || ''; box.hidden = !text; } }
     function progress(text) { if (info) info.textContent = text; }
+    var noteEl = null;
+    function note(text) {                                       // a lasting line under the progress (left-out files)
+      if (!noteEl && text && info) {
+        noteEl = document.createElement('p');
+        noteEl.className = 'cj-mut';
+        noteEl.setAttribute('data-cj-upload-note', '');
+        info.parentNode.insertBefore(noteEl, info.nextSibling);
+      }
+      if (noteEl) { noteEl.textContent = text || ''; noteEl.hidden = !text; }
+    }
     function busy(on) {
       if (!btn) return;
       btn.disabled = on;
@@ -180,7 +190,7 @@
     function remember(id) { try { if (id) sessionStorage.setItem(store, id); else sessionStorage.removeItem(store); } catch (x) { /* private mode */ } }
     function remembered() { try { return sessionStorage.getItem(store); } catch (x) { return null; } }
 
-    function sendAll(st, files) {
+    function sendAll(st, files, onState) {
       var id = st.upload, chunk = st.chunk, total = files.reduce(function (a, f) { return a + f.size; }, 0);
       var sentOf = function (s) {
         return files.reduce(function (a, f) {
@@ -210,7 +220,12 @@
       var i = 0, s = st;
       var next = function () {
         if (i >= files.length) return Promise.resolve(id);
-        return one(files[i], i, s, 0).then(function (s2) { s = s2; i += 1; return next(); });
+        return one(files[i], i, s, 0).then(function (s2) {
+          s = s2;
+          i += 1;
+          if (onState) onState(s);
+          return next();
+        });
       };
       return next();
     }
@@ -220,6 +235,28 @@
       e.stopPropagation();                                      // not the plain-form handler below
       if (form.dataset.sending === '1') return;
       var files = Array.prototype.slice.call(input.files || []);
+      var leftOut = 0;
+      var noteLeft = function (byServer) {                      // atlas files left out here + those the server left out
+        var n = leftOut + byServer;
+        note(n ? n + ' file' + (n === 1 ? '' : 's') + ' left out (not converted)' +
+             (leftOut ? ', ' + leftOut + ' of them atlas file' + (leftOut === 1 ? '' : 's') : '') + '.' : '');
+      };
+      if (kind === 'raw') {                                     // whole-grid atlases are never converted: not sent
+        var out = {};
+        files.forEach(function (f) { if (/atlas/i.test(f.name)) out[f.name.toLowerCase()] = 1; });
+        files.forEach(function (f) {                            // an .mrc whose .mrc.mdoc is left out goes too
+          var lo = f.name.toLowerCase();
+          if (/\.mrc$/.test(lo) && out[lo + '.mdoc']) out[lo] = 1;
+        });
+        leftOut = files.filter(function (f) { return out[f.name.toLowerCase()]; }).length;
+        files = files.filter(function (f) { return !out[f.name.toLowerCase()]; });
+        if (leftOut && !files.length) {
+          note('');
+          say('Only atlas files were chosen: nothing to convert.');
+          return;
+        }
+        noteLeft(0);
+      }
       var fields = {};
       new FormData(form).forEach(function (v, k) { if (typeof v === 'string') fields[k] = v; });
       form.dataset.sending = '1';
@@ -232,7 +269,8 @@
         .then(function (st) {
           if (st._status !== 200) throw st;
           remember(st.upload);
-          return sendAll(st, files);
+          if (kind === 'raw') noteLeft((st.skipped || []).length);
+          return sendAll(st, files, function (s) { if (kind === 'raw') noteLeft((s.skipped || []).length); });
         })
         .then(function (id) {
           progress('All ' + files.length + ' file' + (files.length === 1 ? '' : 's') + ' sent; starting…');
