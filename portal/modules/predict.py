@@ -691,8 +691,11 @@ def spot_list(cfg, d: Path, ps: str, rows) -> tuple:
                 while len(_SPOT_CACHE) > CACHE_MAX:
                     _SPOT_CACHE.pop(next(iter(_SPOT_CACHE)))
     out = []
+    from annotation import prediction_package as PP
     for i in ids:
         r = by_image.get(i) or {}
+        if pkg is not None and PP._rejected_file(pkg, Path(r.get("file") or "").name or None):
+            continue                                     # rejected after spotcheck.json was written: nothing to check
         out.append({"image": i, "file": Path(r.get("file") or "").name or None,
                     "sample_label": r.get("sample_label"), "orig_name": r.get("orig_name")})
     return out
