@@ -97,6 +97,8 @@ def diff(recipe: dict, eff: dict) -> list:
     """[(key, recipe value, used value)] where the used value is not the recipe's."""
     out = []
     for k in KEYS:
+        if k == "bandpass_nm" and (eff or {}).get("denoise") is False:
+            continue                                         # no cutoff with denoise off (the CLI reports it as null)
         a, b = (recipe or {}).get(k), (eff or {}).get(k)
         if b is None and a is None:
             continue
