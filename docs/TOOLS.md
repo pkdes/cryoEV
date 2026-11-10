@@ -112,3 +112,15 @@ The review server, review sandbox, history server and job monitor (and later the
   - Remove it: `... register_services_task.ps1 -Unregister`. Running services are left as they are.
   - It runs at logon only: after a sign-out the services stop, and the next logon starts them again.
 - **Switching review packages:** edit `--package` in the config, then `services.py restart review`.
+
+## Test gate (`tools/test_gate.py`)
+- **Default (`--affected`):** runs only the suites the changed files touch (vs `origin/main`, uncommitted edits included), plus the quick repo-wide `tests` suite.
+  - Shared code (`data_utils/`) or an unrecognized code file runs everything.
+- **`--full`:** every suite. Use it for go-lives.
+- **`--suites a,b`:** named suites.
+- **How it runs:**
+  - Each test file is one unit. Units run in parallel (`--jobs`, default CPU/2), slowest first.
+  - Browser (Playwright) files share a lane of 2.
+  - A file that fails is re-run alone once. If it then passes it is reported as **FLAKY**, never as a plain pass.
+  - The pre-push scan runs at the end.
+- **Timings:** each file's time is appended to `~/.cryoev/gate/timings.jsonl`. `--times` lists the slowest files.
