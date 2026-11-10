@@ -859,6 +859,8 @@ def session_grid_cards(records, record, files) -> list:
             registry_counts[slot] = registry_counts.get(slot, 0) + 1
     uploaded: dict = {}
     for c in US.conversions_of(record):
+        if c.get("derived_from"):                               # a re-conversion of another: the same tiles, not new ones
+            continue
         for slot, n in _dict(c.get("tiles_per_grid")).items():
             if _number(n) is not None:
                 uploaded[str(slot)] = uploaded.get(str(slot), 0) + int(n)
@@ -922,7 +924,8 @@ def detail_session(records, record, page=None, viewer=None) -> dict:
         det = _dict(record.get("details"))
         convs = (US.visible_conversions(viewer.cfg, record, viewer.user or {}, viewer.can_see)
                  if viewer is not None and viewer.cfg is not None else [])
-        upload = {"conversions": [{"id": c["id"], "url": c["href"], "gallery": c["gallery"], "n_tiles": c["n_tiles"]}
+        upload = {"conversions": [{"id": c["id"], "url": c["href"], "gallery": c["gallery"], "n_tiles": c["n_tiles"],
+                                   "derived_from": c.get("derived_from")}
                                   for c in convs],
                   "details": {"grid_ids": _dict(det.get("grid_ids")), "sample_display": _dict(det.get("sample_display")),
                               "prep_notes": _text(det.get("prep_notes")), "by": _text(det.get("by")),
@@ -2435,7 +2438,9 @@ def render_session_extras(d, extra="") -> str:
                 f'<li class="cj-data-row"><span class="cj-data-top"><a href="{esc(c["url"])}">Conversion '
                 f'{esc(c["id"])}</a><a class="cj-data-lnk" href="{esc(c["gallery"])}">Gallery</a></span>'
                 + (f'<span class="cj-mut">{esc(plural(c["n_tiles"], "tile"))}</span>'
-                   if _number(c.get("n_tiles")) is not None else "") + "</li>"
+                   if _number(c.get("n_tiles")) is not None else "")
+                + (f'<span class="cj-mut">re-converted from {esc(c["derived_from"])}</span>'
+                   if c.get("derived_from") else "") + "</li>"
                 for c in up["conversions"])
             out.append(f'<div class="cj-card"><ul class="cj-data-rows">{items}</ul></div>')
         else:

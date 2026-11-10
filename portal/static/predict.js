@@ -292,4 +292,146 @@
         });
     });
   });
+  // ---- Conversion settings (round 7 phase 2). Everything the server sends here is escaped HTML or JSON.
+  // - Raw form: select[data-cj-recipe] + [data-cj-recipe-readout]: the real values of the chosen recipe
+  //   (GET /predict/api/recipe/<name>, a child process on the server, cached); the option labels gain a short summary.
+  // - Conversion page: #cj-convset loads GET <data-url> (values used, diff, the Adjust panel). The Adjust panel's sliders
+  //   feed a one-tile preview (POST .../preview), shown as before | after; "Re-convert" is a plain form post.
+  function setHtml(node, frag) {
+    var t = document.createElement('template');
+    t.innerHTML = frag || '';
+    node.replaceChildren(t.content);
+  }
+  function getJson(url) {
+    return fetch(url, {cache: 'no-store', credentials: 'same-origin'}).then(function (r) {
+      return r.json().then(function (j) { j._status = r.status; return j; });
+    });
+  }
+  function plainMsg(e) { return String(e && e.message || e).replace(/[<>&]/g, ''); }
+
+  var rsel = document.querySelector('select[data-cj-recipe]');
+  var rbox = document.querySelector('[data-cj-recipe-readout]');
+  if (rsel && rbox) {
+    var rvals = rbox.querySelector('[data-cj-recipe-values]'), rcache = {}, rchain = Promise.resolve();
+    Array.prototype.forEach.call(rsel.options, function (o) {
+      o.dataset.base = o.textContent.split(' · ')[0];   // the label before any ' · summary' the server put there
+    });
+    var rload = function (name) {
+      if (rcache[name]) return Promise.resolve(rcache[name]);
+      return getJson('/predict/api/recipe/' + encodeURIComponent(name)).then(function (j) {
+        if (j._status !== 200) throw new Error(j.error || ('status ' + j._status));
+        rcache[name] = j;
+        Array.prototype.forEach.call(rsel.options, function (o) {
+          if (o.value === name && j.summary) o.textContent = o.dataset.base + ' · ' + j.summary;
+        });
+        return j;
+      });
+    };
+    var rshow = function () {
+      var name = rsel.value;
+      if (rcache[name]) { setHtml(rvals, rcache[name].html); return; }
+      setHtml(rvals, '<p class="cj-mut">Loading the values of this recipe…</p>');
+      rload(name).then(function () { if (rsel.value === name) setHtml(rvals, rcache[name].html); })
+        .catch(function (e) {
+          if (rsel.value === name) setHtml(rvals, '<p class="cj-mut">The values could not be read (' + plainMsg(e) + ').</p>');
+        });
+    };
+    rsel.addEventListener('change', rshow);
+    if (rvals.querySelector('[data-cj-convset-wait]')) rshow();
+    // fill in the other options' summaries, one recipe at a time (each is a child process on the server)
+    Array.prototype.slice.call(rsel.options, 0, 12).forEach(function (o) {
+      if (o.textContent.indexOf(' · ') > -1) return;
+      rchain = rchain.then(function () { return rload(o.value); }).catch(function () {});
+    });
+  }
+
+  var cs = document.getElementById('cj-convset');
+  if (cs) {
+    var csLoad = function () {
+      getJson(cs.dataset.url).then(function (j) {
+        if (j._status !== 200) throw new Error(j.error || ('status ' + j._status));
+        setHtml(cs, j.html);
+        cs.dataset.state = j.state || '';
+        csWire();
+      }).catch(function (e) {
+        setHtml(cs, '<p class="cj-mut">The settings could not be loaded (' + plainMsg(e) + ').</p>');
+      });
+    };
+    csLoad();
+    if (cs.dataset.state && cs.dataset.state !== 'done' && cs.dataset.state !== 'failed') {
+      var csId = (document.getElementById('cj-predict-conv') || {dataset: {}}).dataset.cid;
+      var csPoll = setInterval(function () {
+        if (document.hidden || !csId) return;
+        getJson('/predict/api/convert/' + encodeURIComponent(csId)).then(function (j) {
+          if (j.state === 'done' || j.state === 'failed') { clearInterval(csPoll); csLoad(); }
+        }).catch(function () {});
+      }, 6000);
+    }
+  }
+
+  function csWire() {
+    var panel = document.getElementById('cj-convset-adjust');
+    if (!panel || panel.dataset.disabled) return;
+    var form = panel.querySelector('[data-cj-convset-form]');
+    var sliders = Array.prototype.slice.call(form.querySelectorAll('[data-cj-slider]'));
+    var dn = form.querySelector('[data-cj-denoise]'), dtext = form.querySelector('[data-cj-denoise-text]');
+    var msg = panel.querySelector('[data-cj-convset-msg]'), pv = panel.querySelector('[data-cj-pv]');
+    var btn = form.querySelector('[data-cj-preview]');
+    var say = function (t) { msg.textContent = t || ''; msg.hidden = !t; };
+    var sync = function () {
+      sliders.forEach(function (s) { s.parentNode.querySelector('[data-cj-out]').textContent = s.value; });
+      dtext.textContent = dn.checked ? 'On' : 'Off';
+      sliders.forEach(function (s) { if (s.name === 'bandpass_nm') s.disabled = !dn.checked; });
+    };
+    sliders.forEach(function (s) { s.addEventListener('input', sync); });
+    dn.addEventListener('change', sync);
+    form.querySelector('[data-cj-reset]').addEventListener('click', function () {
+      sliders.forEach(function (s) { s.value = s.dataset.recipe; });
+      dn.checked = dn.dataset.recipe === '1';
+      sync(); say(''); pv.hidden = true;
+    });
+    form.addEventListener('submit', function () {
+      form.querySelector('[data-cj-reconvert]').disabled = true;
+      say('Starting a new conversion…');
+    });
+    var figure = function (label, src, note) {
+      var f = document.createElement('figure'), c = document.createElement('figcaption'), i = document.createElement('img');
+      c.textContent = label; i.src = src; i.alt = label; f.appendChild(i); f.appendChild(c);
+      if (note) { var n = document.createElement('small'); n.textContent = note; f.appendChild(n); }
+      return f;
+    };
+    var describe = function (p) {
+      if (!p) return '';
+      return 'clip ' + p.clip_lo_pct + '–' + p.clip_hi_pct + ' %, ' + (p.denoise === false ? 'no denoise' :
+        (p.bandpass_nm != null ? 'bandpass ' + p.bandpass_nm + ' nm' : 'denoise on'));
+    };
+    btn.addEventListener('click', function () {
+      var params = {denoise: dn.checked ? 'true' : 'false'};
+      sliders.forEach(function (s) { if (!s.disabled) params[s.name] = s.value; });
+      btn.disabled = true; say('Making the preview… (a few seconds)');
+      fetch(panel.dataset.preview, {method: 'POST', credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({tile: form.querySelector('[data-cj-tile]').value, params: params})})
+        .then(function (r) { return r.json().then(function (j) { j._status = r.status; return j; }); })
+        .then(function (j) {
+          if (!j.ok) { say(j.error || ('The preview failed (' + j._status + ').')); pv.hidden = true; return; }
+          say('');
+          var wrap = document.createElement('div'), row = document.createElement('div'), cap = document.createElement('p');
+          row.className = 'cj-convset-pair';
+          row.appendChild(figure('Before: this conversion', j.before, describe(j.conversion_params || j.recipe_params)));
+          row.appendChild(figure('After: these settings', j.after, describe(j.effective)));
+          cap.className = 'cj-mut';
+          cap.textContent = 'Tile ' + j.tile + (j.compute ? ' · rendered on the ' + j.compute : '') +
+            (j.warnings && j.warnings.length ? ' · ' + j.warnings.join(' ') : '');
+          var cpu = document.createElement('p');
+          cpu.className = 'cj-mut';
+          cpu.textContent = 'Preview is rendered on the CPU; it can differ from GPU-made tiles by at most 1 grey level.';
+          wrap.appendChild(row); wrap.appendChild(cap); wrap.appendChild(cpu);
+          pv.replaceChildren(wrap); pv.hidden = false;
+        })
+        .catch(function (e) { say('The preview failed (' + plainMsg(e) + ').'); })
+        .then(function () { btn.disabled = false; });
+    });
+    sync();
+  }
 })();
