@@ -601,7 +601,7 @@ def refused_notice(res: dict) -> str:
     out_of = {}
     for img in res["images"].values():
         lab = img.get("sample_label")
-        if lab not in res["samples"]:
+        if lab not in res["samples"] and not img.get("rejected"):      # rejected images are not counted anywhere
             out_of[lab] = out_of.get(lab, 0) + 1
     ru = res.get("refused_unsure") or {}
     items = "".join(f"<li><b>{esc(str(k))}</b> ({esc(plural(v, 'image'))}"
@@ -816,7 +816,7 @@ def nm_text(res: dict) -> str:
 
 
 def provenance(res: dict, ps: dict) -> dict:
-    imgs = res["images"].values()
+    imgs = [i for i in res["images"].values() if not i.get("rejected")]      # counted images only
     rule = res.get("rule") or {}
     nm = nm_text(res)
     return {"Prediction set": ps["id"],
@@ -825,8 +825,8 @@ def provenance(res: dict, ps: dict) -> dict:
             "Counting rule": (f"outlines at confidence {rule.get('conf')} or more (on images nobody edited); "
                               f"{ev_rule(rule.get('ev_classes'))}; inner layers not counted; "
                               f"multilayer = {rule.get('multilayer')}"),
-            "Checked by a person": (f"{sum(1 for i in imgs if i.get('reviewed'))} of {len(res['images'])} images "
-                                    f"reviewed, {sum(1 for i in imgs if i.get('edited') and not i.get('reviewed'))}"
+            "Checked by a person": (f"{sum(1 for i in imgs if i.get('reviewed'))} of {len(imgs)} "
+                                    f"{'counted ' if len(imgs) != len(res['images']) else ''}images reviewed, {sum(1 for i in imgs if i.get('edited') and not i.get('reviewed'))}"
                                     " more edited"),
             **({"Pixel size (nm per pixel)": nm} if nm else {}),
             **({"Rejected images (not counted)": f"{n_rejected_total(res)} of {len(res['images'])} images"}
@@ -866,11 +866,11 @@ def incomplete(ps: dict) -> bool:
 
 def csv_header(res: dict, ps: dict) -> bytes:
     """The provenance comment lines put on top of a standalone CSV download (the file on disk is unchanged)."""
-    imgs = res["images"].values()
+    imgs = [i for i in res["images"].values() if not i.get("rejected")]      # counted images only
     rule = res.get("rule") or {}
     lines = [f"# CryoEV results for prediction set {ps['id']}",
              f"# model={res.get('model')}, computed={res.get('computed')}, "
-             f"reviewed={sum(1 for i in imgs if i.get('reviewed'))}/{len(res['images'])} images, "
+             f"reviewed={sum(1 for i in imgs if i.get('reviewed'))}/{len(imgs)} {'counted ' if len(imgs) != len(res['images']) else ''}images, "
              f"edited (not reviewed)={sum(1 for i in imgs if i.get('edited') and not i.get('reviewed'))}",
              f"# rule=conf>={rule.get('conf')}; {ev_rule(rule.get('ev_classes'))}; inner layers not counted; "
              f"multilayer={rule.get('multilayer')}"]
@@ -959,7 +959,7 @@ def render_set(cfg, ps: dict, user: dict) -> str:
                        + compute_form(ps_id, "Compute results") + "</div>")
         if predictions_ready(ps):          # images and outlines do not need results.json
             out.append('<h2 class="cj-sec">Download</h2>')
-            out.append(downloads_zips(ps_id, package_dir(cfg, ps_id) is not None))
+            out.append(downloads_zips(ps_id, package_dir(cfg, ps_id) is not None, (ps["dir"] / "p").is_dir()))
         return "".join(out)
 
     out.append(counted_note(res))
@@ -980,7 +980,7 @@ def render_set(cfg, ps: dict, user: dict) -> str:
         out.append('<h2 class="cj-sec">Images</h2>')
         out.append(image_table(res))
     out.append('<h2 class="cj-sec">Download</h2>')
-    out.append(downloads_zips(ps_id, package_dir(cfg, ps_id) is not None))
+    out.append(downloads_zips(ps_id, package_dir(cfg, ps_id) is not None, (ps["dir"] / "p").is_dir()))
     out.append(downloads(ps_id))
     out.append('<h2 class="cj-sec">How these numbers were made</h2>')
     out.append('<dl class="cj-card cj-results-prov" id="cj-results-prov">' + "".join(
@@ -1047,29 +1047,45 @@ def page_body(content: str) -> str:
     return _PH.sub(lambda m: content, TEMPLATE.read_text(encoding="utf-8"), count=1)
 
 
+def results_doc_lines(prefix: str = "") -> list:
+    """The Files + Columns text of the results tables (README of the results zip and of the Everything zip)."""
+    p = prefix
+    return [
+        "Files",
+        f"  {p}per_sample.csv  one row per sample that could be counted (a sample the engine refused is left out; see",
+        "                  'Not counted'). A sample whose images were ALL rejected is still a row: n_images 0,",
+        "                  n_rejected = how many, every other column blank.",
+        "                  The CSVs in this zip have no # header lines (this README is their provenance).",
+        f"  {p}per_image.csv   one row per image; reviewed / edited say whether a person checked it (reviewed = true),",
+        "                  changed it without marking it reviewed (edited = true), or neither (model only).",
+        "                  rejected / reject_reason / note: a rejected image stays in this file but is not counted.",
+        f"  {p}results.json    everything above, schema results/1", "",
+        "Columns",
+        "  n_images                  images COUNTED in the sample (rejected images are not in this number)",
+        "  n_rejected                images of the sample a reviewer rejected (thick ice, empty, ...); they are left out",
+        "                            of every other number, and of the refusal check on nm/px and tile size",
+        "  n_low_conf                counted EVs a reviewer tagged 'low confidence' (they ARE counted as EVs)",
+        "  ev_total                  EVs (outlines of the EV classes that are not inner layers)",
+        "  pct_multilayer_geometry   % of EVs whose outline contains another outline (the main number)",
+        "  pct_multilayer_reviewer   % of EVs a reviewer called multilayer, reviewed images only (base: reviewer_ev)",
+        "  diam_nm_median / q1 / q3  area-equivalent diameter in nm (each image converted with its own nm/px)",
+        "  nm_per_px_min / max       the pixel sizes used in the sample (they may differ by up to "
+        f"{NM_TOLERANCE * 100:g} %)",
+        "  inner_layers_excluded     inner outlines of multilayer EVs, not counted as EVs",
+        "  nonev_total               other objects, counted separately",
+        "  reviewer_geometry_disagree  reviewed outlines where the reviewer's call differs from the geometry",
+        "  rejected (per_image)      true when the image was rejected; reject_reason says why",
+        "  note (per_image)          the reviewer's free-text note on the image (text starting with = + - @ gets a ' in",
+        "                            front so a spreadsheet does not run it); also says when a rejected image could not",
+        "                            be read",
+        ""]
+
+
 def readme(res: dict, ps: dict, user: dict) -> str:
     lines = [f"CryoEV results for prediction set {ps['id']}", ""]
     lines += [f"{k}: {v}" for k, v in provenance(res, ps).items()]
-    lines += [f"Downloaded: {datetime.now().astimezone().isoformat(timespec='seconds')} by {user.get('id')}", "",
-              "Files",
-              "  per_sample.csv  one row per counted sample (refused samples are left out; see 'Not counted');",
-              "                  the CSVs in this zip have no # header lines (this README is their provenance)",
-              "  per_image.csv   one row per image; columns reviewed / edited say whether a person checked it",
-              "                  (reviewed = true), changed it without marking it reviewed (edited = true), or",
-              "                  neither (model only)",
-              "  results.json    everything above, schema results/1", "",
-              "Columns",
-              "  ev_total                  EVs (outlines of the EV classes that are not inner layers)",
-              "  pct_multilayer_geometry   % of EVs whose outline contains another outline (the main number)",
-              "  pct_multilayer_reviewer   % of EVs a reviewer called multilayer, reviewed images only (base: "
-              "reviewer_ev)",
-              "  diam_nm_median / q1 / q3  area-equivalent diameter in nm (each image converted with its own nm/px)",
-              "  nm_per_px_min / max       the pixel sizes used in the sample (they may differ by up to "
-              f"{NM_TOLERANCE * 100:g} %)",
-              "  inner_layers_excluded     inner outlines of multilayer EVs, not counted as EVs",
-              "  nonev_total               other objects, counted separately",
-              "  reviewer_geometry_disagree  reviewed outlines where the reviewer's call differs from the geometry",
-              ""]
+    lines += [f"Downloaded: {datetime.now().astimezone().isoformat(timespec='seconds')} by {user.get('id')}", ""]
+    lines += results_doc_lines()
     return "\r\n".join(lines)
 
 
@@ -1116,12 +1132,37 @@ def zip_kind(name: str, ps_id: str):
     return None
 
 
+def lp(path):
+    """A long-path-safe Path (data_utils.longpath.long_path: \\\\?\\ prefix over the Windows limit), as the counting
+    chain does; the plain path where that module is not available."""
+    try:
+        from data_utils.longpath import long_path
+    except ImportError:
+        return Path(path)
+    return Path(long_path(Path(path)))
+
+
+def images_csv_bytes(ps: dict) -> bytes | None:
+    """images.csv for the zips, every text cell through the CSV formula guard (orig_name is an uploaded file name).
+    None when it can not be read."""
+    import csv as _csv
+    try:
+        with open(lp(ps["dir"] / "images.csv"), newline="", encoding="utf-8") as fh:
+            rd = _csv.reader(fh)
+            rows = list(rd)
+    except (OSError, ValueError, _csv.Error):
+        return None
+    if not rows:
+        return None
+    return csv_text(rows[0], rows[1:]).encode("utf-8")
+
+
 def set_rows(ps: dict) -> list:
     """The set's images from images.csv: [{image, sample_label, path (Path | None), arc, problem}]. A file that is
     missing, or resolves outside the set folder, has path None and a problem text (listed, never fatal)."""
     import csv as _csv
     try:
-        with open(ps["dir"] / "images.csv", newline="", encoding="utf-8") as fh:
+        with open(lp(ps["dir"] / "images.csv"), newline="", encoding="utf-8") as fh:
             raw = list(_csv.DictReader(fh))
     except (OSError, ValueError, _csv.Error):
         return []
@@ -1136,7 +1177,7 @@ def set_rows(ps: dict) -> list:
             p = (ps["dir"] / rel).resolve()
             if root not in p.parents:
                 row["problem"] = "file is outside the analysis folder"
-            elif not p.is_file():
+            elif not lp(p).is_file():
                 row["problem"] = "file is missing"
             else:
                 row["path"] = p
@@ -1214,12 +1255,19 @@ def reviewed_annotation(aid, image_id, o: dict, names, ev_ids, cat_of, low_id) -
     if len(pts) < 3:
         return None
     cls = int(o.get("cls") or 0)
-    rc = o.get("reviewer_class")
-    is_ev = (ev_ids is None or cls in ev_ids) and rc != "nonEV"
+    label = o.get("reviewer_label")
+    # the FINAL class decides: the reviewer's label when there is one, else the model's class. Only a final class
+    # of EV (or "Low conf EV") with low conf becomes "Low conf EV"; MV, inner, Incomplete, non-EV, ... keep their
+    # class and carry attributes.low_conf
+    ev_names = {"EV", LOW_CONF_NAME} | {names[k] for k in names if ev_ids is None or k in ev_ids}
+    if label:
+        is_ev = str(label) in ev_names
+    else:
+        is_ev = (ev_ids is None or cls in ev_ids) and o.get("reviewer_class") != "nonEV"
     low = bool(o.get("low_conf"))
     attrs = {}
     cat = cat_of[cls]
-    if low and is_ev:
+    if label == LOW_CONF_NAME or (low and is_ev):
         cat = low_id
     elif low:
         attrs["low_conf"] = True
@@ -1250,7 +1298,7 @@ def yolo_line(cls, pts, w, h) -> str:
 def prediction_lines(pred_dir: Path, image: str):
     """Iterator of (cls, conf, [coords...]) from the model's prediction .txt (normalised coordinates), read lazily
     one line at a time; None when the file is absent."""
-    p = pred_dir / f"{image}.txt"
+    p = lp(pred_dir / f"{image}.txt")
     if not p.is_file():
         return None
 
@@ -1325,7 +1373,8 @@ def status_of(entry: dict | None) -> str:
 def reviewed_entries(ps: dict, rows: list, rev: dict, problems: list) -> list:
     """Reviewed labels from reviewed/1 (reviewed_source(): current edits): annotations_reviewed.coco.json (the one
     COCO rule) + labels_reviewed/<image>.txt (YOLO-seg, original class ids) + rejected_images.csv + provenance.csv.
-    Rejected images are listed in rejected_images.csv and provenance.csv and left out of the labels."""
+    Rejected images are KEPT in the labels (a reject changes the counts, never the label data): their COCO image
+    entry is marked rejected: true + reject_reason, and they are listed in rejected_images.csv and provenance.csv."""
     model = ps["request"].get("model")
     imgs = rev.get("images") or {}
     seen = {int(o.get("cls") or 0) for e in imgs.values() for o in (e.get("objects") or [])}
@@ -1334,7 +1383,7 @@ def reviewed_entries(ps: dict, rows: list, rev: dict, problems: list) -> list:
     sizes, kept = {}, []
     for r in rows:
         e = imgs.get(r["image"])
-        if e is None or e.get("rejected"):
+        if e is None:
             continue
         if r["path"] is None:
             problems.append(f"{r['image']}: {r['problem']}; its labels are not in the reviewed labels")
@@ -1345,8 +1394,14 @@ def reviewed_entries(ps: dict, rows: list, rev: dict, problems: list) -> list:
             problems.append(f"{r['image']}: image can not be read ({type(e2).__name__})")
             continue
         kept.append(r)
-    images = [{"id": n + 1, "file_name": r["arc"], "width": sizes[r["image"]][0], "height": sizes[r["image"]][1]}
-              for n, r in enumerate(kept)]
+    def coco_image(n, r):
+        d = {"id": n + 1, "file_name": r["arc"], "width": sizes[r["image"]][0], "height": sizes[r["image"]][1]}
+        if imgs[r["image"]].get("rejected"):          # a reject changes the counts only, never the label data
+            d["rejected"] = True
+            d["reject_reason"] = imgs[r["image"]].get("reject_reason")
+        return d
+
+    images = [coco_image(n, r) for n, r in enumerate(kept)]
 
     def annots():
         aid = 0
@@ -1417,7 +1472,8 @@ def zip_readme(kind: str, ps: dict, user: dict, stale, has_results: bool, has_pk
             L += [f"  {COCO_FILE['reviewed']}   COCO (pixel coordinates) built at download time from the review",
                   f"  {LABEL_DIR['reviewed']}/<image>.txt   YOLO-seg: class x y ... (normalised; original class ids, so "
                   "'Low conf EV' trains as EV; the flag is in the COCO and provenance.csv)",
-                  "  rejected_images.csv      rejected images with reason and note (left out of the labels)",
+                  "  rejected_images.csv      rejected images with reason and note. They are NOT left out of the labels: "
+                  "a reject changes the counts, not the label data (the COCO image entry says rejected: true).",
                   "  provenance.csv           per image: rejected / reviewed / edited / model-only. 'model-only' images "
                   "carry the model's outlines at conf >= 0.5, NOT checked by a person.",
                   "",
@@ -1425,8 +1481,10 @@ def zip_readme(kind: str, ps: dict, user: dict, stale, has_results: bool, has_pk
                   "and gets attributes.low_conf = true; notes are in attributes.note."]
         else:
             L += ["  (no review package for this analysis, so there are no reviewed labels)"]
+    L += ["  PROBLEMS.txt             the last entry: anything that had to be left out while the zip was written "
+          "(for example an outline with fewer than 3 points)"]
     if kind == "everything" and has_results:
-        L += ["  results/                 per_sample.csv, per_image.csv, results.json"]
+        L += [""] + results_doc_lines("results/")
     L += ["", "COCO file_name is the image's name inside the images zip / this zip (images/<name>): unpack the "
           "images next to the COCO file.", ZIP_NOTE]
     if problems:
@@ -1444,30 +1502,46 @@ def build_zip(cfg, ps: dict, user: dict, kind: str):
     want_rev = kind in ("reviewed", "everything")
     rev = None
     if want_rev:
-        rev = reviewed_source(cfg, ps["id"])
+        try:
+            rev = reviewed_source(cfg, ps["id"])
+        except Exception as e:  # noqa: BLE001 - the review package can be mid-write or damaged
+            if kind == "reviewed":
+                return None, f"The review could not be read just now ({type(e).__name__}). Try again in a moment."
+            problems.append(f"reviewed labels: the review could not be read ({type(e).__name__}: {e}); "
+                            "this zip has no reviewed labels")
         if rev is None and kind == "reviewed":
             return None, "There is no review package for this analysis yet, so there are no reviewed labels."
     if want_out and not (ps["dir"] / "p").is_dir() and kind == "outlines":
         return None, "The model has not produced outlines for this analysis."
     entries = []
     if kind in ("images", "everything"):
-        entries += [(r["arc"], r["path"]) for r in rows if r["path"] is not None]
-        if (ps["dir"] / "images.csv").is_file():
-            entries.append(("images.csv", ps["dir"] / "images.csv"))
+        entries += [(r["arc"], lp(r["path"])) for r in rows if r["path"] is not None]
+        csv_bytes = images_csv_bytes(ps)               # through the CSV formula guard (orig_name is user text)
+        if csv_bytes is not None:
+            entries.append(("images.csv", csv_bytes))
     if want_out and (ps["dir"] / "p").is_dir():
         entries += outlines_entries(ps, rows, problems)
     if rev is not None:
-        entries += reviewed_entries(ps, rows, rev, problems)
+        try:
+            entries += reviewed_entries(ps, rows, rev, problems)
+        except Exception as e:  # noqa: BLE001 - a malformed reviewed/1 must not turn into a 500
+            if kind == "reviewed":
+                return None, f"The review could not be read just now ({type(e).__name__}). Try again in a moment."
+            problems.append(f"reviewed labels: could not be built ({type(e).__name__}: {e})")
+            rev = None
     has_results = False
     if kind == "everything":
         rdir = ps["dir"] / "results"
         res, _ = read_results(ps)
         has_results = res is not None and not incomplete(ps)
         if has_results:
-            entries += [(f"results/{f}", rdir / f) for f in FILES if (rdir / f).is_file()]
+            entries += [(f"results/{f}", lp(rdir / f)) for f in FILES if (rdir / f).is_file()]
     stale = stale_info(cfg, ps) if has_results else None
     readme_txt = zip_readme(kind, ps, user, stale, has_results, rev is not None, problems)
-    return [("README.txt", readme_txt.encode("utf-8"))] + entries, None
+
+    def problems_txt():                  # evaluated when the zip reaches it, i.e. after every other entry streamed
+        yield ("\r\n".join(f"{p}" for p in problems) + "\r\n" if problems else "No problems.\r\n").encode("utf-8")
+    return [("README.txt", readme_txt.encode("utf-8"))] + entries + [("PROBLEMS.txt", problems_txt())], None
 
 
 def downloads_zips(ps_id: str, has_pkg: bool, outlines: bool = True) -> str:

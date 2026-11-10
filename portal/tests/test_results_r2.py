@@ -159,7 +159,7 @@ class Page(R2):
 class Downloads(R2):
     def test_images_zip_needs_no_results_json(self):
         z = self.zip(PS3, "images", "owner")                     # PS3: never computed, no package
-        self.assertEqual(sorted(z.namelist()), ["README.txt", "images.csv", "images/0001.png", "images/0002.png",
+        self.assertEqual(sorted(z.namelist()), ["PROBLEMS.txt", "README.txt", "images.csv", "images/0001.png", "images/0002.png",
                                                  "images/0003.png"])
         self.assertEqual(z.read("images/0002.png"), (self.root / PS3 / "images" / "0002.png").read_bytes())
         self.assertEqual(z.testzip(), None)
@@ -189,16 +189,23 @@ class Downloads(R2):
     def test_reviewed_zip_polygons_equal_the_source(self):
         z = self.zip(PS, "reviewed", "owner")
         self.assertEqual(sorted(n for n in z.namelist() if "/" not in n),
-                         ["README.txt", "annotations_reviewed.coco.json", "provenance.csv", "rejected_images.csv"])
+                         ["PROBLEMS.txt", "README.txt", "annotations_reviewed.coco.json", "provenance.csv",
+                          "rejected_images.csv"])
+        self.assertEqual(z.namelist()[-1], "PROBLEMS.txt")                                    # always the last entry
         coco = json.loads(z.read("annotations_reviewed.coco.json"))
         src = R.reviewed_source(self.cfg, PS)
         cats = {c["id"]: c["name"] for c in coco["categories"]}
         names = {i["id"]: i["file_name"] for i in coco["images"]}
-        self.assertEqual(sorted(names.values()), ["images/0002.png", "images/0003.png"])      # A is rejected: not in
+        # a reject changes the counts, never the label data: A (rejected) is in the COCO, marked, and has its YOLO txt
+        self.assertEqual(sorted(names.values()), ["images/0001.png", "images/0002.png", "images/0003.png"])
+        flags = {i["file_name"]: (i.get("rejected"), i.get("reject_reason")) for i in coco["images"]}
+        self.assertEqual(flags, {"images/0001.png": (True, "thick ice"), "images/0002.png": (None, None),
+                                 "images/0003.png": (None, None)})
+        self.assertEqual(len(z.read("labels_reviewed/0001.txt").decode().splitlines()), 7)
         got = {}
         for a in coco["annotations"]:
             got.setdefault(names[a["image_id"]], []).append(a)
-        for image in ("0002", "0003"):
+        for image in ("0001", "0002", "0003"):
             want = src["images"][image]["objects"]
             have = got[f"images/{image}.png"]
             self.assertEqual(len(have), len(want))
@@ -220,8 +227,7 @@ class Downloads(R2):
         self.assertEqual([r.split()[0] for r in rows], ["0", "0", "0", "1"])
         for v in rows[0].split()[1:]:
             self.assertTrue(0.0 <= float(v) <= 1.0)
-        self.assertNotIn("labels_reviewed/0001.txt", z.namelist())
-        rej = list(csv.DictReader(io.StringIO(z.read("rejected_images.csv").decode())))
+        rej =list(csv.DictReader(io.StringIO(z.read("rejected_images.csv").decode())))
         self.assertEqual([(r["image"], r["reject_reason"], r["note"]) for r in rej],
                          [("0001", "thick ice", "'=HYPERLINK(\"http://x\")")])               # formula guard
         prov = {r["image"]: r for r in csv.DictReader(io.StringIO(z.read("provenance.csv").decode()))}
@@ -245,15 +251,119 @@ class Downloads(R2):
         pkg = self.review / f"pred_{PS}"
         (pkg / "reviewed.json").write_text(json.dumps({"stale": True}), encoding="utf-8")
         coco = json.loads(self.zip(PS, "reviewed", "owner").read("annotations_reviewed.coco.json"))
-        self.assertEqual(len(coco["annotations"]), 4 + 2)
+        self.assertEqual(len(coco["annotations"]), 7 + 4 + 2)
         d = self.docs[PS]
         d["images"]["0003"]["objects"] = d["images"]["0003"]["objects"][:1]               # a new edit
         try:
             coco = json.loads(self.zip(PS, "reviewed", "owner").read("annotations_reviewed.coco.json"))
-            self.assertEqual(len(coco["annotations"]), 4 + 1)
+            self.assertEqual(len(coco["annotations"]), 7 + 4 + 1)
         finally:
             self.docs[PS] = doc_for(PS)
             (pkg / "reviewed.json").unlink()
+
+    def test_coco_rule_decides_on_the_final_class(self):
+        """MV / inner / Incomplete with low conf keep their class + attributes.low_conf; only a final EV (or
+        'Low conf EV') with low conf becomes 'Low conf EV'. An unlabelled model EV with low conf is an EV."""
+        d = self.docs[PS]
+        keep = json.dumps(d)
+        try:
+            objs = d["images"]["0003"]["objects"]
+            for label, low in (("MV", True), ("inner", True), ("Incomplete", True), ("EV", True), ("EV", False),
+                               ("Low conf EV", True), (None, True)):
+                o = TR.obj(100, 100, 20, rc=label, low=low)
+                if label is None:
+                    o["reviewer_label"] = o["reviewer_class"] = None
+                if label == "Incomplete":
+                    o["reviewer_class"] = "EV"
+                objs.append(o)
+            z = self.zip(PS, "reviewed", "owner")
+            coco = json.loads(z.read("annotations_reviewed.coco.json"))
+            cats = {c["id"]: c["name"] for c in coco["categories"]}
+            three = [a for a in coco["annotations"] if a["image_id"] == 3][2:]          # the 7 added after C's two
+            got = [(cats[a["category_id"]], (a.get("attributes") or {}).get("low_conf")) for a in three]
+            self.assertEqual(got, [("EV", True), ("EV", True), ("EV", True), ("Low conf EV", None), ("EV", None),
+                                   ("Low conf EV", None), ("Low conf EV", None)])
+            self.assertEqual([(a.get("attributes") or {}).get("reviewer_label") for a in three][:3],
+                             ["MV", "inner", "Incomplete"])
+        finally:
+            self.docs[PS] = json.loads(keep)
+
+    def test_images_csv_in_the_zips_is_guarded(self):
+        ps = make(type(self), "ps_20261109_c10008", with_pkg=False)
+        rows = list(csv.DictReader(open(ps / "images.csv", newline="", encoding="utf-8")))
+        rows[0]["orig_name"] = "=HYPERLINK(\"http://x\")"
+        with open(ps / "images.csv", "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0]))
+            w.writeheader()
+            w.writerows(rows)
+        for kind in ("images", "everything"):
+            z = self.zip("ps_20261109_c10008", kind, "owner")
+            got = list(csv.DictReader(io.StringIO(z.read("images.csv").decode())))
+            self.assertEqual(got[0]["orig_name"], "'=HYPERLINK(\"http://x\")")
+            self.assertEqual([r["image"] for r in got], ["0001", "0002", "0003"])
+
+    def test_problems_found_while_streaming_land_in_problems_txt(self):
+        d = self.docs[PS]
+        keep = json.dumps(d)
+        try:
+            d["images"]["0003"]["objects"].append({"cls": 0, "poly": [[1, 1], [2, 2]], "conf": 0.9})   # 2 points
+            z = self.zip(PS, "reviewed", "owner")
+            self.assertEqual(z.namelist()[-1], "PROBLEMS.txt")
+            self.assertIn("0003: an outline with fewer than 3 points was left out", z.read("PROBLEMS.txt").decode())
+        finally:
+            self.docs[PS] = json.loads(keep)
+        self.assertEqual(self.zip(PS3, "images", "owner").read("PROBLEMS.txt").decode().strip(), "No problems.")
+
+    def test_everything_survives_a_review_that_cannot_be_read(self):
+        old = R.REVIEWED
+
+        def boom(pkg, write=False):
+            raise ValueError("half-written edit")
+        R.REVIEWED = boom
+        try:
+            z = self.zip(PS, "everything", "owner")                           # 200, not a 500
+            names = set(z.namelist())
+            self.assertIn("images/0001.png", names)
+            self.assertIn("annotations_model.coco.json", names)
+            self.assertIn("results/per_sample.csv", names)
+            self.assertNotIn("annotations_reviewed.coco.json", names)
+            self.assertIn("review could not be read", z.read("PROBLEMS.txt").decode())
+            st, _, body = self.get(f"/results/{PS}/download/reviewed_labels_{PS}.zip", "owner")
+            self.assertEqual(st, 404)
+            self.assertIn(b"could not be read", body)
+        finally:
+            R.REVIEWED = old
+
+    def test_readme_documents_the_new_columns(self):
+        readme = self.zip(PS, "everything", "owner").read("README.txt").decode()
+        for want in ("n_rejected", "n_low_conf", "reject_reason", "note (per_image)", "results/per_sample.csv",
+                     "n_images 0", "PROBLEMS.txt", "NOT left out of the labels"):
+            self.assertIn(want, readme)
+        self.assertNotIn("one row per counted sample", readme)
+        tables = zipfile.ZipFile(io.BytesIO(self.get(f"/results/{PS}/download/results_{PS}.zip", "owner")[2]))
+        t = tables.read("README.txt").decode()
+        for want in ("n_rejected", "n_low_conf", "reject_reason", "n_images 0"):
+            self.assertIn(want, t)
+
+    def test_counted_images_only_in_provenance_and_refused_notice(self):
+        res = json.loads((self.root / PS / "results" / "results.json").read_text(encoding="utf-8"))
+        prov = R.provenance(res, {"id": PS})
+        self.assertEqual(prov["Checked by a person"], "2 of 2 counted images reviewed, 0 more edited")
+        self.assertIn("reviewed=2/2 counted images", R.csv_header(res, {"id": PS}).decode())
+        self.assertIn("# rejected images (not counted)=1", R.csv_header(res, {"id": PS}).decode())
+        res["refused"] = "x"
+        res["samples"] = {}
+        self.assertNotIn("0001", R.refused_notice(res))
+        self.assertIn("(2 images", R.refused_notice(res))                    # B and C; the rejected A is not counted
+
+    def test_outlines_link_hidden_without_predictions(self):
+        import shutil as _sh
+        ps = make(type(self), "ps_20261109_c10007", with_pkg=False)
+        _sh.rmtree(ps / "p")
+        page = self.page("ps_20261109_c10007", "owner")
+        self.assertNotIn("model_outlines_", page)
+        self.assertIn("images_ps_20261109_c10007.zip", page)
+        self.assertIn("model_outlines_" + PS, self.page(PS, "owner"))
 
     def test_reviewed_without_a_package_is_a_plain_404(self):
         st, _, body = self.get(f"/results/{PS3}/download/reviewed_labels_{PS3}.zip", "owner")

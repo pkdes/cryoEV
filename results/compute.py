@@ -403,31 +403,43 @@ def compute(ps_dir, reviewed_json=None) -> dict:
     per_image = {}
     for r in rows:
         image = r["image"]
-        w, h = _image_size(ps_dir, r["file"])
         nm = _nm_per_px(r)
         entry = reviewed["images"][image] if reviewed is not None else None
         is_rev = bool(entry and entry.get("reviewed"))
         is_edited = bool(entry and entry.get("edited", entry.get("reviewed")))   # no key: same as reviewed
-        if is_rev or is_edited:
-            objs, n_cand = _objects_from_reviewed(entry, image, w, h, to_mask), None
-        else:
-            objs, n_cand = _split_predictions(pred_dir, image, w, h, load)
-        # unsure candidates still open: Reviewed 0; edited = the package's own count (None = unknown, an old
-        # reviewed.json); untouched = all candidates (the package's count when it gives one, else the .txt's)
-        if is_rev:
-            unsure = 0
-        elif is_edited:
-            unsure = entry.get("n_candidates_open")
-        else:
-            unsure = entry["n_candidates_open"] if entry and entry.get("n_candidates_open") is not None else n_cand
         rejected = bool(entry and entry.get("rejected"))
+        note = (entry.get("note") if entry else None) or None
+        try:
+            w, h = _image_size(ps_dir, r["file"])
+            if is_rev or is_edited:
+                objs, n_cand = _objects_from_reviewed(entry, image, w, h, to_mask), None
+            else:
+                objs, n_cand = _split_predictions(pred_dir, image, w, h, load)
+            # unsure candidates still open: Reviewed 0; edited = the package's own count (None = unknown, an old
+            # reviewed.json); untouched = all candidates (the package's count when it gives one, else the .txt's)
+            if is_rev:
+                unsure = 0
+            elif is_edited:
+                unsure = entry.get("n_candidates_open")
+            else:
+                unsure = entry["n_candidates_open"] if entry and entry.get("n_candidates_open") is not None else n_cand
+            m = _measure(objs, nm, ev_ids, roles_for, compute_morphology)
+        except Exception as e:  # noqa: BLE001
+            if not rejected:
+                raise                       # a counted image that can't be read is a real error
+            # a rejected image is not counted, so a broken file or a missing .txt must not fail the whole set:
+            # it is recorded on its own row (note) and left out of every number
+            w = h = None
+            unsure = 0
+            m = {"ev": 0, "multilayer": 0, "inner": 0, "nonev": 0, "_diam": [], "_low_conf": 0, "_rev_ev": 0,
+                 "_rev_mv": 0, "_rev_inner": 0, "_rev_nonev": 0, "_disagree": 0}
+            note = (note + " | " if note else "") + f"not read ({type(e).__name__}: {e})"
         if rejected:
             unsure = 0                      # a rejected image has nothing left to decide
-        m = _measure(objs, nm, ev_ids, roles_for, compute_morphology)
         per_image[image] = {"sample_label": r["sample_label"], "reviewed": is_rev, "edited": is_edited,
                             "nm_per_px": nm, "rejected": rejected,
                             "reject_reason": (entry.get("reject_reason") if rejected else None),
-                            "note": (entry.get("note") if entry else None) or None,
+                            "note": note,
                             **m, "_unsure": unsure, "_size": (w, h), "_image": image}
 
     by_sample = {}

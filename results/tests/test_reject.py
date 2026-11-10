@@ -65,7 +65,7 @@ def A_IMG():
 
 
 def B_IMG():
-    return img([obj(60, 60, 25), obj(200, 60, 25, rc="MV", low=True, note="blurry edge"), obj(320, 60, 25),
+    return img([obj(60, 60, 25), obj(200, 60, 25, rc="EV", low=True, note="blurry edge"), obj(320, 60, 25, rc="MV"),
                 obj(60, 300, 25, cls=1, rc="nonEV", low=True)])
 
 
@@ -174,7 +174,9 @@ class KnownAnswer(Tmp):
         """A refused sample's open-unsure tally is over its counted images only."""
         ps = self.make(a_nm="1.0", a_confirmed="tester")
         doc = reviewed_doc()
-        doc["images"]["0001"]["n_candidates_open"] = 9        # rejected: closed, whatever it says
+        # A: rejected but NOT reviewed and NOT edited (its outlines come from the .txt) and 9 open candidates: if
+        # it leaked into the refused tally, S1 would show 9
+        doc["images"]["0001"].update(reviewed=False, edited=False, n_candidates_open=9)
         rows = list(csv.DictReader(open(ps / "images.csv", newline="", encoding="utf-8")))
         for r in rows:
             if r["image"] == "0003":
@@ -187,6 +189,42 @@ class KnownAnswer(Tmp):
         self.assertIn("S1", res["refused_unsure"])
         self.assertEqual(res["refused_unsure"]["S1"], 0)
         self.assertEqual(res["images"]["0001"]["rejected"], True)
+        self.assertEqual(res["images"]["0001"]["reviewed"], False)
+        self.assertIn("S1", res["refused"])                    # B and C differ in nm/px (A is not what refused it)
+
+    def test_mixed_paths_rejected_unedited_image_from_the_txt(self):
+        """A rejected, not edited, not reviewed: its outlines come from the .txt (a real EV there); it is still
+        dropped: n_images 2, n_rejected 1, and its EV is not in ev_total."""
+        ps = self.make(a_nm="1.0", a_confirmed="tester")
+        pred = ps / "p" / MODEL / "predictions" / "0001.txt"
+        pred.write_text(TP.pred_line(0, 0.9, 200, 200, 40, 400) + "\n", encoding="utf-8")
+        doc = reviewed_doc()
+        doc["images"]["0001"] = {"reviewed": False, "edited": False, "reviewed_by": [], "n_candidates_open": 0,
+                                 "objects": [], "rejected": True, "reject_reason": "empty"}
+        res = compute(ps, doc)
+        s = res["samples"]["S1"]
+        self.assertEqual((s["n_images"], s["n_rejected"], s["ev_total"], s["ev_per_image_mean"]), (2, 1, 5, 2.5))
+        self.assertEqual(res["images"]["0001"]["ev"], 1)          # measured (it is on its own row), not counted
+        self.assertEqual(res["images"]["0001"]["reject_reason"], "empty")
+
+    def test_rejected_image_that_cannot_be_read_does_not_fail_the_set(self):
+        ps = self.make(a_nm="1.0", a_confirmed="tester")
+        (ps / "p" / MODEL / "predictions" / "0001.txt").unlink()            # its .txt is gone ...
+        doc = reviewed_doc()
+        doc["images"]["0001"] = {"reviewed": False, "edited": False, "reviewed_by": [], "n_candidates_open": 0,
+                                 "objects": [], "rejected": True, "reject_reason": "other", "note": "bad file"}
+        res = compute(ps, doc)                                              # ... and the set still computes
+        a = res["images"]["0001"]
+        self.assertIn("bad file | not read (FileNotFoundError", a["note"])
+        self.assertEqual(res["samples"]["S1"]["ev_total"], 5)
+        (ps / "images" / "0001.png").write_bytes(b"not a png")             # a broken picture as well
+        res = compute(ps, doc)
+        self.assertIn("not read", res["images"]["0001"]["note"])
+        write_results(res, self.tmp / "out")
+        # a COUNTED image that can't be read is still a real error
+        (ps / "images" / "0002.png").write_bytes(b"not a png")
+        with self.assertRaises(Exception):
+            compute(ps, reviewed_doc())
 
 
 class Guard(unittest.TestCase):
