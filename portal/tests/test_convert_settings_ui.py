@@ -30,6 +30,8 @@ import cjtest as T  # noqa: E402
 from portal import convert_settings as CS  # noqa: E402
 from portal import predict_sources as PSRC  # noqa: E402
 from portal.modules import predict as P  # noqa: E402
+from portal.predict_parts import raw as RAW  # noqa: E402
+from portal.predict_parts import runner as RUNNER  # noqa: E402
 import test_predict_convert as TPC  # noqa: E402
 
 XSS = TPC.XSS
@@ -179,7 +181,7 @@ class Readout(Base):
 
     def test_recipe_names_and_values_are_escaped(self):
         self.stub.text = XSS
-        with mock.patch.object(P, "recipes", return_value=[XSS, "20261027"]):
+        with mock.patch.object(RAW, "recipes", return_value=[XSS, "20261027"]):
             html = self.page("/predict/new/raw/", "advanced")
             self.assertNotIn(XSS, html)
             self.assertIn("&lt;img src=x onerror=alert(1)&gt;", html)
@@ -503,8 +505,8 @@ class Followups(Base):
                   json.loads((x / "status.json").read_text(encoding="utf-8"))) for x in (d, d2, solo)]
         for x, _m, st in items:
             st["montages_done"] = True
-        with mock.patch.object(P, "min_free_bytes", return_value=1 << 60), \
-                mock.patch.object(P, "montages_done", return_value=True):
+        with mock.patch.object(RUNNER, "min_free_bytes", return_value=1 << 60), \
+                mock.patch.object(RUNNER, "montages_done", return_value=True):
             n = P.sweep_inputs(self.w.cfg, items)
         self.assertEqual(n, 1)                                             # only the unlinked one was taken early
         self.assertTrue((d / "input").is_dir() and (d2 / "input").is_dir() and not (solo / "input").exists())
@@ -517,7 +519,7 @@ class Followups(Base):
             asked.append((str(where), nbytes, kw))
             raise P.Refusal("Not enough free disk space.", 507)
         with mock.patch.object(os, "link", side_effect=OSError("cross-device")), \
-                mock.patch.object(P, "check_disk_for", no_room):
+                mock.patch.object(RUNNER, "check_disk_for", no_room):
             r = self.form(f"/predict/convert/{CID}/reconvert", self.full(clip_hi_pct="99.5"), "advanced")
         self.assertEqual(r.status_code, 507)
         self.assertEqual(len(asked), 1)

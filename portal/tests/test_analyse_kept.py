@@ -28,6 +28,8 @@ import cjtest as T  # noqa: E402,F401
 import test_gallery as TG  # noqa: E402
 from portal.modules import gallery as G  # noqa: E402
 from portal.modules import predict as P  # noqa: E402
+from portal.predict_parts import common as COMMON  # noqa: E402
+from portal.predict_parts import create as CREATE  # noqa: E402
 
 try:
     from playwright.sync_api import sync_playwright
@@ -121,7 +123,7 @@ class Base(unittest.TestCase):
             return d
 
         with mock.patch.object(P.PS, "create", side_effect=fake_create), mock.patch.object(P.PL, "start_detached"), \
-                mock.patch.object(P, "check_model", return_value=None), mock.patch.object(P, "check_active"):
+                mock.patch.object(CREATE, "check_model", return_value=None), mock.patch.object(CREATE, "check_active"):
             P.session_submit(self.w.cfg, self.user, src, data)
         return seen["rows"]
 
@@ -187,7 +189,7 @@ class Control(Base):
             data = {"confirm": "yes", "sig": t_old["sig"], "samples": ["g0"], "nm_g0": "1.4724", "how": "all", "model": MODEL}
             data.update(form)
             with mock.patch.object(old, "check_model", return_value=None), mock.patch.object(old, "check_active"), \
-                    mock.patch.object(P, "check_active"), mock.patch.object(P, "check_model", return_value=None):
+                    mock.patch.object(CREATE, "check_active"), mock.patch.object(CREATE, "check_model", return_value=None):
                 a = old.session_plan(self.w.cfg, self.user, src, dict(data))["names"]
                 b = P.session_plan(self.w.cfg, self.user, src, dict(data))["names"]
             self.assertEqual(a, b)
@@ -229,7 +231,7 @@ class Page(Base):
         body = urllib.parse.urlencode([("sig", sig), ("which", "kept"), ("from", CID_M), ("confirm", "yes"),
                                        ("samples", "g0"), ("samples", "g1"), ("nm_g0", "0.5"), ("nm_g1", "2"),
                                        ("model", MODEL)]).encode()
-        with mock.patch.object(P, "check_model", return_value=None), mock.patch.object(P, "check_active"):
+        with mock.patch.object(CREATE, "check_model", return_value=None), mock.patch.object(CREATE, "check_active"):
             st, _, page = self.w.req("owner", "POST", path, body, extra=FORM)
         page = page.decode()
         self.assertEqual(st, 400)
@@ -248,8 +250,8 @@ class Page(Base):
 
     def test_over_max_files_kept_message(self):
         src = self.w.source()
-        with mock.patch.object(P, "MAX_FILES", 2), mock.patch.object(P, "check_model", return_value=None), \
-                mock.patch.object(P, "check_active"):
+        with mock.patch.object(COMMON, "MAX_FILES", 2), mock.patch.object(CREATE, "check_model", return_value=None), \
+                mock.patch.object(CREATE, "check_active"):
             t = P.kept_scope(self.w.cfg, src, {"which": "kept", "from": CID}, P.read_tiles(src))
             with self.assertRaises(P.Refusal) as cm:
                 P.session_plan(self.w.cfg, self.user, src, {"which": "kept", "from": CID, "confirm": "yes", "sig": t["sig"],
@@ -319,7 +321,7 @@ class Page(Base):
                                        ("samples", "g0"), ("nm_g0", "1.4724"), ("model", MODEL), ("how", "all"),
                                        ("names", NAMES[9])]).encode()       # a forged extra tile
         with mock.patch.object(P.PS, "create", side_effect=fake_create), mock.patch.object(P.PL, "start_detached"), \
-                mock.patch.object(P, "check_model", return_value=None), mock.patch.object(P, "check_active"):
+                mock.patch.object(CREATE, "check_model", return_value=None), mock.patch.object(CREATE, "check_active"):
             st, _, _ = self.w.req("owner", "POST", path, body, extra=FORM)
             self.assertEqual(st, 303)
             for _ in range(100):
@@ -333,7 +335,7 @@ class Page(Base):
         sig = tile_sig(self.w.get("owner", path)[2].decode())
         body = urllib.parse.urlencode([("sig", sig), ("which", "kept"), ("from", CID_Z), ("confirm", "yes"),
                                        ("samples", "g0"), ("nm_g0", "1.4724"), ("model", MODEL)]).encode()
-        with mock.patch.object(P, "check_model", return_value=None), mock.patch.object(P, "check_active"):
+        with mock.patch.object(CREATE, "check_model", return_value=None), mock.patch.object(CREATE, "check_active"):
             st, _, html = self.w.req("owner", "POST", path, body, extra=FORM)
         self.assertEqual(st, 409)
         self.assertIn("No tiles are marked keep", html.decode())

@@ -22,6 +22,9 @@ import cjtest as T  # noqa: E402
 import test_predict_module as TM  # noqa: E402
 from portal import names as NM  # noqa: E402
 from portal.modules import predict as P  # noqa: E402
+from portal.predict_parts import common as COMMON  # noqa: E402
+from portal.predict_parts import create as CREATE  # noqa: E402
+from portal.predict_parts import disk as DISK  # noqa: E402
 
 GOLDEN, MODEL, XSS = TM.GOLDEN, TM.MODEL, TM.XSS
 
@@ -59,7 +62,7 @@ class Estimate(unittest.TestCase):
         self.tmp = Path(__import__("tempfile").mkdtemp(prefix="cj_est_"))
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.cfg = object()
-        p = mock.patch.object(P, "predict_root", lambda cfg: self.tmp)
+        p = mock.patch.object(COMMON, "predict_root", lambda cfg: self.tmp)
         p.start()
         self.addCleanup(p.stop)
         P._EST_CACHE.clear()
@@ -186,7 +189,7 @@ class P1(TM.Base):
     def test_cap_n_allowed_n_plus_one_refused_both_layers(self):
         def decl(k):
             return [{"name": f"t{i}.png", "size": 10} for i in range(k)]
-        with mock.patch.object(P, "MAX_FILES", 3):
+        with mock.patch.object(COMMON, "MAX_FILES", 3):
             self.assertEqual(len(P.declared_files("tiles", decl(3))), 3)
             with self.assertRaises(P.Refusal) as cm:
                 P.declared_files("tiles", decl(4))
@@ -343,7 +346,7 @@ class P1(TM.Base):
     # ---- limits
     def test_total_upload_bytes_cap(self):
         files = [{"name": "a.png", "size": 600}, {"name": "b.png", "size": 600}]
-        with mock.patch.object(P, "TILES_MAX_TOTAL_BYTES", 1000):
+        with mock.patch.object(COMMON, "TILES_MAX_TOTAL_BYTES", 1000):
             with self.assertRaises(P.Refusal) as cm:
                 P.declared_files("tiles", files)
             self.assertEqual(cm.exception.status, 413)
@@ -357,20 +360,20 @@ class P1(TM.Base):
         src = self.src_a
         need = P.tile_bytes(src)
         self.assertGreater(need, 0)
-        with mock.patch.object(P, "FREE_MARGIN_BYTES", 0), mock.patch.object(P, "disk_free",
+        with mock.patch.object(COMMON, "FREE_MARGIN_BYTES", 0), mock.patch.object(DISK, "disk_free",
                                                                                return_value=int(need * 1.1) - 1):
             with self.assertRaises(P.Refusal) as cm:
                 P.check_create_disk(self.root, src, None, False)
             self.assertEqual(cm.exception.status, 507)
             self.assertIn("Not enough disk space", cm.exception.msg)
             P.check_create_disk(self.root, src, None, True)              # same drive + link: nothing is copied
-        with mock.patch.object(P, "FREE_MARGIN_BYTES", 0), mock.patch.object(P, "disk_free",
+        with mock.patch.object(COMMON, "FREE_MARGIN_BYTES", 0), mock.patch.object(DISK, "disk_free",
                                                                                return_value=int(need * 1.1) + 1):
             P.check_create_disk(self.root, src, None, False)             # control: 110 % fits
 
     def test_session_pick_refused_when_disk_is_short(self):
         before = self.sets()
-        with mock.patch.object(P, "disk_free", return_value=10):
+        with mock.patch.object(DISK, "disk_free", return_value=10):
             st, loc, _ = self.raw_submit()
             self.assertEqual(st, 303)
             j = self.wait_task(loc.rstrip("/").split("/")[-1])
@@ -445,7 +448,7 @@ class P1(TM.Base):
         self.addCleanup(shutil.rmtree, self.root / ps, True)
         page = self.page(f"/predict/{ps}/", "basic")
         self.assertIn(f'action="/predict/{ps}/rename"', page)
-        with mock.patch.object(P, "audit_event") as audit:
+        with mock.patch.object(CREATE, "audit_event") as audit:
             st, h, _ = self.rename(ps, "Owner   <i>name</i>")
             self.assertEqual((st, T.hget(h, "location")), (303, f"/predict/{ps}/"))
             self.assertEqual(audit.call_args.args[2:4], ("predict.rename", ps))
@@ -488,7 +491,7 @@ class P1(TM.Base):
     def test_rename_oserror_is_a_503_page(self):
         ps = self.fake_set("bas", "done")
         self.addCleanup(shutil.rmtree, self.root / ps, True)
-        with mock.patch.object(P, "rename_set", side_effect=OSError("locked")):
+        with mock.patch.object(CREATE, "rename_set", side_effect=OSError("locked")):
             st, _, body = self.rename(ps, "x")
         self.assertEqual(st, 503)
         self.assertIn("can’t be renamed right now", body.decode("utf-8"))
@@ -601,18 +604,18 @@ class P1(TM.Base):
 
     def test_disk_check_reuses_the_margin_and_uploads_in_flight(self):
         src, need = self.src_a, P.tile_bytes(self.src_a)
-        with mock.patch.object(P, "FREE_MARGIN_BYTES", 1000):
-            with mock.patch.object(P, "disk_free", return_value=int(need * 1.1) + 999):
+        with mock.patch.object(COMMON, "FREE_MARGIN_BYTES", 1000):
+            with mock.patch.object(DISK, "disk_free", return_value=int(need * 1.1) + 999):
                 with self.assertRaises(P.Refusal):
                     P.check_create_disk(self.root, src, None, False)
-            with mock.patch.object(P, "disk_free", return_value=int(need * 1.1) + 1000):
+            with mock.patch.object(DISK, "disk_free", return_value=int(need * 1.1) + 1000):
                 P.check_create_disk(self.root, src, None, False)
-            with mock.patch.object(P, "_held", return_value=5000), \
-                    mock.patch.object(P, "disk_free", return_value=int(need * 1.1) + 1000):
+            with mock.patch.object(DISK, "_held", return_value=5000), \
+                    mock.patch.object(DISK, "disk_free", return_value=int(need * 1.1) + 1000):
                 with self.assertRaises(P.Refusal):               # uploads in flight hold space
                     P.check_create_disk(self.root, src, None, False)
         # a link that cannot be made (volume without hard links) is checked at the copy size
-        with mock.patch.object(P, "can_link", return_value=False), mock.patch.object(P, "disk_free", return_value=10):
+        with mock.patch.object(CREATE, "can_link", return_value=False), mock.patch.object(DISK, "disk_free", return_value=10):
             with self.assertRaises(P.Refusal):
                 P.check_create_disk(self.root, src, None, True)
         self.assertTrue(P.can_link(self.root))

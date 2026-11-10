@@ -41,6 +41,7 @@ from portal import upload_sessions as US  # noqa: E402
 from portal import names as NM  # noqa: E402
 from portal.modules import data as D  # noqa: E402
 from portal.modules import predict as P  # noqa: E402
+from portal.predict_parts import raw as RAW  # noqa: E402
 
 REPO = T.REPO
 sys.path.insert(0, str(REPO / "registry"))
@@ -572,7 +573,7 @@ class Portal(TPC.Base):
         names = set(re.findall(r'<input[^>]*name="([^"]+)"', page)) | set(re.findall(r'<select[^>]*name="([^"]+)"',
                                                                                   page))
         self.assertLessEqual(len(names - {"files"}), P.MAX_FIELDS)
-        with mock.patch.object(P, "gpu_check", lambda: (True, "free")):
+        with mock.patch.object(RAW, "gpu_check", lambda: (True, "free")):
             st, _ = self.upload("advanced", "raw", fields, self.raw_files(key=False), create=False)
         self.assertTrue(st["upload"].startswith("us_"))
         self.assertEqual(self.jpost(f"/predict/api/upload/{st['upload']}/cancel", {}, "advanced").status_code, 200)

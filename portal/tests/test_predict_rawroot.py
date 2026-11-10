@@ -29,6 +29,8 @@ from portal import app as APP  # noqa: E402
 from portal import predict_sources as PSRC  # noqa: E402
 from portal.modules import admin as ADM  # noqa: E402
 from portal.modules import predict as P  # noqa: E402
+from portal.predict_parts import disk as DISK  # noqa: E402
+from portal.predict_parts import runner as RUNNER  # noqa: E402
 
 TestClient, World, md5 = TC.TestClient, TC.World, TC.md5
 Usage = namedtuple("Usage", "total used free")
@@ -220,13 +222,13 @@ class RawRoot(RawBase):
         def free(p):
             seen.append(Path(p))
             return 10 ** 13
-        with mock.patch.object(P, "disk_free", side_effect=free):
+        with mock.patch.object(DISK, "disk_free", side_effect=free):
             self.assertEqual(self.pick_session().status_code, 303)
             self.converted("advanced")
         self.assertTrue(seen)
         self.assertTrue(all(under(p, self.w.raw_base) for p in seen), [str(p) for p in seen])
         # and it refuses by the raw drive's free space
-        with mock.patch.object(P, "disk_free", return_value=P.FREE_MARGIN_BYTES + 10):
+        with mock.patch.object(DISK, "disk_free", return_value=P.FREE_MARGIN_BYTES + 10):
             r = self.pick_session()
         self.assertEqual(r.status_code, 507)
 
@@ -282,7 +284,7 @@ class RawRoot(RawBase):
         staged = self.w.root / P.PORTAL_TMP / uid
         self.assertTrue(staged.is_dir())
         # a forced OSError during create: a clear error, the upload stays, a retry works
-        with mock.patch.object(P, "move_tree", side_effect=OSError(errno.ENOSPC, "boom")):
+        with mock.patch.object(RUNNER, "move_tree", side_effect=OSError(errno.ENOSPC, "boom")):
             r = self.jpost(f"/predict/api/upload/{uid}/create", {}, "advanced")
         self.assertEqual(r.status_code, 500, r.text)
         self.assertFalse(r.json()["dropped"])
@@ -342,7 +344,7 @@ class RawRoot(RawBase):
 
     def test_upload_holds_are_per_drive(self):
         dev = lambda p: 1 if "drive_a" in str(p) else 2  # noqa: E731
-        with mock.patch.object(P, "_dev", side_effect=dev):
+        with mock.patch.object(DISK, "_dev", side_effect=dev):
             a, b = P.Reservation(Path("drive_a/x"), 1000), P.Reservation(Path("drive_b/x"), 70)
             with P._RES_LOCK:
                 self.assertEqual((P._held(1), P._held(2)), (1000, 70))
