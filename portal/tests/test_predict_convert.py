@@ -454,7 +454,14 @@ class Base(unittest.TestCase):
         return sorted(p.name for p in d.iterdir() if P.RAW_ID_RE.match(p.name)) if d.exists() else []
 
     def status(self, cid) -> dict:
-        return json.loads((self.w.root / P.RAW_TILES / cid / "status.json").read_text(encoding="utf-8"))
+        p = self.w.root / P.RAW_TILES / cid / "status.json"
+        for i in range(20):                       # the runner may be replacing it right now (Windows: busy)
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except (PermissionError, ValueError):
+                if i == 19:
+                    raise
+                time.sleep(0.05)
 
     def wait_conv(self, cid, states=("done", "failed"), timeout=60) -> dict:
         def check():
@@ -608,6 +615,9 @@ class Lifecycle(Base):
         done = self.wait_conv(first)
         self.assertEqual(done["state"], "done", done)
         self.assertEqual(self.wait_conv(second)["state"], "done")
+        for c in (first, second):                       # and the stitch jobs they queued (the page is live till then)
+            wait_for(lambda: not P.stitch_busy(self.status(c)), 60, what=f"{c}'s stitch job")
+        done = self.status(first)
         # status.json: the convert JSON and the warnings
         self.assertTrue(done["result"]["ok"])
         self.assertEqual(done["n_tiles"], 3)
@@ -620,7 +630,8 @@ class Lifecycle(Base):
         self.assertEqual(meta["inputs"], [str(raw / "2. Raw images" / "grid1-pos1.mrc.mdoc")])
         self.assertEqual(meta["sample_key"], str(raw / "1. Notes + reports" / "sample_key.csv"))
         # the converter's command line
-        call = next(c for c in self.argv_lines() if str(self.w.root / P.RAW_TILES / first) in " ".join(c["argv"]))
+        call = next(c for c in self.argv_lines() if str(self.w.root / P.RAW_TILES / first) in " ".join(c["argv"])
+                    and "--out" in c["argv"])
         a = call["argv"]
         self.assertEqual(a[a.index("--out") + 1], str(self.w.root / P.RAW_TILES / first / "tiles"))
         self.assertEqual(a[a.index("--recipe") + 1], "default")
@@ -1456,8 +1467,8 @@ class Montages(Base):
             self.w.settle()
             # busy (and a raise): backoff 2, 4 s, "waiting: registry busy", then registered
             fake.register_conversion = reg
-            script["*"] = [{"ok": False, "busy": True, "error": "registry busy: the lock is held", "retry": True},
-                           OSError("share gone")]                         # the next upload's first two calls
+            busy = {"ok": False, "busy": True, "error": "registry busy: the lock is held", "retry": True}
+            script["*"] = [dict(busy), dict(busy)]                       # the next upload's first two calls
             c = self.converted("advanced", session="20261101", recipe="20261101")
             st = wait_for(lambda: (lambda s: s if s.get("register_wait") else None)(self.status(c)), 30,
                           what="waiting")
@@ -1471,6 +1482,14 @@ class Montages(Base):
             t = [x for x in calls if x[0] == c]
             self.assertEqual(len(t), 3)
             self.assertTrue(all(free for _c, free, _t in calls))
+            # a call that raises is a retry too (backoff, never given up)
+            self.w.settle()
+            boom = types.ModuleType("boom")
+            boom.register_conversion = mock.Mock(side_effect=OSError("share gone"))
+            P.register_conversions(None, [(self.d(c), {})], boom)
+            st = self.status(c)
+            self.assertEqual((st["register_wait"], st["register_tries"]), ("waiting: OSError: share gone", 3))
+            self.assertGreater(st["register_next"], time.time() + 4)            # 2 ** 3 s
         with mock.patch.dict(sys.modules, {"portal.upload_sessions": None}):   # the module not there: stays false
             c4 = self.mine()
             self.w.settle()
