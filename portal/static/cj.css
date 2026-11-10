@@ -256,6 +256,14 @@ a.cj-data-graph-node:focus-visible{outline:2px solid var(--acc);outline-offset:1
 .cj-data-graph-a{fill:var(--mut)}
 .cj-data-graph-a.cj-data-graph-back{fill:var(--acc)}
 .cj-data-graph-edim{opacity:.35}
+.cj-data-graph-toggle{display:inline-flex;margin:0 0 10px;border:1px solid var(--line);border-radius:999px;
+  background:var(--card);overflow:hidden}
+.cj-data-graph-toggle[hidden],.cj-data-graph-more[hidden]{display:none}
+.cj-data-graph-toggle button{font:inherit;font-size:.9rem;color:var(--fg);background:transparent;border:0;min-height:40px;
+  min-width:84px;padding:0 16px;cursor:pointer}
+.cj-data-graph-toggle button[aria-pressed="true"]{background:var(--acc);color:var(--bg);font-weight:700}
+.cj-data-graph-toggle button:focus-visible{outline:2px solid var(--acc);outline-offset:-3px}
+.cj-data-graph-more{margin:8px 0 0;font-size:.9rem}
 
 /* cj-gallery:begin */
 /* ---------------------------------------------------------------- Gallery module (portal/modules/gallery.py, static/gallery.js)
