@@ -172,7 +172,7 @@ class EditorTests(Base):
         page = self.open()
         self.assertEqual(page.evaluate("__review.CATS"), CLASS_ORDER)  # fixture's data.js lists them alphabetically, no VLDL
         self.assertEqual(page.locator("#chipBar button").all_inner_texts(), [f"{k + 1} {c}" for k, c in enumerate(CLASS_ORDER)])
-        self.assertEqual(page.locator("#flagLegend .sw").count(), 5)
+        self.assertEqual(page.locator("#flagLegend .sw").count(), 6)  # 5 flags + the Low conf tag (this server's t cap)
 
     def test_queue_view(self):
         page = self.open()

@@ -14,7 +14,10 @@ page: data.js is served with window.REVIEW_SERVER = {"sandbox": true} appended (
 
 Routes:
   GET  /, /data.js, /images/<name>   the package itself
-  GET  /api/ping                     {"ok": true}
+  GET  /api/ping                     {"ok": true, "caps": ["i", "t"]}: caps = the decision kinds beyond g/p/n this
+                                     server accepts (i: image reject / note, t: object low-conf tag / note). The page
+                                     hides those controls when they are missing (an older server answers {"ok": true}
+                                     and refuses the keys with a 400)
   GET  /api/people                   the reviewer roster from annotation/people.json, for the name picker
   GET  /api/edits                    {file: edit record} for every saved image
   PUT  /api/edits?f=<file>           merge one image's record into the saved one (per decision, the latest
@@ -51,6 +54,18 @@ from urllib.parse import parse_qs, urlparse
 COOKIE = "review_key"  # legacy name, accepted (when it matches) but never set; the cookie is COOKIE_<port>
 SANDBOX_PREFIX = "SANDBOX_"
 DEC_PREFIXES = ("g", "p", "n")  # g<label id>, p<prediction index>, n<id of an outline drawn in the tool>
+# Image and object state (docs/REVIEW_TOOL.md "Reject, notes, low conf"): decisions on keys of their own, so they
+# merge per key, carry who and server_t, and undo like any decision. Never extra fields on a class decision.
+CAPS = ("i", "t")              # /api/ping caps: i:reject / i:note, t:<objkey>
+IMAGE_KEYS = ("i:reject", "i:note")
+TAG_KEY_RE = re.compile(r"t:(?:g[0-9]+|p[0-9]+|n[0-9a-z]+)")   # t:<objkey>, objkey = the object's decision key
+REJECT_PREFIX = "reject:"
+REJECT_REASONS = ("thick ice", "empty", "contaminated", "crystalline ice", "broken carbon", "aggregates",
+                  "out of focus / drift", "other")  # the gallery's tags plus focus (the same list in index.html)
+IMAGE_NOTE_MAX = 1000          # characters
+TAG_NOTE_MAX = 300
+TAG_VALUES = ("lowconf", "plain")  # lowconf = the Low conf tag (+ note); plain = a note without the tag
+LOW_CONF_EV = "Low conf EV"    # the class stays (old data, the lab package) and is read as EV + low conf
 MAX_BODY = 20 * 2**20
 CLAIM_SECONDS = 90
 MAX_CLAIMS = 200      # active claims kept at most (one per reviewer is the norm); the soonest to expire go first
@@ -132,7 +147,7 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
             extra = ({"Set-Cookie": f"{self._cookie()}={key}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"}
                      if "k" in q else None)
             if url.path == "/api/ping":
-                return self._json(200, {"ok": True})
+                return self._json(200, {"ok": True, "caps": list(CAPS)})
             if url.path == "/api/people":
                 return self._json(200, {"people": people})
             if url.path == "/api/claims":
@@ -283,6 +298,10 @@ def valid_edit(edit) -> bool:
     if not all(_valid_item(g) for g in edit.get("gt") or []):
         return False
     for k, d in (edit.get("dec") or {}).items():
+        if k in IMAGE_KEYS or TAG_KEY_RE.fullmatch(k):
+            if not _valid_state_dec(k, d):
+                return False
+            continue
         if not k or k[0] not in DEC_PREFIXES:
             return False
         if isinstance(d, str):  # the oldest records stored bare strings
@@ -298,6 +317,25 @@ def valid_edit(edit) -> bool:
         if (d.get("v") or "").startswith("new:") and d.get("p") is None:  # a drawn outline carries its polygon
             return False
     return True
+
+
+def _valid_state_dec(k, d) -> bool:
+    """An i:reject / i:note / t:<objkey> decision: a dict (never a bare string) without an outline, v from its own
+    set, notes strings within their caps."""
+    if not isinstance(d, dict) or not _num(d.get("t", 0)) or "p" in d:
+        return False
+    if d.get("who") is not None and not valid_who(d["who"]):
+        return False
+    if ("server_t" in d and not _num(d["server_t"])) or ("pending" in d and not isinstance(d["pending"], bool)):
+        return False
+    v = d.get("v")
+    if k == "i:reject":
+        return "note" not in d and (v is None or (isinstance(v, str) and v.startswith(REJECT_PREFIX)
+                                                   and v[len(REJECT_PREFIX):] in REJECT_REASONS))
+    if k == "i:note":
+        return "note" not in d and (v is None or (isinstance(v, str) and len(v) <= IMAGE_NOTE_MAX))
+    note = d.get("note")
+    return (v is None or v in TAG_VALUES) and (note is None or (isinstance(note, str) and len(note) <= TAG_NOTE_MAX))
 
 
 def _migrate(e):
@@ -418,7 +456,8 @@ def effective_labels(image: dict, edit) -> list:
 
     image: a data.js images[] entry (gt: [{id, c, p}], pr: [{s, p}]); edit: a saved record, any version.
     Returns [{id, c, p, src, ...}]: id is the COCO annotation id (None for added objects), c the class,
-    p the outline (list of normalized flat rings), src "p<k>" (accepted prediction) or "n<id>" (drawn).
+    p the outline (list of normalized flat rings), src "p<k>" (accepted prediction) or "n<id>" (drawn); low_conf
+    (true) and note only when the object's t:<key> decision sets them (tag_of; the class decision is never touched).
     Base = the record's polygon list if it has one (gtT), else the package labels; decisions apply on top.
     A list item with its own t (saved by the current tool) takes its decision whenever the decision is at
     least as new as the item, so per-object edits survive anyone's newer list; an item without t (older
@@ -473,6 +512,56 @@ def effective_labels(image: dict, edit) -> list:
             out.append({"id": None, "c": v[4:], "p": json.loads(json.dumps(d.get("p") or pr["p"])), "src": key})
         elif key[0] == "n" and v.startswith("new:") and d.get("p"):
             out.append({"id": None, "c": v[4:], "p": json.loads(json.dumps(d["p"])), "src": key})
+    return _with_tags(out, e["dec"])
+
+
+def object_key(g):
+    """An object's decision key, as keyOf() in the page: its src (p<k> / n<uid>), else g<label id>, else None."""
+    return g.get("src") or (f"g{g['id']}" if g.get("id") is not None else None)
+
+
+def tag_of(dec: dict, key) -> tuple:
+    """(v, note) of the t:<key> decision in a migrated record's dec: v "lowconf" | "plain" | None; note only while v
+    is set (an undone tag carries nothing)."""
+    d = dec.get(f"t:{key}") if key else None
+    v = d.get("v") if isinstance(d, dict) else None
+    note = d.get("note") if v and isinstance(d.get("note"), str) and d["note"].strip() else None
+    return v, note
+
+
+def is_low_conf(cls, tag_v) -> bool:
+    """Low conf: the tag is set, or the class is Low conf EV and the tag wasn't turned off ("plain")."""
+    return tag_v == "lowconf" or (cls == LOW_CONF_EV and tag_v != "plain")
+
+
+def _with_tags(out: list, dec: dict) -> list:
+    """effective_labels' objects with their t:<objkey> tag passed through: low_conf: true (the tag is set) and note,
+    each only when set. The same list, untouched, when the record has no tags (outputs as before)."""
+    if not any(k.startswith("t:") for k in dec) and not any("low_conf" in o or "note" in o for o in out):
+        return out
+    res = []
+    for o in out:
+        v, note = tag_of(dec, object_key(o))
+        o = {k: x for k, x in o.items() if k not in ("low_conf", "note")}  # a list item never carries a stale copy
+        if v == "lowconf":
+            o["low_conf"] = True
+        if note:
+            o["note"] = note
+        res.append(o)
+    return res
+
+
+def image_flags(edit) -> dict:
+    """A record's image-level state, each key only when set: rejected (True) + reject_reason from i:reject, note
+    from i:note. {} for a record without them (every record saved before round 7)."""
+    dec = _migrate(edit)["dec"] if edit else {}
+    out = {}
+    v = (dec.get("i:reject") or {}).get("v")
+    if isinstance(v, str) and v.startswith(REJECT_PREFIX):
+        out["rejected"], out["reject_reason"] = True, v[len(REJECT_PREFIX):]
+    n = (dec.get("i:note") or {}).get("v")
+    if isinstance(n, str) and n.strip():
+        out["note"] = n
     return out
 
 
