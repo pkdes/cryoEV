@@ -31,6 +31,10 @@ review_server.py is wrapped, not changed; the real review (review_server.py on :
   package's own index.html and the page asks for a name as it always did.
   So a package's data.js is frozen at build while the tool page is the repo's: later changes to review_tool/index.html
   must keep reading old data.js files (add fields only; never rename, remove or re-mean one).
+- Capabilities: the page is read from disk on every request, but review_server (valid_edit) is the code this process
+  started with. GET /<id>/api/ping answers review_server's caps (["i", "t"]: image reject / note, object low-conf tag);
+  a page served by a process started on older code gets {"ok": true} without caps and hides those controls, so it
+  never sends keys that process would refuse with a 400. Restart this server when review_server.py changes.
 """
 import argparse
 import io

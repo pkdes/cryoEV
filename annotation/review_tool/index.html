@@ -147,6 +147,40 @@ body.sandbox #list,body.sandbox #side{top:var(--sbh,0px)}
 #whoDlg .row{display:flex;justify-content:flex-end}
 #whoDlg p.err{color:var(--warn);margin:-4px 0 10px}#whoErr[hidden]{display:none}
 #triBio p.picked.septdec{color:#38bdf8}
+/* Image reject / note and the object Low conf tag: shown only when the server lists them in /api/ping caps */
+.ok.rejected{color:#dc2626}
+.rejb{font-size:11px;font-weight:700;color:#fff;background:#dc2626;border-radius:8px;padding:0 6px;white-space:nowrap}
+.notem{font-size:13px;color:var(--acc);cursor:help}
+#rejTag{max-width:240px;overflow:hidden;text-overflow:ellipsis}
+#rejTag[hidden],#imgSec[hidden],#triImgBtn[hidden],#aLow[hidden],#helpL[hidden],#helpI[hidden]{display:none}
+#side #imgBox{flex-direction:column;align-items:flex-start}
+#side #imgBox #imgNoteShow{align-self:stretch}
+#imgBox .st{font-weight:600}#imgBox .st.rej{color:#dc2626}
+#imgBox .tip{font-size:11.5px;color:var(--mute)}
+#imgBox .nt,#imgNoteShow{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 6px;max-height:9em;overflow:auto}
+button.lowTog{border-color:#f59e0b}
+button.lowTog.on{background:#f59e0b;border-color:#f59e0b;color:#1c1300;font-weight:700}
+#objNote{flex:1 1 100%;min-width:0;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 6px}
+#imgDlg{position:fixed;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.55)}
+#imgDlg[hidden]{display:none}
+#imgDlg .box{width:min(440px,100%);max-height:100%;overflow:auto;background:var(--panel);color:var(--ink);border-radius:14px;padding:16px;box-shadow:0 8px 30px rgba(0,0,0,.4)}
+#imgDlg h2{margin:0 0 2px;font-size:18px}
+#imgDlg .mut{margin:0 0 10px;color:var(--mute);overflow-wrap:anywhere}
+#imgDlg .lbl{font-weight:600;margin:8px 0 4px;display:block}
+#rejChips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+#rejChips button{border-radius:16px;min-height:38px;font-size:14px}
+#rejChips button.on{background:#dc2626;border-color:#dc2626;color:#fff}
+#rejChips button.keep.on{background:var(--acc);border-color:var(--acc)}
+#imgNote{width:100%;min-height:5em;font:inherit;font-size:15px;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;resize:vertical}
+#imgNoteN{font-size:11px;color:var(--mute);text-align:right}
+#imgDlg .row{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}
+#imgDlg .row button{min-height:44px;font-size:15px;padding:4px 16px}
+#triImgBtn{white-space:nowrap;padding:3px 9px;font-size:12px}
+#aLow{width:48px;height:48px;font-size:22px;color:#d97706;border-color:#f59e0b}
+#aLow.on{background:#f59e0b;border-color:#f59e0b;color:#1c1300}
+#triActions.pcard #aLow{width:auto;min-width:92px;height:60px;border-radius:30px;padding:0 12px;font-size:15px;font-weight:700;flex-direction:column;line-height:1.1;background:#f59e0b;border-color:#f59e0b;color:#1c1300}
+#aLow small{font-size:11px;font-weight:500}
+#triBio p.lowc{color:#fbbf24;font-weight:700}
 @media (max-width:900px){
   #app{grid-template-columns:minmax(0,1fr)}
   header{min-width:0}
@@ -166,6 +200,7 @@ body.sandbox #list,body.sandbox #side{top:var(--sbh,0px)}
   <button id="menuBtn" title="Image list">☰</button>
   <button id="prev" title="Previous image (P)">◀</button>
   <span id="title"></span>
+  <span id="rejTag" class="rejb" hidden></span>
   <button id="next" title="Next image (N)">▶</button>
   <span class="sep"></span>
   <button id="toTri" title="One flagged object at a time, swipe to decide (phone friendly)">Cryonder</button>
@@ -194,7 +229,7 @@ body.sandbox #list,body.sandbox #side{top:var(--sbh,0px)}
   <div class="ctl">
     <select id="fSplit"><option value="">All splits</option></select>
     <select id="fSort"><option value="flags">Most flags first</option><option value="pkg">Package order</option><option value="name">By name</option></select>
-    <select id="fStat"><option value="">Any status</option><option value="unreviewed">Unreviewed</option><option value="edited">Edited</option><option value="todo">Not reviewed</option><option value="reviewed">Reviewed</option></select>
+    <select id="fStat"><option value="">Any status</option><option value="unreviewed">Unreviewed</option><option value="edited">Edited</option><option value="todo">Not reviewed</option><option value="reviewed">Reviewed</option><option value="rejected" hidden>Rejected</option></select>
     <div id="qSum"></div>
   </div>
   <div id="items"></div>
@@ -202,6 +237,10 @@ body.sandbox #list,body.sandbox #side{top:var(--sbh,0px)}
 <main id="stage"><canvas id="cv"></canvas><div id="banner"></div><div id="hint"></div><div id="edToast" role="status" hidden><span id="edToastMsg">Accepted (edited) —</span><button id="edToastUndo" title="Restore the previous decision (Z)">Undo</button></div><div id="chipBar" title="Class: a tap or 1–8 reclasses the selection and is used for new shapes"></div></main>
 <aside id="side">
   <div id="progress"></div>
+  <div id="imgSec" hidden>
+    <h3>Image</h3>
+    <div id="imgBox" class="row"></div>
+  </div>
   <h3>Selection</h3>
   <div id="selBox" class="row" style="color:var(--mute)">Click a polygon to select it.</div>
   <h3>Legend</h3>
@@ -218,6 +257,8 @@ body.sandbox #list,body.sandbox #side{top:var(--sbh,0px)}
     <li><kbd>D</kbd> freehand: drag around the object · <kbd>V</kbd> vertex: tap points, tap the first point or <kbd>Enter</kbd> to close · <kbd>Esc</kbd> cancel. In both, right/middle-drag or two fingers pan</li>
     <li><kbd>E</kbd> redraw the selected outline (keeps class and id)</li>
     <li><kbd>1</kbd>–<kbd>8</kbd> or a class chip: reclass the selection; also the class for new shapes</li>
+    <li id="helpL" hidden><kbd>L</kbd> Low conf tag on the selection, on / off (still counted; a selected unsure outline is accepted as low conf). Its note and the image's reject / note are in this panel</li>
+    <li id="helpI" hidden>Image reject and note: <kbd>Z</kbd> doesn't undo them. Change them in their dialog (the <b>Not rejected</b> chip un-rejects)</li>
     <li><kbd>N</kbd>/<kbd>P</kbd> next/prev · <kbd>R</kbd> reviewed · <kbd>Z</kbd> undo · <kbd>T</kbd> toggle <span id="helpT">predictions</span> · <kbd>H</kbd> hide/show all outlines</li>
   </ul>
   <h3>Saving</h3>
@@ -246,7 +287,7 @@ body.sandbox #list,body.sandbox #side{top:var(--sbh,0px)}
     <span id="sync2" class="badge">local only</span>
     <button id="triWho" class="badge" title="Change your reviewer name">👤</button>
   </div>
-  <div id="triHead"><b id="thName"></b><span id="thObj"></span><span id="thSept" class="sept" hidden>Sept</span><a id="triOpen" href="#" title="Open this object in the Editor. Long-press to copy or bookmark the link">Open in editor ↗</a></div>
+  <div id="triHead"><b id="thName"></b><span id="thObj"></span><span id="thSept" class="sept" hidden>Sept</span><button id="triImgBtn" class="badge" title="Reject this whole image, or add a note to it" hidden>⚑ Image</button><a id="triOpen" href="#" title="Open this object in the Editor. Long-press to copy or bookmark the link">Open in editor ↗</a></div>
   <div id="thPos"></div>
   <div id="triStage">
     <div id="card">
@@ -270,10 +311,24 @@ body.sandbox #list,body.sandbox #side{top:var(--sbh,0px)}
     <button id="aNope" class="round" title="Nope">✕</button>
     <button id="aSkip" class="round" title="Maybe later">↑</button>
     <button id="aYes" class="round" title="Match">♥</button>
+    <button id="aLow" class="round" title="Low conf (L)" hidden>◐</button>
     <button id="aNext" title="Next card (N, or swipe)" hidden>Next →</button>
   </div>
   <div id="triKeys" hidden></div>
 </section>
+<div id="imgDlg" role="dialog" aria-modal="true" aria-labelledby="imgDlgTitle" hidden>
+  <div class="box">
+    <h2 id="imgDlgTitle">Image</h2>
+    <p id="imgDlgName" class="mut"></p>
+    <span class="lbl">Reject the whole image</span>
+    <p class="mut" style="margin:0 0 6px">A rejected image drops out of the results. Its outlines stay (no training effect).</p>
+    <div id="rejChips"></div>
+    <label class="lbl" for="imgNote">Note ✎</label>
+    <textarea id="imgNote" maxlength="1000" placeholder="Anything about this image (optional)"></textarea>
+    <div id="imgNoteN"></div>
+    <div class="row"><button id="imgCancel" type="button">Cancel</button><button id="imgSave" type="button" class="on">Save</button></div>
+  </div>
+</div>
 <div id="whoDlg" role="dialog" aria-modal="true" aria-labelledby="whoTitle" hidden>
   <div class="box">
     <h2 id="whoTitle">Who is reviewing?</h2>
@@ -303,6 +358,14 @@ const NEW_TIP = "new class: not in this package's categories (apply_review_edits
 // Flags from build_review_package.py. u: no match (old); x, lc, fx, flc: optional, newer packages only.
 const FLAG = {gu: "rgba(255,0,255,.55)", pu: "#facc15", x: "#f97316", lc: "rgba(226,232,240,.9)"};
 const $ = id => document.getElementById(id);
+// Image reject / note and the object Low conf tag: decisions on keys of their own (i:reject, i:note, t:<objkey>;
+// docs/REVIEW_TOOL.md "Reject, notes, low conf"), so they merge per key and undo like any decision. Their controls
+// show only when the server lists them in /api/ping caps: an older server refuses the keys (400), and a file:// page
+// has no server. Their text (reasons, notes) is always set with textContent / title, never as HTML.
+const REJECT_REASONS = ["thick ice", "empty", "contaminated", "crystalline ice", "broken carbon", "aggregates", "out of focus / drift", "other"];
+const NOTE_MAX = 1000, TAG_NOTE_MAX = 300, LOWC = "#f59e0b";  // review_server IMAGE_NOTE_MAX / TAG_NOTE_MAX
+let caps = new Set();
+const capOn = k => caps.has(k);
 // A prediction package (annotation/prediction_package.py) sets cand_conf, its lowest candidate confidence: the Editor's
 // prediction slider and the cards' confidence filter start there, so every candidate shows. Without it: as before.
 if (typeof D.cand_conf === "number" && isFinite(D.cand_conf)) {
@@ -426,6 +489,19 @@ function migrate(e) {
 }
 Object.values(edits).forEach(migrate);
 const decV = (e, key) => { const d = e && e.dec && e.dec[key]; return d ? d.v : null; };
+const decOf = (file, key) => (key && edits[file] && edits[file].dec && edits[file].dec[key]) || null;
+const rejectOf = file => { const d = decOf(file, "i:reject"); return d && typeof d.v === "string" && d.v.startsWith("reject:") ? d.v.slice(7) : null; };
+const noteOf = file => { const d = decOf(file, "i:note"); return d && typeof d.v === "string" && d.v.trim() ? d.v : ""; };
+// The object's t:<key> tag: v "lowconf" | "plain" (a note without the tag) | null; its note only while v is set
+const tagOf = (file, key) => { const d = decOf(file, key ? "t:" + key : null); return d && d.v ? {v: d.v, note: typeof d.note === "string" ? d.note : ""} : {v: null, note: ""}; };
+// Low conf: the tag, or the Low conf EV class (turning it off makes the label EV): review_server.is_low_conf
+const isLowObj = (file, g) => g.c === "Low conf EV" || tagOf(file, keyOf(g)).v === "lowconf";
+// The Low conf EV alias picked (class picker, chips, cards) with the t cap: a note-only tag ("plain") on that object
+// becomes the Low conf tag, keeping its note, in the same step, so the tag and the class always agree.
+function aliasTag(e, file, key, cls) {
+  if (cls !== "Low conf EV" || !capOn("t") || !key) return;
+  const t = tagOf(file, key); if (t.v === "plain") setDec(e, "t:" + key, "lowconf", undefined, t.note);
+}
 // U7: a decision carried over from the September review has seed ("september:<v4 file>:<v4 key>", written by
 // resolve_review_edits.py). Display only: read here, never written; a reviewer's new decision has no seed.
 const seedOf = (file, key) => { const d = key && edits[file] && edits[file].dec && edits[file].dec[key]; return d && d.v && d.seed ? d.seed : null; };
@@ -462,7 +538,14 @@ function effGt(im) {  // labels as they stand: base list + everyone's decisions 
       if (pr) out.push({id: null, c: d.v.slice(4), p: clone(d.p || pr.p), src: key});
     } else if (key[0] === "n" && d.v.startsWith("new:") && d.p) out.push({id: null, c: d.v.slice(4), p: clone(d.p), src: key});
   }
-  return out;
+  // the t:<key> tag passed through (review_server._with_tags): low_conf / note only when set; the list as before without tags
+  if (!(e && e.dec && Object.keys(e.dec).some(k => k.startsWith("t:"))) && !out.some(g => "low_conf" in g || "note" in g)) return out;
+  return out.map(g => {
+    const {low_conf, note, ...o} = g, t = tagOf(im.file, keyOf(o));
+    if (t.v === "lowconf") o.low_conf = true;
+    if (t.note.trim()) o.note = t.note;
+    return o;
+  });
 }
 let dragLive = null;  // {file, key, p}: the outline under a vertex drag, drawn live until the drag is recorded
 function gtOf(im) {
@@ -487,10 +570,11 @@ const selEdit = e => sel && sel.kind === "gt" ? findKey(e.gt, sel.key) : null;  
 // A new entry's t (this device's clock) is above the entry and list item it replaces (and the list), so the
 // per-item rule in effGt applies it. It is marked pending until the server stamps server_t (its receive time),
 // which orders the merge (pickDec), so a device whose clock runs ahead can't override later saves.
-function setDec(e, key, v, p) {
+function setDec(e, key, v, p, note) {  // note: a t:<objkey> tag's note (written only when non-empty)
   const prev = e.dec[key], item = (e.gt || []).find(g => keyOf(g) === key);
   const t = Math.max(Date.now(), prev ? (prev.t || 0) + 1 : 0, item && typeof item.t === "number" ? item.t + 1 : 0, (e.gtT || 0) + 1);
   e.dec[key] = p ? {v, t, who: me(), p, pending: true} : {v, t, who: me(), pending: true};
+  if (typeof note === "string" && note.trim()) e.dec[key].note = note.trim().slice(0, TAG_NOTE_MAX);
   const f = recFile.get(e); if (f) mine.add(f + "\n" + key + "\n" + t);
 }
 const decided = (im, key) => !!key && decV(edits[im.file], key) != null;
@@ -511,6 +595,7 @@ const newId = () => "n" + Date.now().toString(36) + Math.random().toString(36).s
 function materialize(im) {  // the Editor edits a concrete list: freeze the current labels into e.gt, each with its t
   const e = ensureEdit(im), legacyT = e.gtT && e.gt ? e.gtT : 0, list = clone(effGt(im));
   for (const g of list) {
+    delete g.low_conf; delete g.note;  // the tag lives in its t: decision only, never in the list
     if (!keyOf(g)) {  // keyless outline from an older version: it becomes a drawn object with a decision of its own
       const old = selKey(g); g.src = newId(); setDec(e, g.src, "new:" + g.c, clone(g.p));
       if (sel && sel.key === old) sel.key = g.src;
@@ -526,9 +611,10 @@ const snapOf = e => JSON.stringify({gt: e.gt, gtT: e.gtT, dec: e.dec});
 function restoreSnap(im, snap) {  // undo: revert only entries this tab wrote since the snapshot; others' newer ones stay
   const s = JSON.parse(snap), e = ensureEdit(im);
   for (const k of Object.keys(e.dec)) {
+    if (k.startsWith("i:")) continue;  // the image's reject / note are never part of an object step: set in their own dialog
     const cur = e.dec[k], was = s.dec && s.dec[k];
     if ((was && cur.t === was.t) || !mine.has(im.file + "\n" + k + "\n" + cur.t)) continue;
-    if (was) setDec(e, k, was.v, was.p);
+    if (was) setDec(e, k, was.v, was.p, was.note);
     else if (k[0] === "g") {  // no decision before: back to the label as it stood then, stated explicitly
       const id = +k.slice(1), so = (s.gt || []).find(g => g.id === id), po = im.gt.find(g => g.id === id);
       const sameP = so && po && JSON.stringify(so.p) === JSON.stringify(po.p);
@@ -643,7 +729,7 @@ function draw() {
     });
     ctx.setLineDash([]);
   }
-  const septTags = [];
+  const septTags = [], lowTags = [];
   if ($("showGt").checked) {
     const halo = (g, col, w, dash) => { ctx.setLineDash(dash); ctx.lineWidth = w; ctx.strokeStyle = col; g.p.forEach(rg => { path(rg); ctx.stroke(); }); ctx.setLineDash([]); };
     gtOf(im).forEach(g => {
@@ -652,6 +738,9 @@ function draw() {
         if (g.x) halo(g, FLAG.x, 5, [2, 4]);
         if (g.lc) halo(g, FLAG.lc, 4, [9, 6]);
       }
+      // the Low conf tag: a solid amber double line + a "low conf" tag at the top-right (unlike the dashed / dotted
+      // flag halos: lc long grey dashes, x orange dots)
+      if (g.low_conf) { halo(g, LOWC, 7, []); halo(g, "rgba(0,0,0,.85)", 2.5, []); lowTags.push(g); }
       ctx.lineWidth = 1.6; ctx.strokeStyle = catColor(g.c);
       g.p.forEach(rg => { path(rg); ctx.stroke(); });
       if ($("showSept").checked && seedOf(im.file, keyOf(g))) septTags.push(g);
@@ -661,6 +750,11 @@ function draw() {
       const [x0, y0] = ringBox(g.p[0]), [sx, sy] = toScr(x0, y0);
       ctx.fillStyle = "rgba(0,0,0,.7)"; ctx.fillRect(sx, sy - 13, 28, 12);
       ctx.fillStyle = SEPT; ctx.fillText("Sept", sx + 3, sy - 1);
+    }
+    for (const g of lowTags) {  // "low conf" above the outline's top-right corner
+      const [, y0, x1] = ringBox(g.p[0]), [sx, sy] = toScr(x1, y0), w = ctx.measureText("low conf").width + 6;
+      ctx.fillStyle = "rgba(0,0,0,.75)"; ctx.fillRect(sx - w, sy - 13, w, 12);
+      ctx.fillStyle = LOWC; ctx.fillText("low conf", sx - w + 3, sy - 1);
     }
   }
   if (sel && sel.kind === "gt") {
@@ -687,9 +781,10 @@ let hover = null;
 
 // ---------- list / side panels ----------
 // ---- queue: every image with its status, flags, split and who has it open ----
-const statusOf = im => {
+const statusOf = im => {  // rejected (i:reject) first; an image note alone (i:note) doesn't make an image edited
   const e = edits[im.file];
-  return e && e.reviewed ? "reviewed" : e && (e.modified || Object.values(e.dec || {}).some(d => d.v)) ? "edited" : "unreviewed";
+  if (rejectOf(im.file)) return "rejected";
+  return e && e.reviewed ? "reviewed" : e && (e.modified || Object.entries(e.dec || {}).some(([k, d]) => d.v && !k.startsWith("i:"))) ? "edited" : "unreviewed";
 };
 const FLAG_COUNTS = [["fg", FLAG.gu, PW.fg], ["fp", FLAG.pu, PW.fp], ["fx", FLAG.x, PW.fx], ["flc", FLAG.lc, PW.flc]];
 const flagRank = im => (im.fg || 0) + (im.fp || 0) + (im.fx || 0);  // flc is shown, but doesn't rank (spec)
@@ -699,7 +794,7 @@ function renderList() {
   const fs = $("fSplit").value, st = $("fStat").value, srt = $("fSort").value;
   order = D.images.map((_, i) => i).filter(i => {
     const im = D.images[i], s = statusOf(im);
-    return (!fs || im.split === fs) && (!st || st === s || (st === "todo" && s !== "reviewed"));
+    return (!fs || im.split === fs) && (!st || st === s || (st === "todo" && s !== "reviewed" && s !== "rejected"));
   });
   if (srt === "flags") order.sort((a, b) => flagRank(D.images[b]) - flagRank(D.images[a]) || a - b);
   else if (srt === "name") order.sort((a, b) => D.images[a].file.localeCompare(D.images[b].file));
@@ -709,18 +804,22 @@ function renderList() {
     const im = D.images[i], s = statusOf(im), who = claimedBy(im.file);
     const fl = FLAG_COUNTS.filter(([k]) => im[k]).map(([k, col, t]) => `<b style="color:${col}" title="${t}">${im[k]}</b>`).join("");
     const d = document.createElement("div"); d.className = "it" + (i === cur ? " cur" : "");
-    d.innerHTML = `<span class="ok ${s}" title="${s}">${s === "reviewed" ? "✓" : s === "edited" ? "•" : ""}</span>` +
+    d.innerHTML = `<span class="ok ${s}" title="${s}">${s === "reviewed" ? "✓" : s === "edited" ? "•" : s === "rejected" ? "✕" : ""}</span>` +
       `<span class="nm" title="${esc(im.file)}">${esc(im.file.replace(/_(jpg|png)\.rf\..*$/, ""))}</span>` +
       (who.length ? `<span class="who" title="open now: ${esc(who.map(dispName).join(", "))}">👤${esc(who.map(dispName).join(","))}</span>` : "") +
       (septCount(im.file) ? `<span class="sept" title="${septCount(im.file)} decisions carried from the September review">Sept ${septCount(im.file)}</span>` : "") +
       `<span class="badge">${esc(im.split)}</span><span class="fl" title="flags: ${FLAG_COUNTS.map(([k, , t]) => `${im[k] || 0} ${t}`).join(" · ")}">${fl}</span>`;
+    const rj = rejectOf(im.file), nt = noteOf(im.file), at = d.querySelector(".badge");  // text: textContent / title only
+    if (nt) { const m = document.createElement("span"); m.className = "notem"; m.textContent = "✎"; m.title = nt; d.insertBefore(m, at); }
+    if (rj) { const b = document.createElement("span"); b.className = "rejb"; b.textContent = "Rejected"; b.title = "Rejected: " + rj; d.insertBefore(b, at); }
     d.onclick = () => { go(i); $("list").classList.remove("show"); };
     frag.appendChild(d);
   }
   box.appendChild(frag);
-  const n = {unreviewed: 0, edited: 0, reviewed: 0}; D.images.forEach(im => n[statusOf(im)]++);
-  $("qSum").textContent = `${order.length} shown · ${n.unreviewed} unreviewed · ${n.edited} edited · ${n.reviewed} reviewed`;
-  $("progress").innerHTML = `<b>${n.reviewed}</b> / ${D.images.length} reviewed · ${n.edited} edited<br><span style="color:var(--mute)">${PW.run}: ${esc(D.run)}</span>`;
+  const n = {unreviewed: 0, edited: 0, reviewed: 0, rejected: 0}; D.images.forEach(im => n[statusOf(im)]++);
+  const rjs = n.rejected ? ` · ${n.rejected} rejected` : "";
+  $("qSum").textContent = `${order.length} shown · ${n.unreviewed} unreviewed · ${n.edited} edited · ${n.reviewed} reviewed${rjs}`;
+  $("progress").innerHTML = `<b>${n.reviewed}</b> / ${D.images.length} reviewed · ${n.edited} edited${rjs}<br><span style="color:var(--mute)">${PW.run}: ${esc(D.run)}</span>`;
 }
 function flagText(o, pred) {
   const t = [];
@@ -737,6 +836,7 @@ function renderSide() {
   const e = edits[im.file]; $("reviewed").classList.toggle("on", !!(e && e.reviewed));
   $("undo").disabled = !(undoStacks[im.file] && undoStacks[im.file].length);
   $("bClose").hidden = !(mode === "tap" && draft && draft.length >= 6);
+  renderImgBox();
   renderChips();
   if (!sel) { box.innerHTML = `${g.length} ${PW.lab}, ${im.pr.filter(p => p.s >= conf()).length} ${PW.pr} shown.<br>Click a polygon to select it.`; return; }
   if (sel.kind === "gt") {
@@ -744,12 +844,23 @@ function renderSide() {
     const sd = seedOf(im.file, keyOf(a));
     box.innerHTML = `<div>Label <b style="color:${catColor(a.c)}">${esc(a.c)}</b>${a.id == null ? " (new)" : ""}${flagText(a, false)}</div>` +
       (sd ? `<div class="sept" title="${esc(sd)}">Sept: carried from the September review</div>` : "");
-    const s = document.createElement("select"); CATS.forEach((c, k) => { const o = new Option(`${k+1}. ${c}`, c); o.selected = c === a.c; s.add(o); });
+    const s = document.createElement("select");
+    CATS.forEach((c, k) => { const o = new Option(`${k+1}. ${c}${c === "Low conf EV" && capOn("t") ? " (= EV + Low conf)" : ""}`, c); o.selected = c === a.c; s.add(o); });
     s.onchange = () => setCat(s.value);
     const del = document.createElement("button"); del.textContent = "Delete label"; del.onclick = deleteSel;
     const rd = document.createElement("button"); rd.textContent = "Redraw outline (E)"; rd.title = "Trace a new outline for this label (keeps its class and id)";
     rd.onclick = startRedraw;
     box.append(s, del, rd);
+    if (capOn("t")) {  // the Low conf tag and a note on this object (its t:<key> decision)
+      const low = isLowObj(im.file, a), lb = document.createElement("button");
+      lb.id = "lowBtn"; lb.className = "lowTog" + (low ? " on" : ""); lb.textContent = low ? "◐ Low conf: on" : "◐ Low conf";
+      lb.title = low ? "Low conf is on: tap to turn it off (L)" : "Tag as low confidence: still counted, reported as low conf (L)";
+      lb.onclick = toggleLow;
+      const ni = document.createElement("input"); ni.id = "objNote"; ni.maxLength = TAG_NOTE_MAX; ni.value = tagOf(im.file, keyOf(a)).note;
+      ni.placeholder = "Note on this object (Enter saves)"; ni.title = "A note on this object, saved with it";
+      ni.onchange = () => setObjNote(ni.value);
+      box.append(lb, ni);
+    }
   } else {
     const p = im.pr[sel.i], d = e && e.dec && e.dec["p" + sel.i], v = (d && d.v) || "", pc = predCls(p);
     const by = d && d.who ? ` · ${esc(dispName(d.who))}` : "";
@@ -761,6 +872,11 @@ function renderSide() {
     const acc = big("accBtn", `✓ Accept as ${esc(pc)}<kbd>A</kbd>`, `Add it as a ${pc} label (A)`, () => acceptPred(pc));
     const rej = big("rejBtn", `✕ Reject<kbd>X</kbd>`, "Not an object (X)", rejectPred); rej.disabled = v === "no";
     box.append(acc, rej);
+    if (capOn("t")) {
+      const lb = document.createElement("button"); lb.id = "accLowBtn"; lb.className = "lowTog"; lb.textContent = `◐ Accept as low conf (L)`;
+      lb.title = `Add it as a ${pc} label with the Low conf tag: counted, reported as low conf. One undo step (Z)`; lb.onclick = acceptLow;
+      box.append(lb);
+    }
     if (pc !== curCls) { const b = document.createElement("button"); b.textContent = `Accept as ${curCls}`; b.onclick = () => acceptPred(curCls); box.append(b); }
     if (prEditable(im, sel.i)) box.insertAdjacentHTML("beforeend", `<div class="tip">Or drag a white handle (click the outline: add a point; right-click a point: delete it): that accepts it with the edited outline.</div>`);
   }
@@ -778,6 +894,8 @@ function legend() {
     [sw(`5px dotted ${FLAG.x}`), "class disagrees with the matched object (label halo, dotted prediction)"],
     [sw(`4px dashed ${FLAG.lc}`), "Low conf EV label: confirm the class"],
     [`<span class="sept" style="margin-right:6px">Sept</span>`, "decision carried from the September review (gone once someone re-decides)"]]),
+    ...(capOn("t") ? [[`<span class="sw"><i style="border-top:5px double ${LOWC}"></i></span>`,
+      `Low conf tag (L): amber double line, "low conf" above it: a reviewer is unsure; still counted, reported as low conf. Low conf EV = EV with this tag`]] : []),
   ].map(([s, t]) => `<div>${s}${t}</div>`).join("") + `<div style="color:var(--mute);margin-top:3px">Flags disappear once the object has a decision.${isPredPkg ? "" : " Older packages have only the first three."}</div>`;
 }
 function renderChips() {
@@ -787,7 +905,8 @@ function renderChips() {
     const b = document.createElement("button"); b.textContent = (k < 9 ? k + 1 + " " : "") + c;
     b.style.color = catColor(c); b.className = [c === curCls ? "on" : "", isNewCls(c) ? "newcls" : ""].join(" ").trim();
     if (selG && selG.c === c) b.style.background = "rgba(255,255,255,.18)";
-    b.title = (sel ? `Reclass the selection as ${c}` : `New shapes: ${c}`) + (isNewCls(c) ? ` · ${NEW_TIP}` : "");
+    b.title = (sel ? `Reclass the selection as ${c}` : `New shapes: ${c}`) + (isNewCls(c) ? ` · ${NEW_TIP}` : "")
+      + (c === "Low conf EV" && capOn("t") ? " · the same as EV with the Low conf tag (L), the main way now" : "");
     b.onclick = () => setCat(c); bar.appendChild(b);
   });
 }
@@ -829,7 +948,7 @@ function setCat(c) {  // Select mode: reclass the selection (accept a selected p
   if (!sel || sel.kind !== "gt" || (mode !== "select" && redrawKey == null)) { hint(); renderSide(); return; }
   if (!needWho(() => setCat(c))) return;
   const im = curImg(); pushUndo();
-  const e = ensureEdit(im), g = selEdit(e); if (!g) return; g.c = c; record(im, e, g);
+  const e = ensureEdit(im), g = selEdit(e); if (!g) return; g.c = c; record(im, e, g); aliasTag(e, im.file, keyOf(g), c);
   changed();
 }
 function deleteSel() {
@@ -844,7 +963,7 @@ function acceptPred(cls) {  // A / "Accept": no class given = the predicted clas
   const im = curImg(), key = "p" + sel.i, p = im.pr[sel.i]; cls = cls || predCls(p); pushUndo();
   const e = ensureEdit(im); e.gt = e.gt.filter(g => g.src !== key);  // accepting twice must not duplicate it
   e.gt.push({id: null, c: cls, p: clone(p.p), src: key});
-  setDec(e, key, "add:" + cls);
+  setDec(e, key, "add:" + cls); aliasTag(e, im.file, key, cls);
   sel = {kind: "gt", key}; changed();
 }
 function rejectPred() {  // X / "Reject": a selected prediction is not an object; an accepted one is rejected again (as Del)
@@ -855,6 +974,95 @@ function rejectPred() {  // X / "Reject": a selected prediction is not an object
   const e = ensureEdit(im); e.gt = e.gt.filter(g => g.src !== key);
   setDec(e, key, "no"); changed();
 }
+// ---- Low conf tag + object note (t:<objkey>) and image reject + note (i:reject, i:note) ----
+// The tag is offered on counted objects only (labels, accepted candidates, drawn outlines); an unaccepted candidate
+// gets "Accept as low conf" instead: add:<cls> + the tag in one step, undone together. Turning the tag off on a Low
+// conf EV label also makes it EV (the class reads as EV + low conf). A keyless outline gets a key first (materialize).
+function toggleLow() {
+  if (!capOn("t") || !sel || mode !== "select") return;
+  if (sel.kind === "pr") return acceptLow();
+  if (sel.kind !== "gt" || !needWho(toggleLow)) return;
+  const im = curImg(); pushUndo();
+  const e = ensureEdit(im), g = selEdit(e); if (!g) return;
+  const key = keyOf(g), note = tagOf(im.file, key).note;
+  if (!isLowObj(im.file, g)) setDec(e, "t:" + key, "lowconf", undefined, note);
+  else {
+    setDec(e, "t:" + key, note ? "plain" : null, undefined, note);
+    if (g.c === "Low conf EV") { g.c = "EV"; record(im, e, g); }
+  }
+  changed();
+}
+function setObjNote(text) {  // the selected object's note: kept with its tag (lowconf), else as "plain"
+  if (!capOn("t") || !sel || sel.kind !== "gt") return;
+  const im = curImg(), txt = String(text || "").trim().slice(0, TAG_NOTE_MAX), a = selObj();
+  if (!a || txt === tagOf(im.file, keyOf(a)).note.trim() || !needWho(() => setObjNote(text))) return;
+  pushUndo(); const e = ensureEdit(im), g = selEdit(e); if (!g) return;
+  setDec(e, "t:" + keyOf(g), isLowObj(im.file, g) ? "lowconf" : txt ? "plain" : null, undefined, txt);
+  changed();
+}
+function acceptLow() {  // a selected unaccepted candidate: accept as its predicted class with the Low conf tag
+  if (!capOn("t") || !sel || sel.kind !== "pr" || mode !== "select" || !needWho(acceptLow)) return;
+  const im = curImg(), key = "p" + sel.i, p = im.pr[sel.i], cls = predCls(p); pushUndo();
+  const e = ensureEdit(im); e.gt = e.gt.filter(g => g.src !== key);
+  e.gt.push({id: null, c: cls, p: clone(p.p), src: key});
+  setDec(e, key, "add:" + cls); setDec(e, "t:" + key, "lowconf", undefined, tagOf(im.file, key).note);
+  sel = {kind: "gt", key}; changed();
+}
+function reclassKey(e, im, key, cls) {  // cards: the object's class decision, keeping its own outline
+  const prev = e.dec[key], p = prev && prev.v && /^(keep|add|new):/.test(prev.v) && prev.p ? prev.p : undefined;
+  if (key[0] === "g") setDec(e, key, "keep:" + cls, p);
+  else if (key[0] === "p") setDec(e, key, "add:" + cls, p);
+  else if (key[0] === "n") { const np = p || (findKey(effGt(im), key) || {}).p; if (np) setDec(e, key, "new:" + cls, clone(np)); }
+  aliasTag(e, im.file, key, cls);
+}
+function renderImgBox() {  // Editor: the header's Rejected tag and the side panel's reject state and note (textContent only)
+  const im = curImg(), rj = rejectOf(im.file), tag = $("rejTag");
+  tag.hidden = !rj; tag.textContent = rj ? "Rejected: " + rj : ""; tag.title = tag.textContent;
+  const sec = $("imgSec"); sec.hidden = !capOn("i"); if (sec.hidden) return;
+  const box = $("imgBox"), nt = noteOf(im.file), d = decOf(im.file, "i:reject");
+  box.textContent = "";
+  const st = document.createElement("div"); st.className = "st" + (rj ? " rej" : "");
+  st.textContent = rj ? "Rejected: " + rj + (d && d.who ? " · " + dispName(d.who) : "") : "Not rejected"; box.append(st);
+  if (rj) { const t = document.createElement("div"); t.className = "tip"; t.textContent = "Left out of the results; its outlines stay (no training effect)."; box.append(t); }
+  if (nt) { const n = document.createElement("div"); n.id = "imgNoteShow"; n.textContent = "✎ " + nt; box.append(n); }
+  const b = document.createElement("button"); b.id = "imgEdit"; b.textContent = rj || nt ? "Change reject / note…" : "Reject image or add a note…";
+  b.onclick = () => openImg(cur); box.append(b);
+}
+// The image dialog: which image, the reason picked (null = not rejected), and both values as the dialog opened
+// (pick0, note0). Save writes only what this reviewer changed in the dialog: a reject or note that arrived from another
+// device while it was open (a pull) is never overwritten by values the reviewer didn't touch.
+let imgFor = -1, imgPick = null, pick0 = null, note0 = "";
+function openImg(i) {
+  if (!capOn("i") || !D.images[i]) return;
+  const im = D.images[i]; imgFor = i; imgPick = pick0 = rejectOf(im.file); note0 = noteOf(im.file).trim();
+  $("imgDlgName").textContent = shortName(im.file); $("imgDlgName").title = im.file;
+  $("imgNote").value = noteOf(im.file); noteCount(); renderRejChips(); $("imgDlg").hidden = false;
+}
+function renderRejChips() {
+  const box = $("rejChips"); box.textContent = "";
+  const add = (label, val, cls) => {
+    const b = document.createElement("button"); b.type = "button"; b.textContent = label; b.className = [cls || "", imgPick === val ? "on" : ""].join(" ").trim();
+    b.onclick = () => { imgPick = val; renderRejChips(); }; box.append(b);
+  };
+  add("Not rejected", null, "keep");
+  REJECT_REASONS.forEach(r => add(r, r));
+}
+function noteCount() { $("imgNoteN").textContent = `${$("imgNote").value.length} / ${NOTE_MAX}`; }
+function closeImg() { $("imgDlg").hidden = true; imgFor = -1; }
+function saveImg() {
+  const i = imgFor, im = D.images[i]; if (!im || !capOn("i")) return closeImg();
+  if (!needWho(saveImg)) return;
+  const e = ensureEdit(im), note = $("imgNote").value.trim().slice(0, NOTE_MAX); let n = 0;
+  if (imgPick !== pick0) { setDec(e, "i:reject", imgPick ? "reject:" + imgPick : null); n++; }
+  if (note !== note0) { setDec(e, "i:note", note || null); n++; }
+  closeImg();
+  if (!n) return;
+  touch(im.file); renderList(); renderSide(); draw();
+  if (!$("tri").hidden) { const c = tri.queue[tri.pos]; if (c && c.i === i && rejectOf(im.file)) advance(); else triRender(); }
+}
+$("imgNote").oninput = noteCount; $("imgCancel").onclick = closeImg; $("imgSave").onclick = saveImg;
+$("imgDlg").onclick = ev => { if (ev.target === $("imgDlg")) closeImg(); };
+$("triImgBtn").onclick = () => { const c = tri.queue[tri.pos]; if (c) openImg(c.i); };
 // A vertex edit on an unaccepted prediction accepts it first, as its predicted class, in the same undo step; the
 // caller then edits the new label's outline and record() writes add:<cls> + p.
 function acceptForEdit(i) {
@@ -1036,8 +1244,9 @@ cv.addEventListener("contextmenu", ev => ev.preventDefault());
 // ---------- keyboard / buttons ----------
 document.addEventListener("keydown", ev => {
   if (!$("whoDlg").hidden) { if (ev.key === "Escape") $("whoCancel").click(); return; }  // typing a name: no hotkeys
+  if (!$("imgDlg").hidden) { if (ev.key === "Escape") closeImg(); return; }  // the image's reject / note: no hotkeys
   if (!$("tri").hidden) return triKey(ev);
-  if (ev.target.tagName === "SELECT" || ev.target.tagName === "INPUT" && ev.target.type !== "checkbox" && ev.target.type !== "range") return;
+  if (ev.target.tagName === "SELECT" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "INPUT" && ev.target.type !== "checkbox" && ev.target.type !== "range") return;
   const k = ev.key;
   if (k === "Escape") { draft = null; if (mode !== "select") setMode("select"); else { sel = null; renderSide(); draw(); } }
   else if (k === "Enter" && mode === "tap") finishDraft();
@@ -1050,6 +1259,7 @@ document.addEventListener("keydown", ev => {
   else if (k === "e" || k === "E") startRedraw();
   else if ((k === "a" || k === "A") && !(ev.ctrlKey || ev.metaKey)) acceptPred();  // not Ctrl+A / Ctrl+X
   else if ((k === "x" || k === "X") && !(ev.ctrlKey || ev.metaKey)) rejectPred();
+  else if ((k === "l" || k === "L") && !(ev.ctrlKey || ev.metaKey)) toggleLow();
   else if (k === "r" || k === "R") markReviewed();
   else if (k === "f" || k === "F") fit();
   else if (k === "t" || k === "T") { $("showPr").checked = !$("showPr").checked; draw(); }
@@ -1204,6 +1414,7 @@ function applyBrand() {
 $("logo").onclick = () => { brandI = (brandI + 1) % BRANDS.length; try { localStorage.setItem("cryoev-review:brand", brandI); } catch (e) {} applyBrand(); triRender(); };
 function resolved(c) {  // decided, unless the decision is September's (seed): a reviewer still has to confirm it
   const im = D.images[c.i], d = edits[im.file] && edits[im.file].dec && edits[im.file].dec[c.key];
+  if (rejectOf(im.file)) return true;  // a rejected image: its cards are skipped (back if it is un-rejected)
   if (d && d.v) return !d.seed;
   return c.kind === "g" && !effGt(im).some(g => g.id === c.id);
 }
@@ -1228,8 +1439,8 @@ function buildQueue() {
   const byFlags = D.images.map((_, i) => i).sort((a, b) => flagRank(D.images[b]) - flagRank(D.images[a]) || a - b);
   byFlags.forEach(i => { const im = D.images[i];
     if (fs && im.split !== fs) return;
-    if (clsMode()) {  // class flags first within each image: disagreements, then Low conf EV
-      const rank = g => g.x ? 0 : g.lc || g.c === "Low conf EV" ? 1 : 2;
+    if (clsMode()) {  // class flags first within each image: disagreements, then Low conf EV and the Low conf tag
+      const rank = g => g.x ? 0 : g.lc || g.c === "Low conf EV" || tagOf(im.file, "g" + g.id).v === "lowconf" ? 1 : 2;
       const own = im.gt.filter(g => g.id != null && (all || rank(g) < 2)).sort((a, b) => rank(a) - rank(b))
         .map(g => ({i, kind: "g", id: g.id, key: "g" + g.id}));
       q.push(...own, ...seededCases(i, new Set(own.map(c => c.key))));
@@ -1309,8 +1520,9 @@ function setTriMode(m) {
   openTri();
 }
 function triKeysText(cm) {
-  return cm ? `1–${Math.min(9, CATS.length)} pick class · → / A keep · ← / ↑ / S next · Z undo · Esc close`
-            : "→ / A accept · ← / X reject · ↑ / S skip · Z undo · Esc close";
+  const low = capOn("t") ? (cm ? " · L low conf" : " · L accept as low conf / low conf") : "";
+  return cm ? `1–${Math.min(9, CATS.length)} pick class · → / A keep · ← / ↑ / S next${low} · Z undo · Esc close`
+            : `→ / A accept · ← / X reject · ↑ / S skip${low} · Z undo · Esc close`;
 }
 function openTri() {
   const cm = clsMode();
@@ -1346,6 +1558,7 @@ function triRender() {
   $("triActions").classList.toggle("pcard", big);
   $("aYes").innerHTML = big ? `✓ Accept<small>as ${esc(cardPredCls(c))}</small>` : clsMode() ? "✓" : "♥";
   $("aNope").innerHTML = big ? "✕ Reject" : "✕";
+  const lowNow = renderLowBtn(c, big);
   if (!c) {
     bio.innerHTML = `<h2>${brand().empty}</h2>` + (clsMode() ? "<p>No labels left to check here. Pick “all labels”, or open the Editor.</p>"
       : "<p>Lower the confidence filter to meet more vesicles, or open the Editor.</p>");
@@ -1391,7 +1604,49 @@ function triRender() {
     $("aYes").title = sept ? "Swipe right: confirm the September decision" : `Swipe right: keep as ${g.c}`; $("aNope").title = "Swipe left: delete label";
     CATS.filter(cl => cl !== g.c).forEach(cl => chip(`→ ${cl}`, "", () => tri.adj ? saveAdjust(cl) : pick(act, cl, `now ${cl}`)));
   }
+  if (lowNow) {  // the card's object carries the Low conf tag (or is Low conf EV): say so, with its note (text only)
+    const p = document.createElement("p"); p.className = "lowc"; p.id = "triLow";
+    const nt = tagOf(im.file, c.key).note; p.textContent = "◐ Low conf" + (nt ? ": " + nt : "");
+    bio.insertBefore(p, bio.querySelector("small"));
+  }
   triDraw(); tri.sig = triSig();
+}
+// The ◐ button on a card (L): an unaccepted candidate -> "Accept as low conf"; a counted object -> the tag on / off.
+// Returns whether the card's object is low conf now. Hidden without the t cap, and on an object that is gone.
+function renderLowBtn(c, big) {
+  const b = $("aLow"), im = c && D.images[c.i], now = c && findKey(gtOf(im), c.key);
+  b.hidden = !capOn("t") || !c || (!now && c.kind !== "p");
+  b.classList.remove("on"); b.textContent = "◐";
+  if (b.hidden) return false;
+  if (!now) {
+    b.title = "Accept as low conf: counted, reported as low conf (L)";
+    if (big) { b.textContent = "◐ Low conf"; const s = document.createElement("small"); s.textContent = "accept as low conf"; b.append(s); }
+    return false;
+  }
+  const on = isLowObj(im.file, now);
+  b.classList.toggle("on", on); b.title = on ? "Low conf is on: tap to turn it off (L)" : "Tag as low conf: still counted (L)";
+  return on;
+}
+function lowCard() {
+  const c = tri.queue[tri.pos]; if (!c || !capOn("t") || tri.adj) return;
+  const im = D.images[c.i], now = findKey(gtOf(im), c.key);
+  if (!now && c.kind !== "p") return;
+  if (!now) return react("yes", decideLow, `added as ${cardPredCls(c)}, low conf`);
+  if (!needWho(lowCard)) return;
+  const e = ensureEdit(im), note = tagOf(im.file, c.key).note;
+  tri.undo.push({i: c.i, snap: snapOf(e), pos: tri.pos});
+  if (!isLowObj(im.file, now)) setDec(e, "t:" + c.key, "lowconf", undefined, note);
+  else { setDec(e, "t:" + c.key, note ? "plain" : null, undefined, note); if (now.c === "Low conf EV") reclassKey(e, im, c.key, "EV"); }
+  e.modified = true; touch(im.file); renderList();
+  tri.picked = caseId(c); triRender();
+}
+function decideLow() {  // after the fly-off: the candidate accepted as its predicted class + the tag, one undo step
+  const c = tri.queue[tri.pos]; if (!c || !needWho()) return;
+  const im = D.images[c.i], e = ensureEdit(im), prev = e.dec[c.key];
+  tri.undo.push({i: c.i, snap: snapOf(e), pos: tri.pos});
+  const poly = (prev && prev.v && prev.v.startsWith("add:") && prev.p) || undefined;  // keeps a reshape
+  setDec(e, c.key, "add:" + cardPredCls(c), poly); setDec(e, "t:" + c.key, "lowconf", undefined, tagOf(im.file, c.key).note);
+  e.modified = true; touch(im.file); renderList(); advance();
 }
 function decide(act, cls, poly, stay) {
   const c = tri.queue[tri.pos]; if (!c || !needWho()) return;
@@ -1410,6 +1665,7 @@ function decide(act, cls, poly, stay) {
     poly = poly || (prev && prev.v && prev.v.startsWith("keep:") && prev.p) || undefined;  // a class change keeps an earlier reshape
     setDec(e, c.key, "keep:" + cls, poly); if ((g && g.c !== cls) || poly) e.modified = true;
   }
+  if (act !== "del" && act !== "no") aliasTag(e, im.file, c.key, cls);  // same undo step (the snapshot above)
   touch(im.file); renderList();
   if (stay) { tri.picked = caseId(c); triRender(); } else advance();
 }
@@ -1442,6 +1698,7 @@ function deepLink(file, key) {  // a bookmarkable Editor link to one object; kee
 }
 function triHeader(c) {
   const open = $("triOpen");
+  $("triImgBtn").hidden = !c || !capOn("i");
   if (!c) { $("thSept").hidden = true; $("thName").textContent = ""; $("thObj").textContent = ""; $("thPos").textContent = "order: most flags first"; open.hidden = true; return; }
   const im = D.images[c.i], same = tri.queue.filter(q => q.i === c.i);
   $("thName").textContent = shortName(im.file); $("thName").title = im.file;
@@ -1603,6 +1860,7 @@ function react(kind, act, sub) {
 $("aYes").onclick = () => react("yes", swipeYes);
 $("aNope").onclick = () => react("nope", swipeNo);
 $("aSkip").onclick = () => react("skip", advance);
+$("aLow").onclick = lowCard;
 // Gestures on the card: swipe right/left/up; tap = next zoom level; press and hold = peek without outlines.
 let g0 = null, pressT = null;
 tcv.addEventListener("pointerdown", ev => {
@@ -1652,6 +1910,7 @@ function triKey(ev) {
     pick(c.kind === "p" ? "add" : "keep", cl, c.kind === "p" ? `added as ${cl}` : `now ${cl}`);
   }
   else if (ev.ctrlKey || ev.metaKey) return;  // leave Ctrl+A / Ctrl+X to the browser
+  else if (k === "l" || k === "L") lowCard();
   else if (k === "ArrowRight" || k === "Enter" || k === "a" || k === "A") react("yes", swipeYes);  // A: accept
   else if (!cm && (k === "ArrowLeft" || k === "x" || k === "X" || k === "Delete")) react("nope", swipeNo);
   else if (k === "ArrowUp" || k === "s" || k === "S" || k === "n" || k === "N" || (cm && k === "ArrowLeft")) react("skip", advance);
@@ -1830,11 +2089,27 @@ async function pull() {  // bring in other reviewers' decisions (and who is look
     if (!(file in remote) && (l.modified || l.reviewed || Object.keys(l.dec || {}).length)) dirty.add(file);
   persist();
   if (!$("tri").hidden && !g0) { if (!leaveTaken() && triSig() !== tri.sig) triRender(); }  // re-render only on a change
-  else if ($("tri").hidden) { renderList(); draw(); }
+  else if ($("tri").hidden) { renderList(); renderImgBox(); draw(); }
+}
+// /api/ping caps: the decision kinds beyond g/p/n the server accepts (review_server.CAPS). A server started on older
+// code answers {"ok": true}: the reject, note and Low conf controls stay hidden, so this page never sends a key it
+// would refuse (multi_review_server serves this file from disk, but validates with the code it started with).
+async function loadCaps() {
+  try {
+    const r = await fetch("api/ping", {cache: "no-store"}), j = r.ok ? await r.json() : null;
+    caps = new Set(j && Array.isArray(j.caps) ? j.caps.filter(x => typeof x === "string") : []);
+  } catch (e) { caps = new Set(); }
+  applyCaps();
+}
+function applyCaps() {
+  $("helpL").hidden = !capOn("t"); $("helpI").hidden = !capOn("i");
+  $("fStat").querySelector('option[value="rejected"]').hidden = !capOn("i");
+  legend(); renderList(); renderSide(); draw();
+  if (!$("tri").hidden) { if (isPredPkg) $("triKeys").textContent = triKeysText(clsMode()); triRender(); }
 }
 async function connect() {
   if (!location.protocol.startsWith("http")) return;
-  try { await pull(); server = true; if (deep && cur === deep.i) openDeep(deep); else go(cur); syncBadge(); sync(); if (!$("tri").hidden) { rebuildQueue(); tri.claimed = null; triRender(); } }
+  try { await pull(); await loadCaps(); server = true; if (deep && cur === deep.i) openDeep(deep); else go(cur); syncBadge(); sync(); if (!$("tri").hidden) { rebuildQueue(); tri.claimed = null; triRender(); } }
   catch (e) { syncBadge(); }
 }
 setInterval(async () => {  // claims: cards poll; the Editor renews its claim on the open image and shows others' in the queue
@@ -1856,7 +2131,7 @@ let startMode = null; try { startMode = localStorage.getItem("cryoev-review:mode
   if (m === "classes" || m === "cls" || m === "cards") startMode = "tri"; else if (m === "editor") startMode = "editor"; }
 if (deep) startMode = "editor";  // a deep link always opens the Editor on its object
 if (startMode === "tri" || (!startMode && window.matchMedia("(max-width: 700px)").matches)) openTri();
-window.__review = {D, CATS, effGt, gtOf, mergeEdit, pull, materialize, edits: () => edits, triGo: n => { tri.pos = n; tri.zoom = 0; tri.picked = null; triRender(); }, render: () => { renderList(); renderSide(); draw(); if (!$("tri").hidden) triRender(); }, state: () => ({mode, sel, curCls, redrawKey, cur, order, view: {...view}, W, H, imgReady, server, dirty: dirty.size,
+window.__review = {D, CATS, effGt, gtOf, mergeEdit, pull, materialize, edits: () => edits, caps: () => [...caps], openImg, statusOf, triGo: n => { tri.pos = n; tri.zoom = 0; tri.picked = null; triRender(); }, render: () => { renderList(); renderSide(); draw(); if (!$("tri").hidden) triRender(); }, state: () => ({mode, sel, curCls, redrawKey, cur, order, view: {...view}, W, H, imgReady, server, dirty: dirty.size,
   who: me(), tri: {mode: tri.mode, pos: tri.pos, queue: tri.queue, ready: tri.ready, picked: tri.picked || null}})};  // for annotation/tests
 })();
 </script>
