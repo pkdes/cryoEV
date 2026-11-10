@@ -19,6 +19,9 @@ Predict module (CryoEV portal, journey J1): a person runs the production model o
     POST /predict/convert/<id>/stop       admin: kill a running converter (or drop a queued one) -> failed "stopped"
     POST /predict/convert/<id>/retry      admin: a failed conversion whose inputs are still there is queued again
     POST /predict/convert/<id>/inputs     admin: delete its uploaded raw files now
+    POST /predict/convert/<id>/stitch     admin: (re)make the montages of a done conversion whose raw files are
+                                            still there (a queued "stitch" job: convert_raw --stitch-only)
+    POST /predict/convert/<id>/register   admin: add the upload to Data -> Sessions again (the watcher does it)
     POST /predict/convert/<id>/details    owner / admin: the upload's Session details (portal/upload_sessions.py);
                                             the raw form's "Sample on each grid" becomes input/sample_key.csv
     GET  /predict/<ps>/                   the set: status (auto-refresh), Review / Results, spot-check list
@@ -70,6 +73,14 @@ the session id: Predict reads the id from it):
     input/         the uploaded raw files: kept CJ_RAW_KEEP_DAYS (default 7; 0 = removed at once) after the
                    conversion ends, done or failed, then swept; the admin may delete them sooner
     tiles/         the converter's --out: PNG tiles + MANIFEST.csv, the Predict source once done
+    montages/      (round 7) <montage>_stitched.jpg, layout.json, stitch.json from a stitch job (convert_raw
+                   --stitch-only, stdout stitch.out) queued when the conversion is done (job "convert") or by the
+                   admin (job "backfill"); a stitch failure, timeout or stop never fails the conversion and never
+                   replaces a finished set. acquisition.json beside it (written by the conversion itself).
+                   status.json stitch {state queued|running|done|failed|skipped, job, error, n, kept_previous, pid
+                   ...}; registered false|true|"error: ..."|"excluded: ..." (upload conversions, registered by the
+                   watcher when portal.upload_sessions is on) with register_tries / register_since / register_next
+                   (backoff) / register_wait while the registry is busy
   The recipe is "default" (convert_raw's DEFAULT_RECIPE; the page warns) or one of the processing repo's session
   recipes that convert_raw's static check accepts (the portal never runs one). The GPU is used only when ticked and the
   GPU check passes (else refused, saying why); the CPU otherwise. A session folder the admin picks is never written:
@@ -88,6 +99,9 @@ Configuration (environment, read per request; Config attributes of the same lowe
                        external drive (cfg.raw_root wins); default = the predict root. Old <predict root>/raw_tiles
                        conversions stay listed and swept. Prediction sets made from it copy tiles (never link).
   CJ_RAW_KEEP_DAYS     days uploaded raw files are kept after their conversion ends (default 7; 0 = not kept)
+  CJ_RAW_MIN_FREE_GB   below this much free disk (default 25; 0 = off), the oldest-ended kept raw inputs go early
+  CJ_RAW_LEGACY_LIST   off: with CJ_RAW_ROOT set, the old <predict root>/raw_tiles is not listed (preview portals)
+  CJ_UPLOAD_SESSIONS   on: finished upload conversions are registered as sessions (portal.upload_sessions; live only)
   The registry is the portal's (cfg.registry).
 
 Rules:
@@ -122,6 +136,7 @@ Rules:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import csv
 import errno
 import hashlib
@@ -2152,6 +2167,17 @@ def gpu_box(checked=False) -> str:
 
 
 # ---------------------------------------------------------------- raw conversion: records and the runner
+# Round 7 (BUILD_CONTRACTS.md section 13): a conversion also writes acquisition.json; its montages/ come from a
+# "stitch" job (convert_raw --stitch-only) queued when it is done, run by this runner one job at a time with the
+# conversions; the admin can queue one again while the raw files are there. Finished upload conversions are
+# registered as sessions (portal.upload_sessions, when it is on) by the watcher thread, outside the runner lock.
+CONVERT_MONTAGES, CONVERT_ACQ, STITCH_OUT = "montages", "acquisition.json", "stitch.out"
+LEGACY_LIST_SETTING = "CJ_RAW_LEGACY_LIST"             # off: <predict root>/raw_tiles not listed (preview portals)
+MIN_FREE_SETTING, MIN_FREE_DEFAULT_GB = "CJ_RAW_MIN_FREE_GB", 25   # below: oldest ended raw inputs removed early
+UPLOAD_SESSIONS_SETTING = "CJ_UPLOAD_SESSIONS"         # on: register finished upload conversions (live only)
+REGISTER_BACKOFF_MAX_S = 300                           # a busy registry: tried again after 2, 4, 8 ... s, at most this
+
+
 def raw_base(cfg) -> Path:
     """The folder holding the whole raw pipeline (.portal staging of raw uploads + raw_tiles/): cfg.raw_root, else
     CJ_RAW_ROOT, else the predict root (today's behaviour)."""
@@ -2167,11 +2193,22 @@ def _same_path(a: Path, b: Path) -> bool:
     return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
+def _off(v) -> bool:
+    return str(v if v is not None else "").strip().lower() in ("off", "0", "no", "false")
+
+
+def _on(v) -> bool:
+    return str(v if v is not None else "").strip().lower() in ("on", "1", "yes", "true")
+
+
 def raw_roots(cfg) -> list:
     """Where conversions are listed from: the raw root, then (when CJ_RAW_ROOT moved it) the old
-    <predict root>/raw_tiles, whose conversions stay listed, swept and usable."""
+    <predict root>/raw_tiles, whose conversions stay listed, swept and usable -- unless CJ_RAW_LEGACY_LIST=off (a
+    preview portal with its own CJ_RAW_ROOT never lists, sweeps or converts the live raw_tiles)."""
     new, old = raw_root(cfg), predict_root(cfg) / RAW_TILES
-    return [new] if _same_path(new, old) else [new, old]
+    if _same_path(new, old) or _off(_setting(cfg, LEGACY_LIST_SETTING)):
+        return [new]
+    return [new, old]
 
 
 def tmp_dirs(cfg) -> list:
@@ -2361,17 +2398,28 @@ def new_conversion(cfg, user, fields: dict, *, source: dict, inputs=None, upload
     return d
 
 
+def _converter_cmd() -> list:
+    hook = test_hooks().get("convert_cmd")
+    return [str(x) for x in hook] if isinstance(hook, list) and hook else [sys.executable, "-m", "jobs.convert_raw"]
+
+
 def convert_argv(d: Path, meta: dict, repo: Path) -> list:
     """`python -m jobs.convert_raw --in ... --out <d>/tiles --recipe <r> [--sample-key k] [--gpu]
-    --processing-repo <repo>` (tests: the hooks' convert_cmd in place of `python -m jobs.convert_raw`)."""
-    hook = test_hooks().get("convert_cmd")
-    cmd = [str(x) for x in hook] if isinstance(hook, list) and hook else [sys.executable, "-m", "jobs.convert_raw"]
-    argv = cmd + ["--in", *meta["inputs"], "--out", str(d / CONVERT_TILES), "--recipe", str(meta["recipe"])]
+    --acquisition-out <d>/acquisition.json --processing-repo <repo>` (tests: the hooks' convert_cmd in place of
+    `python -m jobs.convert_raw`). The montages are a separate stitch job, queued when this one is done: a stitch
+    that runs long, crashes or is stopped never fails the conversion."""
+    argv = _converter_cmd() + ["--in", *meta["inputs"], "--out", str(d / CONVERT_TILES), "--recipe",
+                               str(meta["recipe"])]
     if meta.get("sample_key"):
         argv += ["--sample-key", str(meta["sample_key"])]
     if meta.get("gpu"):
         argv.append("--gpu")
-    return argv + ["--processing-repo", str(repo)]
+    return argv + ["--acquisition-out", str(d / CONVERT_ACQ), "--processing-repo", str(repo)]
+
+
+def stitch_argv(d: Path, repo: Path) -> list:
+    """`python -m jobs.convert_raw --stitch-only <d> --processing-repo <repo>`: the backfill job."""
+    return _converter_cmd() + ["--stitch-only", str(d), "--processing-repo", str(repo)]
 
 
 # -- the converter's process: identity by pid AND start time (a pid can be reused by another program)
@@ -2464,26 +2512,31 @@ def start_conversion(cfg, d: Path, meta: dict) -> dict:
         check_disk_for(d, input_bytes(meta))
     except Refusal as e:
         return write_conv_status(d, state="failed", kind="refused", finished=now_iso(), error=e.msg)
-    kw = {}
-    if os.name == "nt":
-        kw["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        kw["start_new_session"] = True
-    env = {**os.environ, CR.REPO_ENV: str(repo), "PYTHONIOENCODING": "utf-8"}
     try:
-        with open(d / CONVERT_OUT, "wb") as out, open(d / CONVERT_LOG, "ab") as log:
-            p = subprocess.Popen(convert_argv(d, meta, repo), cwd=REPO, stdin=subprocess.DEVNULL, stdout=out,
-                                 stderr=log, env=env, close_fds=True, **kw)
+        p = spawn_converter(convert_argv(d, meta, repo), repo, d / CONVERT_OUT, d / CONVERT_LOG)
     except OSError as e:
         return write_conv_status(d, state="failed", kind="failed", finished=now_iso(),
                                  error=f"could not start the converter: {type(e).__name__}: {e}")
     return write_conv_status(d, state="running", pid=p.pid, pid_created=proc_created(p.pid), started=now_iso())
 
 
-def converter_result(d: Path):
-    """The converter's one JSON object from convert.out, or None (not finished, or nothing printed)."""
+def spawn_converter(argv: list, repo: Path, out: Path, log: Path):
+    """Popen detached (no console window; it outlives the portal): stdout -> out, stderr appended to log."""
+    kw = {}
+    if os.name == "nt":
+        kw["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kw["start_new_session"] = True
+    env = {**os.environ, CR.REPO_ENV: str(repo), "PYTHONIOENCODING": "utf-8"}
+    with open(out, "wb") as fo, open(log, "ab") as fl:
+        return subprocess.Popen(argv, cwd=REPO, stdin=subprocess.DEVNULL, stdout=fo, stderr=fl, env=env,
+                                close_fds=True, **kw)
+
+
+def converter_result(d: Path, name=CONVERT_OUT):
+    """The converter's one JSON object from convert.out (or stitch.out), or None (not finished, nothing printed)."""
     try:
-        text = (d / CONVERT_OUT).read_text(encoding="utf-8", errors="replace").strip()
+        text = (d / name).read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
         return None
     for line in reversed(text.splitlines()):
@@ -2523,10 +2576,244 @@ def finalize(d: Path, meta: dict, st: dict) -> dict:
                                      error="The converter stopped without a result.")
     warnings = [str(w) for w in (res.get("warnings") or [])]
     if res.get("ok"):
+        extra = {"registered": False} if is_upload(meta) else {}
         return write_conv_status(d, state="done", pid=None, finished=now_iso(), error=None, kind=None,
-                                 warnings=warnings, result=res, n_tiles=res.get("n_tiles"))
+                                 warnings=warnings, result=res, n_tiles=res.get("n_tiles"),
+                                 stitch=queued_stitch("convert"), **extra)
     return write_conv_status(d, state="failed", pid=None, finished=now_iso(), kind=res.get("kind") or "failed",
                              error=str(res.get("error") or "unknown error"), warnings=warnings, result=res)
+
+
+def is_upload(meta: dict) -> bool:
+    return (meta.get("source") or {}).get("kind") == "upload"
+
+
+# -- montages: the conversion's own stitch pass, or a "stitch" job (convert_raw --stitch-only) through this runner
+def stitch_state(st: dict) -> str | None:
+    """status.json stitch.state: queued | running (a stitch job) | done | failed | skipped; None = never stitched."""
+    s = st.get("stitch")
+    return s.get("state") if isinstance(s, dict) else None
+
+
+def stitch_busy(st: dict) -> bool:
+    return stitch_state(st) in ("queued", "running")
+
+
+def queued_stitch(job: str) -> dict:
+    """A stitch job waiting for the runner: job "convert" (queued when the conversion is done) or "backfill"."""
+    return {"state": "queued", "job": job, "queued": now_iso(), "pid": None, "started": None, "finished": None,
+            "error": None, "kind": None}
+
+
+def montages_done(d: Path) -> bool:
+    """montages/ holds a finished set (stitch.json done; convert_raw never replaces one with a failed pass)."""
+    doc = _read_json(d / CONVERT_MONTAGES / CR.STITCH_JSON)
+    return isinstance(doc, dict) and doc.get("state") == "done"
+
+
+def stitch_summary(d: Path, job: str, doc=None) -> dict:
+    """status.json's stitch record from the stitcher's result (its stitch doc), else montages/stitch.json."""
+    if not isinstance(doc, dict):
+        doc = _read_json(d / CONVERT_MONTAGES / CR.STITCH_JSON)
+    if not isinstance(doc, dict) or doc.get("state") not in ("done", "failed", "skipped"):
+        return {"state": "skipped", "error": "The stitcher made no montages.", "n": 0, "job": job}
+    return {"state": doc["state"], "error": doc.get("error"), "n": doc.get("n"), "job": job,
+            "kept_previous": bool(doc.get("kept_previous"))}
+
+
+def inputs_present(meta: dict, d: Path) -> bool:
+    """The raw files a conversion read are all still there (an upload's input/, or the picked session files)."""
+    paths = [Path(p) for p in meta.get("inputs") or []]
+    if is_upload(meta) and not (d / CONVERT_INPUT).is_dir():
+        return False
+    return bool(paths) and all(p.is_file() for p in paths)
+
+
+def can_stitch(meta: dict, d: Path, st: dict) -> bool:
+    return (st.get("state") == "done" and not stitch_busy(st) and (d / CONVERT_TILES / PSRC.MANIFEST).is_file()
+            and inputs_present(meta, d))
+
+
+def _stitch_end(d: Path, st: dict, meta: dict, acquisition=False, **fields) -> dict:
+    """Record a stitch job's end (fields: state, error, n, kind ...). An upload conversion is (re)registered when
+    a backfill wrote its acquisition.json, or when it was never registered (made before round 7): registered false
+    and the register_* bookkeeping reset, so the watcher registers it."""
+    s = {**(st.get("stitch") or {}), "pid": None, "finished": now_iso(), **fields}
+    extra = {}
+    if is_upload(meta) and ("registered" not in st or (acquisition and s.get("job") == "backfill")):
+        extra = {"registered": False, "register_next": 0, "register_since": None, "register_tries": 0,
+                 "register_wait": None}
+    return write_conv_status(d, stitch=s, **extra)
+
+
+def start_stitch(cfg, d: Path, meta: dict, st: dict) -> dict:
+    """Spawn `convert_raw --stitch-only <d>` (stdout -> stitch.out, stderr appended to convert.log). -> status."""
+    repo, why = processing_repo(cfg)
+    if repo is None:
+        return _stitch_end(d, st, meta, state="failed", kind="refused", error=f"Raw conversion is not set up: {why}")
+    if not inputs_present(meta, d):
+        return _stitch_end(d, st, meta, state="failed", kind="refused",
+                           error="The raw files are gone: the montages can't be made.")
+    try:
+        p = spawn_converter(stitch_argv(d, repo), repo, d / STITCH_OUT, d / CONVERT_LOG)
+    except OSError as e:
+        return _stitch_end(d, st, meta, state="failed", kind="failed",
+                           error=f"could not start the stitcher: {type(e).__name__}: {e}")
+    s = {**(st.get("stitch") or {}), "state": "running", "pid": p.pid, "pid_created": proc_created(p.pid),
+         "started": now_iso(), "finished": None, "error": None, "kind": None}
+    return write_conv_status(d, stitch=s)
+
+
+def finalize_stitch(d: Path, meta: dict, st: dict) -> dict:
+    """A running stitch job: recorded once it printed its result (stitch.json says done / failed), failed when its
+    process is gone without one, stopped when overdue() (same limits as a conversion); else unchanged."""
+    s = st.get("stitch") or {}
+    res = converter_result(d, STITCH_OUT)
+    if res is None:
+        if proc_alive(s):
+            why = overdue(d, s)
+            if why is None:
+                return st
+            kill_proc(s)
+            return _stitch_end(d, st, meta, state="failed", kind="timeout", error=why)
+        res = converter_result(d, STITCH_OUT)
+        if res is None:
+            return _stitch_end(d, st, meta, state="failed", kind="failed",
+                               error="The stitcher stopped without a result.")
+    if res.get("ok"):
+        got = stitch_summary(d, s.get("job") or "backfill", res.get("stitch"))
+        return _stitch_end(d, st, meta, acquisition=bool(res.get("acquisition")), state=got["state"],
+                           error=got["error"], n=got["n"], kept_previous=got["kept_previous"], kind=None,
+                           warnings=[str(w) for w in res.get("warnings") or []])
+    return _stitch_end(d, st, meta, state="failed", kind=res.get("kind") or "failed",
+                       error=str(res.get("error") or "unknown error"))
+
+
+def queue_stitch(cfg, d: Path, meta: dict) -> str:
+    """Admin "Make the montages": a done conversion whose raw files are still there gets a stitch job, run by the
+    runner when nothing else runs (never next to a conversion)."""
+    with runner_lock(cfg):
+        st = _read_json(d / PS.STATUS) or {}
+        if not can_stitch(meta, d, st):
+            raise Refusal("The montages can’t be made for this conversion (it is not done, a stitch is already "
+                          "waiting or running, or its raw files were removed).", 409)
+        write_conv_status(d, stitch=queued_stitch("backfill"))
+    kick(cfg)
+    ensure_watcher(cfg)
+    return "queued"
+
+
+# -- registration as a session (portal.upload_sessions, S), after the runner lock is released
+def needs_registration(meta: dict, st: dict) -> bool:
+    """A done upload conversion not registered yet that has not been given up on (register_next None = a refusal
+    that says not to try again)."""
+    return (st.get("state") == "done" and st.get("registered") is False and is_upload(meta)
+            and st.get("register_next", 0) is not None)
+
+
+def can_register_again(cfg, meta: dict, st: dict) -> bool:
+    """A done upload with upload sessions on (also while waiting: it retries now, the backoff reset)."""
+    return is_upload(meta) and st.get("state") == "done" and upload_sessions_module(cfg) is not None
+
+
+def register_again(cfg, d: Path, meta: dict) -> str:
+    """Admin "Register again": a done upload conversion goes back to registered false with the backoff reset; the
+    watcher registers it (idempotent: an unchanged record is not appended twice)."""
+    with runner_lock(cfg):
+        st = _read_json(d / PS.STATUS) or {}
+        if not (is_upload(meta) and st.get("state") == "done"):
+            raise Refusal("Only a finished upload can be added to Data → Sessions.", 409)
+        if upload_sessions_module(cfg) is None:
+            raise Refusal("Upload sessions are not switched on on this server.", 409)
+        write_conv_status(d, registered=False, register_next=0, register_since=None, register_tries=0,
+                          register_wait=None)
+    kick(cfg)
+    ensure_watcher(cfg)
+    return "queued"
+
+
+def registration_line(cfg, meta: dict, st: dict) -> str | None:
+    """Where the upload's registration as a session stands, in a few words (None: not an upload, not done)."""
+    if not is_upload(meta) or st.get("state") != "done":
+        return None
+    reg = st.get("registered")
+    if reg is True:
+        return "Listed under Data → Sessions."
+    if isinstance(reg, str):
+        return f"Not added to Data → Sessions ({reg})."
+    if upload_sessions_module(cfg) is None:
+        return "Not added to Data → Sessions (upload sessions are off on this server)."
+    if reg is False and st.get("register_next", 0) is None:
+        return f"Not added to Data → Sessions ({st.get('register_wait') or 'skipped'})."
+    if reg is False:
+        wait = st.get("register_wait")
+        return ("Being added to Data → Sessions" + (f" ({wait}; tried {int(st.get('register_tries') or 0)} time(s) "
+                                                     f"since {when(st.get('register_since'))})" if wait else "") + ".")
+    return None
+
+
+def registration_due(st: dict, now=None) -> bool:
+    return (time.time() if now is None else now) >= float(st.get("register_next") or 0)
+
+
+def upload_sessions_module(cfg):
+    """portal.upload_sessions when it is installed AND switched on (its enabled(cfg) is the one predicate; without
+    one, CJ_UPLOAD_SESSIONS on/1/yes/true); else None."""
+    try:
+        import importlib
+        US = importlib.import_module("portal.upload_sessions")
+    except ImportError:
+        return None                                     # not installed here: registered stays false
+    fn = getattr(US, "enabled", None)
+    try:
+        on = fn(cfg) if callable(fn) else _on(_setting(cfg, UPLOAD_SESSIONS_SETTING))
+    except Exception:                                   # noqa: BLE001 - a broken flag reads as off
+        on = False
+    return US if on else None
+
+
+def register_conversions(cfg, todo: list, US=None):
+    """portal.upload_sessions.register_conversion for each due (folder, meta), from the watcher thread only and
+    never holding the runner lock; the outcome is written under it:
+      {"ok": true}                                    -> registered true
+      {"ok": false, "retry": true} (busy, unreadable)  -> stays false; register_next = now + 2, 4, 8 ... (at most
+                                                         REGISTER_BACKOFF_MAX_S) s, register_since = the first
+                                                         try, register_wait = "waiting: registry busy" (or why)
+      an exception                                     -> the same as retry
+      {"ok": false, "error", "retry": false}           -> "excluded: <msg>" for an excluded session, else
+                                                         "error: <msg>" (given up)
+      {"ok": false, "skipped", "retry": false}         -> stays false, not tried again (register_next null)
+    Off, or the module not there: nothing is called."""
+    US = US or upload_sessions_module(cfg)
+    if US is None:
+        return
+    for d, _meta in todo:
+        try:
+            out = US.register_conversion(d, cfg)
+            out = out if isinstance(out, dict) else {}
+        except Exception as e:                          # noqa: BLE001 - tried again with the backoff
+            out = {"ok": False, "error": f"{type(e).__name__}: {e}", "retry": True}
+        with runner_lock(cfg):
+            st = _read_json(d / PS.STATUS) or {}
+            now = time.time()
+            msg = str(out.get("error") or out.get("skipped") or out.get("excluded") or "")[:400]
+            if out.get("ok"):
+                f = {"registered": True, "register_wait": None, "register_next": 0}
+            elif out.get("retry"):
+                tries = int(st.get("register_tries") or 0) + 1
+                f = {"register_tries": tries, "register_since": st.get("register_since") or now_iso(),
+                     "register_next": now + min(REGISTER_BACKOFF_MAX_S, 2 ** tries),
+                     "register_wait": "waiting: registry busy" if out.get("busy") or "busy" in msg.lower()
+                     else f"waiting: {msg or 'try again'}"}
+                print(f"[predict] registering {d.name}: {msg} (again in {f['register_next'] - now:.0f} s)",
+                      file=sys.stderr, flush=True)
+            elif out.get("excluded") or "excluded" in msg.lower():
+                f = {"registered": f"excluded: {msg}", "register_wait": None}
+            elif out.get("error"):
+                f = {"registered": f"error: {msg}", "register_wait": None}
+            else:
+                f = {"register_next": None, "register_wait": f"not registered: {msg}" if msg else None}
+            write_conv_status(d, **f)
 
 
 def inputs_kept_until(cfg, d: Path, st: dict) -> float | None:
@@ -2546,29 +2833,70 @@ def remove_inputs(d: Path) -> bool:
     return True
 
 
+def min_free_bytes(cfg) -> int:
+    """CJ_RAW_MIN_FREE_GB (default MIN_FREE_DEFAULT_GB; 0 = no floor) in bytes; an unreadable value = the default."""
+    v = _setting(cfg, MIN_FREE_SETTING)
+    try:
+        x = float(v) if v not in (None, "") else MIN_FREE_DEFAULT_GB
+    except (TypeError, ValueError):
+        x = MIN_FREE_DEFAULT_GB
+    return int(max(0.0, x) * 1024 ** 3) if math.isfinite(x) else int(MIN_FREE_DEFAULT_GB * 1024 ** 3)
+
+
 def sweep_inputs(cfg, items) -> int:
-    """Remove input/ of ended conversions past CJ_RAW_KEEP_DAYS (0: at once). Callers hold the runner lock."""
-    n = 0
+    """Remove input/ of ended conversions past CJ_RAW_KEEP_DAYS (0: at once); then, while a drive holding kept
+    inputs has less than CJ_RAW_MIN_FREE_GB free, the oldest-ended ones on it go early (logged). A conversion with a
+    stitch job queued or running keeps its inputs; the floor also spares a done conversion whose montages were never
+    made (its inputs are what a backfill needs). Callers hold the runner lock."""
+    n, kept = 0, []
     for d, _meta, st in items:
+        if stitch_busy(st):
+            continue
         until = inputs_kept_until(cfg, d, st)
-        if until is not None and time.time() >= until:
+        if until is None:
+            continue
+        if time.time() >= until:
             n += remove_inputs(d)
+        elif not (st.get("state") == "done" and not montages_done(d)):
+            kept.append((until, d))
+    floor = min_free_bytes(cfg)
+    for until, d in sorted(kept, key=lambda t: (t[0], t[1].name)) if floor else ():
+        try:
+            free = disk_free(_existing(d))
+        except OSError:
+            continue
+        if free >= floor:
+            continue
+        if remove_inputs(d):
+            n += 1
+            write_conv_status(d, inputs_removed_reason="low disk space")
+            print(f"[predict] raw inputs of {d.name} removed early: {free / 2 ** 30:.1f} GB free < "
+                  f"{MIN_FREE_SETTING}={floor / 2 ** 30:g} GB (they were kept until "
+                  f"{datetime.fromtimestamp(until).isoformat(timespec='seconds')})", file=sys.stderr, flush=True)
     return n
 
 
+@contextlib.contextmanager
 def runner_lock(cfg):
-    root = raw_root(cfg)
-    if not root.is_dir():
-        try:
-            root.mkdir(parents=True, exist_ok=True)
-        except OSError:                                   # raw drive away: old conversions still need a lock
-            root = raw_roots(cfg)[-1]
-    return PS.locked(root / CONVERT_LOCK)
+    """The OS lock of every listed raw root that exists (the raw root is made if need be), taken in one sorted order,
+    so two portals sharing a root (live and legacy) never run the queue at once."""
+    roots = raw_roots(cfg)
+    try:
+        roots[0].mkdir(parents=True, exist_ok=True)
+    except OSError:                                       # raw drive away: old conversions still need a lock
+        pass
+    held = [r for r in roots if r.is_dir()] or [roots[-1]]
+    with contextlib.ExitStack() as stack:
+        for r in sorted(held, key=lambda p: os.path.normcase(os.path.abspath(p))):
+            stack.enter_context(PS.locked(r / CONVERT_LOCK))
+        yield
 
 
-def kick(cfg) -> int:
-    """Record finished (or overdue) conversions, start queued ones (at most MAX_CONVERT_RUNNING at once) and sweep
-    old inputs, under the runner lock. -> how many are still queued or running."""
+def kick(cfg, register=False) -> int:
+    """Record finished (or overdue) conversions and stitch jobs, start queued ones (conversions first, then stitch
+    jobs; at most MAX_CONVERT_RUNNING of either at once) and sweep old inputs, under the runner lock; then, with the
+    lock released and only when `register` (the watcher thread), register finished upload conversions that are due.
+    -> how many are still queued or running, plus the registrations still waiting (so the watcher keeps going)."""
     if not any(r.is_dir() for r in raw_roots(cfg)):
         return 0
     with runner_lock(cfg):
@@ -2577,8 +2905,11 @@ def kick(cfg) -> int:
         for i, (d, meta, st) in enumerate(items):
             if st.get("state") == "running":
                 st = finalize(d, meta, st)
-                items[i] = (d, meta, st)
                 running += st.get("state") == "running"
+            if stitch_state(st) == "running":
+                st = finalize_stitch(d, meta, st)
+                running += stitch_state(st) == "running"
+            items[i] = (d, meta, st)
         pending = running
         for i, (d, meta, st) in enumerate(items):
             if st.get("state") != "queued":
@@ -2590,8 +2921,24 @@ def kick(cfg) -> int:
                 pending += st.get("state") == "running"
             else:
                 pending += 1
+        for i, (d, meta, st) in enumerate(items):
+            if stitch_state(st) != "queued":
+                continue
+            if running < MAX_CONVERT_RUNNING:
+                st = start_stitch(cfg, d, meta, st)
+                items[i] = (d, meta, st)
+                running += stitch_state(st) == "running"
+                pending += stitch_state(st) == "running"
+            else:
+                pending += 1
         sweep_inputs(cfg, items)
-    return pending
+        todo = [(d, meta, st) for d, meta, st in items if needs_registration(meta, st)]
+    US = upload_sessions_module(cfg) if todo else None
+    if US is None:
+        return pending
+    if register:
+        register_conversions(cfg, [(d, meta) for d, meta, st in todo if registration_due(st)], US)
+    return pending + len(todo)
 
 
 # -- the admin's actions on one conversion
@@ -2608,6 +2955,13 @@ def stop_conversion(cfg, d: Path) -> str:
             write_conv_status(d, state="failed", kind="stopped", pid=None, finished=now_iso(),
                               error="Stopped by the admin before it started.")
             return "stopped"
+        if stitch_busy(st):                             # a stitch job: stopped, the conversion stays done
+            if stitch_state(st) == "running":
+                kill_proc(st.get("stitch") or {})
+            s = {**st["stitch"], "state": "failed", "kind": "stopped", "pid": None, "finished": now_iso(),
+                 "error": "Stopped by the admin."}
+            write_conv_status(d, stitch=s)
+            return "stopped"
     return "not running"
 
 
@@ -2620,20 +2974,23 @@ def can_retry(meta: dict, d: Path, st: dict) -> bool:
 
 
 def retry_conversion(cfg, d: Path, meta: dict) -> str:
-    """Admin "Retry": a failed conversion whose inputs are still there goes back to the queue (its tiles/ and
-    result cleared; the log is kept and appended to)."""
+    """Admin "Retry": a failed conversion whose inputs are still there goes back to the queue (its tiles/,
+    montages/, acquisition.json and result cleared; the log is kept and appended to)."""
     with runner_lock(cfg):
         st = _read_json(d / PS.STATUS) or {}
-        if not can_retry(meta, d, st):
+        if not can_retry(meta, d, st) or stitch_busy(st):
             raise Refusal("This conversion can’t be tried again (it is not stopped, or its raw files were removed: "
                           "upload them again).", 409)
-        shutil.rmtree(d / CONVERT_TILES, ignore_errors=True)
-        try:
-            (d / CONVERT_OUT).unlink()
-        except OSError:
-            pass
+        for sub in (d / CONVERT_TILES, d / CONVERT_MONTAGES, *CR.stitch_dirs(d / CONVERT_MONTAGES)):
+            shutil.rmtree(sub, ignore_errors=True)
+        for name in (CONVERT_OUT, STITCH_OUT, CONVERT_ACQ):
+            try:
+                (d / name).unlink()
+            except OSError:
+                pass
         write_conv_status(d, state="queued", pid=None, pid_created=None, started=None, finished=None, error=None,
-                          kind=None, warnings=[], result=None, n_tiles=None, retries=int(st.get("retries") or 0) + 1)
+                          kind=None, warnings=[], result=None, n_tiles=None, retries=int(st.get("retries") or 0) + 1,
+                          stitch=None)
     kick(cfg)
     ensure_watcher(cfg)
     return "queued"
@@ -2645,6 +3002,8 @@ def delete_inputs_now(cfg, d: Path) -> bool:
         st = _read_json(d / PS.STATUS) or {}
         if st.get("state") in ("queued", "running"):
             raise Refusal("Stop the conversion first.", 409)
+        if stitch_busy(st):
+            raise Refusal("The montages are being made from these raw files: stop that first, or wait.", 409)
         return remove_inputs(d)
 
 
@@ -2653,7 +3012,8 @@ _WATCH_LOCK = threading.Lock()
 
 
 def ensure_watcher(cfg):
-    """A daemon thread that calls kick() every CONVERT_POLL_S while anything is queued or running, then ends."""
+    """A daemon thread that calls kick(register=True) every CONVERT_POLL_S while anything is queued or running or a
+    session registration is waiting, then ends."""
     key = os.path.normcase(str(raw_root(cfg)))
     with _WATCH_LOCK:
         if key in _WATCH:
@@ -2666,7 +3026,7 @@ def ensure_watcher(cfg):
             with _WATCH_LOCK:
                 _WATCH[key]["dirty"] = False
             try:
-                pending = kick(cfg)
+                pending = kick(cfg, register=True)    # the only caller that registers sessions
             except Exception as e:                     # noqa: BLE001 - logged; the watcher keeps going
                 print(f"[predict] conversion watcher: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
                 pending = 1
@@ -3323,6 +3683,7 @@ def conv_fragments(cfg, user, can_see, d: Path, meta: dict, st: dict, details=No
                      f'<div><dt>nm per pixel</dt><dd>{esc(nm or "?")}</dd></div>'
                      f'<div><dt>Montages</dt><dd>{esc(", ".join(res.get("montages") or []))}</dd></div>'
                      f'<div><dt>Computed on</dt><dd>{esc(res.get("compute") or "?")}</dd></div></dl></div>')
+        parts.append(stitch_card(d, st, admin, paths))
         parts.append(US.conversion_details_html(cfg, user, d, meta, st, **(details or {})))
     if warns:
         parts.append('<h2 class="cj-sec">Warnings</h2><div class="cj-card"><ul class="cj-predict-warns">'
@@ -3337,6 +3698,18 @@ def conv_fragments(cfg, user, can_see, d: Path, meta: dict, st: dict, details=No
         if st.get("state") in ("queued", "running"):
             acts.append(f'<form method="post" action="{base}/stop" class="cj-predict-inline">'
                         f'<button class="cj-predict-btn" type="submit">Stop</button></form>')
+        elif stitch_busy(st):
+            acts.append(f'<form method="post" action="{base}/stop" class="cj-predict-inline">'
+                        f'<button class="cj-predict-btn" type="submit">Stop making the montages</button></form>')
+        if can_stitch(meta, d, st):
+            acts.append(f'<form method="post" action="{base}/stitch" class="cj-predict-inline">'
+                        f'<button class="cj-predict-btn" type="submit">Make the montages</button></form>')
+        if can_register_again(cfg, meta, st):
+            acts.append(f'<form method="post" action="{base}/register" class="cj-predict-inline">'
+                        f'<button class="cj-predict-btn" type="submit">Register again</button></form>')
+        line = registration_line(cfg, meta, st)
+        if line:
+            acts.append(f'<p class="cj-mut" data-cj-registration>{esc(line)}</p>')
         if can_retry(meta, d, st):
             acts.append(f'<form method="post" action="{base}/retry" class="cj-predict-inline">'
                         f'<button class="cj-predict-btn" type="submit">Retry</button></form>')
@@ -3350,7 +3723,44 @@ def conv_fragments(cfg, user, can_see, d: Path, meta: dict, st: dict, details=No
         if tail:
             parts.append(f'<details class="cj-card"><summary>Converter log (admin)</summary>'
                          f'<pre class="cj-predict-log">{esc(tail)}</pre></details>')
-    return {"status": status, "result": "".join(parts), "live": not v["final"], "state": st.get("state")}
+    return {"status": status, "result": "".join(parts), "live": not v["final"] or stitch_busy(st),
+            "state": st.get("state")}
+
+
+STITCH_LABEL = {"queued": ("Waiting", "wait"), "running": ("Being made", "run"), "done": ("Ready", "ok"),
+                "failed": ("Not made", "warn"), "skipped": ("Not made", "warn")}
+
+
+def stitch_card(d: Path, st: dict, admin: bool, paths=()) -> str:
+    """The Montages card on a done conversion: where its stitch job stands, its warnings; empty when it never had
+    one (a conversion made before round 7 shows that the montages can be made)."""
+    s = st.get("stitch") if isinstance(st.get("stitch"), dict) else None
+    if s is None:
+        return ('<div class="cj-card" id="cj-predict-montages"><div class="cj-predict-top"><b>Montages</b>'
+                f'{chip("Not made", "wait")}</div><p class="cj-mut">This conversion was made before montages were '
+                'stitched automatically. The admin can make them while the raw files are kept.</p></div>')
+    label, tone = STITCH_LABEL.get(s.get("state"), ("Unknown", "wait"))
+    n = int(s.get("n") or 0)
+    detail = {"queued": "The stitched montages are made next, after any conversion that is waiting.",
+              "running": "Stitching the montages (about half a minute each). This page updates by itself.",
+              "done": f"{n} stitched montage(s) made.",
+              }.get(s.get("state"))
+    if s.get("state") in ("failed", "skipped"):
+        why = ("Stopped by the admin." if s.get("kind") == "stopped" else
+               "It ran too long." if s.get("kind") == "timeout" else
+               _plain(str(s.get("error") or "unknown"), paths))
+        detail = (f"Some or all montages could not be stitched: {why} The tiles are not affected."
+                  + (" The montages made before are kept." if s.get("kept_previous") else ""))
+    warns = [_plain(str(w), paths) for w in s.get("warnings") or [] if "stitching failed" not in str(w)]
+    tech_line = None
+    if admin:
+        tech_line = "; ".join(f"{k} {s.get(k)}" for k in ("job", "kind", "pid", "queued", "started", "finished")
+                              if s.get(k))
+    return ('<div class="cj-card" id="cj-predict-montages"><div class="cj-predict-top"><b>Montages</b>'
+            f'{chip(label, tone)}</div>'
+            + (f'<p class="cj-predict-detail">{esc(detail)}</p>' if detail else "")
+            + ('<ul class="cj-predict-warns">' + "".join(f"<li>{esc(w)}</li>" for w in warns) + "</ul>"
+               if warns else "") + tech(tech_line) + '</div>')
 
 
 def page_convert(cfg, user, can_see, d: Path, meta: dict, st: dict, details=None) -> str:
@@ -3773,6 +4183,10 @@ def routes(ctx) -> list:
                     stop_conversion(cfg, d)
                 elif kind == "retry":
                     retry_conversion(cfg, d, meta)
+                elif kind == "stitch":
+                    queue_stitch(cfg, d, meta)
+                elif kind == "register":
+                    register_again(cfg, d, meta)
                 else:
                     delete_inputs_now(cfg, d)
             except Refusal as e:
@@ -4024,6 +4438,8 @@ def routes(ctx) -> list:
             Route(PREFIX + "/convert/{cid}/stop", convert_action("stop"), methods=["POST"]),
             Route(PREFIX + "/convert/{cid}/retry", convert_action("retry"), methods=["POST"]),
             Route(PREFIX + "/convert/{cid}/inputs", convert_action("inputs"), methods=["POST"]),
+            Route(PREFIX + "/convert/{cid}/stitch", convert_action("stitch"), methods=["POST"]),
+            Route(PREFIX + "/convert/{cid}/register", convert_action("register"), methods=["POST"]),
             Route(PREFIX + "/convert/{cid}/details", convert_details, methods=["POST"]),
             Route(PREFIX + "/preparing/{tid}/", prep_page, methods=["GET"]),
             Route(PREFIX + "/preparing/{tid}/retry", prep_retry, methods=["POST"]),

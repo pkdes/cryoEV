@@ -498,8 +498,8 @@ class Portal(TPC.Base):
     @classmethod
     def setUpClass(cls):
         cls.flag = os.environ.get(US.FLAG)
+        super().setUpClass()                     # the test World clears CJ_UPLOAD_SESSIONS: set it after
         os.environ[US.FLAG] = "on"
-        super().setUpClass()
 
     @classmethod
     def tearDownClass(cls):
@@ -552,17 +552,13 @@ class Portal(TPC.Base):
         meta = json.loads((d / "convert.json").read_text(encoding="utf-8"))
         self.assertEqual(set(meta), set(meta0))                       # the form adds no key, only the file
 
-        # the conversion page before registration: nothing until the runner says registered: false (waiting)
-        conv_page = self.page(f"/predict/convert/{cid}/", "advanced")
-        self.assertNotIn("Adding this upload to Data", conv_page)
-        st_path = d / "status.json"
-        st = json.loads(st_path.read_text(encoding="utf-8"))
-        st_path.write_text(json.dumps(dict(st, registered=False)), encoding="utf-8")
-        conv_page = self.page(f"/predict/convert/{cid}/", "advanced")
-        self.assertIn("Adding this upload to Data", conv_page)
-        self.assertNotIn('id="cj-us-details"', conv_page)
+        # the runner's watcher registers the finished upload by itself (registered: true in status.json)
+        TPC.wait_for(lambda: self.status(cid).get("registered") is True, 30, what="registered by the watcher")
+        self.w.settle()
+        rec = US.current_record(self.w.cfg, "20991102")
+        self.assertIn(cid, {c["id"] for c in US.conversions_of(rec)})
         (d / "acquisition.json").write_text(json.dumps(ACQ), encoding="utf-8")
-        self.assertEqual(US.register_conversion(d, self.w.cfg)["appended"], True)
+        self.assertEqual(US.register_conversion(d, self.w.cfg)["appended"], True)    # new acquisition: merged in
         self.check_conversion_page(cid, d)
         self.check_data_pages(cid, d)
 

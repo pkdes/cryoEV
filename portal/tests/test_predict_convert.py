@@ -62,31 +62,66 @@ ENV_KEYS = ("CJ_PREDICT_SOURCES", "CJ_PREDICT_ROOT", "CJ_REVIEW_ROOT", "CJ_PREDI
             "CRYOEV_LAPTOP_ROOT", "CRYOEV_CRYOAI_ROOT", "CRYOEV_PROCESSING_ROOT", "CRYOEV_REGISTRY",
             "CRYOEV_JOBS_TESTING", "CRYOEV_JOBS_TEST_HOOKS", "CRYOEV_JOBS_TEST_HOOKS_FILE", "FAKE_PRED_FROM",
             "FAKE_PRED_DELAY", "FAKE_CONVERT_MODE", "FAKE_CONVERT_N", "FAKE_CONVERT_GATE", "FAKE_CONVERT_ARGV",
-            "FAKE_CONVERT_WARN", "CJ_RAW_ROOT", "CJ_RAW_KEEP_DAYS")
+            "FAKE_CONVERT_WARN", "CJ_RAW_ROOT", "CJ_RAW_KEEP_DAYS", "CJ_RAW_MIN_FREE_GB", "CJ_RAW_LEGACY_LIST",
+            "CJ_UPLOAD_SESSIONS", "FAKE_STITCH_MODE")
 HOOKS_OK = {"gpu": {"total_mb": 4096, "apps": []}, "predict_cmd": FAKE_PRED}
 CID_RE = re.compile(r"^/predict/convert/((\d{8}(?:-\d+)?)_[0-9a-f]{6})/$")
 
 FAKE_CONVERT = r'''
 """Stand-in for `python -m jobs.convert_raw` (same CLI, same stdout JSON). Env: FAKE_CONVERT_MODE ok|refuse|crash,
 FAKE_CONVERT_N tiles (3), FAKE_CONVERT_GATE (wait until this file exists), FAKE_CONVERT_ARGV (append argv as JSON),
-FAKE_CONVERT_WARN (one warning), FAKE_GOLDEN (folder of 0001-0003.png)."""
+FAKE_CONVERT_WARN (one warning), FAKE_GOLDEN (folder of 0001-0003.png), FAKE_STITCH_MODE ok|fail (the stitch pass
+of --montages-out and of --stitch-only)."""
 import argparse, csv, json, os, shutil, sys, time
 from pathlib import Path
 ap = argparse.ArgumentParser()
-ap.add_argument("--in", dest="inputs", nargs="+", required=True)
-ap.add_argument("--out", required=True, type=Path)
+ap.add_argument("--in", dest="inputs", nargs="+")
+ap.add_argument("--out", type=Path)
 ap.add_argument("--recipe", default="default")
 ap.add_argument("--sample-key")
 ap.add_argument("--gpu", action="store_true")
 ap.add_argument("--processing-repo")
+ap.add_argument("--montages-out", type=Path)
+ap.add_argument("--acquisition-out", type=Path)
+ap.add_argument("--stitch-only", type=Path)
 a = ap.parse_args()
 if os.environ.get("FAKE_CONVERT_ARGV"):
     with open(os.environ["FAKE_CONVERT_ARGV"], "a", encoding="utf-8") as f:
-        f.write(json.dumps({"argv": sys.argv[1:], "env_repo": os.environ.get("CJ_PROCESSING_REPO")}) + "\n")
+        f.write(json.dumps({"argv": sys.argv[1:], "env_repo": os.environ.get("CJ_PROCESSING_REPO"),
+                            "t": time.time()}) + "\n")
 gate = os.environ.get("FAKE_CONVERT_GATE")
 t0 = time.time()
 while gate and not Path(gate).exists() and time.time() - t0 < 120:
     time.sleep(0.05)
+
+
+def stitch(mout, acq, montages):
+    """What the real stitch pass leaves: montages/<m>_stitched.jpg + layout.json + stitch.json, acquisition.json."""
+    ok = os.environ.get("FAKE_STITCH_MODE", "ok") == "ok"
+    mout.mkdir(parents=True, exist_ok=True)
+    doc = {"state": "done" if ok else "failed", "error": None if ok else "grid1_1: MemoryError: fake",
+           "n": len(montages) if ok else 0, "t": "2026-11-09T00:00:00"}
+    if ok:
+        for m in montages:
+            shutil.copyfile(Path(os.environ["FAKE_GOLDEN"]) / "0001.png", mout / f"{m}_stitched.jpg")
+        (mout / "layout.json").write_text(json.dumps({"schema": "montage_layout/1", "montages": []}))
+    (mout / "stitch.json").write_text(json.dumps(doc))
+    if acq:
+        acq.write_text(json.dumps({"schema": "acquisition/1", "montages": [], "session": {}, "scope_model": None}))
+    print("stitch [1/1] fake: progress", file=sys.stderr)
+    return doc, [] if ok else ["montages: stitching failed for some or all (fake); the tiles are not affected"]
+
+
+if a.stitch_only:
+    d = a.stitch_only
+    if not (d / "tiles" / "MANIFEST.csv").is_file():
+        print(json.dumps({"ok": False, "kind": "refused", "error": "no tiles/MANIFEST.csv", "warnings": []}))
+        sys.exit(2)
+    with open(d / "tiles" / "MANIFEST.csv", newline="", encoding="utf-8") as f:
+        ms = sorted({r["montage"] for r in csv.DictReader(f)})
+    doc, warns = stitch(d / "montages", d / "acquisition.json", ms)
+    print(json.dumps({"ok": True, "mode": "stitch", "stitch": doc, "acquisition": True, "warnings": warns}))
+    sys.exit(0)
 mode = os.environ.get("FAKE_CONVERT_MODE", "ok")
 if mode == "crash":
     print("Traceback (most recent call last):\n  boom", file=sys.stderr)
@@ -124,10 +159,16 @@ with open(a.out / "MANIFEST.csv", "w", newline="", encoding="utf-8") as f:
     w.writeheader()
     w.writerows(rows)
 print("convert_raw: fake pipeline progress", file=sys.stderr)
+sdoc, swarn = (stitch(a.montages_out, a.acquisition_out, sorted({r["montage"] for r in rows}))
+               if a.montages_out else (None, []))
+if a.acquisition_out and not a.montages_out:
+    a.acquisition_out.write_text(json.dumps({"schema": "acquisition/1", "montages": [], "session": {},
+                                             "scope_model": None}))
 print(json.dumps({"ok": True, "out_dir": str(a.out), "recipe": "20261012" if a.recipe == "default" else a.recipe,
                   "recipe_defaulted": a.recipe == "default", "entry_point": "fake", "compute": "CPU",
                   "device": "CPU (NumPy)", "montages": sorted({r["montage"] for r in rows}), "a_px": {},
-                  "n_tiles": n, "tiles": tiles, "nm_per_px": [1.4724], "warnings": [warn]}))
+                  "n_tiles": n, "tiles": tiles, "nm_per_px": [1.4724], "warnings": [warn] + swarn,
+                  "stitch": sdoc, "acquisition": bool(a.acquisition_out)}))
 '''
 
 RECIPE_OK = '''"""A session config (stub)."""
@@ -258,8 +299,10 @@ class World:
         if raw_root:
             os.environ["CJ_RAW_ROOT"] = str(raw_root)
         for k in ("CJ_PREDICT_SOURCES", "CRYOEV_REGISTRY", "FAKE_PRED_DELAY", "FAKE_CONVERT_MODE", "FAKE_CONVERT_N",
-                  "FAKE_CONVERT_GATE", "FAKE_CONVERT_WARN", "CRYOEV_JOBS_TEST_HOOKS_FILE"):
+                  "FAKE_CONVERT_GATE", "FAKE_CONVERT_WARN", "CRYOEV_JOBS_TEST_HOOKS_FILE", "CJ_RAW_LEGACY_LIST",
+                  "CJ_UPLOAD_SESSIONS", "FAKE_STITCH_MODE"):
             os.environ.pop(k, None)
+        os.environ["CJ_RAW_MIN_FREE_GB"] = "0"          # the free-space floor off (this disk may be fuller): Montages tests it
         if real_repo:
             for k in ("CRYOEV_JOBS_TESTING", "CRYOEV_JOBS_TEST_HOOKS"):
                 os.environ.pop(k, None)
@@ -282,7 +325,8 @@ class World:
         """Wait until no conversion is queued or running (the watcher thread done), so nothing outlives the env."""
         t0 = time.time()
         while time.time() - t0 < timeout:
-            busy = [1 for _, _, st in P.all_conversions(None) if st.get("state") in ("queued", "running")]
+            busy = [1 for _, _, st in P.all_conversions(None)
+                    if st.get("state") in ("queued", "running") or P.stitch_busy(st)]
             with P._WATCH_LOCK:
                 watching = bool(P._WATCH)
             if not busy and not watching:
@@ -410,7 +454,14 @@ class Base(unittest.TestCase):
         return sorted(p.name for p in d.iterdir() if P.RAW_ID_RE.match(p.name)) if d.exists() else []
 
     def status(self, cid) -> dict:
-        return json.loads((self.w.root / P.RAW_TILES / cid / "status.json").read_text(encoding="utf-8"))
+        p = self.w.root / P.RAW_TILES / cid / "status.json"
+        for i in range(20):                       # the runner may be replacing it right now (Windows: busy)
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except (PermissionError, ValueError):
+                if i == 19:
+                    raise
+                time.sleep(0.05)
 
     def wait_conv(self, cid, states=("done", "failed"), timeout=60) -> dict:
         def check():
@@ -454,6 +505,8 @@ class Base(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text[:600])
         cid = CID_RE.match(r.json()["href"]).group(1)
         self.assertEqual(self.wait_conv(cid)["state"], "done", self.status(cid))
+        # and the stitch job it queued (round 7) has ended: nothing changes its status.json after this
+        wait_for(lambda: not P.stitch_busy(self.status(cid)), 60, what=f"{cid}'s stitch job")
         return cid
 
     def src_key(self, cid) -> str:
@@ -562,6 +615,9 @@ class Lifecycle(Base):
         done = self.wait_conv(first)
         self.assertEqual(done["state"], "done", done)
         self.assertEqual(self.wait_conv(second)["state"], "done")
+        for c in (first, second):                       # and the stitch jobs they queued (the page is live till then)
+            wait_for(lambda: not P.stitch_busy(self.status(c)), 60, what=f"{c}'s stitch job")
+        done = self.status(first)
         # status.json: the convert JSON and the warnings
         self.assertTrue(done["result"]["ok"])
         self.assertEqual(done["n_tiles"], 3)
@@ -574,7 +630,8 @@ class Lifecycle(Base):
         self.assertEqual(meta["inputs"], [str(raw / "2. Raw images" / "grid1-pos1.mrc.mdoc")])
         self.assertEqual(meta["sample_key"], str(raw / "1. Notes + reports" / "sample_key.csv"))
         # the converter's command line
-        call = next(c for c in self.argv_lines() if str(self.w.root / P.RAW_TILES / first) in " ".join(c["argv"]))
+        call = next(c for c in self.argv_lines() if str(self.w.root / P.RAW_TILES / first) in " ".join(c["argv"])
+                    and "--out" in c["argv"])
         a = call["argv"]
         self.assertEqual(a[a.index("--out") + 1], str(self.w.root / P.RAW_TILES / first / "tiles"))
         self.assertEqual(a[a.index("--recipe") + 1], "default")
@@ -1124,6 +1181,7 @@ class Retention(Base):
         st, r = self.upload(who, "raw", {"session": "20261101", "recipe": "20261101"}, self.raw_files())
         cid = CID_RE.match(r.json()["href"]).group(1)
         self.wait_conv(cid)
+        wait_for(lambda: not P.stitch_busy(self.status(cid)), 60, what=f"{cid}'s stitch job")
         return cid
 
     def test_keep_zero_removes_at_the_end(self):
@@ -1161,6 +1219,340 @@ class Retention(Base):
         self.assertEqual(r.status_code, 507)
         self.assertIn("Not enough disk space on the server to convert", r.text)
         self.assertEqual(self.convs(), [])
+
+
+class Montages(Base):
+    """Round 7 CX (BUILD_CONTRACTS.md section 13): the montages are a stitch job queued when the conversion is done
+    (never in its process, never in tiles/; a stitch failure or stop keeps the conversion done); an admin backfill
+    job runs through the same queue, never beside a conversion, and sweep / delete-now / retry respect it;
+    registration from the watcher only, after the runner lock, with a backoff while the registry is busy; preview
+    isolation (CJ_RAW_LEGACY_LIST=off), the runner lock over every listed root, the free-space floor."""
+
+    def tearDown(self):
+        for k in ("CJ_RAW_KEEP_DAYS", "CJ_UPLOAD_SESSIONS", "CJ_RAW_LEGACY_LIST", "FAKE_STITCH_MODE", "CJ_RAW_ROOT"):
+            os.environ.pop(k, None)
+        os.environ["CJ_RAW_MIN_FREE_GB"] = "0"
+        self.w.gate.touch()
+        super().tearDown()
+
+    def d(self, cid) -> Path:
+        return self.w.root / P.RAW_TILES / cid
+
+    def mine(self, stitched=True) -> str:
+        cid = self.converted("advanced", session="20261101", recipe="20261101")
+        if stitched:
+            self.wait_stitch(cid)
+        return cid
+
+    def wait_stitch(self, cid, states=("done", "failed"), timeout=60) -> dict:
+        return wait_for(lambda: (lambda s: s if (s.get("stitch") or {}).get("state") in states else None)(
+            self.status(cid)), timeout, what=f"{cid} stitch in {states}")
+
+    def test_the_stitch_job_follows_the_conversion(self):
+        cid = self.mine(stitched=False)
+        d = self.d(cid)
+        st = self.status(cid)
+        self.assertEqual(st["state"], "done")
+        self.assertIn(st["stitch"]["state"], ("queued", "running", "done"))
+        self.assertEqual(st["stitch"]["job"], "convert")
+        self.assertTrue((d / "acquisition.json").is_file())             # from the conversion itself
+        st = self.wait_stitch(cid)
+        self.assertEqual({k: st["stitch"][k] for k in ("state", "error", "n", "job", "kept_previous")},
+                         {"state": "done", "error": None, "n": 2, "job": "convert", "kept_previous": False})
+        self.assertGreaterEqual(st["stitch"]["started"], st["finished"])     # after the conversion, not in it
+        self.assertTrue((d / "montages" / "grid1_1_stitched.jpg").is_file())
+        self.assertFalse(any("stitch" in p.name or p.suffix == ".json" for p in (d / "tiles").iterdir()))
+        conv = [a for a in self.argv_lines() if "--out" in a["argv"]][-1]["argv"]
+        self.assertNotIn("--montages-out", conv)
+        self.assertEqual(Path(conv[conv.index("--acquisition-out") + 1]), d / "acquisition.json")
+        job = [a for a in self.argv_lines() if "--stitch-only" in a["argv"]][-1]["argv"]
+        self.assertEqual(Path(job[job.index("--stitch-only") + 1]), d)
+        self.assertIs(st["registered"], False)                       # an upload; registration is off here
+
+    def test_conversion_page_montages_and_registration(self):
+        cid = self.mine()
+        base = f"/predict/convert/{cid}"
+        page = self.page(base + "/")
+        self.assertIn('id="cj-predict-montages"', page)
+        self.assertIn("2 stitched montage(s) made.", page)
+        self.assertIn(f'action="{base}/stitch"', page)                       # admin: Make the montages
+        self.assertIn("upload sessions are off on this server", page)
+        self.assertNotIn(f'action="{base}/register"', page)
+        adv = self.page(base + "/", "advanced")
+        self.assertIn('id="cj-predict-montages"', adv)
+        self.assertNotIn(f'action="{base}/stitch"', adv)
+        self.assertNotIn("data-cj-registration", adv)
+        self.assertEqual(self.form(base + "/register", {}).status_code, 409)   # off: refused
+        # a failed backfill that kept the earlier set; its error is escaped
+        st = self.status(cid)
+        st["stitch"] = {**st["stitch"], "state": "failed", "error": XSS, "kept_previous": True, "job": "backfill"}
+        P.PS.write_json_atomic(self.d(cid) / "status.json", st)
+        page = self.page(base + "/")
+        self.assertIn("The montages made before are kept.", page)
+        self.assertIn(html.escape(XSS), page)
+        self.assertNotIn(XSS, page)
+        # registration on: the admin's "Register again", done by the watcher
+        os.environ["CJ_UPLOAD_SESSIONS"] = "on"
+        st["registered"] = "error: registry unreadable"
+        P.PS.write_json_atomic(self.d(cid) / "status.json", st)
+        page = self.page(base + "/")
+        self.assertIn("Not added to Data → Sessions (error: registry unreadable).", page)
+        self.assertIn(f'action="{base}/register"', page)
+        self.assertEqual(self.form(base + "/register", {}, "advanced").status_code, 403)
+        self.assertEqual(self.form(base + "/register", {}).status_code, 303)
+        wait_for(lambda: self.status(cid).get("registered") is True, 30, what="registered again")
+        self.assertIn("Listed under Data → Sessions.", self.page(base + "/"))
+        # a conversion made before round 7 (no stitch record) says the montages can be made
+        st = self.status(cid)
+        st.pop("stitch")
+        P.PS.write_json_atomic(self.d(cid) / "status.json", st)
+        self.assertIn("made before montages were stitched automatically", self.page(base + "/"))
+
+    def test_a_failed_stitch_is_a_warning_the_conversion_is_done(self):
+        os.environ["FAKE_STITCH_MODE"] = "fail"
+        cid = self.mine()
+        st = self.status(cid)
+        self.assertEqual((st["state"], st["stitch"]["state"]), ("done", "failed"))
+        self.assertTrue(any("stitching failed" in w for w in st["stitch"]["warnings"]), st["stitch"])
+        self.assertIn(self.src_key(cid), [s["key"] for s in P.converted_sources(None, {"id": "adv", "role":
+                                                                                       "advanced"}, lambda u, o: True)])
+
+    def test_backfill_through_the_queue_never_beside_a_conversion(self):
+        cid = self.mine()
+        d = self.d(cid)
+        # as a conversion made before round 7: no montages, no stitch record, never registered
+        shutil.rmtree(d / "montages")
+        (d / "acquisition.json").unlink()
+        st = self.status(cid)
+        for k in ("stitch", "registered"):
+            st.pop(k)
+        P.PS.write_json_atomic(d / "status.json", st)
+        for who in ("advanced", "basic"):
+            self.assertEqual(self.form(f"/predict/convert/{cid}/stitch", {}, who).status_code, 403)
+        # a conversion is running: the stitch job waits, queued
+        os.environ["FAKE_CONVERT_GATE"] = str(self.w.gate)
+        self.w.gate.unlink(missing_ok=True)
+        other = self.started(self.pick_session())
+        wait_for(lambda: self.status(other).get("state") == "running", 20, what="running")
+        self.assertEqual(self.form(f"/predict/convert/{cid}/stitch", {}).status_code, 303)
+        P.kick(None)
+        self.assertEqual(self.status(cid)["stitch"]["state"], "queued")
+        self.assertEqual(self.form(f"/predict/convert/{cid}/stitch", {}).status_code, 409)   # already queued
+        # its raw files stay: delete-now refused, a keep-0 sweep and a disk floor pass it by
+        r = self.form(f"/predict/convert/{cid}/inputs", {})
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("montages are being made", r.text)
+        os.environ.update(CJ_RAW_KEEP_DAYS="0", CJ_RAW_MIN_FREE_GB="25")
+        with mock.patch.object(P, "disk_free", return_value=1):
+            P.kick(None)
+        self.assertTrue((d / "input").is_dir())
+        os.environ.pop("CJ_RAW_KEEP_DAYS")
+        os.environ["CJ_RAW_MIN_FREE_GB"] = "0"
+        self.w.gate.touch()
+        wait_for(lambda: self.status(other).get("state") == "done", 30, what="the other conversion done")
+        ost = self.wait_stitch(other)                       # its own stitch job (queued when it ended) runs too
+        st = self.wait_stitch(cid)
+        self.assertEqual((st["stitch"]["state"], st["stitch"]["job"], st["stitch"]["n"]), ("done", "backfill", 2))
+        self.assertEqual(st["state"], "done")
+        self.assertTrue((d / "montages" / "stitch.json").is_file() and (d / "acquisition.json").is_file())
+        self.assertIs(st["registered"], False)                      # made before round 7: registrable now
+        self.assertGreaterEqual(st["stitch"]["started"], ost["finished"])   # never beside the conversion
+        # one job at a time: the two stitch jobs did not overlap
+        a, b = sorted((st["stitch"], ost["stitch"]), key=lambda s: s["started"])
+        self.assertGreaterEqual(b["started"], a["finished"])
+        line = [x for x in self.argv_lines() if "--stitch-only" in x["argv"] and
+                Path(x["argv"][x["argv"].index("--stitch-only") + 1]) == d][-1]["argv"]
+        self.assertNotIn("--in", line)
+        # once it ended, the inputs are swept as usual
+        os.environ["CJ_RAW_KEEP_DAYS"] = "0"
+        P.kick(None)
+        self.assertFalse((d / "input").exists())
+        r = self.form(f"/predict/convert/{cid}/stitch", {})        # raw files gone: refused
+        self.assertEqual(r.status_code, 409)
+
+    def test_stop_a_stitch_job(self):
+        cid = self.mine()
+        os.environ["FAKE_CONVERT_GATE"] = str(self.w.gate)
+        self.w.gate.unlink(missing_ok=True)
+        self.assertEqual(self.form(f"/predict/convert/{cid}/stitch", {}).status_code, 303)
+        st = self.wait_stitch(cid, ("running",), 20)
+        pid = st["stitch"]["pid"]
+        self.assertEqual(self.form(f"/predict/convert/{cid}/stop", {}).status_code, 303)
+        st = self.status(cid)
+        self.assertEqual((st["state"], st["stitch"]["state"], st["stitch"]["kind"]), ("done", "failed", "stopped"))
+        wait_for(lambda: not P.PL.pid_alive(pid), 15, what="the stitcher killed")
+        self.assertTrue((self.d(cid) / "montages" / "grid1_1_stitched.jpg").is_file())   # the done set stays
+
+    def test_retry_clears_montages_and_acquisition(self):
+        os.environ["FAKE_CONVERT_MODE"] = "refuse"
+        st, r = self.upload("advanced", "raw", {"session": "20261101", "recipe": "20261101"}, self.raw_files())
+        cid = CID_RE.match(r.json()["href"]).group(1)
+        self.assertEqual(self.wait_conv(cid)["state"], "failed")
+        d = self.d(cid)
+        (d / "montages").mkdir()
+        (d / "montages" / "stale_stitched.jpg").write_bytes(b"x")
+        (d / ".montages.stitch_work").mkdir()
+        (d / "acquisition.json").write_text("{}", encoding="utf-8")
+        os.environ.pop("FAKE_CONVERT_MODE")
+        self.assertEqual(self.form(f"/predict/convert/{cid}/retry", {}).status_code, 303)
+        self.assertEqual(self.wait_conv(cid)["state"], "done")
+        st = self.wait_stitch(cid)
+        self.assertEqual(st["stitch"]["state"], "done")
+        self.assertFalse((d / "montages" / "stale_stitched.jpg").exists())
+        self.assertFalse((d / ".montages.stitch_work").exists())
+        self.assertNotEqual((d / "acquisition.json").read_text(encoding="utf-8"), "{}")
+
+    def test_registration_from_the_watcher_with_backoff(self):
+        import threading
+        import types
+        lock = P.raw_root(None) / P.CONVERT_LOCK
+        key = os.path.normcase(str(lock.resolve()))
+        calls, script = [], {}
+
+        def reg(conv_dir, cfg):
+            tl = P.PS._THREAD_LOCKS.get(key)
+            free = tl.acquire(timeout=2) if tl is not None else True
+            if tl is not None and free:
+                tl.release()
+            name = Path(conv_dir).name
+            calls.append((name, free, threading.current_thread().name))
+            steps = script.get(name) or script.get("*")
+            if steps:
+                step = steps.pop(0)
+                if isinstance(step, Exception):
+                    raise step
+                return step
+            return {"ok": True, "session": "20261101", "appended": True}
+        fake = types.ModuleType("portal.upload_sessions")
+        fake.register_conversion = reg
+        fake.enabled = lambda cfg: os.environ.get("CJ_UPLOAD_SESSIONS", "").lower() in ("on", "1", "yes", "true")
+        mine = lambda c: [x for x in calls if x[0] == c]  # noqa: E731
+        with mock.patch.dict(sys.modules, {"portal.upload_sessions": fake}):
+            cid = self.mine()
+            self.w.settle()
+            self.assertEqual(mine(cid), [])                               # off: never called, stays false
+            self.assertIs(self.status(cid)["registered"], False)
+            self.assertEqual(P.kick(None), 0)                             # and nothing keeps the watcher going
+            os.environ["CJ_UPLOAD_SESSIONS"] = "yes"
+            self.assertGreaterEqual(P.kick(None), 1)                      # waiting; a request kick never registers
+            self.assertEqual(mine(cid), [])
+            P.ensure_watcher(None)
+            wait_for(lambda: self.status(cid).get("registered") is True, 20, what="registered by the watcher")
+            self.assertEqual(mine(cid), [(cid, True, "cj-predict-convert-watch")])   # once, lock free, watcher
+            sid = self.started(self.pick_session())                       # a session pick: never registered
+            self.wait_stitch(sid)
+            self.w.settle()
+            self.assertNotIn("registered", self.status(sid))
+            self.assertEqual(mine(sid), [])
+            # a backfill rewrote acquisition.json: registered again
+            self.assertEqual(self.form(f"/predict/convert/{cid}/stitch", {}).status_code, 303)
+            wait_for(lambda: len(mine(cid)) == 2 and self.status(cid).get("registered") is True, 30,
+                     what="registered again after the backfill")
+            # refusals, given up at once
+            for out, want in (({"ok": False, "error": "session 20261012 is excluded (EXCLUDED_SESSIONS)",
+                                "retry": False}, "excluded: session 20261012 is excluded (EXCLUDED_SESSIONS)"),
+                              ({"ok": False, "error": "a bad record", "retry": False}, "error: a bad record")):
+                with self.subTest(want=want):
+                    fake.register_conversion = lambda d, cfg, out=out: (calls.append((Path(d).name, True, "x")),
+                                                                         out)[1]
+                    c = self.mine()
+                    st = wait_for(lambda: (lambda s: s if s.get("registered") is not False else None)(
+                        self.status(c)), 20, what="given up")
+                    self.assertEqual(st["registered"], want)
+            fake.register_conversion = lambda d, cfg: {"ok": False, "skipped": "not on here", "retry": False}
+            c = self.mine()
+            st = wait_for(lambda: (lambda s: s if s.get("register_next", 0) is None else None)(self.status(c)), 20,
+                          what="skipped")
+            self.assertIs(st["registered"], False)                        # left false, not tried again
+            self.w.settle()
+            # busy (and a raise): backoff 2, 4 s, "waiting: registry busy", then registered
+            fake.register_conversion = reg
+            busy = {"ok": False, "busy": True, "error": "registry busy: the lock is held", "retry": True}
+            script["*"] = [dict(busy), dict(busy)]                       # the next upload's first two calls
+            c = self.converted("advanced", session="20261101", recipe="20261101")
+            st = wait_for(lambda: (lambda s: s if s.get("register_wait") else None)(self.status(c)), 30,
+                          what="waiting")
+            self.assertEqual(st["register_wait"], "waiting: registry busy")
+            self.assertIs(st["registered"], False)
+            self.assertTrue(st["register_since"])
+            self.assertGreater(st["register_next"], time.time() - 1)
+            st = wait_for(lambda: (lambda s: s if s.get("registered") is True else None)(self.status(c)), 30,
+                          what="registered after the backoff")
+            self.assertEqual((st["register_tries"], st["register_wait"]), (2, None))
+            t = [x for x in calls if x[0] == c]
+            self.assertEqual(len(t), 3)
+            self.assertTrue(all(free for _c, free, _t in calls))
+            # a call that raises is a retry too (backoff, never given up)
+            self.w.settle()
+            boom = types.ModuleType("boom")
+            boom.register_conversion = mock.Mock(side_effect=OSError("share gone"))
+            P.register_conversions(None, [(self.d(c), {})], boom)
+            st = self.status(c)
+            self.assertEqual((st["register_wait"], st["register_tries"]), ("waiting: OSError: share gone", 3))
+            self.assertGreater(st["register_next"], time.time() + 4)            # 2 ** 3 s
+        with mock.patch.dict(sys.modules, {"portal.upload_sessions": None}):   # the module not there: stays false
+            c4 = self.mine()
+            self.w.settle()
+            self.assertEqual(P.kick(None), 0)
+            self.assertIs(self.status(c4)["registered"], False)
+
+    def test_preview_isolation_and_the_lock_over_both_roots(self):
+        cid = self.mine()                                  # under <predict root>/raw_tiles (CJ_RAW_ROOT unset)
+        self.w.settle()
+        other = Path(tempfile.mkdtemp(prefix="cj_preview_raw_"))
+        try:
+            (other / "raw_tiles").mkdir()
+            os.environ["CJ_RAW_ROOT"] = str(other)
+            self.assertIn(cid, [d.name for d, _m, _s in P.all_conversions(None)])     # control: listed by default
+            keys = [os.path.normcase(str((r / P.CONVERT_LOCK).resolve())) for r in P.raw_roots(None)]
+            self.assertEqual(len(keys), 2)
+            with P.runner_lock(None):                                               # both roots locked
+                self.assertTrue(all(P.PS._THREAD_LOCKS[k].locked() for k in keys))
+            self.assertFalse(any(P.PS._THREAD_LOCKS[k].locked() for k in keys))
+            os.environ["CJ_RAW_LEGACY_LIST"] = "off"
+            self.assertEqual(P.raw_roots(None), [other / "raw_tiles"])
+            self.assertNotIn(cid, [d.name for d, _m, _s in P.all_conversions(None)])
+            self.assertIsNone(P.conv_dir(None, cid))
+            self.assertEqual(self.get(f"/predict/convert/{cid}/").status_code, 404)
+            with P.runner_lock(None):                                               # only its own root
+                self.assertFalse(P.PS._THREAD_LOCKS[keys[1]].locked())
+            os.environ.update(CJ_RAW_KEEP_DAYS="0", CJ_RAW_MIN_FREE_GB="25")
+            with mock.patch.object(P, "disk_free", return_value=1):
+                P.kick(None)
+            self.assertTrue((self.d(cid) / "input").is_dir())                     # never swept by the preview
+        finally:
+            for k in ("CJ_RAW_ROOT", "CJ_RAW_LEGACY_LIST", "CJ_RAW_KEEP_DAYS"):
+                os.environ.pop(k, None)
+            os.environ["CJ_RAW_MIN_FREE_GB"] = "0"
+            shutil.rmtree(other, ignore_errors=True)
+
+    def test_free_space_floor_removes_the_oldest_first(self):
+        from datetime import datetime, timedelta
+        old, unstitched, new = self.mine(), self.mine(), self.mine()
+        self.w.settle()
+        (self.d(unstitched) / "montages" / "stitch.json").write_text('{"state": "failed"}', encoding="utf-8")
+        for cid, ago in ((old, timedelta(days=2)), (unstitched, timedelta(days=3)), (new, timedelta(hours=1))):
+            st = self.status(cid)
+            st["finished"] = (datetime.now() - ago).isoformat(timespec="seconds")
+            P.PS.write_json_atomic(self.d(cid) / "status.json", st)
+        os.environ["CJ_RAW_KEEP_DAYS"] = "7"
+        with mock.patch.object(P, "disk_free", return_value=1):           # floor off (0): nothing goes early
+            P.kick(None)
+        self.assertTrue(all((self.d(c) / "input").is_dir() for c in (old, unstitched, new)))
+        os.environ["CJ_RAW_MIN_FREE_GB"] = "25"
+        frees = [10 * 2 ** 30, 30 * 2 ** 30]                               # below the floor, then above it
+        err = io.StringIO()
+        with mock.patch.object(P, "disk_free", side_effect=lambda p: frees.pop(0) if frees else 100 * 2 ** 30), \
+                mock.patch("sys.stderr", err):
+            P.kick(None)
+        self.assertFalse((self.d(old) / "input").exists())
+        self.assertTrue((self.d(new) / "input").is_dir())
+        self.assertTrue((self.d(unstitched) / "input").is_dir())       # oldest, but its montages were never made
+        self.assertEqual(self.status(old)["inputs_removed_reason"], "low disk space")
+        self.assertIn(f"raw inputs of {old} removed early: 10.0 GB free < CJ_RAW_MIN_FREE_GB=25 GB", err.getvalue())
+        self.assertEqual(P.min_free_bytes(None), 25 * 2 ** 30)
+        os.environ["CJ_RAW_MIN_FREE_GB"] = "nonsense"
+        self.assertEqual(P.min_free_bytes(None), 25 * 2 ** 30)
 
 
 class UploadRules(Base):
