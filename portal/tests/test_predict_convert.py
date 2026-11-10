@@ -961,7 +961,8 @@ class Upload(Base):
                 errs = [self.piece(uid, n, 0, b, "advanced") for n, b in files]
                 # a file failing its content check is left out, not fatal for the upload (round 7) ...
                 self.assertEqual([e.status_code for e in errs], [200] * len(files))
-                self.assertTrue(any(text in x["why"] for x in errs[-1].json()["skipped"]), errs[-1].json())
+                self.assertTrue(any(text in f"{x['name']}: {x['why']}" for x in errs[-1].json()["skipped"]),
+                                errs[-1].json())
                 # ... and with nothing convertible left, create refuses, saying why; nothing is kept
                 c = self.jpost(f"/predict/api/upload/{uid}/create", {}, "advanced")
                 self.assertEqual(c.status_code, 400, c.text)
@@ -1020,10 +1021,57 @@ class RawLeftOut(Base):
         self.assertEqual(r.status_code, 400, r.text)
         err = r.json()["error"]
         self.assertIn("no montage is left to convert (4 file(s) left out)", err)
-        self.assertIn("grid1-pos1.mrc.mdoc: grid1-pos1.mrc.mdoc: not a SerialEM mdoc file", err)
-        self.assertIn("grid2-pos1.mrc: grid2-pos1.mrc: not an MRC file", err)
+        self.assertIn("grid1-pos1.mrc.mdoc: not a SerialEM mdoc file", err)
+        self.assertIn("grid2-pos1.mrc: not an MRC file", err)
+        self.assertNotIn("grid1-pos1.mrc.mdoc: grid1-pos1.mrc.mdoc", err)        # the name once
         self.assertEqual(self.convs(), before)
         self.assertEqual(r.json()["dropped"], True)                      # nothing kept
+
+    def test_an_idoc_missing_a_tile_goes_with_its_tiles(self):
+        """An .idoc whose tile was left out would make the real convert_raw refuse the whole run ("none of its
+        TIFF tiles are beside it" / missing tiles): the .idoc and its other tiles are left out too, and a TIFF no
+        surviving .idoc names is never silently kept."""
+        before = self.convs()
+        files = self.raw_files(key=False) + [
+            ("grid3-1.idoc", idoc_with("t1.tif", "t2.tif")), ("t1.tif", TIF), ("t2.tif", b"not a tiff at all"),
+            ("grid4-1.idoc", idoc_with("u1.tif")), ("u1.tif", TIF), ("stray.tif", TIF)]
+        st, r = self.upload("advanced", "raw", {"session": "20261101", "recipe": "20261101"}, files)
+        self.assertEqual(r.status_code, 200, r.text)
+        cid = CID_RE.match(r.json()["href"]).group(1)
+        self.assertEqual(self.wait_conv(cid)["state"], "done")
+        d = self.w.rawtiles / cid
+        self.assertEqual(sorted(p.name for p in (d / "input").iterdir()),
+                         ["grid1-pos1.mrc", "grid1-pos1.mrc.mdoc", "grid4-1.idoc", "u1.tif"])
+        meta = json.loads((d / "convert.json").read_text(encoding="utf-8"))
+        why = {x["name"]: x["why"] for x in meta["skipped"]}
+        self.assertEqual(why, {"t2.tif": "not a TIFF (by content)", "grid3-1.idoc": "its tile t2.tif was left out",
+                               "t1.tif": "its .idoc was left out", "stray.tif": "its .idoc was left out"})
+        self.assertEqual(sorted(Path(p).name for p in meta["inputs"]), ["grid1-pos1.mrc.mdoc", "grid4-1.idoc"])
+        argv = [ln["argv"] for ln in self.argv_lines() if str(d) in " ".join(ln["argv"]) and "--in" in ln["argv"]][-1]
+        self.assertFalse(any("grid3-1" in a for a in argv))              # never handed to the converter
+        self.assertEqual(meta["input_bytes"], sum(len(b) for n, b in files if n in
+                                                  ("grid1-pos1.mrc", "grid1-pos1.mrc.mdoc", "grid4-1.idoc", "u1.tif")))
+        self.assertEqual(len([c for c in self.convs() if c not in before]), 1)
+
+    def test_resume_keeps_what_was_left_out(self):
+        files = self.raw_files(key=False) + [("grid2-pos1.mrc.mdoc", b"junk"), ("grid2-pos1.mrc", mrc_bytes())]
+        start = {"kind": "raw", "fields": {"session": "20261101", "recipe": "20261101"},
+                 "files": [{"name": n, "size": len(b)} for n, b in files]}
+        st = self.jpost("/predict/api/upload", start, "advanced").json()
+        r = self.piece(st["upload"], "grid2-pos1.mrc.mdoc", 0, b"junk", "advanced")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(sorted(r.json()["done"]), ["grid2-pos1.mrc", "grid2-pos1.mrc.mdoc"])
+        # the page reloads and resumes: the left-out files stay left out (done), the rest is sent
+        st2 = self.jpost("/predict/api/upload", {**start, "resume": st["upload"]}, "advanced").json()
+        self.assertEqual(st2["upload"], st["upload"])
+        self.assertEqual({x["name"] for x in st2["skipped"]}, {"grid2-pos1.mrc", "grid2-pos1.mrc.mdoc"})
+        for n, b in files:
+            if n not in st2["done"]:
+                self.assertEqual(self.piece(st["upload"], n, 0, b, "advanced").status_code, 200)
+        c = self.jpost(f"/predict/api/upload/{st['upload']}/create", {}, "advanced")
+        self.assertEqual(c.status_code, 200, c.text)
+        cid = CID_RE.match(c.json()["href"]).group(1)
+        self.assertEqual(self.wait_conv(cid)["state"], "done")
 
     def test_left_out_helpers(self):
         kept, left = P.raw_leave_out({"a.mrc": 1, "a.mrc.mdoc": 1, "g9-ATLAS.mrc.mdoc": 1, "g9-atlas.mrc": 1})
@@ -1872,6 +1920,26 @@ class Browser(unittest.TestCase):
             self.assertEqual(rec["foreign"], [])
             self.assertEqual(rec["errors"], [])
             self.assertEqual([m for m in rec["console"] if "status of 400" not in m], [])
+        finally:
+            ctx.close()
+
+    def test_only_atlas_files_refused_in_the_page(self):
+        ctx, page, rec = self.session(390, "advanced")
+        try:
+            page.goto(self.p.origin + "/predict/new/raw/")
+            page.fill('input[name="session"]', "20261101")
+            files = self.w.tmp / "atlas_only"
+            files.mkdir(exist_ok=True)
+            (files / "grid9-atlas.mrc").write_bytes(mrc_bytes())
+            (files / "grid9-atlas.mrc.mdoc").write_text("no PixelSpacing", encoding="utf-8")
+            page.set_input_files('input[name="files"]', [str(files / "grid9-atlas.mrc"),
+                                                         str(files / "grid9-atlas.mrc.mdoc")])
+            page.click('button[type="submit"]')
+            box = page.wait_for_selector("[data-cj-upload-msg]:not([hidden])", timeout=15000)
+            self.assertIn("Only atlas files were chosen: nothing to convert.", box.text_content())
+            self.assertFalse([u for m, u, _ in rec["requests"] if m == "POST"])   # nothing was sent
+            self.assertTrue(page.is_enabled('button[type="submit"]'))
+            self.assertEqual(rec["errors"], [])
         finally:
             ctx.close()
 

@@ -3273,6 +3273,7 @@ def skipped_names(meta: dict) -> set:
 def skip_raw_file(d: Path, meta: dict, name: str, why: str) -> None:
     """Leave one raw upload file out (it must never reach the converter): its staged copy (or partial) deleted, the
     name in skipped {name, why} and in done. An .mrc.mdoc takes its .mrc with it. Callers write meta."""
+    why = why.replace(f"{name}: ", "")               # the checks start with the file name: listed once
     names = [(name, why)]
     lo = name.lower()
     if lo.endswith(".mrc.mdoc"):
@@ -3701,6 +3702,18 @@ def upload_create(cfg, user, d: Path, meta: dict) -> str:
             bad = sidecar_problems(files / n, set(meta["declared"]))
             if bad:
                 skip_raw_file(d, meta, n, "; ".join(bad))
+                continue
+            gone = [t for t in sidecar_images(files / n) if t in skipped_names(meta)]
+            if gone:                                 # convert_raw refuses a montage with tiles missing: left out
+                skip_raw_file(d, meta, n, f"its tile {gone[0]} was left out"
+                              + (f" (and {len(gone) - 1} more)" if len(gone) > 1 else ""))
+    named = set()                                    # TIFF tiles go with a surviving .idoc, or not at all
+    for n in sent:
+        if n.lower().endswith(".idoc") and (files / n).is_file():
+            named |= set(sidecar_images(files / n))
+    for n in sent:
+        if n.lower().endswith((".tif", ".tiff")) and (files / n).is_file() and n not in named:
+            skip_raw_file(d, meta, n, "its .idoc was left out")
     for n in sent:                                   # an MRC stack and its .mrc.mdoc go together
         lo = n.lower()
         if not (files / n).is_file():
