@@ -406,7 +406,9 @@ class ShellRealReviewServer(unittest.TestCase):
         c = T.cookie(self.token)
         self.assertEqual(T.request(self.rv.port, "GET", "/api/ping")[0], 403)          # control: no key, refused
         st, _, body = T.request(self.p.port, "GET", "/review/app/api/ping", c)
-        self.assertEqual((st, json.loads(body)), (200, {"ok": True}))
+        ping = json.loads(body)  # the review server's own answer, passed through: ok, and its round-7 caps
+        self.assertEqual((st, ping["ok"]), (200, True))
+        self.assertTrue({"i", "t"} <= set(ping.get("caps") or []), ping)
         st, h, body = T.request(self.p.port, "GET", "/review/app/?k=stale-wrong-key", c)
         self.assertEqual(st, 200)
         self.assertIn(b"<title>EV Label Review</title>", body)

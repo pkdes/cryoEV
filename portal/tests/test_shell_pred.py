@@ -266,7 +266,9 @@ class PredRealServer(unittest.TestCase):
         port = self.srv.server_address[1]
         self.assertEqual(T.request(port, "GET", f"/{PKG_A}/api/ping")[0], 403)          # control: no key
         st, _, body = self.e.req("basic", "GET", f"/review/{PKG_A}/app/api/ping")
-        self.assertEqual((st, json.loads(body)), (200, {"ok": True}))
+        ping = json.loads(body)  # the review server's own answer, passed through: ok, and its round-7 caps
+        self.assertEqual((st, ping["ok"]), (200, True))
+        self.assertTrue({"i", "t"} <= set(ping.get("caps") or []), ping)
         st, h, body = self.e.req("basic", "GET", f"/review/{PKG_A}/app/?k=wrong")
         self.assertEqual(st, 200)
         self.assertIn(b"<html", body.lower())
