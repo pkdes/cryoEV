@@ -879,7 +879,22 @@ def options(values, label_all) -> str:
         f'<option value="{esc(v)}">{esc(v)}</option>' for v in values)
 
 
-def page_gallery(convs, states, who, cids_q: str, compare: bool) -> str:
+def analyse_kept_html(c: Conv, state, src_key) -> str:
+    """Owner / admin (the page is only served to them): the form to Analyse kept tiles (N). Rendered whenever the
+    conversion can be analysed, `hidden` while no tile is flagged keep; gallery.js keeps N, the maybe count and the
+    visibility current from the same tally as the counts line. The session form re-derives the list on the server."""
+    if not src_key:
+        return ""
+    t = tally(list(c.tiles), state)
+    return (f'<form class="cj-gallery-acts cj-gallery-analyse" id="cj-gallery-analyse" data-cid="{esc(c.cid)}" method="get" '
+            f'action="/predict/new/session/{esc(src_key)}/"{"" if t["keep"] >= 1 else " hidden"}>'
+            f'<input type="hidden" name="which" value="kept"><input type="hidden" name="from" value="{esc(c.cid)}">'
+            f'<button class="cj-gallery-btn" type="submit">Analyse kept tiles (<span data-n-keep>{t["keep"]}</span>)</button>'
+            f' <label class="cj-mut" data-maybe-label{"" if t["maybe"] else " hidden"}><input type="checkbox" '
+            f'name="kept_maybe" value="1"> also include maybe (<span data-n-maybe>{t["maybe"]}</span>)</label></form>')
+
+
+def page_gallery(convs, states, who, cids_q: str, compare: bool, analyse_key=None) -> str:
     grids = sorted({g for c in convs for g, _, _ in c.groups() if g}, key=natkey)
     samples = sorted({s for c in convs for _, s, _ in c.groups() if s}, key=natkey)
     tot = merge_tally(tally(list(c.tiles), states[c.cid]) for c in convs)
@@ -896,6 +911,7 @@ def page_gallery(convs, states, who, cids_q: str, compare: bool) -> str:
             f'<p class="cj-gallery-acts"><a class="cj-gallery-btn" href="{esc(rep)}">Report</a> '
             f'<a class="cj-gallery-btn" href="{esc(zipq)}">Download images (zip)</a> '
             f'<a class="cj-gallery-btn" href="{PREFIX}/">All conversions</a></p></div>')
+    head += analyse_kept_html(convs[0], states[convs[0].cid], analyse_key) if len(convs) == 1 else ""
     bar = ('<div class="cj-gallery-bar"><div class="cj-gallery-filters" role="group" aria-label="Filters">'
            '<label>Mark <select data-filter="flag"><option value="">All</option><option value="keep">Keep</option>'
            '<option value="maybe">Maybe</option><option value="reject">Reject</option>'
@@ -1083,8 +1099,11 @@ def routes(ctx) -> list:
         convs = conv_set(request, [request.path_params["cid"]])
         if convs is None:
             return gone(request)
-        return ctx.page(request, f"Gallery {convs[0].session or convs[0].cid}",
-                        page_gallery(convs, states_of(convs), who_of(request), "", False), active="gallery")
+        c0 = convs[0]
+        key = next((x["key"] for x in P.converted_sources(cfg, ctx.user(request), ctx.can_see)
+                    if x.get("conversion") == c0.cid and not x["problem"]), None)
+        return ctx.page(request, f"Gallery {c0.session or c0.cid}",
+                        page_gallery(convs, states_of(convs), who_of(request), "", False, key), active="gallery")
 
     def compare(request: Request):
         if over(request):

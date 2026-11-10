@@ -64,8 +64,10 @@ def expected(name):
     exp = load(name)
     for i, img in exp["images"].items():   # `edited` (added after QC): reviewed.json's flag, missing = reviewed
         img["edited"] = img["reviewed"]
+        img.update(rejected=False, reject_reason=None, note=None)   # round 7 (R2): additive, nothing rejected
     for s, e in exp["samples"].items():
         e.update(REVIEWER_S1 if (name == "expected_results_reviewed.json" and s == "S1") else REVIEWER_NONE)
+        e.update(n_rejected=0, n_low_conf=0)
         e.update(NM_RANGE_GOLDEN)   # contract section 8: every golden image is 1.4724 nm/px (images.csv)
     return exp
 

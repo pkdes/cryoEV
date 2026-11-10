@@ -235,7 +235,7 @@ python -m jobs.convert_raw --in <files or dirs> --out <new dir> [--recipe defaul
 
   | Exit | stdout |
   |---|---|
-  | 0 | `{"ok": true, out_dir, recipe, recipe_defaulted, entry_point, compute, device, montages, a_px, n_tiles, tiles: [{file, nm_per_px, source_file, montage, sample_label, size}], nm_per_px, warnings}` |
+  | 0 | `{"ok": true, out_dir, recipe, recipe_defaulted, entry_point, compute, device, montages, a_px, n_tiles, tiles: [{file, nm_per_px, source_file, montage, sample_label, size, variant}], nm_per_px, warnings, params_effective, params_overrides}` (`variant` and the last two: see "Conversion settings" below) |
   | 2 | `{"ok": false, "kind": "refused", "error", "warnings"}`: nothing left in `<out>` |
   | 1 | `{"ok": false, "kind": "failed", "error", "warnings"}` |
 - **Refused:**
@@ -257,6 +257,70 @@ python -m jobs.convert_raw --in <files or dirs> --out <new dir> [--recipe defaul
   - A stub processing repo checks the plumbing.
   - With `CJ_PROCESSING_REPO` set, synthetic MRC and TIFF montages go through the real pipeline. Known answer: tile size = source / (14.724 / PixelSpacing), nm/px 1.4724, an 8-bit greyscale PNG.
   - **Known-answer control:** with `CJ_CONVERT_CONTROL_DIR` set to a session that already has its 3d tiles, one montage (`CJ_CONVERT_CONTROL_MONTAGE`, default `grid1-pos1`) is converted again. It must be md5-identical to the delivered tiles, with the same nm/px, on the compute the delivered MANIFEST names. The test only reads that folder.
+
+### Conversion settings: `describe`, `preview`, `--params` (round 7 phase 2)
+The portal's conversion page runs these in a child process. Every command prints one JSON object on stdout (`--json`: on one line), exits 2 with `{"ok": false, "kind": "refused", "error", "warnings"}` on a refusal (bad arguments too) and exits 1 on a crash.
+```powershell
+python -m jobs.convert_raw describe --recipe <session|default> --json
+python -m jobs.convert_raw describe --conv <raw_tiles\cid> --json
+python -m jobs.convert_raw preview --conv <raw_tiles\cid> --tile <output_name> [--params JSON] --out <dir> [--gpu] --json
+python -m jobs.convert_raw --in ... --out <dir>\tiles --recipe <r> --params '{"clip_hi_pct": 99.5}'
+```
+- **`--params`**: overrides on the recipe, applied with `dataclasses.replace`. With no `--params`, the recipe is used as is and the outputs are byte-identical to before.
+
+  | Key | Range | Recipe field |
+  |---|---|---|
+  | `clip_lo_pct` | 0–5 | `contrast_lo_pct` |
+  | `clip_hi_pct` | 95–100 | `contrast_hi_pct` |
+  | `bandpass_nm` | 0.5–10 | `denoise_min_nm`; bandpass recipes only, with denoise on after the overrides (`params.get("denoise", recipe's denoise)`), and below the recipe's `denoise_max_nm` |
+  | `denoise` | `true`/`false` | `denoise`; `false` also drops `clean` from `skip_variants`, so a variant is still written |
+
+  - Refused (exit 2, nothing written): any other key, a wrong type (a bool for a number, `"99"`, NaN, null), a value out of range, bad JSON, a non-object.
+  - The result has `params_effective` (all four values after the overrides; `bandpass_nm` is null for a median recipe and whenever denoise is off) and `params_overrides` (what was asked for). To pass `params_effective` back as `--params`, drop the null keys.
+  - A portal conversion (`--out <dir>\tiles` beside `<dir>\convert.json`) also records `params_effective`, `params_overrides` and `variant` in `convert.json`, as read → merge → atomic write, even with no `--params` (then the overrides are `{}`).
+    - If there are overrides and they can't be recorded (`convert.json` unreadable, or the write still fails after its retries), **the conversion fails** (exit 1, no tiles left): a later `--stitch-only` would otherwise stitch with the recipe's settings, not the tiles'.
+    - With no overrides, a miss is only a warning.
+  - `--stitch-only` re-applies `convert.json` `params_overrides`, so the montages match the tiles. It refuses `--params`.
+  - **`variant`** (`"denoised"` | `"clean"`) is on every `tiles[]` entry and in `convert.json`: what the tiles are. The file names are not changed: they still say `denoised_nobar` with `denoise: false`, because the names come from the processing repo and downstream readers rely on them.
+- **`describe --recipe`** (read-only: the recipe is checked statically, then loaded; no bytecode is written):
+  ```
+  {"ok", "mode": "describe", "recipe",
+   "denoise": {"on", "method", "bandpass_nm", "max_nm", "median_target_nm", "match_contrast", "text"},
+   "contrast": {"clip_lo_pct", "clip_hi_pct", "sampling", "sampling_text", "levels_from"},
+   "pixel": {"target_A_px", "target_nm_px", "session_A_px": [...], "binning": [...], "downsample": {A/px: factor}, "resample", "dtype"},
+   "variant", "params": {the four keys}, "params_allowed": {key: [lo, hi], "denoise": "bool"},
+   "source": {"recipe_file", "recipe_md5", "commit", "defaulted", "layout", "checked_by", "entry_point"}}
+  ```
+  - `text` is `cryoem_core.pipeline.describe_denoise`.
+  - `sampling` is the recipe's `contrast_level_sampling_A` (null means the levels are measured on the data as acquired).
+  - `session_A_px` and `binning` come from the recipe session's own sidecars. When they aren't on this machine, `session_A_px` falls back to the level sampling.
+  - With denoise off, `denoise.bandpass_nm` / `max_nm` and `params.bandpass_nm` are null.
+- **`describe --conv`**: the same shape, plus `conv`, `recorded`, `params_effective`, `params_overrides`, `gpu`, `compute`, `processing` and `warnings`. `variant` is the recorded one when there is one.
+  - `recorded: true`: the values are the ones in `convert.json`. If the recipe now gives other values, a warning says so.
+  - `recorded: false`: the conversion predates this, so the values are the recipe's values now.
+- **`preview`** writes `before.png` and `after.png` of one tile into `--out` and nothing else.
+  - **`before.png`** is the conversion's own settings: the recipe plus `convert.json` `params_overrides`. That is the tile the user sees in the gallery.
+  - **`after.png`** is that base plus `--params`. The values are absolute (`{"clip_hi_pct": 99}` means 99, whatever the base had). When the settings equal the base, `after.png` is a copy of `before.png` (one render, `after_reused: true`).
+  - Returns `{"ok", "mode": "preview", "conv", "tile", "montage", "source_file", "before", "after", "after_reused", "params_effective", "params_conversion", "params_recipe", "params_overrides", "params_conversion_overrides", "recipe", "compute", "device", "processing", "warnings", "seconds"}`.
+    - `params_effective`: `after.png`'s values; `params_conversion`: `before.png`'s (the base); `params_recipe`: the recipe's alone.
+    - `params_overrides`: this call's `--params`; `params_conversion_overrides`: the conversion's recorded overrides.
+  - **Same code path as the conversion:** the conversion's own entry point (`export_dataset` → `render_ref`: the clean pass first, its clip levels handed to the denoised pass, then the INTER_AREA downsample and the PNG save), with `load_tiles` narrowed to the one tile. Each tile is rendered on its own (its own clip levels, its own denoise), so the narrowing doesn't change the pixels.
+  - **Known answers:** `before.png` is byte-identical to the conversion's own tile, overrides included (a `clip_hi_pct` 99.5 conversion previewed with no params). A changed value gives an `after.png` byte-identical to the tile of a conversion run with that value.
+  - Stale `.preview_work_<pid>` folders in `--out` (from a killed preview whose process is gone) are removed at the start.
+  - It uses the kept raw input (`<conv>\input\<name>`, else the recorded path) and takes about 4–5 s per tile on the CPU.
+  - CPU unless `--gpu`. A GPU conversion's tiles differ from a CPU preview by ±1 grey level on a few pixels, and the result warns about it.
+  - Refused:
+    - `--out` overlapping the conversion folder, or an existing file;
+    - a tile that is not in the MANIFEST, or a path given as `--tile`;
+    - raw inputs that are gone;
+    - not enough RAM;
+    - `--gpu` with the GPU busy.
+- **Tests** (`jobs/tests/test_convert_settings.py`):
+  - **Stub:** a stand-in export encodes the settings into the tile's grey value. The tests cover the refusals (`bandpass_nm` with denoise off included), no params = `{}` = the recipe's own values byte for byte (and a changed value differs), `convert.json` recording and a failed record, `variant`, `denoise: false` with `skip_variants`, the describe shapes and that describe is read-only, and the stale work-folder cleanup.
+  - **Real** (`CJ_PROCESSING_REPO`):
+    - **Golden md5s made by main's code** (00a1921, before `--params`), hard-coded in the test: no `--params` must reproduce them. Skipped when the recipe file changed (regenerate them from main then, never from the branch under test).
+    - The preview known answers above, and that params are absolute over the conversion's base.
+    - `denoise: false` differs from the default and equals the clean variant of a normal run (`export_dataset` called directly with the denoised variant skipped); `bandpass_nm` 4 differs from both.
 
 ## Queue folder
 ```
