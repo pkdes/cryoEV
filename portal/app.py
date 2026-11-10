@@ -66,6 +66,7 @@ from starlette.routing import Route  # noqa: E402
 
 from data_utils import config as repo_config  # noqa: E402
 from portal import auth as A  # noqa: E402
+from portal import feedback_store as FEEDBACK  # noqa: E402
 from portal import modules as M  # noqa: E402
 from portal import proxy as P  # noqa: E402
 from annotation import multi_review_server as MRS  # noqa: E402
@@ -908,6 +909,7 @@ def startup_lines(cfg: Config, host: str, port: int) -> list:
         (f"[cj] sessions: {cfg.state_dir / 'sessions.json'} (sha256 of session ids only)" if not access else
          "[cj] sessions: none (every request carries its own JWT)"),
         f"[cj] history: {cfg.registry or 'registry NOT FOUND'} (history.html + live/live.json only)",
+        f"[cj] feedback: {FEEDBACK.feedback_path(cfg.state_dir)}",
         f"[cj] review: /review/ = shell, /review/app/ -> {cfg.review_upstream}; key from "
         + (f"{cfg.review_package}" if cfg.review_key else
            f"NOWHERE ({cfg.review_package or 'no package'}: no .review_key), so review answers 403"),

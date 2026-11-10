@@ -115,6 +115,7 @@
       var fb = el('a', 'cj-feedback-link', 'Feedback');
       fb.href = '/feedback/?page=' + encodeURIComponent(location.pathname);
       fb.title = 'Report a bug or suggest something';
+      if (location.pathname.indexOf('/feedback') === 0) fb.setAttribute('aria-current', 'page');
       bar.appendChild(fb);
     }
     if (me && me.id) {

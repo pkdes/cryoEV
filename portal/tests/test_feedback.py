@@ -27,6 +27,17 @@ def form(d):
     return urlencode(d).encode()
 
 
+def _mp_worker(args):
+    f, n, who = args
+    got, limited = [], 0
+    for i in range(n):
+        try:
+            got.append(FS.create(f, who, "bug", ("long text \u00e9 " * 300) + str(i))["id"])
+        except FS.RateLimited:
+            limited += 1
+    return got, limited
+
+
 class StoreTests(unittest.TestCase):
     def setUp(self):
         import tempfile
@@ -85,6 +96,33 @@ class StoreTests(unittest.TestCase):
         [t.join() for t in ts]
         self.assertEqual(sorted(FS.read_all(self.f)), list(range(1, 13)))
 
+    def test_page_rejects_backslash_and_format_chars(self):
+        for p in ("/a\\b", "/a‮b", "/a​b", "/a\x7fb"):
+            self.assertEqual(FS.clean_page(p), "", repr(p))
+
+    def test_torn_last_line_does_not_swallow_the_next_create(self):
+        a = FS.create(self.f, "ann", "bug", "first")
+        with open(self.f, "ab") as fh:
+            fh.write(b'{"type": "create", "id": 2, "who": "bob", "kind": "bug", "te')      # a crash mid-write
+        b = FS.create(self.f, "cat", "bug", "second")
+        self.assertEqual((a["id"], b["id"]), (1, 2))
+        r = FS.read_all(self.f)
+        self.assertEqual({k: v["who"] for k, v in r.items()}, {1: "ann", 2: "cat"})
+
+    def test_cross_process_creates(self):
+        import multiprocessing as mp
+        with mp.Pool(4) as pool:
+            res = pool.map(_mp_worker, [(str(self.f), 12, f"u{i % 2}") for i in range(4)])   # 2 users x 2 procs x 12
+        ids = [i for got, _ in res for i in got]
+        self.assertEqual(len(ids), len(set(ids)))                                      # no id handed out twice
+        r = FS.read_all(self.f)
+        self.assertEqual(sorted(r), sorted(ids))
+        for u in ("u0", "u1"):
+            self.assertEqual(sum(1 for x in r.values() if x["who"] == u), 20)         # the limit held across processes
+        lines = self.f.read_text(encoding="utf-8").splitlines()
+        self.assertTrue(all(ln.startswith("{") and ln.endswith("}") for ln in lines))   # no torn lines
+        self.assertEqual(len(lines), 40)
+
     def test_cli_list_json(self):
         import contextlib
         import io
@@ -104,7 +142,8 @@ class World:
             os.environ.pop(FS.ENV, None)
         self.env = T.Env()
         self.keys = {"admin": self.env.key, "adv": A.add_key(self.env.roster, "alyssia", "advanced"),
-                     "basic": A.add_key(self.env.roster, "bas", "basic"), "basic2": A.add_key(self.env.roster, "bas2", "basic")}
+                     "basic": A.add_key(self.env.roster, "bas", "basic"), "basic2": A.add_key(self.env.roster, "bas2", "basic"),
+                     "adv2": A.add_key(self.env.roster, "bea", "advanced")}
         self.env.write_live(T.live_doc())
         self.portal = T.Portal(self.env.config())
         self.tok = {w: T.login(self.portal.port, k) for w, k in self.keys.items()}
@@ -217,9 +256,9 @@ class PortalTests(unittest.TestCase):
         self.assertNotIn("<script>alert", page)
 
     def test_page_prefill_is_path_only(self):
-        st, page = self.w.get("basic", "/feedback/?page=/gallery/abc%3Fk%3Dsecret")
+        st, page = self.w.get("basic", "/feedback/?page=/gallery/abc%3Fk%3Dzzquery")
         self.assertIn('value="/gallery/abc"', page)
-        self.assertNotIn("secret", page)
+        self.assertNotIn("zzquery", page)
 
     def test_ntfy_has_no_text_or_user(self):
         sent = []
@@ -245,17 +284,90 @@ class PortalTests(unittest.TestCase):
     def test_rate_limit_over_http(self):
         w = self.w
         with mock.patch.object(F, "_ntfy"):
-            codes = [w.req("adv", "POST", "/feedback/", form({"kind": "question", "text": f"q{i}"}))[0]
-                     for i in range(21)]
-        self.assertEqual(codes[:20], [303] * 20)
-        self.assertEqual(codes[20], 429)
-        st, page = w.get("adv", "/feedback/")
-        self.assertNotIn("one too many", page)
+            codes = [w.req("adv2", "POST", "/feedback/", form({"kind": "question", "text": f"q{i}"}))[0]
+                     for i in range(20)]
+            st, _, body = w.req("adv2", "POST", "/feedback/", form({"kind": "question", "text": "one-too-many-ZZ"}))
+        self.assertEqual(codes, [303] * 20)
+        self.assertEqual(st, 429)
+        self.assertIn("one-too-many-ZZ", body.decode())                     # the typed text is kept in the form
+        stored = [r["text"] for r in FS.read_all(FS.feedback_path(w.env.state)).values() if r["who"] == "bea"]
+        self.assertEqual(len(stored), 20)
+        self.assertNotIn("one-too-many-ZZ", stored)                          # and it was not saved
+
+    def test_steps_only_kept_for_bugs(self):
+        w = self.w
+        with mock.patch.object(F, "_ntfy"):
+            w.req("basic", "POST", "/feedback/", form({"kind": "feature", "text": "idea-STEPS", "steps": "should-vanish"}))
+            w.req("basic", "POST", "/feedback/", form({"kind": "bug", "text": "bug-STEPS", "steps": "should-stay"}))
+        by = {r["text"]: r for r in FS.read_all(FS.feedback_path(w.env.state)).values()}
+        self.assertEqual(by["idea-STEPS"]["steps"], "")
+        self.assertEqual(by["bug-STEPS"]["steps"], "should-stay")
+
+    def test_advanced_sees_only_own(self):
+        w = self.w
+        with mock.patch.object(F, "_ntfy"):
+            w.req("adv", "POST", "/feedback/", form({"kind": "bug", "text": "adv-secret-QQ1"}))
+            w.req("basic", "POST", "/feedback/", form({"kind": "bug", "text": "basic-secret-QQ2"}))
+        st, a = w.get("adv", "/feedback/")
+        self.assertIn("adv-secret-QQ1", a)
+        self.assertNotIn("basic-secret-QQ2", a)
+        st, b = w.get("basic", "/feedback/")
+        self.assertIn("basic-secret-QQ2", b)
+        self.assertNotIn("adv-secret-QQ1", b)
+        self.assertEqual(w.get("adv", "/feedback/all")[0], 403)
+        self.assertIn("adv-secret-QQ1", w.get("admin", "/feedback/all")[1])        # control
+
+    def test_crlf_counts_as_one_character(self):
+        text = "\r\n".join(["x" * 39] * 100)            # 3,900 + 99 newlines = 3,999 stored; with \r\n it would be 4,098
+        with mock.patch.object(F, "_ntfy"):
+            st, _, _ = self.w.req("basic2", "POST", "/feedback/", form({"kind": "question", "text": text}))
+        self.assertEqual(st, 303)
+        r = [r for r in FS.read_all(FS.feedback_path(self.w.env.state)).values()
+             if r["text"].startswith("xxxx") and r["who"] == "bas2"]
+        self.assertTrue(r and "\r" not in r[-1]["text"])
+
+    def test_oversize_form_413_keeps_typed_text(self):
+        w = self.w
+        big = form({"kind": "bug", "text": "kept-text-WW", "steps": "y" * (F.MAX_FORM + 10)})
+        st, _, body = w.req("basic", "POST", "/feedback/", big)
+        self.assertEqual(st, 413)
+        self.assertIn("kept-text-WW", body.decode())
+        # a legitimate worst-case form (every field at its limit, all characters percent-encoded) is accepted
+        worst = form({"kind": "bug", "text": "\U0001F600" * FS.TEXT_MAX, "steps": "\U0001F600" * FS.STEPS_MAX,
+                      "page": "/" + "a" * 199})
+        self.assertLessEqual(len(worst), F.MAX_FORM)
+        with mock.patch.object(F, "_ntfy"):
+            st, _, _ = w.req("adv", "POST", "/feedback/", worst)
+        self.assertEqual(st, 303)
+
+    def test_chunked_body_is_capped(self):
+        import socket
+        w = self.w
+        n0 = len(FS.read_all(FS.feedback_path(w.env.state)))
+        s = socket.create_connection(("127.0.0.1", w.portal.port), timeout=10)
+        ck = (A.COOKIE, w.tok["basic"])
+        head = (f"POST /feedback/ HTTP/1.1\r\nHost: 127.0.0.1:{w.portal.port}\r\nOrigin: {w.portal.origin}\r\n"
+                f"Cookie: {ck[0]}={ck[1]}\r\n"
+                "Content-Type: application/x-www-form-urlencoded\r\nTransfer-Encoding: chunked\r\n\r\n")
+        s.sendall(head.encode())
+        chunk = b"text=" + b"a" * 60000
+        data = b""
+        try:
+            for _ in range(10):                                        # 600 KB, far over the cap
+                s.sendall(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+            s.sendall(b"0\r\n\r\n")
+            data = s.recv(65536)
+        except OSError:
+            pass                                                       # the server may stop reading and close
+        s.close()
+        self.assertTrue(data == b"" or b" 413 " in data.split(b"\r\n", 1)[0], data[:80])
+        self.assertEqual(len(FS.read_all(FS.feedback_path(w.env.state))), n0)
 
     def test_header_has_the_link(self):
         js = (Path(__file__).resolve().parent.parent / "static" / "header.js").read_text(encoding="utf-8")
         self.assertIn("'/feedback/?page=' + encodeURIComponent(location.pathname)", js)
         self.assertNotIn("location.search", js)
+        self.assertIn("setAttribute('aria-current', 'page')", js[js.index("cj-feedback-link"):])
         css = (Path(__file__).resolve().parent.parent / "static" / "cj.css").read_text(encoding="utf-8")
         self.assertTrue(css.rstrip().endswith("/* cj-feedback:end */"))
         mods = json.loads((Path(__file__).resolve().parent.parent / "modules.json").read_text(encoding="utf-8"))

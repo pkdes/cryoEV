@@ -25,6 +25,7 @@ import secrets
 import threading
 from urllib.parse import parse_qs, quote
 
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import RedirectResponse
 from starlette.routing import Route
@@ -35,7 +36,9 @@ from portal.modules import admin as AD
 
 PREFIX = "/feedback"
 ROLES = tuple(A.ROLES)
-MAX_FORM = 24 * 1024
+# a worst-case legitimate form: text + steps + page, every character a 4-byte UTF-8 character (an emoji) that urlencodes
+# to 12 bytes (%XX x4; 9 for CJK, 6 for accented Latin), plus the other fields
+MAX_FORM = 12 * (FS.TEXT_MAX + FS.STEPS_MAX + FS.PAGE_MAX) + 2048
 KIND_WORD = {"bug": "Bug", "feature": "Feature idea", "question": "Question"}
 KIND_TITLE = {"bug": "bug report", "feature": "feature idea", "question": "question"}
 esc = html.escape
@@ -91,8 +94,10 @@ def routes(ctx) -> list:
     def note(text, tone="ok"):
         return f'<p class="cj-feedback-note cj-feedback-{tone}" role="{"alert" if tone == "warn" else "status"}">{esc(text)}</p>'
 
-    async def form(request: Request):
-        """-> (fields, None) or (None, error response). urlencoded only, size capped."""
+    async def form(request: Request, redo=None):
+        """-> (fields, None) or (None, error response). urlencoded only. The body is read from the stream with a
+        running cap (a chunked body has no Content-Length). Over the cap: 413, and `redo(fields)` (when given) renders
+        the form again with what could be read of the typed text."""
         ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
         if ctype != "application/x-www-form-urlencoded":
             return None, show(request, "Feedback", note("Send the form from the Feedback page.", "warn"), 415)
@@ -100,14 +105,25 @@ def routes(ctx) -> list:
             n = int(request.headers.get("content-length") or 0)
         except ValueError:
             n = MAX_FORM + 1
-        body = await request.body() if n <= MAX_FORM else b""
-        if n > MAX_FORM or len(body) > MAX_FORM:
-            return None, show(request, "Feedback", note("That form is too large.", "warn"), 413)
+        buf, over = bytearray(), n > MAX_FORM
+        async for chunk in request.stream():          # a running cap: a chunked body has no Content-Length to trust
+            buf += chunk
+            if len(buf) > MAX_FORM:
+                over = True
+                del buf[MAX_FORM:]
+                break
         try:
-            q = parse_qs(body.decode("utf-8"), keep_blank_values=True, max_num_fields=12)
+            q = parse_qs(bytes(buf).decode("utf-8", "ignore" if over else "strict"), keep_blank_values=True,
+                         max_num_fields=12)
         except (UnicodeDecodeError, ValueError):
             return None, show(request, "Feedback", note("That form could not be read.", "warn"), 400)
-        return {k: v[0] for k, v in q.items() if v}, None
+        fields = {k: v[0] for k, v in q.items() if v}
+        if over:
+            msg = note("That is too long to send. Shorten it and try again.", "warn")
+            if redo is not None:
+                return None, await redo(fields, msg, 413)
+            return None, show(request, "Feedback", msg, 413)
+        return fields, None
 
     def hidden_token(request) -> str:
         return AD.hidden_token(token(request))
@@ -155,7 +171,7 @@ def routes(ctx) -> list:
         page = FS.clean_page(request.query_params.get("page", ""))
         kind = request.query_params.get("kind", "bug")
         kind = kind if kind in FS.KINDS else "bug"
-        return render_index(request, page, kind, "", "", "")
+        return await run_in_threadpool(render_index, request, page, kind, "", "", "")
 
     def render_index(request, page, kind, text, steps, msg, status=200):
         opts = "".join(f'<option value="{k}"{" selected" if k == kind else ""}>{esc(KIND_WORD[k])}</option>'
@@ -176,20 +192,24 @@ def routes(ctx) -> list:
         return show(request, "Feedback", content, status)
 
     async def create(request: Request):
-        f, err = await form(request)
+        async def redo(f, msg, status):
+            k = f.get("kind", "bug")
+            return await run_in_threadpool(render_index, request, FS.clean_page(f.get("page", "")),
+                                           k if k in FS.KINDS else "bug", f.get("text", ""), f.get("steps", ""), msg,
+                                           status)
+        f, err = await form(request, redo)
         if err:
             return err
         kind, text, steps, page = f.get("kind", ""), f.get("text", ""), f.get("steps", ""), f.get("page", "")
         try:
-            rec = FS.create(path(), me(request), kind, text, steps if kind == "bug" else "", page)
+            rec = await run_in_threadpool(FS.create, path(), me(request), kind, text, steps if kind == "bug" else "",
+                                          page)
         except FS.RateLimited as e:
-            return render_index(request, FS.clean_page(page), kind, text, steps, note(str(e), "warn"), 429)
+            return await redo(f, note(str(e), "warn"), 429)
         except FS.Invalid as e:
-            return render_index(request, FS.clean_page(page), kind if kind in FS.KINDS else "bug", text, steps,
-                                note(str(e), "warn"), 400)
+            return await redo(f, note(str(e), "warn"), 400)
         except OSError:
-            return render_index(request, FS.clean_page(page), kind, text, steps,
-                                note("That could not be saved just now. Try again in a minute.", "warn"), 503)
+            return await redo(f, note("That could not be saved just now. Try again in a minute.", "warn"), 503)
         notify_new(rec["id"], rec["kind"])
         return back(request, f"Thank you. Your report #{rec['id']} was sent.")
 
@@ -197,7 +217,8 @@ def routes(ctx) -> list:
         if not is_admin(request):
             return show(request, "Feedback", note("Only admins see every report.", "warn"), 403)
         kind, st = request.query_params.get("kind", ""), request.query_params.get("status", "")
-        rows = [r for r in FS.read_all(path()).values()
+        allr = await run_in_threadpool(FS.read_all, path())
+        rows = [r for r in allr.values()
                 if (kind not in FS.KINDS or r["kind"] == kind) and (st not in FS.STATUSES or r["status"] == st)]
         rows.sort(key=lambda r: -r["id"])
         ko = '<option value="">All kinds</option>' + "".join(
@@ -223,9 +244,9 @@ def routes(ctx) -> list:
         try:
             rid = int(request.path_params["rid"])
             if what == "status":
-                FS.set_status(path(), rid, me(request), f.get("status", ""))
+                await run_in_threadpool(FS.set_status, path(), rid, me(request), f.get("status", ""))
             else:
-                FS.set_reply(path(), rid, me(request), f.get("reply", ""))
+                await run_in_threadpool(FS.set_reply, path(), rid, me(request), f.get("reply", ""))
         except (FS.Invalid, ValueError) as e:
             return show(request, "Feedback", note(str(e), "warn") + f'<p><a href="{PREFIX}/all">Back</a></p>', 400)
         except OSError:

@@ -382,10 +382,15 @@ a.cj-data-graph-node:focus-visible{outline:2px solid var(--acc);outline-offset:1
 /* cj-gallery:end */
 /* cj-feedback:begin */
 .cj-bar .cj-feedback-link{flex:none;align-self:center;margin-left:auto;font-size:13px;color:var(--mut);text-decoration:none;white-space:nowrap;padding:6px 4px}
-.cj-bar .cj-feedback-link:hover{color:var(--fg)}
+.cj-bar .cj-feedback-link:hover,.cj-bar .cj-feedback-link[aria-current]{color:var(--fg)}
 .cj-bar .cj-feedback-link:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 .cj-bar .cj-feedback-link+.cj-user{margin-left:0}
-@media (max-width:640px){.cj-bar .cj-feedback-link{height:48px;display:inline-flex;align-items:center}}
+@media (max-width:640px){   /* phone: the link sits at the end of the nav row, so the top row (wordmark, user, Sign out) never wraps */
+  .cj-bar .cj-feedback-link{order:4;flex:0 0 76px;height:40px;margin:0;padding:0 4px;display:inline-flex;align-items:center;
+    justify-content:center;border-top:1px solid var(--line)}
+  .cj-bar .cj-feedback-link+.cj-user{margin-left:auto}
+  .cj-bar:has(.cj-feedback-link) .cj-nav{flex-basis:calc(100% - 68px)}   /* nav (margins -12) + gap 12 + link 76 = the row, 4px to spare */
+  .cj-page[data-active="review"] .cj-bar .cj-feedback-link{display:none}}
 .cj-feedback{max-width:760px}
 .cj-feedback h1{font-size:1.6rem}
 .cj-feedback h2{font-size:1.2rem;margin:26px 0 8px}

@@ -21,6 +21,7 @@ import json
 import os
 import sys
 import threading
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -59,9 +60,15 @@ def clean_page(p) -> str:
     if not isinstance(p, str):
         return ""
     p = p.strip().split("#", 1)[0].split("?", 1)[0]
-    if not p.startswith("/") or p.startswith("//") or len(p) > PAGE_MAX or any(ord(c) < 32 for c in p):
+    if not p.startswith("/") or p.startswith("//") or len(p) > PAGE_MAX or "\\" in p \
+            or any(unicodedata.category(c) in ("Cc", "Cf") for c in p):
         return ""
     return p
+
+
+def norm(x) -> str:
+    """Line endings as \n (a browser form sends \r\n) so the limits count what is stored and shown."""
+    return (x or "").replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
 def _now() -> str:
@@ -120,8 +127,17 @@ def _append(path: Path, rec: dict, check=None):
         try:
             if check is not None:
                 rec = check(_read_lines(path), rec) or rec
+            lead = ""
+            try:                                             # a torn last line (crash mid-write): start a new line
+                with open(path, "rb") as rf:
+                    if rf.seek(0, os.SEEK_END) > 0:
+                        rf.seek(-1, os.SEEK_END)
+                        if rf.read(1) != b"\n":
+                            lead = "\n"
+            except FileNotFoundError:
+                pass
             with open(path, "a", encoding="utf-8", newline="\n") as f:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                f.write(lead + json.dumps(rec, ensure_ascii=False) + "\n")
                 f.flush()
         finally:
             lk.close()
@@ -130,7 +146,7 @@ def _append(path: Path, rec: dict, check=None):
 
 def create(path, who, kind, text, steps="", page="") -> dict:
     """-> the create event (with the new id). Raises Invalid, RateLimited (20 per user per UTC day), OSError."""
-    text, steps = (text or "").strip(), (steps or "").strip()
+    text, steps = norm(text), norm(steps)
     if kind not in KINDS:
         raise Invalid("Choose what kind of report this is.")
     if not text:
@@ -166,7 +182,7 @@ def set_status(path, rid: int, who, status: str) -> dict:
 
 
 def set_reply(path, rid: int, who, reply: str) -> dict:
-    reply = (reply or "").strip()
+    reply = norm(reply)
     if len(reply) > REPLY_MAX:
         raise Invalid("That reply is too long.")
     return _append(Path(path), {"type": "reply", "id": rid, "who": str(who), "t": _now(), "reply": reply},
