@@ -73,6 +73,15 @@
       for (var k in all) all[k] += c[k];
     });
     if (sum) sum.textContent = line(all);
+    var an = document.getElementById('cj-gallery-analyse');
+    if (an) {                                   // "Analyse kept tiles (N)": same tally as the counts line
+      var ac = counts(Array.prototype.slice.call(root.querySelectorAll('.cj-gallery-tile[data-cid="' + an.dataset.cid + '"]')), an.dataset.cid);
+      var nk = an.querySelector('[data-n-keep]'), nmb = an.querySelector('[data-n-maybe]'), ml = an.querySelector('[data-maybe-label]');
+      if (nk) nk.textContent = ac.keep;
+      if (nmb) nmb.textContent = ac.maybe;
+      if (ml) ml.hidden = ac.maybe < 1;
+      an.hidden = ac.keep < 1;
+    }
   }
   function paintAll() {
     cids.forEach(function (cid) { each('[data-cid="' + cid + '"][data-k]', function (n) { paint(cid, n.dataset.k); }); });
