@@ -111,6 +111,13 @@
       nav.appendChild(a);
     });
     bar.appendChild(nav);
+    if (me && me.id) {   // Feedback: on every page; the page it was clicked on is prefilled (path only, never the query)
+      var fb = el('a', 'cj-feedback-link', 'Feedback');
+      fb.href = '/feedback/?page=' + encodeURIComponent(location.pathname);
+      fb.title = 'Report a bug or suggest something';
+      if (location.pathname.indexOf('/feedback') === 0) fb.setAttribute('aria-current', 'page');
+      bar.appendChild(fb);
+    }
     if (me && me.id) {
       var u = el('span', 'cj-user');
       u.title = 'Signed in as ' + me.id + ' (' + me.role + ')';

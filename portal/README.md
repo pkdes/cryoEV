@@ -24,6 +24,16 @@ phone/laptop ── tailnet ── tailscale serve :8446 ──> 127.0.0.1:8770 
 Sandbox: NOT under the shell. It stays on its own origin (:8443); the nav links out to it.
 ```
 
+## Feedback (`/feedback/`, every role)
+The contract is the module docstring in `modules/feedback.py`. In short:
+- A "Feedback" link in the header (built in `static/header.js`) opens the form with the current page (path only, never the query) prefilled. Kind: Bug / Feature idea / Question; text up to 4,000 characters; steps to reproduce for bugs. "My reports" shows status and the admin's reply. A person only ever gets their own reports in the HTML.
+- Admin: `/feedback/all` (filter by kind and status), set status (New / Planned / In progress / Done / Won't do) and a reply. These POSTs carry the admin form token as well as the Gate's Origin check.
+- Storage: append-only events (create / status / reply), folded on read; 20 reports per person per UTC day (counted under the same lock as the append). Report ids are global and sequential, so a person can see how many reports exist in total by their own id.
+- **One file for both live portals.** The two live portals have separate state dirs (:8770 and :8448): set `CJ_FEEDBACK_FILE` to ONE absolute path in both services. Each start logs `[cj] feedback: <path>` so you can confirm they agree. Only portals that share one roster may share a feedback file (reports carry portal ids); the preview portals (:8447 / :8449) must never point at the live file.
+- Each new report sends one ntfy push (`CRYOEV_NTFY_TOPIC`, silent if unset) titled "CryoEV: new bug report #12" from a background thread: no report text and no user id, because ntfy.sh is public. Nothing is ever posted to GitHub (public repo).
+- Triage: `python -m portal.feedback_store list --file <path> --json` (read-only).
+
+
 | File | Holds |
 |---|---|
 | `app.py` | The app: the Gate (deny by default, roles, security headers, Origin check, access log), routes, home, the review shell, History serving |
@@ -38,6 +48,7 @@ Sandbox: NOT under the shell. It stays on its own origin (:8443); the nav links 
 | `static/review.js` | The review shell: mirrors the frame's URL into the address bar; links out of the tool open in the window |
 | `static/predict.js` | Predict's script (served by the module as `/predict/predict.js`): status refresh, form counts, one-file-per-request uploads |
 | `static/gallery.js` | Gallery's script (served as `/gallery/gallery.js`): marks, filters, full-size viewer with keys and scalebar |
+| `feedback_store.py` | Feedback's append-only store (`$CJ_FEEDBACK_FILE` else `<state>/feedback.jsonl`), the 20-a-day limit, and the read-only CLI `python -m portal.feedback_store list --file <path> [--json]` |
 | `zipstream.py` | `stream_zip(entries)`: streamed zip files for the portal (Gallery downloads) |
 | `static/brand.json` | `{"name": "CryoEV", ...}`: renaming the portal = editing this one file |
 | `templates/base.html` | The page every shell page uses (`{{title}} {{active}} {{body}}`; the bar placeholder) |

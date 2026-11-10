@@ -141,6 +141,50 @@ class Shell(unittest.TestCase):
                 finally:
                     ctx.close()
 
+    def test_phone_360_with_sign_out_and_feedback_link(self):
+        """Access mode shows 'Sign out' (me.json says so). At 360 px the top row (wordmark, user, Sign out) must not wrap,
+        the Feedback link sits at the end of the nav row, and the bar stays exactly its fixed height (it used to grow to
+        105 px and cover content). In the compact review bar the link is hidden so the nav keeps its room."""
+        def me_with_signout(route):
+            r = route.fetch()
+            d = r.json()
+            d["signout"] = "/cdn-cgi/access/logout"
+            route.fulfill(response=r, json=d)
+        for scheme in ("light", "dark"):
+            ctx, page, rec = self.session(360, scheme)
+            try:
+                ctx.route("**/cj/me.json", me_with_signout)
+                for name, path in PAGES:
+                    with self.subTest(page=name, scheme=scheme):
+                        page.goto(self.p.origin + path)
+                        page.wait_for_load_state("networkidle")
+                        page.wait_for_selector("#cj-bar .cj-nav a")
+                        page.wait_for_selector("#cj-bar .cj-signout")
+                        g = page.evaluate("""() => { const r = s => { const e = document.querySelector(s);
+                                return e ? e.getBoundingClientRect() : null; };
+                            const bar = r('#cj-bar'), fb = document.querySelector('#cj-bar .cj-feedback-link');
+                            const nav = r('#cj-bar .cj-nav'), user = r('#cj-bar .cj-user'), so = r('#cj-bar .cj-signout'),
+                                  mark = r('#cj-bar .cj-mark'), f = fb.getBoundingClientRect();
+                            return {bar: bar.height, sw: document.documentElement.scrollWidth, iw: window.innerWidth,
+                                    fbShown: getComputedStyle(fb).display !== 'none', fbTop: f.top, fbBottom: f.bottom,
+                                    fbRight: f.right, fbLeft: f.left, navTop: nav.top, navRight: nav.right,
+                                    row1: Math.max(mark.bottom, user.bottom, so.bottom)}; }""")
+                        review = name == "review"
+                        self.assertEqual(g["bar"], 44 if review else 88)
+                        self.assertLessEqual(g["sw"], g["iw"], "horizontal scroll")
+                        self.assertEqual(g["fbShown"], not review)
+                        if not review:
+                            self.assertLessEqual(g["row1"], 48, "the top row wrapped")
+                            self.assertGreaterEqual(g["navTop"], 48)
+                            self.assertGreaterEqual(g["fbTop"], 48)                  # on the nav row, not the top row
+                            self.assertLessEqual(g["fbBottom"], 88)
+                            self.assertLessEqual(g["fbRight"], g["iw"])
+                            self.assertLessEqual(g["navRight"], g["fbLeft"] + 0.5)             # the nav is not under it
+                        page.screenshot(path=str(self.shots / f"shell_{name}_360_signout_{scheme}.png"))
+                self.clean(rec)
+            finally:
+                ctx.close()
+
     def test_no_content_jump(self):
         """The first content's top is the same before header.js runs (JS off: cj.css holds the space) and after the
         bar is built (JS on), on Home and on History."""
