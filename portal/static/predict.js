@@ -423,7 +423,10 @@
           cap.className = 'cj-mut';
           cap.textContent = 'Tile ' + j.tile + (j.compute ? ' · rendered on the ' + j.compute : '') +
             (j.warnings && j.warnings.length ? ' · ' + j.warnings.join(' ') : '');
-          wrap.appendChild(row); wrap.appendChild(cap);
+          var cpu = document.createElement('p');
+          cpu.className = 'cj-mut';
+          cpu.textContent = 'Preview is rendered on the CPU; it can differ from GPU-made tiles by at most 1 grey level.';
+          wrap.appendChild(row); wrap.appendChild(cap); wrap.appendChild(cpu);
           pv.replaceChildren(wrap); pv.hidden = false;
         })
         .catch(function (e) { say('The preview failed (' + plainMsg(e) + ').'); })

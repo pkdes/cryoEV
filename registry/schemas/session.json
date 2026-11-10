@@ -294,6 +294,10 @@
        "type": "string"
       }
      },
+     "derived_from": {
+      "type": "string",
+      "description": "the id of the conversion this one re-converted with other settings (the same raw files: its tiles are not counted again)"
+     },
      "tiles_per_grid": {
       "type": "object",
       "additionalProperties": {

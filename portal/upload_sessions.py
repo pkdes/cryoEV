@@ -279,6 +279,8 @@ def conversion_entry(conv_dir: Path, meta: dict, sid: str) -> dict:
     entry = {"id": Path(conv_dir).name, "uploaded_by": meta.get("owner") if isinstance(meta.get("owner"), str) else None,
              "grids": info["grids"], "sample_labels": info["labels"] or None, "tiles_per_grid": info["counts"],
              "n_tiles": info["n_tiles"], "n_montages": n_mont, "acquisition": acq or None}
+    if isinstance(meta.get("derived_from"), str):       # a re-conversion with other settings: not new tiles
+        entry["derived_from"] = meta["derived_from"]
     return {k: v for k, v in entry.items() if v is not None or k == "uploaded_by"}
 
 
@@ -739,7 +741,8 @@ def visible_conversions(cfg, record: dict, user: dict, can_see) -> list:
         if d is None or not can_see(user, meta.get("owner")):
             continue
         out.append({"id": c["id"], "dir": d, "href": f"/predict/convert/{c['id']}/",
-                    "gallery": f"/gallery/{c['id']}/", "n_tiles": c.get("n_tiles")})
+                    "gallery": f"/gallery/{c['id']}/", "n_tiles": c.get("n_tiles"),
+                    "derived_from": c.get("derived_from") if isinstance(c.get("derived_from"), str) else None})
     return out
 
 

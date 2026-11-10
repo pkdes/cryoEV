@@ -33,7 +33,7 @@ NUM_RE = re.compile(r"^-?\d{1,6}(\.\d{1,6})?$")
 DESCRIBE_TIMEOUT_S = 90
 PREVIEW_TIMEOUT_S = 240
 DESCRIBE_TTL_S = 6 * 3600
-FAIL_TTL_S = 30
+FAIL_TTL_S = 300
 CONV_TTL_S = 600
 
 
@@ -86,6 +86,19 @@ def clean_params(raw) -> dict:
     if out.get("denoise") is False and "bandpass_nm" in out:      # the CLI refuses it too (exit 2)
         raise ParamError("Bandpass nm: there is no cutoff with denoise off.")
     return out
+
+
+def check_against(params: dict, doc) -> None:
+    """The recipe-dependent rules (the CLI refuses the same): a bandpass cutoff only for a bandpass recipe, and below the
+    recipe's own upper cutoff (denoise.max_nm, exclusive). doc: a describe document (None: nothing more is checked)."""
+    if not isinstance(doc, dict) or "bandpass_nm" not in params:
+        return
+    dn = doc.get("denoise") or {}
+    if dn.get("method") != "bandpass":
+        raise ParamError("Bandpass nm: this recipe does not use a bandpass filter.")
+    mx = dn.get("max_nm")
+    if isinstance(mx, (int, float)) and not isinstance(mx, bool) and params["bandpass_nm"] >= mx:
+        raise ParamError(f"Bandpass nm: it must be below {mx:g} (this recipe's own upper cutoff).")
 
 
 def params_json(params: dict) -> str:
@@ -157,6 +170,15 @@ def _md5(p: Path) -> str:
         return ""
 
 
+def _commit(repo):
+    """The processing repo's HEAD commit (read from .git, no git run): a changed repo re-describes."""
+    try:
+        from jobs import convert_raw as CR
+        return CR.repo_commit(Path(repo)) or ""
+    except Exception:                                            # noqa: BLE001 - any trouble: no commit in the key
+        return ""
+
+
 def _cached(key, ttl_ok, fetch):
     now = time.time()
     with _DESC_LOCK:
@@ -179,14 +201,14 @@ def recipe_file(repo, name) -> Path:
 def describe_recipe(cmd, repo, name, file_name=None) -> tuple:
     """`describe --recipe <name> --json`. file_name: the recipe file's session name (for "default": convert_raw's
     DEFAULT_RECIPE), used for the cache key (its md5)."""
-    key = ("recipe", os.path.normcase(str(repo)), name, _md5(recipe_file(repo, file_name or name)))
+    key = ("recipe", os.path.normcase(str(repo)), _commit(repo), name, _md5(recipe_file(repo, file_name or name)))
     return _cached(key, DESCRIBE_TTL_S, lambda: run_cli(
         cmd, repo, ["describe", "--recipe", name, "--json"], DESCRIBE_TIMEOUT_S, HOME))
 
 
 def peek_recipe(repo, name, file_name=None):
     """The cached `describe --recipe` document, or None (never runs the child: for pages that must not wait)."""
-    key = ("recipe", os.path.normcase(str(repo)), name, _md5(recipe_file(repo, file_name or name)))
+    key = ("recipe", os.path.normcase(str(repo)), _commit(repo), name, _md5(recipe_file(repo, file_name or name)))
     with _DESC_LOCK:
         hit = _DESC.get(key)
     return hit[1] if hit and hit[1] is not None and time.time() - hit[0] < DESCRIBE_TTL_S else None
@@ -199,7 +221,7 @@ def describe_conv(cmd, repo, d: Path) -> tuple:
             return (d / n).stat().st_mtime_ns
         except OSError:
             return 0
-    key = ("conv", os.path.normcase(str(d)), mt("convert.json"), mt("status.json"))
+    key = ("conv", os.path.normcase(str(d)), _commit(repo), mt("convert.json"), mt("status.json"))
     return _cached(key, CONV_TTL_S, lambda: run_cli(
         cmd, repo, ["describe", "--conv", str(d), "--json"], DESCRIBE_TIMEOUT_S, HOME))
 
@@ -217,11 +239,14 @@ def preview_busy() -> bool:
     return _PREVIEW.locked()
 
 
-def run_preview(cmd, repo, d: Path, tile: str, params: dict, out_dir: Path) -> tuple:
-    """`preview --conv <d> --tile <t> --params <json> --out <out_dir> --json` (CPU). Refuses to start a second one."""
+def run_preview(cmd, repo, d: Path, tile: str, params: dict, out_dir: Path, before=None) -> tuple:
+    """`preview --conv <d> --tile <t> --params <json> --out <out_dir> --json` (CPU). Refuses to start a second one.
+    before: called while the preview lock is held (the caller's cleanup of old preview folders)."""
     if not _PREVIEW.acquire(blocking=False):
         raise PreviewBusy()
     try:
+        if before is not None:
+            before()
         out_dir.mkdir(parents=True, exist_ok=True)
         args = ["preview", "--conv", str(d), "--tile", tile, "--out", str(out_dir), "--json"]
         if params:

@@ -2441,7 +2441,8 @@ def move_tree(src: Path, dst: Path):
 
 
 def new_conversion(cfg, user, fields: dict, *, source: dict, inputs=None, upload_files: Path | None = None,
-                   sample_key=None, nbytes=None, skipped=None, params=None, derived_from=None) -> Path:
+                   sample_key=None, nbytes=None, skipped=None, params=None, derived_from=None, owner=None,
+                   made_by=None) -> Path:
     """Make <root>/raw_tiles/<session>_<6 hex>/ with convert.json + status queued (uploaded files moved into
     input/), then start it when nothing else runs. -> the folder."""
     root = raw_root(cfg)
@@ -2468,13 +2469,16 @@ def new_conversion(cfg, user, fields: dict, *, source: dict, inputs=None, upload
             inputs = [str(inp / n) for n in names if n.lower().endswith((".mrc.mdoc", ".idoc"))]
             keys = [n for n in names if n.lower().endswith(".csv")]
             sample_key = str(inp / keys[0]) if keys else None
-        meta = {"schema": SCHEMA_CONVERT, "id": d.name, "owner": user["id"], "session": fields["session"],
+        meta = {"schema": SCHEMA_CONVERT, "id": d.name, "owner": owner or user["id"], "session": fields["session"],
                 "recipe": fields["recipe"], "gpu": bool(fields["gpu"]), "source": source,
                 "inputs": [str(x) for x in inputs or []], "sample_key": str(sample_key) if sample_key else None,
                 "created": now_iso()}
-        if params:                                       # settings overrides (convert_raw --params); derived_from: the original
+        if params:                                       # settings overrides (convert_raw --params)
             meta["params"] = CS.clean_params(params)
-            meta["derived_from"] = str(derived_from) if derived_from else None
+        if derived_from:                                 # a re-conversion of another one (made_by: who asked, if not the owner)
+            meta["derived_from"] = str(derived_from)
+            if made_by and made_by != meta["owner"]:
+                meta["made_by"] = str(made_by)
         meta["input_bytes"] = int(nbytes) if nbytes is not None else input_bytes(meta)
         if skipped:                                      # upload files left out: [{name, why}] (the page lists them)
             meta["skipped"] = [{"name": str(x.get("name"))[:200], "why": str(x.get("why"))[:300]} for x in skipped]
@@ -2607,6 +2611,9 @@ def start_conversion(cfg, d: Path, meta: dict) -> dict:
         return write_conv_status(d, state="failed", kind="refused", finished=now_iso(), error=e.msg)
     try:
         p = spawn_converter(convert_argv(d, meta, repo), repo, d / CONVERT_OUT, d / CONVERT_LOG)
+    except CS.ParamError as e:
+        return write_conv_status(d, state="failed", kind="refused", finished=now_iso(),
+                                 error=f"The settings of this conversion are not valid: {e}")
     except OSError as e:
         return write_conv_status(d, state="failed", kind="failed", finished=now_iso(),
                                  error=f"could not start the converter: {type(e).__name__}: {e}")
@@ -2954,6 +2961,14 @@ def min_free_bytes(cfg) -> int:
     return int(max(0.0, x) * 1024 ** 3) if math.isfinite(x) else int(MIN_FREE_DEFAULT_GB * 1024 ** 3)
 
 
+def inputs_linked(d: Path) -> bool:
+    """True when a file of d/input is also another conversion's (hard link, st_nlink > 1): removing it frees no space."""
+    try:
+        return any(p.is_file() and p.stat().st_nlink > 1 for p in (d / CONVERT_INPUT).iterdir())
+    except OSError:
+        return False
+
+
 def sweep_inputs(cfg, items) -> int:
     """Remove input/ of ended conversions past CJ_RAW_KEEP_DAYS (0: at once); then, while a drive holding kept
     inputs has less than CJ_RAW_MIN_FREE_GB free, the oldest-ended ones on it go early (logged). A conversion with a
@@ -2976,7 +2991,7 @@ def sweep_inputs(cfg, items) -> int:
             free = disk_free(_existing(d))
         except OSError:
             continue
-        if free >= floor:
+        if free >= floor or inputs_linked(d):          # a hard-linked input (a re-conversion's) frees nothing
             continue
         if remove_inputs(d):
             n += 1
@@ -4020,22 +4035,6 @@ def _fnum(v) -> str:
         return "?"
 
 
-def settings_rows(doc) -> str:
-    """The values of a describe document as a <dl> (every value escaped)."""
-    dn, c, px = doc.get("denoise") or {}, doc.get("contrast") or {}, doc.get("pixel") or {}
-    den = (dn.get("text") or "On") if dn.get("on") else "Off: the tiles are not denoised."
-    rows = [("Denoise", den),
-            ("Clip low / high", f"{_fnum(c.get('clip_lo_pct'))} % / {_fnum(c.get('clip_hi_pct'))} % of the pixel values"),
-            ("Level sampling", c.get("sampling_text") or "measured on the data as acquired"),
-            ("Tile pixel size", f"{_fnum(px.get('target_nm_px'))} nm/px ({_fnum(px.get('target_A_px'))} Å/px)")]
-    if doc.get("variant"):
-        rows.append(("Tile variant", str(doc.get("variant"))))
-    if dn.get("on") and dn.get("match_contrast"):
-        rows.append(("Denoised tile contrast", f"levels from {c.get('levels_from') or 'the clean pass'}"))
-    return ('<dl class="cj-predict-kv cj-convset-kv">'
-            + "".join(f'<div><dt>{esc(k)}</dt><dd>{esc(v)}</dd></div>' for k, v in rows) + '</dl>')
-
-
 def recipe_readout(doc, err, name) -> str:
     """The readout under the recipe <select> (also the fragment the script fetches)."""
     if doc is None:
@@ -4077,6 +4076,45 @@ def tile_names(d: Path) -> list:
         return []
 
 
+def settings_rows(doc, eff=None, rec=None) -> str:
+    """The values of a describe document as a <dl> (every value escaped). eff: the values the conversion really used
+    (recipe + its overrides); rec: the bare recipe's values (to tell a custom bandpass from the recipe's)."""
+    dn, c, px = doc.get("denoise") or {}, doc.get("contrast") or {}, doc.get("pixel") or {}
+    eff, rec = eff or {}, rec or doc.get("params") or {}
+    on = bool(dn.get("on")) if eff.get("denoise") is None else eff.get("denoise") is not False
+    den = "Off: the tiles are not denoised."
+    if on:
+        den = dn.get("text") or "On"
+        b, rb = eff.get("bandpass_nm"), rec.get("bandpass_nm")
+        if isinstance(b, (int, float)) and isinstance(rb, (int, float)) and abs(b - rb) > 1e-9:
+            den = f"Gaussian bandpass, keeps structures >{_fnum(b)} nm (the recipe: {den})"
+    lo = eff.get("clip_lo_pct", c.get("clip_lo_pct"))
+    hi = eff.get("clip_hi_pct", c.get("clip_hi_pct"))
+    rows = [("Denoise", den),
+            ("Clip low / high", f"{_fnum(lo)} % / {_fnum(hi)} % of the pixel values"),
+            ("Level sampling", c.get("sampling_text") or "measured on the data as acquired"),
+            ("Tile pixel size", f"{_fnum(px.get('target_nm_px'))} nm/px ({_fnum(px.get('target_A_px'))} Å/px)")]
+    if doc.get("variant"):
+        rows.append(("Tile variant", str(doc.get("variant"))))
+    if on and dn.get("match_contrast"):
+        rows.append(("Denoised tile contrast", f"levels from {c.get('levels_from') or 'the clean pass'}"))
+    return ('<dl class="cj-predict-kv cj-convset-kv">'
+            + "".join(f'<div><dt>{esc(k)}</dt><dd>{esc(v)}</dd></div>' for k, v in rows) + '</dl>')
+
+
+def bare_recipe(cfg, repo, meta: dict, doc) -> dict:
+    """The recipe's own four values (never the conversion's: `describe --conv` params = recipe + recorded overrides)."""
+    name = str(meta.get("recipe") or "default")
+    rdoc, _err = CS.describe_recipe(_converter_cmd(), repo, name, recipe_file_name(name))
+    return dict((rdoc or {}).get("params") or (doc or {}).get("params") or {})
+
+
+def conv_values(doc: dict, meta: dict) -> dict:
+    """What the conversion used (or will use): the recorded effective values, then what a queued re-conversion asked for
+    (its overrides are only recorded when it finishes)."""
+    return {**(doc.get("params_effective") or {}), **(meta.get("params") or {})}
+
+
 def _slider(name, label, lo, hi, step, val, unit, disabled=False, hint="") -> str:
     v = _fnum(val)
     return (f'<div class="cj-convset-row"><label for="cj-cs-{name}">{esc(label)}</label>'
@@ -4086,18 +4124,24 @@ def _slider(name, label, lo, hi, step, val, unit, disabled=False, hint="") -> st
             + (f'<small class="cj-mut">{esc(hint)}</small>' if hint else "") + '</div>')
 
 
-def adjust_panel(d: Path, doc: dict, why_not: str | None) -> str:
-    """The "Adjust settings" panel of a finished conversion. Disabled, with the reason, when the raw input is gone."""
+def adjust_panel(d: Path, doc: dict, eff: dict, rec: dict, why_not: str | None) -> str:
+    """The "Adjust settings" panel of a finished conversion. Disabled, with the reason, when the raw input is gone.
+    Sliders start at eff (what the conversion used)."""
     base = f"/predict/convert/{esc(d.name)}"
     if why_not:
         return (f'<div class="cj-card cj-convset-adjust" id="cj-convset-adjust" data-disabled="1"><b>Adjust settings</b>'
                 f'<p class="cj-convset-why">{esc(why_not)}</p>'
                 f'<p><button type="button" class="cj-predict-btn" disabled>Preview</button> '
                 f'<button type="button" class="cj-predict-btn" disabled>Re-convert with these settings</button></p></div>')
-    eff = doc.get("params_effective") or doc.get("params") or {}
-    bp = eff.get("bandpass_nm")
-    opts = "".join(f'<option value="{esc(n)}">{esc(n)}</option>' for n in tile_names(d))
+    dn = doc.get("denoise") or {}
+    is_bp = dn.get("method") == "bandpass"
     on = eff.get("denoise", True) is not False
+    bp = eff.get("bandpass_nm")
+    if bp is None:
+        bp = rec.get("bandpass_nm")
+    mx = dn.get("max_nm")
+    hi = 10.0 if not isinstance(mx, (int, float)) or isinstance(mx, bool) else min(10.0, round(float(mx) - 0.1, 4))
+    opts = "".join(f'<option value="{esc(n)}">{esc(n)}</option>' for n in tile_names(d))
     return (
         f'<div class="cj-card cj-convset-adjust" id="cj-convset-adjust" data-preview="{base}/preview"><b>Adjust settings'
         f'</b><p class="cj-mut">Try other contrast and denoise settings on one tile. A preview takes a few seconds; '
@@ -4105,11 +4149,11 @@ def adjust_panel(d: Path, doc: dict, why_not: str | None) -> str:
         f'<form method="post" action="{base}/reconvert" class="cj-convset-form" data-cj-convset-form>'
         f'<div class="cj-convset-row"><label for="cj-cs-tile">Tile</label><select id="cj-cs-tile" name="tile" '
         f'data-cj-tile>{opts}</select></div>'
-        + _slider("clip_lo_pct", "Clip low %", 0, 5, 0.1, eff.get("clip_lo_pct", 1.0), "%")
-        + _slider("clip_hi_pct", "Clip high %", 95, 100, 0.1, eff.get("clip_hi_pct", 99.0), "%")
-        + (_slider("bandpass_nm", "Bandpass nm", 0.5, 10, 0.1, bp, "nm", disabled=not on,
-                   hint="Structures smaller than this are smoothed away.") if bp is not None else
-           '<p class="cj-mut">This recipe denoises with a median filter: there is no cutoff to adjust.</p>')
+        + _slider("clip_lo_pct", "Clip low %", 0, 5, 0.1, eff.get("clip_lo_pct", rec.get("clip_lo_pct", 1.0)), "%")
+        + _slider("clip_hi_pct", "Clip high %", 95, 100, 0.1, eff.get("clip_hi_pct", rec.get("clip_hi_pct", 99.0)), "%")
+        + (_slider("bandpass_nm", "Bandpass nm", 0.5, hi, 0.1, bp, "nm", disabled=not on,
+                   hint="Structures smaller than this are smoothed away.") if is_bp and bp is not None else
+           '<p class="cj-mut">This recipe does not denoise with a bandpass filter: there is no cutoff to adjust.</p>')
         + f'<div class="cj-convset-row"><label for="cj-cs-denoise">Denoise</label>'
           f'<label class="cj-convset-switch"><input type="checkbox" id="cj-cs-denoise" name="denoise" value="true" '
           f'data-cj-denoise data-recipe="{1 if on else 0}"{" checked" if on else ""}>'
@@ -4122,23 +4166,29 @@ def adjust_panel(d: Path, doc: dict, why_not: str | None) -> str:
         f'<div class="cj-convset-pv" data-cj-pv hidden></div></div>')
 
 
-def convset_fragment(user, d: Path, meta: dict, st: dict, doc, err) -> str:
-    """The Settings section of a conversion page: the values used (and the diff when custom) + the adjust panel."""
+def convset_fragment(cfg, user, d: Path, meta: dict, st: dict, doc, err, rec=None) -> str:
+    """The Settings section of a conversion page: the values used (and the diff when custom) + the adjust panel.
+    rec: the bare recipe's values (the diff is against these, never against doc["params"])."""
+    admin = user.get("role") == "admin"
     if doc is None:
         return (f'<h2 class="cj-sec">Settings</h2><div class="cj-card"><p class="cj-mut">The settings could not be '
-                f'read{": " + esc(err) if err and user.get("role") == "admin" else ""}.</p></div>')
-    rec, eff, ov = doc.get("params") or {}, doc.get("params_effective") or {}, doc.get("params_overrides") or {}
-    custom = bool(ov) or bool(meta.get("params"))
+                f'read.</p>{tech(err) if admin and err else ""}</div>')
+    rec = rec or doc.get("params") or {}
+    eff = conv_values(doc, meta)
+    custom = bool(doc.get("params_overrides")) or bool(meta.get("params"))
     changed = CS.diff(rec, eff) if custom else []
+    repo, _ = processing_repo(cfg)
+    hide = [d, *([repo] if repo else []), CS.HOME]
     parts = ['<div class="cj-predict-top"><b>Settings used</b>'
              + (chip("custom settings", "warn") if custom else chip(f"{meta.get('recipe')} recipe", "ok")) + '</div>']
     if meta.get("derived_from"):
+        by = f" by {esc(meta['made_by'])}" if meta.get("made_by") else ""
         parts.append(f'<p class="cj-mut">Re-converted from <a href="/predict/convert/{esc(meta["derived_from"])}/">'
-                     f'{esc(meta["derived_from"])}</a> with other settings.</p>')
+                     f'{esc(meta["derived_from"])}</a>{by} with other settings.</p>')
     if not doc.get("recorded") and not custom:
         parts.append('<p class="cj-mut">This conversion did not record its settings; these are the recipe’s values '
                      'now.</p>')
-    parts.append(settings_rows(doc))
+    parts.append(settings_rows(doc, eff, rec))
     if changed:
         def show(v):
             return "on" if v is True else "off" if v is False else ("–" if v is None else _fnum(v))
@@ -4149,10 +4199,10 @@ def convset_fragment(user, d: Path, meta: dict, st: dict, doc, err) -> str:
     elif custom:
         parts.append('<p class="cj-mut">These are the recipe’s own values.</p>')
     for w in (doc.get("warnings") or [])[:5]:
-        parts.append(f'<p class="cj-mut">{esc(str(w))}</p>')
+        parts.append(f'<p class="cj-mut">{esc(_plain(str(w), hide))}</p>')
     out = '<h2 class="cj-sec">Settings</h2><div class="cj-card cj-convset-used">' + "".join(parts) + '</div>'
     if st.get("state") == "done" and user.get("role") in RAW_ROLES:
-        out += adjust_panel(d, doc, raw_kept_reason(d, meta, st))
+        out += adjust_panel(d, doc, eff, rec, raw_kept_reason(d, meta, st))
     return out
 
 
@@ -4868,6 +4918,7 @@ def routes(ctx) -> list:
         if repo is None or (name != "default" and name not in recipes(repo)):
             return ctx.json({"error": "not found"}, 404)
         doc, err = CS.describe_recipe(_converter_cmd(), repo, name, recipe_file_name(name))
+        err = _plain(err, [repo, CS.HOME]) if err and user.get("role") != "admin" else err
         return ctx.json({"html": recipe_readout(doc, err, name), "summary": settings_summary(doc) if doc else ""})
 
     def convert_settings(request: Request):
@@ -4881,7 +4932,8 @@ def routes(ctx) -> list:
                                      'The settings can’t be read: raw conversion is not set up on this server.</p></div>',
                              "state": st.get("state")})
         doc, err = CS.describe_conv(_converter_cmd(), repo, d)
-        return ctx.json({"html": convset_fragment(user, d, meta, st, doc, err), "state": st.get("state")})
+        rec = bare_recipe(cfg, repo, meta, doc) if doc is not None else None
+        return ctx.json({"html": convset_fragment(cfg, user, d, meta, st, doc, err, rec), "state": st.get("state")})
 
     async def convert_preview(request: Request):
         got = await run_in_threadpool(cs_conv, request)
@@ -4898,6 +4950,8 @@ def routes(ctx) -> list:
             if not isinstance(body, dict):
                 raise ValueError("not an object")
             params = CS.clean_params(body.get("params") or {})
+            if "bandpass_nm" in params:                          # the recipe's own rules (method, upper cutoff)
+                CS.check_against(params, (await run_in_threadpool(CS.describe_conv, _converter_cmd(), repo, d))[0])
         except (ValueError, CS.ParamError) as e:
             return ctx.json({"error": str(e) if isinstance(e, CS.ParamError) else "Bad request."}, 400)
         if st.get("state") != "done":
@@ -4916,8 +4970,7 @@ def routes(ctx) -> list:
         out = prev_base() / d.name / token
 
         def work():
-            prune_previews()
-            return CS.run_preview(_converter_cmd(), repo, d, tile, params, out)
+            return CS.run_preview(_converter_cmd(), repo, d, tile, params, out, before=prune_previews)
         try:
             doc, err = await run_in_threadpool(work)
         except CS.PreviewBusy:
@@ -4926,12 +4979,14 @@ def routes(ctx) -> list:
             return r
         if doc is None or not all((out / n).is_file() for n in PREV_FILES):
             await run_in_threadpool(shutil.rmtree, out, True)
-            return ctx.json({"error": "The preview could not be made: " + _plain(str(err or "no image"), [d])}, 502)
+            shown = _plain(str(err or "no image"), [d, repo, CS.HOME, prev_base()])
+            return ctx.json({"error": "The preview could not be made: " + shown}, 502)
         u = f"/predict/convert/{d.name}/preview/{token}"
         return ctx.json({"ok": True, "tile": tile, "before": f"{u}/before.png", "after": f"{u}/after.png",
                          "effective": doc.get("params_effective"), "recipe_params": doc.get("params_recipe"), "conversion_params": doc.get("params_conversion"),
                          "overrides": doc.get("params_overrides"), "compute": doc.get("compute"),
-                         "warnings": [str(w)[:300] for w in (doc.get("warnings") or [])[:5]],
+                         "warnings": [_plain(str(w)[:300], [d, repo, CS.HOME, prev_base()])
+                                      for w in (doc.get("warnings") or [])[:5]],
                          "seconds": doc.get("seconds")})
 
     def preview_file(request: Request):
@@ -4965,30 +5020,46 @@ def routes(ctx) -> list:
             raise Refusal(f"Raw conversion is not set up: {whynot}", 503)
         raw = {k: form[k] for k in CS.RANGES if k in form}
         raw["denoise"] = "true" if "denoise" in form else "false"
+        doc, _err = CS.describe_conv(_converter_cmd(), repo, d)
         try:
-            params = CS.clean_params(raw)
+            params = CS.clean_params(raw)                       # every value as previewed, not only the changed ones
+            CS.check_against(params, doc)
         except CS.ParamError as e:
             raise Refusal(str(e), 400)
-        doc, _err = CS.describe_conv(_converter_cmd(), repo, d)
-        if doc is not None:                                  # only what differs from the recipe is an override
-            rec, used = doc.get("params") or {}, doc.get("params_effective") or doc.get("params") or {}
-            params = {k: v for k, v in params.items() if k in {x[0] for x in CS.diff(rec, {**rec, **params})}}
-            if not CS.diff({**rec, **params}, used):
+        if doc is not None:
+            used = conv_values(doc, meta)
+            if not CS.diff(used, {**used, **params}):
                 raise Refusal("These are the settings this conversion already used: change a slider first.", 400)
-        check_conv_cap(cfg, user)
+        owner = str(meta.get("owner") or user["id"])             # an admin's re-conversion stays the owner's
+        check_conv_cap(cfg, {"id": owner})
         fields = {"session": meta.get("session"), "recipe": meta.get("recipe"), "gpu": False}
         src = meta.get("source") or {}
+        kw = dict(params=params, derived_from=d.name, owner=owner, made_by=user["id"],
+                  nbytes=meta.get("input_bytes"))
         stage = None
         try:
             if src.get("kind") == "upload":
-                stage = raw_base(cfg) / PORTAL_TMP / f"sel_rc{secrets.token_hex(4)}"
-                stage.parent.mkdir(parents=True, exist_ok=True)
+                base = raw_base(cfg) / PORTAL_TMP
+                base.mkdir(parents=True, exist_ok=True)
+                probe = base / f".lp{secrets.token_hex(4)}"
+                first = next((q for q in (d / CONVERT_INPUT).iterdir() if q.is_file()), None)
+                try:                                              # can the new input be hard links of the old one?
+                    if first is None:
+                        raise OSError("no input file")
+                    os.link(first, probe)
+                except OSError:                                   # no (another drive): it is a real copy; room for it?
+                    check_disk_for(raw_root(cfg), input_bytes(meta), factor=1.0, what="to copy the raw files")
+                finally:
+                    try:
+                        probe.unlink()
+                    except OSError:
+                        pass
+                stage = base / f"sel_rc{secrets.token_hex(4)}"
                 shutil.copytree(d / CONVERT_INPUT, stage, copy_function=link_or_copy)
-                return new_conversion(cfg, user, fields, source=src, upload_files=stage, nbytes=meta.get("input_bytes"),
-                                      skipped=meta.get("skipped"), params=params, derived_from=d.name)
+                return new_conversion(cfg, user, fields, source=src, upload_files=stage,
+                                      skipped=meta.get("skipped"), **kw)
             return new_conversion(cfg, user, fields, source=src, inputs=list(meta.get("inputs") or []),
-                                  sample_key=meta.get("sample_key"), nbytes=meta.get("input_bytes"),
-                                  params=params, derived_from=d.name)
+                                  sample_key=meta.get("sample_key"), **kw)
         finally:
             if stage is not None and stage.exists():
                 shutil.rmtree(stage, ignore_errors=True)
