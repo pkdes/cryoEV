@@ -23,6 +23,13 @@ Rules:
     exact results), or an edit file it counted is gone; without that record (a CLI run), after results.json was
     written (it is written last). A banner says so and the index chip reads "Out of date". After a failed
     recompute the earlier results stay, labelled.
+  - Round 7 (R2): rejected images (reviewed/1 `rejected`) are dropped before every per-sample number (see
+    results/compute.py); the page says "Counted EVs 120 (8 low conf) · 3 images rejected", marks rejected images and
+    shows an "All images rejected" notice for a sample with none left. Streamed zips (portal/zipstream.stream_zip,
+    the Gallery's 2-per-person slots): GET /results/<ps>/download/{images,model_outlines,reviewed_labels,everything}_
+    <ps>.zip. Images and Model outlines need no results.json; Reviewed labels are built at download time from
+    reviewed_source() (COCO under the one COCO rule + YOLO + rejected_images.csv + provenance.csv); Everything adds
+    the results and a README that says when they are out of date.
   - Downloads: a CSV newer than results.json (a write in progress or interrupted) is not served: 404 "compute
     again".
   - Images of a refused sample are listed muted, "Not counted (sample refused)".
@@ -65,7 +72,7 @@ from datetime import datetime
 from pathlib import Path
 
 from starlette.requests import Request
-from starlette.responses import RedirectResponse, Response
+from starlette.responses import PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 from portal import names as NM
@@ -359,6 +366,9 @@ def chip(label, tone) -> str:
 
 
 def image_chip(img: dict, counted=True) -> str:
+    if img.get("rejected"):
+        why = str(img.get("reject_reason") or "").strip()
+        return chip("Rejected" + (f": {why}" if why else ""), "warn")
     if not counted:
         return chip("Not counted (sample refused)", "off")
     if img.get("reviewed"):
@@ -552,8 +562,8 @@ def chart_summary(rows) -> str:
 
 # ---------------------------------------------------------------- page parts
 def honesty(res: dict, ps_id: str, spot_n, has_pkg: bool) -> str:
-    imgs = res["images"].values()
-    n = len(res["images"])
+    imgs = [i for i in res["images"].values() if not i.get("rejected")]      # rejected images are not counted
+    n = len(imgs)
     n_rev = sum(1 for i in imgs if i.get("reviewed"))
     n_edit = sum(1 for i in imgs if i.get("edited") and not i.get("reviewed"))
     links = [f'<a class="cj-results-btn cj-results-btn-s" href="/predict/{esc(ps_id)}/">'
@@ -642,6 +652,34 @@ def counted_note(res: dict) -> str:
     return f'<p class="cj-results-counted" id="cj-results-counted"><b>Counted:</b> {esc(text)}</p>'
 
 
+def n_rejected_total(res: dict) -> int:
+    return sum(1 for i in res["images"].values() if i.get("rejected"))
+
+
+def counts_line(res: dict) -> str:
+    """'Counted EVs 120 (8 low conf) · 3 images rejected' (counted samples only; parts that are 0 are left out)."""
+    rows = [s for s in res["samples"].values() if not s.get("all_rejected")]
+    if not rows:
+        return ""
+    ev = sum(int(s.get("ev_total") or 0) for s in rows)
+    low = sum(int(s.get("n_low_conf") or 0) for s in rows)
+    rej = n_rejected_total(res)
+    text = (f"Counted EVs {ev}" + (f" ({low} low conf)" if low else "")
+            + (f" · {plural(rej, 'image')} rejected" if rej else ""))
+    return f'<p class="cj-results-counts" id="cj-results-counts"><b>{esc(text)}</b></p>'
+
+
+def all_rejected_notice(res: dict) -> str:
+    names = [k for k, s in res["samples"].items() if s.get("all_rejected")]
+    if not names:
+        return ""
+    items = "".join(f"<li><b>{esc(str(k))}</b> ({esc(plural(int(res['samples'][k].get('n_rejected') or 0), 'image'))}"
+                    " rejected)</li>" for k in names)
+    return ('<div class="cj-results-banner cj-results-b-warn" role="status" id="cj-results-allrej">'
+            f'<p><b>{esc("All images rejected.")}</b> {esc("Nothing is counted for:")}</p>'
+            f'<ul class="cj-results-ul">{items}</ul></div>')
+
+
 def unsure_banner(cfg, res: dict, ps: dict, st: dict) -> str:
     """The nudge (open unsure outlines) or, for an old results.json, the Update prompt. '' when neither applies."""
     ps_id = ps["id"]
@@ -680,11 +718,15 @@ def sample_table(res: dict) -> str:
     for label, s in samples.items():
         dv, dsub = fdiam(s)
         n_img, n_rev = int(s.get("n_images") or 0), int(s.get("n_reviewed") or 0)
+        n_rej, n_low = int(s.get("n_rejected") or 0), int(s.get("n_low_conf") or 0)
+        gone = bool(s.get("all_rejected"))
         cells = [f'<th scope="row" data-label="Sample" class="cj-results-sname">{esc(str(label))}</th>',
-                 td("Images", fint(n_img), k="n_images"),
+                 td("Images", fint(n_img), k="n_images",
+                    sub="All images rejected" if gone else (f"{n_rej} rejected" if n_rej else None)),
                  td("Reviewed", f"{n_rev} / {n_img}", k="n_reviewed"),
                  checked_cell(s, n_img),
-                 td("EVs", fint(s.get("ev_total")), k="ev_total", sub="counted"),
+                 td("EVs", fint(s.get("ev_total")), k="ev_total",
+                    sub=None if gone else "counted" + (f" · {n_low} low conf" if n_low else "")),
                  unsure_cell(s),
                  td("EVs per image", fnum(s.get("ev_per_image_mean")), k="ev_per_image_mean"),
                  td("Median diameter (Q1–Q3)", dv, k="diam_nm_median", sub=dsub),
@@ -732,7 +774,7 @@ def image_table(res: dict) -> str:
     rows = []
     for k, i in imgs.items():
         counted = i.get("sample_label") in res["samples"]
-        cls = "" if counted else ' class="cj-results-off"'
+        cls = "" if counted and not i.get("rejected") else ' class="cj-results-off"'
         rows.append(f'<tr data-image="{esc(str(k))}"{cls}><td class="cj-num">{esc(str(k))}</td>'
                     f'<td class="cj-results-l">{esc(str(i.get("sample_label")))}</td><td>{image_chip(i, counted)}</td>'
                     f'<td>{esc(fint(i.get("ev")))}</td><td>{esc(fint(i.get("multilayer")))}</td>'
@@ -749,9 +791,12 @@ def nm_ranges(res: dict) -> dict:
     out = {}
     for label, s in res["samples"].items():
         lo, hi = s.get("nm_per_px_min"), s.get("nm_per_px_max")
+        if s.get("all_rejected"):
+            continue
         if lo is None or hi is None:
             vals = [float(i["nm_per_px"]) for i in res["images"].values()
-                    if i.get("sample_label") == label and i.get("nm_per_px") is not None]
+                    if i.get("sample_label") == label and i.get("nm_per_px") is not None
+                    and not i.get("rejected")]
             if not vals:
                 continue
             lo, hi = min(vals), max(vals)
@@ -784,6 +829,8 @@ def provenance(res: dict, ps: dict) -> dict:
                                     f"reviewed, {sum(1 for i in imgs if i.get('edited') and not i.get('reviewed'))}"
                                     " more edited"),
             **({"Pixel size (nm per pixel)": nm} if nm else {}),
+            **({"Rejected images (not counted)": f"{n_rejected_total(res)} of {len(res['images'])} images"}
+               if n_rejected_total(res) else {}),
             "Not counted": str(res.get("refused") or "nothing")}
 
 
@@ -792,8 +839,8 @@ def downloads(ps_id: str) -> str:
     items = [("per_sample.csv", "Per sample (CSV)"), ("per_image.csv", "Per image (CSV)"),
              ("results.json", "All numbers (JSON)")]
     return (f'<p class="cj-results-dlmain"><a class="cj-results-btn" href="{base}{esc(f"results_{ps_id}.zip")}" '
-            f'download>{esc("Download everything (zip)")}</a> <span class="cj-mut">'
-            f'{esc("Recommended: the tables, all numbers and a README of how they were made.")}</span></p>'
+            f'download>{esc("Results tables (zip)")}</a> <span class="cj-mut">'
+            f'{esc("The tables, all numbers and a README of how they were made.")}</span></p>'
             '<ul class="cj-results-dl">' + "".join(
                 f'<li><a href="{base}{esc(f)}" download>{esc(t)}</a></li>' for f, t in items) + "</ul>"
             f'<p class="cj-mut cj-results-note">'
@@ -829,6 +876,8 @@ def csv_header(res: dict, ps: dict) -> bytes:
              f"multilayer={rule.get('multilayer')}"]
     if nm_text(res):
         lines.append(f"# nm_per_px={nm_text(res)}")
+    if n_rejected_total(res):
+        lines.append(f"# rejected images (not counted)={n_rejected_total(res)}")
     lines.append(f"# not counted={res.get('refused') or 'nothing'}")
     return ("\n".join(x.replace("\r", " ").replace("\n", " ") for x in lines) + "\n").encode("utf-8")
 
@@ -908,9 +957,14 @@ def render_set(cfg, ps: dict, user: dict) -> str:
                        f'<p><b>{esc("Results are not computed yet.")}</b> '
                        f'{esc("Counting takes up to a minute on a big set; you can leave the page.")}</p>'
                        + compute_form(ps_id, "Compute results") + "</div>")
+        if predictions_ready(ps):          # images and outlines do not need results.json
+            out.append('<h2 class="cj-sec">Download</h2>')
+            out.append(downloads_zips(ps_id, package_dir(cfg, ps_id) is not None))
         return "".join(out)
 
     out.append(counted_note(res))
+    out.append(counts_line(res))
+    out.append(all_rejected_notice(res))
     out.append(honesty(res, ps_id, spot_count(cfg, ps_id), package_dir(cfg, ps_id) is not None))
     out.append(unsure_banner(cfg, res, ps, st))
     out.append(refused_notice(res))
@@ -926,6 +980,7 @@ def render_set(cfg, ps: dict, user: dict) -> str:
         out.append('<h2 class="cj-sec">Images</h2>')
         out.append(image_table(res))
     out.append('<h2 class="cj-sec">Download</h2>')
+    out.append(downloads_zips(ps_id, package_dir(cfg, ps_id) is not None))
     out.append(downloads(ps_id))
     out.append('<h2 class="cj-sec">How these numbers were made</h2>')
     out.append('<dl class="cj-card cj-results-prov" id="cj-results-prov">' + "".join(
@@ -1026,6 +1081,408 @@ def attachment(body: bytes, name: str, media: str) -> Response:
     return r
 
 
+# ---------------------------------------------------------------- round 7: downloads (streamed zips)
+# Images / Model outlines / Reviewed labels / Everything. Built and streamed with portal.zipstream.stream_zip (no
+# whole zip in memory, no temp file). Images and Model outlines do not need results.json; Reviewed labels are built
+# at download time from reviewed_source() (the review package's current edits, never a stale reviewed.json).
+CAND_CONF = 0.25             # = results.compute.CAND_CONF: the lowest model confidence the outlines download keeps
+ZIP_KINDS = {"images": "images", "outlines": "model_outlines", "reviewed": "reviewed_labels",
+             "everything": "everything"}
+LOW_CONF_NAME = "Low conf EV"
+COCO_FILE = {"outlines": "annotations_model.coco.json", "reviewed": "annotations_reviewed.coco.json"}
+LABEL_DIR = {"outlines": "labels_model", "reviewed": "labels_reviewed"}
+
+
+def guard_cell(text: str) -> str:
+    """CSV formula guard (the same rule as results.compute.guard_cell; a test pins both)."""
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
+def csv_text(header: list, rows) -> str:
+    import csv as _csv
+    buf = io.StringIO()
+    w = _csv.writer(buf, lineterminator="\n")
+    w.writerow(header)
+    for row in rows:
+        w.writerow(["" if v is None else ("true" if v is True else "false" if v is False else
+                                           guard_cell(v) if isinstance(v, str) else v) for v in row])
+    return buf.getvalue()
+
+
+def zip_kind(name: str, ps_id: str):
+    for kind, stem in ZIP_KINDS.items():
+        if name == f"{stem}_{ps_id}.zip":
+            return kind
+    return None
+
+
+def set_rows(ps: dict) -> list:
+    """The set's images from images.csv: [{image, sample_label, path (Path | None), arc, problem}]. A file that is
+    missing, or resolves outside the set folder, has path None and a problem text (listed, never fatal)."""
+    import csv as _csv
+    try:
+        with open(ps["dir"] / "images.csv", newline="", encoding="utf-8") as fh:
+            raw = list(_csv.DictReader(fh))
+    except (OSError, ValueError, _csv.Error):
+        return []
+    out, root = [], ps["dir"].resolve()
+    for r in sorted(raw, key=lambda r: r.get("image") or ""):
+        image, rel = (r.get("image") or "").strip(), (r.get("file") or "").strip()
+        if not image:
+            continue
+        row = {"image": image, "sample_label": (r.get("sample_label") or "").strip(), "path": None,
+               "arc": None, "problem": None}
+        try:
+            p = (ps["dir"] / rel).resolve()
+            if root not in p.parents:
+                row["problem"] = "file is outside the analysis folder"
+            elif not p.is_file():
+                row["problem"] = "file is missing"
+            else:
+                row["path"] = p
+                row["arc"] = zipstream_mod().safe_arcname("images/" + p.name)
+        except (OSError, ValueError):
+            row["problem"] = "file can not be read"
+        out.append(row)
+    return out
+
+
+def zipstream_mod():
+    from portal import zipstream
+    return zipstream
+
+
+def image_size(path: Path):
+    from PIL import Image
+    try:
+        from data_utils.longpath import long_path
+        path = long_path(path)
+    except ImportError:
+        pass
+    with Image.open(path) as im:
+        return im.size
+
+
+def class_names(model, objs_cls=()):
+    """({class id: name}, EV class ids | None) for COCO categories. Names come from the model registry (lazy: the
+    portal starts without it); a class the registry does not name gets EV / non-EV / 'class k'."""
+    names, ev_ids = {}, None
+    try:
+        from inference.model_classes import ev_class_ids, model_classes
+        names, ev_ids = model_classes(model), ev_class_ids(model)
+    except Exception:  # noqa: BLE001 - no registry here: fall back to generic names
+        pass
+    for k in list(objs_cls) + [0]:
+        names.setdefault(k, {0: "EV", 1: "non-EV"}.get(k, f"class {k}"))
+    return names, ev_ids
+
+
+def coco_categories(names: dict) -> tuple:
+    """([categories], {class id: category id}, low conf EV category id): category id = class id + 1; 'Low conf EV'
+    takes the next free id."""
+    cats = [{"id": k + 1, "name": names[k]} for k in sorted(names)]
+    low = max(c["id"] for c in cats) + 1
+    cats.append({"id": low, "name": LOW_CONF_NAME})
+    return cats, {k: k + 1 for k in names}, low
+
+
+def poly_area(pts) -> float:
+    a = 0.0
+    for (x1, y1), (x2, y2) in zip(pts, pts[1:] + pts[:1]):
+        a += x1 * y2 - x2 * y1
+    return abs(a) / 2
+
+
+def coco_annotation(aid, image_id, cat, pts, score=None, attrs=None) -> dict:
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    a = {"id": aid, "image_id": image_id, "category_id": cat,
+         "segmentation": [[round(c, 2) for p in pts for c in p]],
+         "bbox": [round(min(xs), 2), round(min(ys), 2), round(max(xs) - min(xs), 2), round(max(ys) - min(ys), 2)],
+         "area": round(poly_area(pts), 2), "iscrowd": 0}
+    if score is not None:
+        a["score"] = round(float(score), 4)
+    if attrs:
+        a["attributes"] = attrs
+    return a
+
+
+def reviewed_annotation(aid, image_id, o: dict, names, ev_ids, cat_of, low_id) -> dict | None:
+    """ONE COCO RULE (BUILD_CONTRACTS.md section 14): an EV with low conf -> category 'Low conf EV'; any other class
+    keeps its class and gets attributes.low_conf = true; a note goes in attributes.note. None for a polygon with
+    fewer than 3 points."""
+    pts = [(float(p[0]), float(p[1])) for p in (o.get("poly") or [])]
+    if len(pts) < 3:
+        return None
+    cls = int(o.get("cls") or 0)
+    rc = o.get("reviewer_class")
+    is_ev = (ev_ids is None or cls in ev_ids) and rc != "nonEV"
+    low = bool(o.get("low_conf"))
+    attrs = {}
+    cat = cat_of[cls]
+    if low and is_ev:
+        cat = low_id
+    elif low:
+        attrs["low_conf"] = True
+    if o.get("note"):
+        attrs["note"] = str(o["note"])
+    if o.get("reviewer_label"):
+        attrs["reviewer_label"] = str(o["reviewer_label"])
+    if o.get("source"):
+        attrs["source"] = str(o["source"])
+    return coco_annotation(aid, image_id, cat, pts, o.get("conf"), attrs)
+
+
+def coco_stream(info: dict, images: list, cats: list, annots):
+    """The COCO json as byte pieces (annotations one by one: the whole file is never built in memory)."""
+    head = json.dumps({"info": info, "categories": cats, "images": images}, separators=(",", ":"))
+    yield (head[:-1] + ',"annotations":[').encode("utf-8")
+    first = True
+    for a in annots:
+        yield (("" if first else ",") + json.dumps(a, separators=(",", ":"))).encode("utf-8")
+        first = False
+    yield b"]}"
+
+
+def yolo_line(cls, pts, w, h) -> str:
+    return f"{cls} " + " ".join(f"{p[0] / w:.6f} {p[1] / h:.6f}" for p in pts)
+
+
+def prediction_lines(pred_dir: Path, image: str):
+    """Iterator of (cls, conf, [coords...]) from the model's prediction .txt (normalised coordinates), read lazily
+    one line at a time; None when the file is absent."""
+    p = pred_dir / f"{image}.txt"
+    if not p.is_file():
+        return None
+
+    def gen():
+        with open(p, encoding="utf-8") as fh:
+            for line in fh:
+                t = line.split()
+                if len(t) >= 8:
+                    yield int(t[0]), float(t[1]), [float(v) for v in t[2:]]
+    return gen()
+
+
+def outlines_entries(ps: dict, rows: list, problems: list) -> list:
+    """Model outlines: labels_model/<image>.txt (YOLO-seg, no score) + annotations_model.coco.json (with scores)
+    for predictions with conf >= CAND_CONF. The images folder is not in this zip; file_name = images/<name>.
+    Prediction files are read again while streaming (nothing big is held in memory)."""
+    model = ps["request"].get("model")
+    pred_dir = ps["dir"] / "p" / str(model) / "predictions"
+    sizes, ok, seen = {}, [], set()
+    for r in rows:
+        if r["path"] is None:
+            continue
+        try:
+            sizes[r["image"]] = image_size(r["path"])
+        except Exception as e:  # noqa: BLE001 - one bad image is listed, not fatal
+            problems.append(f"{r['image']}: image can not be read ({type(e).__name__})")
+            continue
+        lines = prediction_lines(pred_dir, r["image"])
+        if lines is None:
+            problems.append(f"{r['image']}: no prediction file")
+            continue
+        seen.update(ln[0] for ln in lines)
+        ok.append(r)
+    names, _ = class_names(model, seen)
+    cats, cat_of, _low = coco_categories(names)
+    images = [{"id": n + 1, "file_name": r["arc"], "width": sizes[r["image"]][0], "height": sizes[r["image"]][1]}
+              for n, r in enumerate(ok)]
+
+    def kept(image):
+        return (ln for ln in (prediction_lines(pred_dir, image) or ()) if ln[1] >= CAND_CONF)
+
+    def annots():
+        aid = 0
+        for n, r in enumerate(ok):
+            w, h = sizes[r["image"]]
+            for cls, conf, c in kept(r["image"]):
+                aid += 1
+                pts = [(c[k] * w, c[k + 1] * h) for k in range(0, len(c) - 1, 2)]
+                yield coco_annotation(aid, n + 1, cat_of[cls], pts, conf)
+
+    def yolo(image):
+        for cls, _conf, c in kept(image):
+            yield (f"{cls} " + " ".join(f"{v:.6f}" for v in c) + "\n").encode("utf-8")
+
+    info = {"description": f"Model outlines for {ps['id']} (model {model}), conf >= {CAND_CONF}",
+            "pixel_coordinates": True}
+    entries = [(COCO_FILE["outlines"], coco_stream(info, images, cats, annots()))]
+    entries += [(f"{LABEL_DIR['outlines']}/{r['image']}.txt", yolo(r["image"])) for r in ok]
+    return entries
+
+
+def status_of(entry: dict | None) -> str:
+    if not entry:
+        return "model-only"
+    if entry.get("rejected"):
+        return "rejected"
+    if entry.get("reviewed"):
+        return "reviewed"
+    return "edited" if entry.get("edited") else "model-only"
+
+
+def reviewed_entries(ps: dict, rows: list, rev: dict, problems: list) -> list:
+    """Reviewed labels from reviewed/1 (reviewed_source(): current edits): annotations_reviewed.coco.json (the one
+    COCO rule) + labels_reviewed/<image>.txt (YOLO-seg, original class ids) + rejected_images.csv + provenance.csv.
+    Rejected images are listed in rejected_images.csv and provenance.csv and left out of the labels."""
+    model = ps["request"].get("model")
+    imgs = rev.get("images") or {}
+    seen = {int(o.get("cls") or 0) for e in imgs.values() for o in (e.get("objects") or [])}
+    names, ev_ids = class_names(model, seen)
+    cats, cat_of, low_id = coco_categories(names)
+    sizes, kept = {}, []
+    for r in rows:
+        e = imgs.get(r["image"])
+        if e is None or e.get("rejected"):
+            continue
+        if r["path"] is None:
+            problems.append(f"{r['image']}: {r['problem']}; its labels are not in the reviewed labels")
+            continue
+        try:
+            sizes[r["image"]] = image_size(r["path"])
+        except Exception as e2:  # noqa: BLE001
+            problems.append(f"{r['image']}: image can not be read ({type(e2).__name__})")
+            continue
+        kept.append(r)
+    images = [{"id": n + 1, "file_name": r["arc"], "width": sizes[r["image"]][0], "height": sizes[r["image"]][1]}
+              for n, r in enumerate(kept)]
+
+    def annots():
+        aid = 0
+        for n, r in enumerate(kept):
+            for o in imgs[r["image"]].get("objects") or []:
+                a = reviewed_annotation(aid + 1, n + 1, o, names, ev_ids, cat_of, low_id)
+                if a is None:
+                    problems.append(f"{r['image']}: an outline with fewer than 3 points was left out")
+                    continue
+                aid += 1
+                yield a
+
+    info = {"description": f"Reviewed labels for {ps['id']} (model {model}), built {datetime.now().astimezone().isoformat(timespec='seconds')}",
+            "pixel_coordinates": True, "rule": f"EV + low conf -> '{LOW_CONF_NAME}'; other classes keep their "
+            "class with attributes.low_conf; notes in attributes.note"}
+    entries = [(COCO_FILE["reviewed"], coco_stream(info, images, cats, annots()))]
+    for r in kept:
+        w, h = sizes[r["image"]]
+        lines = []
+        for o in imgs[r["image"]].get("objects") or []:
+            pts = [(float(p[0]), float(p[1])) for p in (o.get("poly") or [])]
+            if len(pts) >= 3:
+                lines.append(yolo_line(int(o.get("cls") or 0), pts, w, h) + "\n")
+        entries.append((f"{LABEL_DIR['reviewed']}/{r['image']}.txt", "".join(lines).encode("utf-8")))
+    rej = [[r["image"], r["sample_label"], (imgs[r["image"]] or {}).get("reject_reason"),
+            (imgs[r["image"]] or {}).get("note")]
+           for r in rows if (imgs.get(r["image"]) or {}).get("rejected")]
+    entries.append(("rejected_images.csv", csv_text(["image", "sample_label", "reject_reason", "note"], rej).encode("utf-8")))
+    prov = []
+    for r in rows:
+        e = imgs.get(r["image"])
+        objs = (e or {}).get("objects") or []
+        prov.append([r["image"], r["sample_label"], status_of(e), len(objs),
+                     sum(1 for o in objs if o.get("low_conf")), ";".join(str(x) for x in (e or {}).get("reviewed_by") or []),
+                     (e or {}).get("reject_reason") if (e or {}).get("rejected") else None, (e or {}).get("note")])
+    entries.append(("provenance.csv", csv_text(["image", "sample_label", "status", "n_objects", "n_low_conf",
+                                                "reviewed_by", "reject_reason", "note"], prov).encode("utf-8")))
+    return entries
+
+
+ZIP_NOTE = ("These zips are streamed: entries have data descriptors (fine for desktop unzip, 7-Zip and Python; "
+            "Java's ZipInputStream rejects them).")
+
+
+def zip_readme(kind: str, ps: dict, user: dict, stale, has_results: bool, has_pkg: bool, problems: list) -> str:
+    L = [f"CryoEV download ({ZIP_KINDS[kind]}) for prediction set {ps['id']}", "",
+         f"Model: {ps['request'].get('model')}",
+         f"Downloaded: {datetime.now().astimezone().isoformat(timespec='seconds')} by {user.get('id')}", ""]
+    if kind == "everything":
+        if not has_results:
+            L += ["RESULTS: not computed yet, so there is no results/ folder.", ""]
+        elif stale:
+            L += ["RESULTS ARE OUT OF DATE: the review changed after they were computed ("
+                  + {"edit": "a later edit", "build": "the review package was rebuilt",
+                     "removed": "an edit that was counted has been removed"}.get(stale.get("kind"), "review changed")
+                  + "). The reviewed labels in this zip are built from the CURRENT review and do not match results/.",
+                  "Open the results page and press 'Update results now', then download again.", ""]
+        else:
+            L += ["Results are up to date with the review at download time.", ""]
+    L += ["Files"]
+    if kind in ("images", "everything"):
+        L += ["  images/<name>.png        the analysed images", "  images.csv               image, file, sample_label, nm_per_px, ..."]
+    if kind in ("outlines", "everything"):
+        L += [f"  {COCO_FILE['outlines']}  COCO (pixel coordinates) with a score per outline, conf >= {CAND_CONF}",
+              f"  {LABEL_DIR['outlines']}/<image>.txt    YOLO-seg: class x y x y ... (normalised, no score)"]
+    if kind in ("reviewed", "everything"):
+        if has_pkg:
+            L += [f"  {COCO_FILE['reviewed']}   COCO (pixel coordinates) built at download time from the review",
+                  f"  {LABEL_DIR['reviewed']}/<image>.txt   YOLO-seg: class x y ... (normalised; original class ids, so "
+                  "'Low conf EV' trains as EV; the flag is in the COCO and provenance.csv)",
+                  "  rejected_images.csv      rejected images with reason and note (left out of the labels)",
+                  "  provenance.csv           per image: rejected / reviewed / edited / model-only. 'model-only' images "
+                  "carry the model's outlines at conf >= 0.5, NOT checked by a person.",
+                  "",
+                  f"COCO rule: an EV with low confidence is category '{LOW_CONF_NAME}'; any other class keeps its class "
+                  "and gets attributes.low_conf = true; notes are in attributes.note."]
+        else:
+            L += ["  (no review package for this analysis, so there are no reviewed labels)"]
+    if kind == "everything" and has_results:
+        L += ["  results/                 per_sample.csv, per_image.csv, results.json"]
+    L += ["", "COCO file_name is the image's name inside the images zip / this zip (images/<name>): unpack the "
+          "images next to the COCO file.", ZIP_NOTE]
+    if problems:
+        L += ["", f"Not included ({len(problems)}):"] + [f"  {p}" for p in problems[:200]]
+    return "\r\n".join(L) + "\r\n"
+
+
+def build_zip(cfg, ps: dict, user: dict, kind: str):
+    """-> (entries for stream_zip, None) or (None, problem text). Never reads results.json except for 'everything'."""
+    rows = set_rows(ps)
+    if not rows:
+        return None, "This analysis has no images."
+    problems = [f"{r['image']}: {r['problem']}" for r in rows if r["problem"]]
+    want_out = kind in ("outlines", "everything")
+    want_rev = kind in ("reviewed", "everything")
+    rev = None
+    if want_rev:
+        rev = reviewed_source(cfg, ps["id"])
+        if rev is None and kind == "reviewed":
+            return None, "There is no review package for this analysis yet, so there are no reviewed labels."
+    if want_out and not (ps["dir"] / "p").is_dir() and kind == "outlines":
+        return None, "The model has not produced outlines for this analysis."
+    entries = []
+    if kind in ("images", "everything"):
+        entries += [(r["arc"], r["path"]) for r in rows if r["path"] is not None]
+        if (ps["dir"] / "images.csv").is_file():
+            entries.append(("images.csv", ps["dir"] / "images.csv"))
+    if want_out and (ps["dir"] / "p").is_dir():
+        entries += outlines_entries(ps, rows, problems)
+    if rev is not None:
+        entries += reviewed_entries(ps, rows, rev, problems)
+    has_results = False
+    if kind == "everything":
+        rdir = ps["dir"] / "results"
+        res, _ = read_results(ps)
+        has_results = res is not None and not incomplete(ps)
+        if has_results:
+            entries += [(f"results/{f}", rdir / f) for f in FILES if (rdir / f).is_file()]
+    stale = stale_info(cfg, ps) if has_results else None
+    readme_txt = zip_readme(kind, ps, user, stale, has_results, rev is not None, problems)
+    return [("README.txt", readme_txt.encode("utf-8"))] + entries, None
+
+
+def downloads_zips(ps_id: str, has_pkg: bool, outlines: bool = True) -> str:
+    base = f"/results/{esc(ps_id)}/download/"
+    items = [("images", "Images (PNG + images.csv)")]
+    if outlines:
+        items.append(("outlines", "Model outlines (YOLO-seg + COCO with scores)"))
+    if has_pkg:
+        items.append(("reviewed", "Reviewed labels (COCO + YOLO, rejected list, provenance)"))
+    items.append(("everything", "Everything (zip with README)"))
+    lis = "".join(f'<li><a href="{base}{esc(ZIP_KINDS[k])}_{esc(ps_id)}.zip" download>{esc(t)}</a></li>' for k, t in items)
+    return (f'<h3 class="cj-results-h3">{esc("Images and labels")}</h3><ul class="cj-results-dl" id="cj-results-zips">{lis}</ul>'
+            f'<p class="cj-mut cj-results-note">{esc("Big sets are streamed, so the download starts at once and takes a while. Reviewed labels are built from the review as it is now.")}</p>')
+
+
 # ---------------------------------------------------------------- the page's script (served as /results/results.js)
 JS = r"""// Results page (portal/modules/results.py): while a computation runs, GET api/status (same origin) every few
 // seconds and reload the page when it is done. The button form is disabled after one press. No HTML built here.
@@ -1105,11 +1562,40 @@ def routes(ctx) -> list:
             return ctx.json({"error": "not found"}, status=404)
         return ctx.json(status_doc(ctx.cfg, ps))
 
+    def stream_download(request: Request, ps: dict, kind: str):
+        user = ctx.user(request)
+        entries, problem = build_zip(ctx.cfg, ps, user, kind)
+        if entries is None:
+            r = ctx.page(request, "Nothing to download", f'<h1>Nothing to download</h1><p>{esc(problem)}</p>'
+                         f'<p><a href="/results/{esc(ps["id"])}/">Back to the results</a></p>', active="results")
+            r.status_code = 404
+            return r
+        from portal.modules import gallery as G           # the shared "2 downloads per person" slots and stream classes
+        slot = G.take_slot(str(user.get("id") or ""))
+        if slot is None:
+            r = ctx.no_store(PlainTextResponse("Two downloads are already running for you. Wait for one to finish.",
+                                               status_code=429))
+            r.headers["Retry-After"] = "30"
+            return r
+        try:
+            stream = G.Progress(zipstream_mod().stream_zip(entries), slot)
+        except BaseException:
+            slot.release()
+            raise
+        r = G.SlotResponse(stream, slot, media_type="application/zip")
+        r.headers["Content-Disposition"] = f'attachment; filename="{ZIP_KINDS[kind]}_{ps["id"]}.zip"'
+        r.headers["Cache-Control"] = "no-store"
+        r.headers["X-Content-Type-Options"] = "nosniff"
+        return r
+
     def download(request: Request):
         ps = get_set(request)
         name = request.path_params["name"]
         if ps is None:
             return not_found(request)
+        kind = zip_kind(name, ps["id"])
+        if kind:                                # round 7: streamed zips; images / outlines need no results.json
+            return stream_download(request, ps, kind)
         rdir = ps["dir"] / "results"
         res, _ = read_results(ps)               # results.json is written last: without it nothing is complete
         if res is None:
