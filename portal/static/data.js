@@ -1,11 +1,15 @@
-/* Data module's Lab graph (served as /data/data.js by portal/modules/data.py; no inline script on the page).
-   Reads /data/api/lineage/graph (with this page's ?focus) and draws History's lineage graph: the same layout as
+/* Data module's graphs (served as /data/data.js by portal/modules/data.py; no inline script on the page).
+   Two pages use it: the Lab graph (endpoint /data/api/lineage/graph + this page's ?focus) and a Lineage item page's
+   Tree | Graph toggle (endpoint with ?focus=..&scope=item: the item's ancestors and descendants only). Endpoint and
+   scope come from data-* attributes on #cj-data-graph-root. Draws History's lineage graph: the same layout as
    registry/history_page.py drawGraph (columns, boxes over an SVG edge layer, bezier edges, same-column lanes on the
    left, back-edges routed over the top). Record text only ever goes in through textContent. */
 (function () {
   'use strict';
+  var root = document.getElementById('cj-data-graph-root');
   var canvas = document.getElementById('cj-data-graph-canvas');
-  if (!canvas) return;
+  if (!root || !canvas) return;
+  var ITEM = root.getAttribute('data-scope') === 'item';
   var svg = document.getElementById('cj-data-graph-svg'), NS = svg.namespaceURI;
   var histBox = document.getElementById('cj-data-graph-hist'), anBox = document.getElementById('cj-data-graph-an');
   var status = document.getElementById('cj-data-graph-status');
@@ -147,13 +151,27 @@
     if (f.tagName === 'A') f.focus({preventScroll: true});      // a box without a link is not focusable
   }
 
+  // item scope: keep only the columns the slice uses (a lineage rarely spans every column)
+  function compact(g) {
+    var used = [];
+    g.nodes.forEach(function (n) { if (used.indexOf(n.col) < 0) used.push(n.col); });
+    used.sort(function (a, b) { return a - b; });
+    g.nodes.forEach(function (n) { n.col = used.indexOf(n.col); });
+    g.cols = used.map(function (c) { return g.cols[c]; });
+  }
+
   function start(data) {
     G = data;
+    if (ITEM && G.nodes && G.nodes.length) compact(G);
     if (G.error) status.textContent = 'The registry could not be read just now (' + G.error + ').';
+    else if (ITEM && G.focus == null) status.textContent = 'This item is not in the lab graph.';
     else if (!G.nodes.length) status.textContent = 'Nothing in the registry to draw yet.';
     else status.textContent = G.nodes.length + ' items, ' + G.edges.length + ' links.';
+    var more = document.getElementById('cj-data-graph-more');
+    if (more) more.hidden = !G.more;
     if (!G.cols.length) return;
     labels();
+    if (ITEM) histBox.checked = true;      // a superseded ancestor must not leave the focus looking orphaned
     if (G.focus != null) {               // show the item asked for even when it starts hidden
       var n = G.nodes[G.focus];
       if (n.hist) histBox.checked = true;
@@ -165,10 +183,46 @@
     anBox.addEventListener('change', draw);
   }
 
-  var focus = new URLSearchParams(location.search).get('focus');
-  fetch('/data/api/lineage/graph' + (focus ? '?focus=' + encodeURIComponent(focus) : ''),
-        {credentials: 'same-origin', headers: {'Accept': 'application/json'}})
-    .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-    .then(start)
-    .catch(function (e) { status.textContent = 'Could not load the graph (' + e.message + '). Reload to try again.'; });
+  var loaded = false;
+  function load() {
+    if (loaded) return;
+    loaded = true;
+    var url = root.getAttribute('data-endpoint');
+    if (root.hasAttribute('data-focus-from-url')) {
+      var focus = new URLSearchParams(location.search).get('focus');
+      if (focus) url += '?focus=' + encodeURIComponent(focus);
+    }
+    fetch(url, {credentials: 'same-origin', headers: {'Accept': 'application/json'}})
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(start)
+      .catch(function (e) {
+        loaded = false;
+        status.textContent = 'Could not load the graph (' + e.message + '). Reload to try again.';
+      });
+  }
+
+  // Tree | Graph on a Lineage item page; the choice is remembered (storage may be blocked: the page works without)
+  var toggle = document.getElementById('cj-data-view-toggle'), KEY = 'cj-data-lineage-view';
+  if (toggle) {
+    var panel = document.getElementById('cj-data-graph-panel'), tree = document.getElementById('cj-data-tree-panel');
+    var show = function (view, save) {
+      var g = view === 'graph';
+      tree.hidden = g; panel.hidden = !g;
+      Array.prototype.forEach.call(toggle.querySelectorAll('button'), function (b) {
+        b.setAttribute('aria-pressed', b.getAttribute('data-view') === (g ? 'graph' : 'tree') ? 'true' : 'false');
+      });
+      if (save) { try { localStorage.setItem(KEY, g ? 'graph' : 'tree'); } catch (e) { /* blocked: not remembered */ } }
+      if (g) { if (G) focusBox(); else load(); }
+    };
+    toggle.hidden = false;
+    toggle.addEventListener('click', function (ev) {
+      var b = ev.target.closest('button[data-view]');
+      if (b) show(b.getAttribute('data-view'), true);
+    });
+    var saved = null;
+    try { saved = localStorage.getItem(KEY); } catch (e) { saved = null; }
+    if (saved === 'graph') show('graph', false);
+  } else {
+    load();
+  }
 })();

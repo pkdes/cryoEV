@@ -1932,6 +1932,64 @@ def lab_graph(records, viewer: Viewer, root, focus=None) -> dict:
             "error": error}
 
 
+ITEM_DOWNSTREAM_MAX = 150           # descendants in one item graph; past it a link to the lab graph (no count)
+
+
+def item_graph(g: dict) -> dict:
+    """The slice of a lab_graph() result (already visibility-filtered and whitelisted) that one item needs: its
+    ancestors over REVERSE edges, its descendants over FORWARD edges (never an undirected walk: that would reach a
+    sibling dataset through a shared label set), following `part` links too (a part's parent package is an ancestor,
+    a package's parts are descendants). Descendants stop at ITEM_DOWNSTREAM_MAX, then "more" is true (no count).
+    Node payloads are copied as they are; edges, `part` and `focus` are remapped to the slice's indices (a part whose
+    parent is outside the slice -> -1). An unknown or hidden focus (focus None) gives an empty graph."""
+    nodes, edges, f = g["nodes"], g["edges"], g.get("focus")
+    out = {"schema": g["schema"], "scope": "item", "cols": [], "nodes": [], "edges": [], "focus": None,
+           "more": False, "error": g.get("error")}
+    if f is None:
+        return out
+    up, down, kids = {}, {}, {}
+    for a, b, _ in edges:
+        up.setdefault(b, []).append(a)
+        down.setdefault(a, []).append(b)
+    for i, n in enumerate(nodes):
+        if n["part"] is not None and n["part"] >= 0:
+            kids.setdefault(n["part"], []).append(i)
+
+    def parents(i):
+        p = nodes[i]["part"]
+        return up.get(i, []) + ([p] if p is not None and p >= 0 else [])
+
+    def children(i):
+        return down.get(i, []) + kids.get(i, [])
+
+    keep, queue = {f}, [f]
+    for i in queue:                                         # ancestors: uncapped
+        for j in parents(i):
+            if j not in keep:
+                keep.add(j)
+                queue.append(j)
+    seen, queue, n_down = set(keep), [f], 0
+    for i in queue:                                         # descendants: breadth first, capped
+        for j in children(i):
+            if j in seen:
+                continue
+            if n_down >= ITEM_DOWNSTREAM_MAX:
+                out["more"] = True
+                continue
+            seen.add(j)
+            keep.add(j)
+            n_down += 1
+            queue.append(j)
+    order = sorted(keep)
+    new = {old: k for k, old in enumerate(order)}
+    out["cols"] = list(g["cols"])
+    out["nodes"] = [dict(nodes[i], part=new.get(nodes[i]["part"], -1) if nodes[i]["part"] is not None else -1)
+                    for i in order]
+    out["edges"] = [[new[a], new[b], role] for a, b, role in edges if a in new and b in new]
+    out["focus"] = new[f]
+    return out
+
+
 def graph_focus_key(records, kind, entity_id):
     """The Lab graph key (History's '<entity>|<id>') of a catalog item, for the "Lab graph" link on its Lineage."""
     if kind == "images":
@@ -2197,6 +2255,24 @@ def render_lineage_node(node) -> str:
     return f'<li class="cj-data-ln">{card}{kids}</li>'
 
 
+def view_toggle(focus) -> str:
+    """Tree | Graph, for an item that is a graph node (a session or grid is not, so it gets none). Hidden until
+    /data/data.js runs: without script the Tree is the page."""
+    if not focus:
+        return ""
+    return ('<div class="cj-data-graph-toggle" id="cj-data-view-toggle" role="group" aria-label="View" hidden>'
+            '<button type="button" data-view="tree" aria-pressed="true">Tree</button>'
+            '<button type="button" data-view="graph" aria-pressed="false">Graph</button></div>')
+
+
+def graph_panel(focus) -> str:
+    if not focus:
+        return ""
+    ep = f"{PREFIX}/api/lineage/graph?focus={quote(focus, safe='')}&scope=item"
+    return ('<div id="cj-data-graph-panel" hidden>' + graph_frame(ep, True, lab_graph_href(focus)) + "</div>"
+            f'<script src="{PREFIX}/data.js" defer></script>')
+
+
 def render_lineage(tree, error, focus=None) -> str:
     kind, root = tree["kind"], tree["root"]
     s = tree["summary"]
@@ -2212,8 +2288,32 @@ def render_lineage(tree, error, focus=None) -> str:
             + '<p class="cj-mut cj-data-sub">The chain back to the raw imaging sessions, read from the registry. '
               'A step the registry does not record is shown as unknown, never guessed. '
               f'<a href="{esc(lab_graph_href(focus))}">Lab graph</a> shows it among everything else.</p>'
-            + banner(error) + f'<p class="cj-data-lsum">{esc(summary)}</p>'
-            + '<ol class="cj-data-lroot">' + render_lineage_node(root) + "</ol>")
+            + banner(error) + view_toggle(focus)
+            + '<div id="cj-data-tree-panel">' + f'<p class="cj-data-lsum">{esc(summary)}</p>'
+            + '<ol class="cj-data-lroot">' + render_lineage_node(root) + "</ol></div>"
+            + graph_panel(focus))
+
+
+def graph_frame(endpoint: str, item: bool = False, lab_href: str = "") -> str:
+    """The graph's controls and empty canvas. /data/data.js finds the frame by id cj-data-graph-root and takes its
+    endpoint (and, on the lab page, the page's own ?focus) from data-* attributes; no record text is in this HTML."""
+    attrs = (f'data-endpoint="{esc(endpoint)}"' + (' data-scope="item"' if item else ' data-focus-from-url="1"'))
+    note = ("Arrows: parent \u2192 child (inputs). Dashed: model predictions \u2192 review / revise \u2192 label "
+            "version. \u2605 = production." if not item else
+            "This item, what it was built from, and what was built from it. Arrows: parent \u2192 child (inputs).")
+    return ('<div class="cj-data-graph-bar">'
+            '<label><input type="checkbox" id="cj-data-graph-hist"> <span id="cj-data-graph-histl">Show history'
+            '</span></label>'
+            '<label><input type="checkbox" id="cj-data-graph-an"> <span id="cj-data-graph-anl">Show analyses'
+            '</span></label>'
+            f'<span class="cj-mut cj-data-graph-note">{note}</span></div>'
+            f'<div id="cj-data-graph-root" {attrs}>'
+            '<p class="cj-mut cj-data-graph-status" id="cj-data-graph-status" role="status">Loading the graph\u2026</p>'
+            '<div class="cj-data-graph-wrap" id="cj-data-graph-wrap"><div class="cj-data-graph-canvas" '
+            'id="cj-data-graph-canvas"><svg id="cj-data-graph-svg" aria-hidden="true"></svg></div></div>'
+            + ('<p class="cj-data-graph-more" id="cj-data-graph-more" hidden>'
+               f'<a href="{esc(lab_href)}">More downstream: open lab graph</a></p>' if item else "")
+            + '</div>')
 
 
 def render_lab_graph(error) -> str:
@@ -2222,16 +2322,7 @@ def render_lab_graph(error) -> str:
     return (breadcrumb(("Data", PREFIX + "/")) + '<h1>Lab graph</h1>'
             '<p class="cj-mut cj-data-sub">How label sets, datasets, models and reviews connect, read from the '
             'registry. Open a box for its lineage.</p>' + banner(error)
-            + '<div class="cj-data-graph-bar">'
-              '<label><input type="checkbox" id="cj-data-graph-hist"> <span id="cj-data-graph-histl">Show history'
-              '</span></label>'
-              '<label><input type="checkbox" id="cj-data-graph-an"> <span id="cj-data-graph-anl">Show analyses'
-              '</span></label>'
-              '<span class="cj-mut cj-data-graph-note">Arrows: parent → child (inputs). Dashed: model predictions → '
-              'review / revise → label version. ★ = production.</span></div>'
-            + '<p class="cj-mut cj-data-graph-status" id="cj-data-graph-status" role="status">Loading the graph…</p>'
-            + '<div class="cj-data-graph-wrap" id="cj-data-graph-wrap"><div class="cj-data-graph-canvas" '
-              'id="cj-data-graph-canvas"><svg id="cj-data-graph-svg" aria-hidden="true"></svg></div></div>'
+            + graph_frame(PREFIX + "/api/lineage/graph")
             + '<noscript><p class="cj-mut">The Lab graph needs JavaScript.</p></noscript>'
             + f'<script src="{PREFIX}/data.js" defer></script>')
 
@@ -2394,8 +2485,9 @@ def routes(ctx) -> list:
     def api_graph(request: Request):
         records, _, viewer = state(request)
         focus = request.query_params.get("focus")
-        return ctx.json(lab_graph(records, viewer, getattr(ctx.cfg, "registry", None),
-                                  focus if focus and len(focus) <= 300 else None))
+        g = lab_graph(records, viewer, getattr(ctx.cfg, "registry", None),
+                      focus if focus and len(focus) <= 300 else None)
+        return ctx.json(item_graph(g) if request.query_params.get("scope") == "item" else g)
 
     def script(request: Request):
         r = Response(SCRIPT.read_bytes(), media_type="text/javascript; charset=utf-8")
