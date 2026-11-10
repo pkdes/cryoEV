@@ -46,6 +46,17 @@ t, then key order); in conflicts.csv with severity "dropped". Base pairs that al
 (version.json base_duplicates). An add/new over another class's label at IoU >= 0.5 is applied with a warning
 (severity "warn"). Outlines are compared numerically (1e-9), so 0 and 0.0 are the same outline.
 
+Image and object state (round 7; docs/REVIEW_TOOL.md "Reject, notes, low conf"): the i:reject / i:note / t:<objkey>
+keys are not object decisions and are left out of the diff. Images are never dropped: a rejected image keeps its
+labels and is listed in version.json "rejected_images" (image, reason, reviewed, who; every scope). The Low conf tag
+goes through THE ONE COCO RULE (coco_rule), applied before the diff so the change log shows the reclass: EV + tag ->
+category Low conf EV (dec_key t:<objkey> when the tag alone changed it); any other class keeps its class with
+attributes.low_conf = true; a tag note goes in attributes.note. version.json "low_conf" lists the applied images'
+objects that are low conf (the tag, or the Low conf EV class: what reviewed_polygons calls low_conf), "object_notes"
+the other objects with a tag note; each row image, key (the object's decision key), ann (its id in the output, null
+if not written), cls (its category there), tagged (t: "lowconf"), note. A record whose only decisions are i: keys
+counts as a record without changes; a t: tag counts as a change.
+
 Not logged (no label change, no review verdict): null (undone) decisions, n<uid>/p<k> "del" of an
 outline that was drawn/accepted and then removed again. Counted in version.json "skipped".
 
@@ -89,7 +100,8 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO))
-from review_server import _migrate, _num, effective_labels, load_people  # noqa: E402
+from review_server import (LOW_CONF_EV, _migrate, _num, effective_labels, image_flags, is_low_conf,  # noqa: E402
+                           load_people, object_key, tag_of)
 from data_utils.path_guard import PROTECTED_ROOTS, normalize, protected_problem  # noqa: E402
 
 SCHEMA = "label_change/1"
@@ -292,16 +304,40 @@ def _iou_cached(a, b, cache):
     return cache[k]
 
 
-def image_ops(im: dict, rec: dict, base_anns: dict, w: int, h: int, dup_iou: float = DUP_IOU, base_dups=(), cache=None):
+def coco_rule(f: dict, full_dec: dict) -> dict:
+    """THE ONE COCO RULE for the Low conf tag (R1 and R2, BUILD_CONTRACTS.md section 14), on one final object: EV with
+    the tag (t:<objkey> "lowconf") -> category Low conf EV, so training is unchanged; the original class is kept in
+    _c0 and the tag key in _tag (for the change row). Any other class keeps its class (attributes.low_conf, written
+    with the COCO). Applied before the op diff, so the change log shows the reclass."""
+    key = object_key(f)
+    v, _ = tag_of(full_dec, key)
+    if v == "lowconf" and f["c"] == "EV":
+        return {**f, "c": LOW_CONF_EV, "_c0": f["c"], "_tag": f"t:{key}"}
+    return f
+
+
+def image_ops(im: dict, rec: dict, base_anns: dict, w: int, h: int, dup_iou: float = DUP_IOU, base_dups=(), cache=None,
+              tags=None):
     """One image's edit record -> (ops, skipped). base_anns: {id: COCO annotation} of this image only.
 
     Each op: {dec_key, op, ann_old, cls_from, cls_to, p (normalized, final), px (pixel, final), d (decision
     or None), item (the final label), conflict (reason or None)}. Final labels = base anns with every
-    non-conflict op applied."""
+    non-conflict op applied.
+    The image-level i: keys and the t:<objkey> tags are not object decisions: they are left out of the diff (a
+    note whose text is "no" is not a removal). A tag reaches the labels through coco_rule only. tags: a list that
+    gets (object key, final object, low conf, tag note) for every final object that is low conf or has a note."""
     edit = rec["edit"]
     e = _migrate(edit)
-    dec = e["dec"]
-    final = effective_labels(im, edit)
+    full = e["dec"]
+    dec = {k: d for k, d in full.items() if not k.startswith(("i:", "t:"))}
+    final = [coco_rule(f, full) for f in effective_labels(im, edit)]
+    if tags is not None:  # (key, object, low conf (is_low_conf, as reviewed_polygons), tag note)
+        for f in final:
+            key = object_key(f)
+            tv, note = tag_of(full, key)
+            low = is_low_conf(f.get("_c0", f["c"]), tv) or f["c"] == LOW_CONF_EV
+            if low or note:
+                tags.append((key, f, low, note))
     pkg_gt = {g["id"]: g for g in im["gt"]}
     ops, skipped = [], Counter()
 
@@ -317,7 +353,7 @@ def image_ops(im: dict, rec: dict, base_anns: dict, w: int, h: int, dup_iou: flo
             return False
         if f is None:
             return v == "del"
-        return v == f"keep:{f['c']}" and (d.get("p") is None or _same(d["p"], f["p"]))
+        return v == f"keep:{f.get('_c0', f['c'])}" and (d.get("p") is None or _same(d["p"], f["p"]))
 
     seen_ids = set()
     final_by_id = {}
@@ -327,22 +363,25 @@ def image_ops(im: dict, rec: dict, base_anns: dict, w: int, h: int, dup_iou: flo
         fid = f["id"]
         key = f"g{fid}"
         d = dec.get(key) if explains(key, f) else None
+        rk = key if d else "gt"
+        if not d and f.get("_tag") and fid in pkg_gt and pkg_gt[fid]["c"] == f["_c0"]:
+            rk, d = f["_tag"], full.get(f["_tag"])  # the class change is the tag's alone (coco_rule)
         if fid in seen_ids:
-            op_row(key if d else "gt", "reshape", d, f, fid, None, f["c"], "duplicate_id")
+            op_row(rk, "reshape", d, f, fid, None, f["c"], "duplicate_id")
             continue
         seen_ids.add(fid)
         final_by_id[fid] = f
         if fid not in base_anns:
-            op_row(key if d else "gt", "reshape" if not (fid in pkg_gt and _same(f["p"], pkg_gt[fid]["p"])) else
+            op_row(rk, "reshape" if not (fid in pkg_gt and _same(f["p"], pkg_gt[fid]["p"])) else
                    "reclass", d, f, fid, (pkg_gt.get(fid) or {}).get("c"), f["c"], "g_missing_from_base")
             continue
         g = pkg_gt.get(fid)
         if g is None:  # a base annotation the package dropped (no valid ring) but a list carries: treat as reshape
-            op_row(key if d else "gt", "reshape", d, f, fid, None, f["c"])
+            op_row(rk, "reshape", d, f, fid, None, f["c"])
             continue
         moved, recl = not _same(f["p"], g["p"]), f["c"] != g["c"]
         if moved or recl:
-            op_row(key if d else "gt", "reclass+reshape" if moved and recl else "reshape" if moved else "reclass",
+            op_row(rk, "reclass+reshape" if moved and recl else "reshape" if moved else "reclass",
                    d, f, fid, g["c"], f["c"])
         elif d and (d.get("v") or "").startswith("keep:"):
             op_row(key, "keep", d, f, fid, g["c"], g["c"])
@@ -627,6 +666,7 @@ def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou
 
     rows, skipped, applied_images, n_unchanged = [], Counter(), 0, 0
     reviewed_images, held_back = set(), set()
+    rejected, tagged = [], []  # version.json rejected_images / low_conf (images are never dropped: user decision)
     cache = {}
     base_dups = {i["id"]: base_duplicate_pairs(anns_by_img.get(i["id"], {}), dup_iou, cache) for i in base["images"]}
     per_image = {}  # base image id -> ops
@@ -640,7 +680,13 @@ def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou
         reviewed = is_reviewed(rec["edit"])
         if reviewed:
             reviewed_images.add(image)
-        if not (e["dec"] or e.get("modified")):
+        flags = image_flags(rec["edit"])
+        if flags.get("rejected"):  # recorded in every scope: a rejection has no label effect
+            rejected.append({"image": image, "reason": flags["reject_reason"], "reviewed": reviewed,
+                             "who_raw": e["dec"]["i:reject"].get("who"), "who": who_of(e["dec"]["i:reject"].get("who")),
+                             **({"note": flags["note"]} if flags.get("note") else {})})
+        # the image-level i: keys change no label; a t: tag can (coco_rule), so it counts as a change
+        if not (any(not k.startswith("i:") for k in e["dec"]) or e.get("modified")):
             n_unchanged += 1
             continue
         if scope == "reviewed_only" and not reviewed:
@@ -654,9 +700,12 @@ def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou
                          else "image_not_in_package"})
             continue
         applied_images += 1
-        ops, sk = image_ops(im, rec, anns_by_img.get(b["id"], {}), b["width"], b["height"], dup_iou, base_dups[b["id"]], cache)
+        img_tags = []
+        ops, sk = image_ops(im, rec, anns_by_img.get(b["id"], {}), b["width"], b["height"], dup_iou, base_dups[b["id"]], cache,
+                            img_tags)
         skipped.update(sk)
         per_image[b["id"]] = ops
+        tagged += [(image, b["id"], key, f, low, note, ops) for key, f, low, note in img_tags]
         rx = rec.get("rx") or {}
         for o in ops:
             rows.append({**common, **o, "rx": rx.get(o["dec_key"]), "_op": o})  # _op: ann_new is set below
@@ -696,6 +745,30 @@ def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou
                                      "segmentation": o["px"], "iscrowd": 0}
                 o["ann_new"] = next_id
                 next_id += 1
+    # The tag's COCO attributes (coco_rule): low_conf on any class but Low conf EV (that category says it), the note
+    # (the attribute comes from the tag only: a Low conf EV class label without one stays exactly as before).
+    # version.json: low_conf = the objects that are low conf (the tag, or the Low conf EV class: n_low_conf counts what
+    # reviewed_polygons calls low_conf on these images); object_notes = the other objects with a tag note.
+    low_conf, object_notes = [], []
+    names = {c["id"]: c["name"] for c in cats}
+    for image, _img_id, key, f, low, note, ops in tagged:
+        if f.get("id") is not None:
+            aid = f["id"] if f["id"] in out_anns else None
+        else:
+            aid = next((o.get("ann_new") for o in ops if o["dec_key"] == key and o["op"] in ("add", "new")
+                        and not o["conflict"] and not o.get("dropped")), None)
+        cls = names.get(out_anns[aid]["category_id"]) if aid is not None else f["c"]
+        if aid is not None:
+            attrs = {}
+            if f.get("low_conf") and cls != LOW_CONF_EV:
+                attrs["low_conf"] = True
+            if f.get("note"):
+                attrs["note"] = f["note"]
+            if attrs:
+                out_anns[aid]["attributes"] = {**(out_anns[aid].get("attributes") or {}), **attrs}
+        row = {"image": image, "key": key, "ann": aid, "cls": cls, "tagged": bool(f.get("low_conf")),
+               **({"note": note} if note else {})}
+        (low_conf if low else object_notes).append(row)
     anns = []
     for aid in sorted(out_anns):
         a = {k: v for k, v in out_anns[aid].items() if k not in INTERNAL and k != "category_name"}
@@ -743,7 +816,9 @@ def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou
                                     "note": "not in the base categories; pushing it to Roboflow needs the user's OK"}
                                    for n in new_cats],
                 "n_annotations_base": len(base["annotations"]), "n_annotations_out": len(anns),
-                "base_name": base_name, "pkg": pkg_id}
+                "base_name": base_name, "pkg": pkg_id,
+                "rejected_images": sorted(rejected, key=lambda r: r["image"]), "low_conf": low_conf,
+                "object_notes": object_notes}
     return coco, out_rows, conflicts, info_out
 
 
@@ -823,6 +898,8 @@ def main(argv=None):
                "n_annotations_base": info["n_annotations_base"], "n_annotations_out": info["n_annotations_out"],
                "labels_sha256": hashlib.sha256(labels).hexdigest(), "dup_iou": a.dup_iou,
                "class_groups_sha256": sha256_file(a.class_groups), "people_sha256": sha256_file(a.people),
+               "rejected_images": info["rejected_images"], "n_rejected": len(info["rejected_images"]),
+               "low_conf": info["low_conf"], "n_low_conf": len(info["low_conf"]), "object_notes": info["object_notes"],
                "tool": f"apply_review_edits.py {git_sha()}", "created": datetime.now().isoformat(timespec="seconds")}
     if scope == "reviewed_only":
         print(f"[OK] reviewed only: {info['n_reviewed']} of {info['n_package_images']} images; "

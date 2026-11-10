@@ -124,10 +124,11 @@ class PredictionWordsTests(trb.Base):
         page.click("#toTri")
         w = page.evaluate(WORDS)
         self.assertIn(w["title"], BRANDS)  # document.title is still the brand
-        self.assertEqual(w["keys"], "→ / A accept · ← / X reject · ↑ / S skip · Z undo · Esc close")
+        # L: the Low conf key (round 7), listed because this server has the t cap (/api/ping caps)
+        self.assertEqual(w["keys"], "→ / A accept · ← / X reject · ↑ / S skip · L accept as low conf / low conf · Z undo · Esc close")
         self.assertTrue(w["keysShown"])
         page.select_option("#triMode", "cls")
-        self.assertEqual(page.inner_text("#triKeys"), "1–8 pick class · → / A keep · ← / ↑ / S next · Z undo · Esc close")
+        self.assertEqual(page.inner_text("#triKeys"), "1–8 pick class · → / A keep · ← / ↑ / S next · L low conf · Z undo · Esc close")
         self.assertTrue(page.evaluate("document.getElementById('toTri').innerText").startswith("Quick check"))
         self.assertEqual(self.errors, [])
 

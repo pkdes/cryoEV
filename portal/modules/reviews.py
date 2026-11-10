@@ -10,8 +10,8 @@ Rules:
   - Owner = review_package.json `owner`; ctx.can_see(user, owner) before a row is built or rendered, so a package
     that is not yours leaves no trace in the page (id, name or owner).
   - Name = portal.names.display_name(<predict root>/<ps>/request.json), else the package id.
-  - Checked = images whose edits/<file>.json holds an edit that is Reviewed or edited (the rule reviewed_polygons
-    uses: annotation.prediction_package.is_edited). Of M = review_package.json n_images.
+  - Checked = images whose edits/<file>.json holds an edit that is Reviewed, edited (the rule reviewed_polygons
+    uses: annotation.prediction_package.is_edited) or rejected (is_rejected). Of M = review_package.json n_images.
   - The scan is cached per package by the edits folder's mtime (a saved edit replaces a file, which changes it).
   - This prefix (/reviews) is not the core /review page and does not match the Gate's /review/<pkg> owner rule
     (that needs the slash after /review): the module's own ROLES decide, all three roles.
@@ -55,8 +55,8 @@ def _is_checked(rec) -> bool:
     if isinstance(edit, dict) and edit.get("reviewed"):
         return True
     try:
-        from annotation.prediction_package import is_edited
-        return bool(is_edited(edit))
+        from annotation.prediction_package import is_edited, is_rejected
+        return bool(is_edited(edit) or is_rejected(edit))  # a rejected image is checked: nothing left to review
     except Exception:                                   # the tool's own rule is unavailable: any decision counts
         return isinstance(edit, dict) and bool(edit.get("dec"))
 

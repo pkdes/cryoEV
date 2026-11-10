@@ -242,9 +242,32 @@ def registry_record(pkg: Path, data: dict, built: str, predictions_dir=None) -> 
 
 # ---------------------------------------------------------------- reviewed.json
 def is_edited(edit) -> bool:
-    """Any saved decision, or an edited label list (the Editor's gt + gtT)."""
+    """Any saved object decision (g / p / n, and t:<objkey> low-conf tags: without them a tag would never reach the
+    results), or an edited label list (the Editor's gt + gtT). The image-level i:note and i:reject don't count: a
+    note or a rejection alone leaves the image's objects on the model path (rejection is read by is_rejected)."""
     e = rs._migrate(edit) if edit else {"dec": {}}
-    return bool(e["dec"]) or (bool(e.get("gtT")) and e.get("gt") is not None)
+    return any(not k.startswith("i:") for k in e["dec"]) or (bool(e.get("gtT")) and e.get("gt") is not None)
+
+
+def is_rejected(edit) -> bool:
+    """The image is rejected (i:reject set): it drops out of results; no training effect."""
+    return bool(rs.image_flags(edit).get("rejected"))
+
+
+def _edit_record(pkg: Path, file: str):
+    p = Path(pkg) / "edits" / f"{file}.json"
+    return _read_json(p).get("edit") if p.is_file() else None
+
+
+def _rejected_file(pkg: Path, file) -> bool:
+    """is_rejected for one package image; an unreadable record counts as not rejected (one bad file never stops a
+    spot check)."""
+    if not file:
+        return False
+    try:
+        return is_rejected(_edit_record(pkg, file))
+    except (OSError, ValueError, AttributeError, TypeError):
+        return False
 
 
 def _ring_px(rings, w, h):
@@ -280,7 +303,10 @@ def reviewed_polygons(pkg_dir, write=True) -> dict:
     Reviewed, so an image marked Reviewed with no decisions has [].
     neither: the model predictions at conf >= 0.50, source "model", reviewer_label / reviewer_class null.
     Every image also has n_candidates_open (additive to reviewed/1): its candidates (cand_conf <= conf < label_conf,
-    data.js pr items with u = 1) with no accept and no reject decision; all of them for an untouched image."""
+    data.js pr items with u = 1) with no accept and no reject decision; all of them for an untouched image.
+    Round 7, additive and each key only when set (readers use .get): per image rejected (true) + reject_reason
+    (i:reject; such an image has n_candidates_open 0) and note (i:note); per object (edited / reviewed images)
+    low_conf (true: its t: tag, or the Low conf EV class, review_server.is_low_conf) and note (its t: note)."""
     pkg = Path(pkg_dir)
     meta, data = _read_json(pkg / META), read_datajs(pkg)
     by_file = {i["file"]: i for i in data["images"]}
@@ -290,15 +316,16 @@ def reviewed_polygons(pkg_dir, write=True) -> dict:
         im, w, h = by_file[info["file"]], info["w"], info["h"]
         lab = {g["id"]: g for g in im["gt"]}
         lab_meta = {m["id"]: m for m in info["labels"]}
-        rec_path = pkg / "edits" / f"{info['file']}.json"
-        edit = _read_json(rec_path).get("edit") if rec_path.is_file() else None
+        edit = _edit_record(pkg, info["file"])
         reviewed, edited = bool(edit and edit.get("reviewed")), is_edited(edit)
+        flags = rs.image_flags(edit)
         if not (reviewed or edited):
-            out["images"][image] = {"reviewed": False, "edited": False, "reviewed_by": [],
-                                    "n_candidates_open": len(im["pr"]), "objects": [
+            out["images"][image] = _image_flags({"reviewed": False, "edited": False, "reviewed_by": [],
+                                                 "n_candidates_open": len(im["pr"]), "objects": [
                 {"cls": m["cls"], "poly": _ring_px(lab[m["id"]]["p"], w, h), "conf": m["conf"], "source": "model",
-                 "reviewer_label": None, "reviewer_class": None} for m in info["labels"]]}
+                 "reviewer_label": None, "reviewer_class": None} for m in info["labels"]]}, flags)
             continue
+        dec = rs._migrate(edit)["dec"]
         objs = []
         for g in rs.effective_labels(im, edit):
             src, model_cls, c_conf, orig = g.get("src") or "", None, None, None
@@ -310,24 +337,44 @@ def reviewed_polygons(pkg_dir, write=True) -> dict:
             rc = REVIEWER_CLASS.get(g["c"])
             if rc is None:
                 out["unknown_labels"] += 1
-            objs.append({"cls": (1 if rc == "nonEV" else 0) if rc else (model_cls if model_cls is not None else 0),
-                         "poly": _ring_px(g["p"], w, h), "conf": c_conf,
-                         "source": "model" if orig is not None and g["p"] == orig else "human",
-                         "reviewer_label": g["c"], "reviewer_class": rc})
-        who = sorted({d.get("who") for d in rs._migrate(edit)["dec"].values() if d.get("who")})
-        out["images"][image] = {"reviewed": reviewed, "edited": edited, "reviewed_by": who,
-                                "n_candidates_open": candidates_open(len(im["pr"]), edit), "objects": objs}
+            obj = {"cls": (1 if rc == "nonEV" else 0) if rc else (model_cls if model_cls is not None else 0),
+                   "poly": _ring_px(g["p"], w, h), "conf": c_conf,
+                   "source": "model" if orig is not None and g["p"] == orig else "human",
+                   "reviewer_label": g["c"], "reviewer_class": rc}
+            tag_v, note = rs.tag_of(dec, rs.object_key(g))
+            if rs.is_low_conf(g["c"], tag_v):
+                obj["low_conf"] = True
+            if note:
+                obj["note"] = note
+            objs.append(obj)
+        who = sorted({d.get("who") for d in dec.values() if d.get("who")})
+        out["images"][image] = _image_flags({"reviewed": reviewed, "edited": edited, "reviewed_by": who,
+                                             "n_candidates_open": candidates_open(len(im["pr"]), edit),
+                                             "objects": objs}, flags)
     if write:
         _write_json(pkg / "reviewed.json", out)
     return out
 
 
+def _image_flags(entry: dict, flags: dict) -> dict:
+    """One reviewed/1 image entry plus its image-level state (rs.image_flags), keys only when set, after the
+    existing keys. A rejected image has no open candidates: nobody needs to decide them."""
+    if flags.get("rejected"):
+        entry["n_candidates_open"] = 0
+        entry["rejected"], entry["reject_reason"] = True, flags["reject_reason"]
+    if flags.get("note"):
+        entry["note"] = flags["note"]
+    return entry
+
+
 # ---------------------------------------------------------------- spot check
 def _spot_rows(src: Path):
-    """[(image, sample_label, n_candidates, n_labels)] from a package (its sidecar) or a prediction set."""
+    """[(image, sample_label, n_candidates, n_labels)] from a package (its sidecar) or a prediction set. A package's
+    rejected images (i:reject) are left out: they drop out of results, so there is nothing to spot-check."""
     if (src / META).is_file():
         meta = _read_json(src / META)
-        return [(i, m["sample_label"], len(m["candidates"]), len(m["labels"])) for i, m in meta["images"].items()], meta
+        return [(i, m["sample_label"], len(m["candidates"]), len(m["labels"])) for i, m in meta["images"].items()
+                if not _rejected_file(src, m.get("file"))], meta
     _, ps_id, model, rows, pred_dir = _ps_inputs(src)
     out = []
     for r in rows:

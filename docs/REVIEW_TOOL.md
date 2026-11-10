@@ -185,6 +185,10 @@ edit = {dec: {key: {v, t, who, p?, server_t?}}, gt?, gtT?, reviewed, reviewedT, 
 | `n<uid>` (**new**: an outline drawn in the Editor) | `new:<class>` + `p` (always) | Add this drawn outline as a label |
 | | `del` | Deleted again |
 | any | `null` | Undone. A label goes back to the package's version; an added object is dropped |
+| `i:reject` (the image) | `reject:<reason>` | Reject the whole image (round 7; reasons below). It drops out of results; no training effect |
+| `i:note` (the image) | `<text>` (≤ 1000 characters) | A note on the image |
+| `t:<objkey>` (`objkey` = the object's own key: `g<id>`, `p<k>`, `n<uid>`) | `lowconf` [+ `note`] | The **Low conf** tag (+ an optional note ≤ 300) |
+| | `plain` + `note` | A note on the object, without the tag |
 
 - Redraw and vertex edits create **no new value type**. They write `keep:<class>` + `p` for a label, or `add:<class>` + `p` for an accepted prediction, as card reshapes already did.
 - Since this version, every Editor change also writes that object's decision: reclass, redraw, vertex move / add / delete, new shape. So an Editor change merges per object, like card decisions.
@@ -223,7 +227,11 @@ edit = {dec: {key: {v, t, who, p?, server_t?}}, gt?, gtT?, reviewed, reviewedT, 
 - an unknown decision key;
 - a `new:` without `p`;
 - a ring with < 3 points or a coordinate outside [0, 1] (± 1e-6);
-- a `gt` item not shaped like a `data.js` label (`c` string, `p` rings, `id` int or null, `src` `p…`/`n…`, `t` number).
+- a `gt` item not shaped like a `data.js` label (`c` string, `p` rings, `id` int or null, `src` `p…`/`n…`, `t` number);
+- an `i:` / `t:` decision that isn't exactly `i:reject`, `i:note` or `t:(g<digits>|p<digits>|n<[0-9a-z]+>)`, is a
+  bare string, has a field other than `v`, `t`, `who`, `server_t`, `pending`, `note` (so no `p`), a key longer than 64,
+  a reason not in the list, a note that isn't a string within its cap (1000 / 300), or a `v` / `note` that isn't
+  valid UTF-8 (a lone surrogate such as `\ud800` would crash every later writer of the package).
 
 The page clamps coordinates. If the server rejects one image, the page shows a banner and still syncs the others.
 
@@ -232,6 +240,54 @@ The page clamps coordinates. If the server rejects one image, the page shows a b
 - The planned `apply_review_edits.py` should use it, and add categories missing from the export; see Classes.
 
 Known limit: older items without a decision key or `t` still follow the whole-list rule. That means September-era list items until their first edit, and keyless hand-drawn outlines until the Editor keys them. Two offline reviewers who both change such an item: the newer list wins.
+
+## Reject, notes, low conf (round 7)
+New image and object state are **decisions on keys of their own** (`i:reject`, `i:note`, `t:<objkey>`; table above), never
+extra fields on a class decision. So they merge per key (the newest received wins), carry `who` and `server_t`, and
+pass through older pages, exports and imports untouched. A class change on another device leaves an object's `t:` as it is.
+
+- **Capability gate.** `GET /api/ping` answers `{"ok": true, "caps": ["i", "t"]}`. The page shows the reject, note and
+  Low conf controls only when the caps are there. A server started on older code answers `{"ok": true}` and would
+  refuse the new keys with a 400, so the page never offers them; the same for a page opened from a file. The multi
+  server reads `index.html` from disk on every request but validates with the code it started with: restart the
+  review servers in the same step as the code moves.
+- **Reject image** (Editor side panel "Image", or **⚑ Image** on a card): the reason chips (`thick ice`, `empty`,
+  `contaminated`, `crystalline ice`, `broken carbon`, `aggregates`, `out of focus / drift`, `other`; the gallery's
+  tags plus focus) and the image note in one dialog. Save writes only what was changed in the dialog, compared with
+  the values when it opened: a reject or note that arrived from another device meanwhile is never overwritten. A rejected image gets a red **Rejected** badge in the image list,
+  a ✕ status, the **Rejected** status filter and count, and the reason in the header. Quick check and class review
+  skip its cards (they come back when it is un-rejected); the spot check leaves it out. Its outlines stay.
+- **Image note** (✎ in the list, the text in the side panel). A note alone doesn't make the image "edited".
+- **Low conf tag** on the selected counted object (labels, accepted candidates, drawn outlines): **◐ Low conf** (**L**)
+  turns it on / off, with a note box under it. It is drawn as a solid amber double line plus a small "low conf" tag at
+  the top right, unlike the dashed / dotted flag halos (`lc` long grey dashes, `x` orange dots). On an unaccepted candidate the button reads **◐ Accept as low
+  conf**: `p<k>` `add:<cls>` and `t:p<k>` `lowconf` in one step, undone together (Editor **Z**, card ↺). On cards the
+  ◐ button (**L**) does the same, and lists in the key legend. A keyless legacy outline gets its key first.
+- **Low conf EV** stays a class (old data, the lab package) and reads as EV + low conf: its ◐ shows on, and turning it
+  off writes `t:` null (or `plain` with a note) **plus** `keep:EV`. In the class picker it is labelled "(= EV + Low
+  conf)"; picking it still writes the class, and turns a note-only (`plain`) tag on that object into `lowconf` (note
+  kept) in the same step, so class and tag agree. Class review ranks tagged labels with the Low conf EV flags.
+- **Text** (reasons, notes) is set with `textContent` / `title` only, never as HTML.
+- **Undo:** `Z` / ↺ undo the tag like any object decision. The image's reject and note are never part of an object
+  undo step: change them in their dialog (the **Not rejected** chip un-rejects). The Editor's help says so.
+
+**Downstream**
+- `reviewed.json` (`reviewed/1`, additive, each key **only when set**, so files without the new decisions are
+  byte-identical to before; readers use `.get`): per image `rejected: true` + `reject_reason`, `note`; a rejected
+  image has `n_candidates_open: 0`. Per object `low_conf: true` (the tag, or the Low conf EV class: such a label
+  stops being low conf only when it is turned into EV) and `note`.
+- `is_edited` ignores the `i:` keys (a note or a rejection alone leaves the image on the model path) and counts `t:`
+  (else the tags would never reach results). The portal's "checked" count = edited, Reviewed or rejected.
+- `effective_labels()` / `effGt()` pass `low_conf` / `note` through from `t:<key>`.
+- `apply_review_edits.py`: the `i:` / `t:` keys are never counted as ops (a note "no" is not a removal). **The one COCO
+  rule**, applied before the diff: EV + tag -> category Low conf EV (training unchanged; the change row is a reclass
+  with `dec_key` `t:<key>` when the tag alone changed it); any other class keeps its class with
+  `attributes.low_conf = true`; a tag note goes in `attributes.note`. Images are never dropped. `version.json` adds
+  `rejected_images` (image, reason, reviewed, who_raw, who, note) + `n_rejected`; `low_conf`, the applied images'
+  objects that are low conf (the tag, or the Low conf EV class: the same rule as `reviewed.json`) + `n_low_conf`; and
+  `object_notes`, the other objects with a tag note. Their rows: image, key (the object's decision key), ann (its id
+  in the output, null if not written), cls (its category there), tagged (`t:` is `lowconf`), note. A record with only
+  `i:` keys is a record without changes; a `t:` tag counts as a change.
 
 ## Shipping a partial review
 1. Review images in the tool and press **R** on each one you have checked (also when you changed nothing).
@@ -327,4 +383,12 @@ python -m unittest discover -s annotation/tests -v
 - Real packages are copied to a temp folder and never written.
   - September v4, searched in order: `$CRYOEV_REVIEW_PACKAGE`, then `CryoAI/annotation review/cryoai_v4_review` beside the repo, then the Box copy.
   - Pre-lipo, searched in order: `$CRYOEV_PRELIPO_PACKAGE`, then `CryoAI-laptop/review/prelipo_v5F5_review`.
+- `test_review_reject_lowconf.py` (round 7): `valid_edit` for the new keys, `/api/ping` caps, the HEAD (00a1921)
+  `valid_edit` refusing them; two devices merged per key; a class change keeping the tag; `effective_labels`,
+  `is_edited`, `is_rejected`, `_is_checked`, the spot check; `reviewed.json` fields only when set; `apply_review_edits`
+  (a note "no" is no removal, the COCO rule, `version.json`, a tag-only record).
+- `test_review_reject_lowconf_browser.py` (Playwright): the page against the HEAD server hides every new control and
+  sends no new key; reject + note, badge, filter, counts, Quick check skipping; XSS strings inert; Accept as low conf
+  and its one-step undo (Editor and cards); the toggle and note, the Low conf EV alias; export -> import round trip;
+  screenshots at 1280 / 390 / 360 px, light and dark.
 - `REVIEW_TEST_SHOTS=<dir>` keeps phone screenshots.
