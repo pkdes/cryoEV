@@ -91,7 +91,7 @@ class OldServerCapsGateTests(Base):
             src = subprocess.run(["git", "show", f"{HEAD}:annotation/review_server.py"], cwd=HERE, capture_output=True,
                                  text=True, check=True, encoding="utf-8").stdout
         except (OSError, subprocess.CalledProcessError):
-            raise unittest.SkipTest(f"git show {HEAD} unavailable")
+            raise unittest.SkipTest(f"CONTROL NOT RUN: no git history (git show {HEAD} failed)")
         cls._old_dir = Path(tempfile.mkdtemp(prefix="old_server_"))
         script = cls._old_dir / "review_server.py"
         script.write_text(src, encoding="utf-8")
@@ -195,6 +195,38 @@ class RejectNoteTests(Base):
         self.check_js_equals_python(page)
 
 
+class ImageDialogRaceTests(Base):
+    """M1: saving the image dialog writes only what this reviewer changed in it. Another device's reject that arrived
+    (pull) while the dialog was open survives a save that only changed the note."""
+
+    def test_save_keeps_a_reject_that_arrived_while_open(self):
+        f = "fixB_old.png"
+        page = self.open("&who=tester&mode=editor", **DESK)
+        self.go(page, f)
+        page.click("#imgEdit")  # opened: not rejected, no note
+        code = self.srv.put(f, {"t": 1, "dec": {"i:reject": {"v": "reject:thick ice", "t": 1, "who": "bob", "pending": True},
+                                               "i:note": {"v": "B note", "t": 1, "who": "bob", "pending": True}}})[0]
+        self.assertEqual(code, 200)
+        page.evaluate("__review.pull()")
+        page.wait_for_function(f"(__review.edits()[{json.dumps(f)}].dec['i:reject'] || {{}}).v === 'reject:thick ice'")
+        page.fill("#imgNote", "A note")  # A changes only the note
+        page.click("#imgSave")
+        self.synced(page)
+        d = self.saved_dec(f)
+        self.assertEqual((d["i:reject"]["v"], d["i:reject"]["who"]), ("reject:thick ice", "bob"))  # untouched by A
+        self.assertEqual((d["i:note"]["v"], d["i:note"]["who"]), ("A note", "tester"))  # A's own change: newest wins
+        # and the other way round: A opens, B changes the note, A only un-rejects -> B's note stays
+        page.click("#imgEdit")
+        self.srv.put(f, {"t": 2, "dec": {"i:note": {"v": "B again", "t": 2, "who": "bob", "pending": True}}})
+        page.evaluate("__review.pull()")
+        page.wait_for_function(f"__review.edits()[{json.dumps(f)}].dec['i:note'].v === 'B again'")
+        page.click("#rejChips button:has-text('Not rejected')")
+        page.click("#imgSave")
+        self.synced(page)
+        d = self.saved_dec(f)
+        self.assertEqual((d["i:reject"]["v"], d["i:note"]["v"], d["i:note"]["who"]), (None, "B again", "bob"))
+
+
 class LowConfTests(Base):
     def test_accept_as_low_conf_in_the_editor_undone_together(self):
         f = "fixB_old.png"
@@ -240,6 +272,16 @@ class LowConfTests(Base):
         t = self.saved_dec(f)["t:g105"]
         self.assertEqual((t["v"], t["note"]), ("plain", XSS))
         self.assertNotIn("low_conf", self.obj(page, f, 105))
+        # S1: the Low conf EV alias picked while the tag is note-only: the tag becomes lowconf, the note kept, one step
+        page.keyboard.press("2")
+        self.synced(page)
+        d = self.saved_dec(f)
+        self.assertEqual((d["g105"]["v"], d["t:g105"]["v"], d["t:g105"]["note"]), ("keep:Low conf EV", "lowconf", XSS))
+        self.assertIn("on", page.get_attribute("#lowBtn", "class"))
+        page.keyboard.press("z")
+        self.synced(page)
+        d = self.saved_dec(f)
+        self.assertEqual((d["t:g105"]["v"], self.obj(page, f, 105)["c"]), ("plain", "EV"))
         # a Low conf EV label reads as low conf; turning it off makes it EV
         self.click_obj(page, next(g for g in self.image(f)["gt"] if g["id"] == 104)["p"][0])
         page.wait_for_function("__review.state().sel && __review.state().sel.key === 'g104'")

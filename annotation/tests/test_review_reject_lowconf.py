@@ -75,6 +75,16 @@ class ValidEditTests(unittest.TestCase):
         for d in bad:
             self.assertFalse(self.ok(d), d)
 
+    def test_crafted_state_decisions_refused(self):
+        """S2: only the decision fields, UTF-8 encodable strings (a lone surrogate would crash every later writer),
+        a bounded key."""
+        lone = json.loads('"x\\ud800y"')
+        self.assertRaises(UnicodeEncodeError, lone.encode, "utf-8")  # control: it really is unencodable
+        for d in ({"t:g1": dec("lowconf", seed="s")}, {"i:note": dec("n", extra=1)}, {"t:g1": dec("lowconf", p=None)},
+                  {"i:note": dec(lone)}, {"t:g1": dec("plain", note=lone)}, {"t:n" + "a" * 62: dec("lowconf")}):
+            self.assertFalse(self.ok(d), d)
+        self.assertTrue(self.ok({"t:g" + "1" * 61: dec("lowconf")}))  # 64 characters: the cap
+
     def test_old_keys_unchanged(self):
         self.assertTrue(self.ok({"g1": dec("keep:EV"), "p0": "no", "nabc": dec("new:EV", p=[[0, 0, 1, 0, 1, 1]])}))
         self.assertFalse(self.ok({"x1": dec("keep:EV")}))
@@ -85,7 +95,7 @@ class ValidEditTests(unittest.TestCase):
             src = subprocess.run(["git", "show", f"{HEAD}:annotation/review_server.py"], cwd=REPO, capture_output=True,
                                  text=True, check=True, encoding="utf-8").stdout
         except (OSError, subprocess.CalledProcessError):
-            self.skipTest(f"git show {HEAD} unavailable")
+            self.skipTest(f"CONTROL NOT RUN: no git history (git show {HEAD} failed)")
         old = types.ModuleType("review_server_head")
         old.__file__ = str(REPO / "annotation" / "review_server.py")  # people.json is looked up beside it
         exec(compile(src, "review_server_head.py", "exec"), old.__dict__)
@@ -150,6 +160,10 @@ class ServerMergeTests(unittest.TestCase):
     def test_bad_new_key_is_a_400_and_nothing_is_stored(self):
         f = "fixD_new.png"
         before = self.srv.request("GET", "/api/edits")[1].get(f)
+        for raw in (b'{"t": 1, "dec": {"i:note": {"v": "a\\ud800", "t": 1, "who": "x"}}}',
+                    b'{"t": 1, "dec": {"t:g401": {"v": "lowconf", "t": 1, "who": "x", "note": "\\udfff"}}}',
+                    b'{"t": 1, "dec": {"t:g401": {"v": "lowconf", "t": 1, "who": "x", "big": "' + b"z" * 5000 + b'"}}}'):
+            self.assertEqual(self.srv.put(f, raw)[0], 400, raw[:80])
         for d in ({"i:reject": dec("reject:nope", pending=True)}, {"i:note": dec("x" * 1001, pending=True)},
                   {"t:g401": dec("lowconf", note="y" * 301, pending=True)}):
             self.assertEqual(self.srv.put(f, {"t": 1, "dec": d})[0], 400, d)
@@ -171,7 +185,8 @@ class HelperTests(unittest.TestCase):
         self.assertEqual({k for k in out[1]} | {k for k in out[2]}, {"id", "c", "p"})  # undone / blank note: nothing
         self.assertEqual(rs.tag_of(rs._migrate(e)["dec"], "g2"), ("plain", None))
         self.assertTrue(rs.is_low_conf("Low conf EV", None))
-        self.assertFalse(rs.is_low_conf("Low conf EV", "plain"))
+        self.assertTrue(rs.is_low_conf("Low conf EV", "plain"))  # the class: off only by turning it into EV
+        self.assertFalse(rs.is_low_conf("EV", "plain"))
         self.assertTrue(rs.is_low_conf("MV", "lowconf"))
 
     def test_is_edited_ignores_image_keys_counts_tags(self):
@@ -214,7 +229,7 @@ class ReviewedPolygonsTests(tpp.Tmp):
         got = pp.reviewed_polygons(pkg, write=False)
         ia, ib, ic = (got["images"][k] for k in ("0001", "0002", "0003"))
         self.assertEqual([(o["reviewer_label"], o.get("low_conf"), o.get("note")) for o in ia["objects"]],
-                         [("EV", True, XSS), ("Low conf EV", True, None), ("Low conf EV", None, "off"),
+                         [("EV", True, XSS), ("Low conf EV", True, None), ("Low conf EV", True, "off"),
                           (ia["objects"][3]["reviewer_label"], None, "just a note")])
         self.assertEqual((ia["edited"], ia["note"], "rejected" in ia), (True, "image note", False))
         # 0002: rejected + note, no object decision -> model path, no open candidates, nothing else changed
@@ -258,7 +273,8 @@ class ApplyTests(unittest.TestCase):
             self.assertEqual(ver1[k], ver0[k], k)
         self.assertEqual(ver1["rejected_images"], [{"image": "a_png", "reason": "empty", "reviewed": True, "who_raw": "ann",
                                                     "who": "unknown", "note": "no"}])
-        self.assertEqual((ver0["rejected_images"], ver0["low_conf"], ver1["low_conf"]), ([], [], []))
+        self.assertEqual((ver0["rejected_images"], ver0["object_notes"], ver1["object_notes"]), ([], [], []))
+        self.assertEqual(ver1["low_conf"], ver0["low_conf"])  # p0 add:Low conf EV, in both
         self.assertEqual(len(coco1["images"]), 3)  # never dropped
         # image_ops directly: the i: / t: keys are not counted as superseded / undone / removed_again
         data = tar.ar.read_data_js(self.pkg / "data.js")
@@ -286,10 +302,12 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual((r6["dec_key"], r6["op"], r6["cls_from"], r6["cls_to"], r6["who_raw"], r6["status"]),
                          ("t:g6", "reclass", "EV", "Low conf EV", "Pujan", "applied"))
         self.assertFalse(any(r["dec_key"].startswith("i:") for r in rows))
-        self.assertEqual({(x["dec_key"], x["cls"], x["low_conf"], x.get("note")) for x in ver["low_conf"]},
-                         {("t:g6", "Low conf EV", True, None), ("t:g2", "MV", True, "thin"),
-                          ("t:p1", "Low conf EV", True, None), ("t:g7", "MV", False, XSS)})
+        # low_conf = what is low conf (tag, or the Low conf EV class: p0 add:Low conf EV); note-only -> object_notes
+        self.assertEqual({(x["key"], x["cls"], x["tagged"], x.get("note")) for x in ver["low_conf"]},
+                         {("g6", "Low conf EV", True, None), ("g2", "MV", True, "thin"),
+                          ("p1", "Low conf EV", True, None), ("p0", "Low conf EV", False, None)})
         self.assertEqual(ver["n_low_conf"], 4)
+        self.assertEqual([(x["key"], x["cls"], x["tagged"], x["note"]) for x in ver["object_notes"]], [("g7", "MV", False, XSS)])
         self.assertEqual(ver["n_annotations_out"], json.loads(self.base.read_text())["annotations"].__len__() - 1 + 4)
 
     def test_tag_only_record_counts_as_a_change(self):

@@ -306,7 +306,7 @@ def reviewed_polygons(pkg_dir, write=True) -> dict:
     data.js pr items with u = 1) with no accept and no reject decision; all of them for an untouched image.
     Round 7, additive and each key only when set (readers use .get): per image rejected (true) + reject_reason
     (i:reject; such an image has n_candidates_open 0) and note (i:note); per object (edited / reviewed images)
-    low_conf (true: its t: tag, or the Low conf EV class unless the tag was turned off) and note (its t: note)."""
+    low_conf (true: its t: tag, or the Low conf EV class, review_server.is_low_conf) and note (its t: note)."""
     pkg = Path(pkg_dir)
     meta, data = _read_json(pkg / META), read_datajs(pkg)
     by_file = {i["file"]: i for i in data["images"]}

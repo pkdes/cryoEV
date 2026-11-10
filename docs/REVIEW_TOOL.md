@@ -229,7 +229,9 @@ edit = {dec: {key: {v, t, who, p?, server_t?}}, gt?, gtT?, reviewed, reviewedT, 
 - a ring with < 3 points or a coordinate outside [0, 1] (± 1e-6);
 - a `gt` item not shaped like a `data.js` label (`c` string, `p` rings, `id` int or null, `src` `p…`/`n…`, `t` number);
 - an `i:` / `t:` decision that isn't exactly `i:reject`, `i:note` or `t:(g<digits>|p<digits>|n<[0-9a-z]+>)`, is a
-  bare string, has a `p`, a reason not in the list, or a note that isn't a string within its cap (1000 / 300).
+  bare string, has a field other than `v`, `t`, `who`, `server_t`, `pending`, `note` (so no `p`), a key longer than 64,
+  a reason not in the list, a note that isn't a string within its cap (1000 / 300), or a `v` / `note` that isn't
+  valid UTF-8 (a lone surrogate such as `\ud800` would crash every later writer of the package).
 
 The page clamps coordinates. If the server rejects one image, the page shows a banner and still syncs the others.
 
@@ -251,27 +253,29 @@ pass through older pages, exports and imports untouched. A class change on anoth
   review servers in the same step as the code moves.
 - **Reject image** (Editor side panel "Image", or **⚑ Image** on a card): the reason chips (`thick ice`, `empty`,
   `contaminated`, `crystalline ice`, `broken carbon`, `aggregates`, `out of focus / drift`, `other`; the gallery's
-  tags plus focus) and the image note in one dialog. A rejected image gets a red **Rejected** badge in the image list,
+  tags plus focus) and the image note in one dialog. Save writes only what was changed in the dialog, compared with
+  the values when it opened: a reject or note that arrived from another device meanwhile is never overwritten. A rejected image gets a red **Rejected** badge in the image list,
   a ✕ status, the **Rejected** status filter and count, and the reason in the header. Quick check and class review
   skip its cards (they come back when it is un-rejected); the spot check leaves it out. Its outlines stay.
 - **Image note** (✎ in the list, the text in the side panel). A note alone doesn't make the image "edited".
 - **Low conf tag** on the selected counted object (labels, accepted candidates, drawn outlines): **◐ Low conf** (**L**)
-  turns it on / off, with a note box under it. It is drawn as round amber dots plus a small "low conf" tag at the top
-  right, unlike the long grey dashes of the `lc` flag. On an unaccepted candidate the button reads **◐ Accept as low
+  turns it on / off, with a note box under it. It is drawn as a solid amber double line plus a small "low conf" tag at
+  the top right, unlike the dashed / dotted flag halos (`lc` long grey dashes, `x` orange dots). On an unaccepted candidate the button reads **◐ Accept as low
   conf**: `p<k>` `add:<cls>` and `t:p<k>` `lowconf` in one step, undone together (Editor **Z**, card ↺). On cards the
   ◐ button (**L**) does the same, and lists in the key legend. A keyless legacy outline gets its key first.
 - **Low conf EV** stays a class (old data, the lab package) and reads as EV + low conf: its ◐ shows on, and turning it
   off writes `t:` null (or `plain` with a note) **plus** `keep:EV`. In the class picker it is labelled "(= EV + Low
-  conf)"; picking it still writes the class. Class review ranks tagged labels with the Low conf EV flags.
+  conf)"; picking it still writes the class, and turns a note-only (`plain`) tag on that object into `lowconf` (note
+  kept) in the same step, so class and tag agree. Class review ranks tagged labels with the Low conf EV flags.
 - **Text** (reasons, notes) is set with `textContent` / `title` only, never as HTML.
 - **Undo:** `Z` / ↺ undo the tag like any object decision. The image's reject and note are never part of an object
-  undo step: change them in their dialog.
+  undo step: change them in their dialog (the **Not rejected** chip un-rejects). The Editor's help says so.
 
 **Downstream**
 - `reviewed.json` (`reviewed/1`, additive, each key **only when set**, so files without the new decisions are
   byte-identical to before; readers use `.get`): per image `rejected: true` + `reject_reason`, `note`; a rejected
-  image has `n_candidates_open: 0`. Per object `low_conf: true` (the tag, or Low conf EV unless the tag is `plain`)
-  and `note`.
+  image has `n_candidates_open: 0`. Per object `low_conf: true` (the tag, or the Low conf EV class: such a label
+  stops being low conf only when it is turned into EV) and `note`.
 - `is_edited` ignores the `i:` keys (a note or a rejection alone leaves the image on the model path) and counts `t:`
   (else the tags would never reach results). The portal's "checked" count = edited, Reviewed or rejected.
 - `effective_labels()` / `effGt()` pass `low_conf` / `note` through from `t:<key>`.
@@ -279,8 +283,11 @@ pass through older pages, exports and imports untouched. A class change on anoth
   rule**, applied before the diff: EV + tag -> category Low conf EV (training unchanged; the change row is a reclass
   with `dec_key` `t:<key>` when the tag alone changed it); any other class keeps its class with
   `attributes.low_conf = true`; a tag note goes in `attributes.note`. Images are never dropped. `version.json` adds
-  `rejected_images` (image, reason, reviewed, who), `low_conf` (image, dec_key, ann, class, note) and their counts. A
-  record with only `i:` keys is a record without changes; a `t:` tag counts as a change.
+  `rejected_images` (image, reason, reviewed, who_raw, who, note) + `n_rejected`; `low_conf`, the applied images'
+  objects that are low conf (the tag, or the Low conf EV class: the same rule as `reviewed.json`) + `n_low_conf`; and
+  `object_notes`, the other objects with a tag note. Their rows: image, key (the object's decision key), ann (its id
+  in the output, null if not written), cls (its category there), tagged (`t:` is `lowconf`), note. A record with only
+  `i:` keys is a record without changes; a `t:` tag counts as a change.
 
 ## Shipping a partial review
 1. Review images in the tool and press **R** on each one you have checked (also when you changed nothing).

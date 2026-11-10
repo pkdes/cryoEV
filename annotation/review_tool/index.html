@@ -152,7 +152,7 @@ body.sandbox #list,body.sandbox #side{top:var(--sbh,0px)}
 .rejb{font-size:11px;font-weight:700;color:#fff;background:#dc2626;border-radius:8px;padding:0 6px;white-space:nowrap}
 .notem{font-size:13px;color:var(--acc);cursor:help}
 #rejTag{max-width:240px;overflow:hidden;text-overflow:ellipsis}
-#rejTag[hidden],#imgSec[hidden],#triImgBtn[hidden],#aLow[hidden],#helpL[hidden]{display:none}
+#rejTag[hidden],#imgSec[hidden],#triImgBtn[hidden],#aLow[hidden],#helpL[hidden],#helpI[hidden]{display:none}
 #side #imgBox{flex-direction:column;align-items:flex-start}
 #side #imgBox #imgNoteShow{align-self:stretch}
 #imgBox .st{font-weight:600}#imgBox .st.rej{color:#dc2626}
@@ -258,6 +258,7 @@ button.lowTog.on{background:#f59e0b;border-color:#f59e0b;color:#1c1300;font-weig
     <li><kbd>E</kbd> redraw the selected outline (keeps class and id)</li>
     <li><kbd>1</kbd>–<kbd>8</kbd> or a class chip: reclass the selection; also the class for new shapes</li>
     <li id="helpL" hidden><kbd>L</kbd> Low conf tag on the selection, on / off (still counted; a selected unsure outline is accepted as low conf). Its note and the image's reject / note are in this panel</li>
+    <li id="helpI" hidden>Image reject and note: <kbd>Z</kbd> doesn't undo them. Change them in their dialog (the <b>Not rejected</b> chip un-rejects)</li>
     <li><kbd>N</kbd>/<kbd>P</kbd> next/prev · <kbd>R</kbd> reviewed · <kbd>Z</kbd> undo · <kbd>T</kbd> toggle <span id="helpT">predictions</span> · <kbd>H</kbd> hide/show all outlines</li>
   </ul>
   <h3>Saving</h3>
@@ -493,8 +494,14 @@ const rejectOf = file => { const d = decOf(file, "i:reject"); return d && typeof
 const noteOf = file => { const d = decOf(file, "i:note"); return d && typeof d.v === "string" && d.v.trim() ? d.v : ""; };
 // The object's t:<key> tag: v "lowconf" | "plain" (a note without the tag) | null; its note only while v is set
 const tagOf = (file, key) => { const d = decOf(file, key ? "t:" + key : null); return d && d.v ? {v: d.v, note: typeof d.note === "string" ? d.note : ""} : {v: null, note: ""}; };
-// Low conf: the tag, or the Low conf EV class unless the tag was turned off ("plain"): review_server.is_low_conf
-const isLowObj = (file, g) => { const v = tagOf(file, keyOf(g)).v; return v === "lowconf" || (g.c === "Low conf EV" && v !== "plain"); };
+// Low conf: the tag, or the Low conf EV class (turning it off makes the label EV): review_server.is_low_conf
+const isLowObj = (file, g) => g.c === "Low conf EV" || tagOf(file, keyOf(g)).v === "lowconf";
+// The Low conf EV alias picked (class picker, chips, cards) with the t cap: a note-only tag ("plain") on that object
+// becomes the Low conf tag, keeping its note, in the same step, so the tag and the class always agree.
+function aliasTag(e, file, key, cls) {
+  if (cls !== "Low conf EV" || !capOn("t") || !key) return;
+  const t = tagOf(file, key); if (t.v === "plain") setDec(e, "t:" + key, "lowconf", undefined, t.note);
+}
 // U7: a decision carried over from the September review has seed ("september:<v4 file>:<v4 key>", written by
 // resolve_review_edits.py). Display only: read here, never written; a reviewer's new decision has no seed.
 const seedOf = (file, key) => { const d = key && edits[file] && edits[file].dec && edits[file].dec[key]; return d && d.v && d.seed ? d.seed : null; };
@@ -731,8 +738,9 @@ function draw() {
         if (g.x) halo(g, FLAG.x, 5, [2, 4]);
         if (g.lc) halo(g, FLAG.lc, 4, [9, 6]);
       }
-      // the Low conf tag: round amber dots + a "low conf" tag at the top-right (the lc flag halo is long grey dashes)
-      if (g.low_conf) { ctx.lineCap = "round"; halo(g, LOWC, 3.5, [0.1, 6]); ctx.lineCap = "butt"; lowTags.push(g); }
+      // the Low conf tag: a solid amber double line + a "low conf" tag at the top-right (unlike the dashed / dotted
+      // flag halos: lc long grey dashes, x orange dots)
+      if (g.low_conf) { halo(g, LOWC, 7, []); halo(g, "rgba(0,0,0,.85)", 2.5, []); lowTags.push(g); }
       ctx.lineWidth = 1.6; ctx.strokeStyle = catColor(g.c);
       g.p.forEach(rg => { path(rg); ctx.stroke(); });
       if ($("showSept").checked && seedOf(im.file, keyOf(g))) septTags.push(g);
@@ -886,8 +894,8 @@ function legend() {
     [sw(`5px dotted ${FLAG.x}`), "class disagrees with the matched object (label halo, dotted prediction)"],
     [sw(`4px dashed ${FLAG.lc}`), "Low conf EV label: confirm the class"],
     [`<span class="sept" style="margin-right:6px">Sept</span>`, "decision carried from the September review (gone once someone re-decides)"]]),
-    ...(capOn("t") ? [[`<span class="sw"><i style="border-top:3px dotted ${LOWC}"></i></span>`,
-      `Low conf tag (L), "low conf" above it: a reviewer is unsure; still counted, reported as low conf. Low conf EV = EV with this tag`]] : []),
+    ...(capOn("t") ? [[`<span class="sw"><i style="border-top:5px double ${LOWC}"></i></span>`,
+      `Low conf tag (L): amber double line, "low conf" above it: a reviewer is unsure; still counted, reported as low conf. Low conf EV = EV with this tag`]] : []),
   ].map(([s, t]) => `<div>${s}${t}</div>`).join("") + `<div style="color:var(--mute);margin-top:3px">Flags disappear once the object has a decision.${isPredPkg ? "" : " Older packages have only the first three."}</div>`;
 }
 function renderChips() {
@@ -940,7 +948,7 @@ function setCat(c) {  // Select mode: reclass the selection (accept a selected p
   if (!sel || sel.kind !== "gt" || (mode !== "select" && redrawKey == null)) { hint(); renderSide(); return; }
   if (!needWho(() => setCat(c))) return;
   const im = curImg(); pushUndo();
-  const e = ensureEdit(im), g = selEdit(e); if (!g) return; g.c = c; record(im, e, g);
+  const e = ensureEdit(im), g = selEdit(e); if (!g) return; g.c = c; record(im, e, g); aliasTag(e, im.file, keyOf(g), c);
   changed();
 }
 function deleteSel() {
@@ -955,7 +963,7 @@ function acceptPred(cls) {  // A / "Accept": no class given = the predicted clas
   const im = curImg(), key = "p" + sel.i, p = im.pr[sel.i]; cls = cls || predCls(p); pushUndo();
   const e = ensureEdit(im); e.gt = e.gt.filter(g => g.src !== key);  // accepting twice must not duplicate it
   e.gt.push({id: null, c: cls, p: clone(p.p), src: key});
-  setDec(e, key, "add:" + cls);
+  setDec(e, key, "add:" + cls); aliasTag(e, im.file, key, cls);
   sel = {kind: "gt", key}; changed();
 }
 function rejectPred() {  // X / "Reject": a selected prediction is not an object; an accepted one is rejected again (as Del)
@@ -1005,6 +1013,7 @@ function reclassKey(e, im, key, cls) {  // cards: the object's class decision, k
   if (key[0] === "g") setDec(e, key, "keep:" + cls, p);
   else if (key[0] === "p") setDec(e, key, "add:" + cls, p);
   else if (key[0] === "n") { const np = p || (findKey(effGt(im), key) || {}).p; if (np) setDec(e, key, "new:" + cls, clone(np)); }
+  aliasTag(e, im.file, key, cls);
 }
 function renderImgBox() {  // Editor: the header's Rejected tag and the side panel's reject state and note (textContent only)
   const im = curImg(), rj = rejectOf(im.file), tag = $("rejTag");
@@ -1019,10 +1028,13 @@ function renderImgBox() {  // Editor: the header's Rejected tag and the side pan
   const b = document.createElement("button"); b.id = "imgEdit"; b.textContent = rj || nt ? "Change reject / note…" : "Reject image or add a note…";
   b.onclick = () => openImg(cur); box.append(b);
 }
-let imgFor = -1, imgPick = null;  // the image dialog: which image, and the reason picked (null = not rejected)
+// The image dialog: which image, the reason picked (null = not rejected), and both values as the dialog opened
+// (pick0, note0). Save writes only what this reviewer changed in the dialog: a reject or note that arrived from another
+// device while it was open (a pull) is never overwritten by values the reviewer didn't touch.
+let imgFor = -1, imgPick = null, pick0 = null, note0 = "";
 function openImg(i) {
   if (!capOn("i") || !D.images[i]) return;
-  const im = D.images[i]; imgFor = i; imgPick = rejectOf(im.file);
+  const im = D.images[i]; imgFor = i; imgPick = pick0 = rejectOf(im.file); note0 = noteOf(im.file).trim();
   $("imgDlgName").textContent = shortName(im.file); $("imgDlgName").title = im.file;
   $("imgNote").value = noteOf(im.file); noteCount(); renderRejChips(); $("imgDlg").hidden = false;
 }
@@ -1041,8 +1053,8 @@ function saveImg() {
   const i = imgFor, im = D.images[i]; if (!im || !capOn("i")) return closeImg();
   if (!needWho(saveImg)) return;
   const e = ensureEdit(im), note = $("imgNote").value.trim().slice(0, NOTE_MAX); let n = 0;
-  if (imgPick !== rejectOf(im.file)) { setDec(e, "i:reject", imgPick ? "reject:" + imgPick : null); n++; }
-  if (note !== noteOf(im.file).trim()) { setDec(e, "i:note", note || null); n++; }
+  if (imgPick !== pick0) { setDec(e, "i:reject", imgPick ? "reject:" + imgPick : null); n++; }
+  if (note !== note0) { setDec(e, "i:note", note || null); n++; }
   closeImg();
   if (!n) return;
   touch(im.file); renderList(); renderSide(); draw();
@@ -1653,6 +1665,7 @@ function decide(act, cls, poly, stay) {
     poly = poly || (prev && prev.v && prev.v.startsWith("keep:") && prev.p) || undefined;  // a class change keeps an earlier reshape
     setDec(e, c.key, "keep:" + cls, poly); if ((g && g.c !== cls) || poly) e.modified = true;
   }
+  if (act !== "del" && act !== "no") aliasTag(e, im.file, c.key, cls);  // same undo step (the snapshot above)
   touch(im.file); renderList();
   if (stay) { tri.picked = caseId(c); triRender(); } else advance();
 }
@@ -2089,7 +2102,7 @@ async function loadCaps() {
   applyCaps();
 }
 function applyCaps() {
-  $("helpL").hidden = !capOn("t");
+  $("helpL").hidden = !capOn("t"); $("helpI").hidden = !capOn("i");
   $("fStat").querySelector('option[value="rejected"]').hidden = !capOn("i");
   legend(); renderList(); renderSide(); draw();
   if (!$("tri").hidden) { if (isPredPkg) $("triKeys").textContent = triKeysText(clsMode()); triRender(); }

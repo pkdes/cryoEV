@@ -51,9 +51,11 @@ keys are not object decisions and are left out of the diff. Images are never dro
 labels and is listed in version.json "rejected_images" (image, reason, reviewed, who; every scope). The Low conf tag
 goes through THE ONE COCO RULE (coco_rule), applied before the diff so the change log shows the reclass: EV + tag ->
 category Low conf EV (dec_key t:<objkey> when the tag alone changed it); any other class keeps its class with
-attributes.low_conf = true; a tag note goes in attributes.note. Every tagged object is listed in version.json
-"low_conf" (image, dec_key, ann id in the output or null, class). A record whose only decisions are i: keys counts
-as a record without changes; a t: tag counts as a change.
+attributes.low_conf = true; a tag note goes in attributes.note. version.json "low_conf" lists the applied images'
+objects that are low conf (the tag, or the Low conf EV class: what reviewed_polygons calls low_conf), "object_notes"
+the other objects with a tag note; each row image, key (the object's decision key), ann (its id in the output, null
+if not written), cls (its category there), tagged (t: "lowconf"), note. A record whose only decisions are i: keys
+counts as a record without changes; a t: tag counts as a change.
 
 Not logged (no label change, no review verdict): null (undone) decisions, n<uid>/p<k> "del" of an
 outline that was drawn/accepted and then removed again. Counted in version.json "skipped".
@@ -98,8 +100,8 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO))
-from review_server import (LOW_CONF_EV, _migrate, _num, effective_labels, image_flags, load_people,  # noqa: E402
-                           object_key, tag_of)
+from review_server import (LOW_CONF_EV, _migrate, _num, effective_labels, image_flags, is_low_conf,  # noqa: E402
+                           load_people, object_key, tag_of)
 from data_utils.path_guard import PROTECTED_ROOTS, normalize, protected_problem  # noqa: E402
 
 SCHEMA = "label_change/1"
@@ -323,14 +325,19 @@ def image_ops(im: dict, rec: dict, base_anns: dict, w: int, h: int, dup_iou: flo
     non-conflict op applied.
     The image-level i: keys and the t:<objkey> tags are not object decisions: they are left out of the diff (a
     note whose text is "no" is not a removal). A tag reaches the labels through coco_rule only. tags: a list that
-    gets (object key, final object) for every final object with low_conf or a note, for the COCO attributes."""
+    gets (object key, final object, low conf, tag note) for every final object that is low conf or has a note."""
     edit = rec["edit"]
     e = _migrate(edit)
     full = e["dec"]
     dec = {k: d for k, d in full.items() if not k.startswith(("i:", "t:"))}
     final = [coco_rule(f, full) for f in effective_labels(im, edit)]
-    if tags is not None:
-        tags.extend((object_key(f), f) for f in final if f.get("low_conf") or f.get("note"))
+    if tags is not None:  # (key, object, low conf (is_low_conf, as reviewed_polygons), tag note)
+        for f in final:
+            key = object_key(f)
+            tv, note = tag_of(full, key)
+            low = is_low_conf(f.get("_c0", f["c"]), tv) or f["c"] == LOW_CONF_EV
+            if low or note:
+                tags.append((key, f, low, note))
     pkg_gt = {g["id"]: g for g in im["gt"]}
     ops, skipped = [], Counter()
 
@@ -698,7 +705,7 @@ def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou
                             img_tags)
         skipped.update(sk)
         per_image[b["id"]] = ops
-        tagged += [(image, b["id"], key, f, ops) for key, f in img_tags]
+        tagged += [(image, b["id"], key, f, low, note, ops) for key, f, low, note in img_tags]
         rx = rec.get("rx") or {}
         for o in ops:
             rows.append({**common, **o, "rx": rx.get(o["dec_key"]), "_op": o})  # _op: ann_new is set below
@@ -739,9 +746,12 @@ def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou
                 o["ann_new"] = next_id
                 next_id += 1
     # The tag's COCO attributes (coco_rule): low_conf on any class but Low conf EV (that category says it), the note
-    low_conf = []
+    # (the attribute comes from the tag only: a Low conf EV class label without one stays exactly as before).
+    # version.json: low_conf = the objects that are low conf (the tag, or the Low conf EV class: n_low_conf counts what
+    # reviewed_polygons calls low_conf on these images); object_notes = the other objects with a tag note.
+    low_conf, object_notes = [], []
     names = {c["id"]: c["name"] for c in cats}
-    for image, _img_id, key, f, ops in tagged:
+    for image, _img_id, key, f, low, note, ops in tagged:
         if f.get("id") is not None:
             aid = f["id"] if f["id"] in out_anns else None
         else:
@@ -756,8 +766,9 @@ def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou
                 attrs["note"] = f["note"]
             if attrs:
                 out_anns[aid]["attributes"] = {**(out_anns[aid].get("attributes") or {}), **attrs}
-        low_conf.append({"image": image, "dec_key": f"t:{key}", "ann": aid, "cls": cls, "low_conf": bool(f.get("low_conf")),
-                         **({"note": f["note"]} if f.get("note") else {})})
+        row = {"image": image, "key": key, "ann": aid, "cls": cls, "tagged": bool(f.get("low_conf")),
+               **({"note": note} if note else {})}
+        (low_conf if low else object_notes).append(row)
     anns = []
     for aid in sorted(out_anns):
         a = {k: v for k, v in out_anns[aid].items() if k not in INTERNAL and k != "category_name"}
@@ -806,7 +817,8 @@ def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou
                                    for n in new_cats],
                 "n_annotations_base": len(base["annotations"]), "n_annotations_out": len(anns),
                 "base_name": base_name, "pkg": pkg_id,
-                "rejected_images": sorted(rejected, key=lambda r: r["image"]), "low_conf": low_conf}
+                "rejected_images": sorted(rejected, key=lambda r: r["image"]), "low_conf": low_conf,
+                "object_notes": object_notes}
     return coco, out_rows, conflicts, info_out
 
 
@@ -887,7 +899,7 @@ def main(argv=None):
                "labels_sha256": hashlib.sha256(labels).hexdigest(), "dup_iou": a.dup_iou,
                "class_groups_sha256": sha256_file(a.class_groups), "people_sha256": sha256_file(a.people),
                "rejected_images": info["rejected_images"], "n_rejected": len(info["rejected_images"]),
-               "low_conf": info["low_conf"], "n_low_conf": len(info["low_conf"]),
+               "low_conf": info["low_conf"], "n_low_conf": len(info["low_conf"]), "object_notes": info["object_notes"],
                "tool": f"apply_review_edits.py {git_sha()}", "created": datetime.now().isoformat(timespec="seconds")}
     if scope == "reviewed_only":
         print(f"[OK] reviewed only: {info['n_reviewed']} of {info['n_package_images']} images; "

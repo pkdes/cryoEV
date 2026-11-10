@@ -66,6 +66,8 @@ IMAGE_NOTE_MAX = 1000          # characters
 TAG_NOTE_MAX = 300
 TAG_VALUES = ("lowconf", "plain")  # lowconf = the Low conf tag (+ note); plain = a note without the tag
 LOW_CONF_EV = "Low conf EV"    # the class stays (old data, the lab package) and is read as EV + low conf
+STATE_FIELDS = frozenset({"v", "t", "who", "server_t", "pending", "note"})  # the only fields of an i: / t: decision
+STATE_KEY_MAX = 64             # an i: / t: key longer than this is refused
 MAX_BODY = 20 * 2**20
 CLAIM_SECONDS = 90
 MAX_CLAIMS = 200      # active claims kept at most (one per reviewer is the norm); the soonest to expire go first
@@ -298,7 +300,7 @@ def valid_edit(edit) -> bool:
     if not all(_valid_item(g) for g in edit.get("gt") or []):
         return False
     for k, d in (edit.get("dec") or {}).items():
-        if k in IMAGE_KEYS or TAG_KEY_RE.fullmatch(k):
+        if k in IMAGE_KEYS or (len(k) <= STATE_KEY_MAX and TAG_KEY_RE.fullmatch(k)):  # a longer t: key: refused below
             if not _valid_state_dec(k, d):
                 return False
             continue
@@ -319,10 +321,22 @@ def valid_edit(edit) -> bool:
     return True
 
 
+def _utf8(s) -> bool:
+    """A string that encodes as UTF-8: JSON can carry lone surrogates ("\\ud800"), which would crash every later
+    writer of the package (apply_review_edits, the results CSVs)."""
+    try:
+        s.encode("utf-8")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
 def _valid_state_dec(k, d) -> bool:
-    """An i:reject / i:note / t:<objkey> decision: a dict (never a bare string) without an outline, v from its own
-    set, notes strings within their caps."""
-    if not isinstance(d, dict) or not _num(d.get("t", 0)) or "p" in d:
+    """An i:reject / i:note / t:<objkey> decision: a dict (never a bare string) with only STATE_FIELDS, v from its
+    own set, notes UTF-8 strings within their caps."""
+    if not isinstance(d, dict) or not set(d) <= STATE_FIELDS or not _num(d.get("t", 0)):
+        return False
+    if any(isinstance(d.get(f), str) and not _utf8(d[f]) for f in ("v", "note")):
         return False
     if d.get("who") is not None and not valid_who(d["who"]):
         return False
@@ -530,8 +544,9 @@ def tag_of(dec: dict, key) -> tuple:
 
 
 def is_low_conf(cls, tag_v) -> bool:
-    """Low conf: the tag is set, or the class is Low conf EV and the tag wasn't turned off ("plain")."""
-    return tag_v == "lowconf" or (cls == LOW_CONF_EV and tag_v != "plain")
+    """Low conf: the tag is set, or the class is Low conf EV (whatever its tag says: turning the tag off on such a
+    label makes it EV, keep:EV, so a Low conf EV label with a note-only "plain" tag is still low conf)."""
+    return tag_v == "lowconf" or cls == LOW_CONF_EV
 
 
 def _with_tags(out: list, dec: dict) -> list:
