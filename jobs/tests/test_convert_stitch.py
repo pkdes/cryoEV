@@ -173,6 +173,45 @@ class Stub(unittest.TestCase):
         self.assertFalse(res["stitch"].get("kept_previous"))
         self.assertEqual(sorted(p.name for p in (conv / "montages").iterdir()), ["stitch.json"])
 
+    @unittest.skipUnless(os.name == "nt", "a folder holding an open file can't be renamed only on Windows")
+    def test_montages_held_open_keep_the_previous_set(self):
+        """The gallery holds a montage JPG open (WinError 5 on the rename): retried, then the previous set stays
+        and the error says so in plain words; once it is closed, the new set is swapped in."""
+        import threading
+        import types
+        dest, tiles = self.tmp / "conv" / "montages", self.tmp / "conv" / "tiles"
+        tiles.mkdir(parents=True)
+        dest.mkdir()
+        (dest / "grid1_1_stitched.jpg").write_bytes(b"previous")
+        (dest / "stitch.json").write_text('{"state": "done"}', encoding="utf-8")
+        before = tree_md5(dest)
+        cfg = types.SimpleNamespace(output_dirs=lambda: [("clean", None, None), ("denoised", None, None)],
+                                    skip_variants=("clean",), max_long_edge=2000, jpeg_quality=92)
+        m = types.SimpleNamespace(basename="grid1_1")
+
+        def fake_montage(cfg, m, rows, work):
+            (work / "grid1_1_stitched.jpg").write_bytes(b"new")
+            return {"name": "grid1_1", "file": "grid1_1_stitched.jpg", "width": 1, "height": 1, "tiles": []}
+        run = lambda: CR.stitch_pass(None, cfg, [m], [], dest, tiles, io.StringIO())  # noqa: E731
+        with mock.patch.object(CR, "stitch_montage", fake_montage), \
+                mock.patch.object(CR, "RENAME_WAITS", (0.05, 0.05)):
+            with open(dest / "grid1_1_stitched.jpg", "rb"):
+                doc, warns = run()
+            self.assertEqual((doc["state"], doc["error"], doc["kept_previous"]),
+                             ("failed", CR.MONTAGES_IN_USE, True))
+            self.assertEqual(warns, [f"montages: {CR.MONTAGES_IN_USE}; the tiles are not affected"])
+            self.assertEqual(tree_md5(dest), before)
+            self.assertEqual(sorted(p.name for p in dest.parent.iterdir()), ["montages", "tiles"])
+            # released while it waits: the retry gets through
+            fh = open(dest / "grid1_1_stitched.jpg", "rb")
+            threading.Timer(0.3, fh.close).start()
+            with mock.patch.object(CR, "RENAME_WAITS", (0.2, 0.2, 0.5, 1)):
+                doc, _w = run()
+            fh.close()
+        self.assertEqual(doc["state"], "done")
+        self.assertEqual((dest / "grid1_1_stitched.jpg").read_bytes(), b"new")
+        self.assertEqual(sorted(p.name for p in dest.parent.iterdir()), ["montages", "tiles"])
+
     def test_processing_recorded_and_a_change_warned(self):
         conv = self.stitched_conv()
         res = CR.stitch_only(conv, processing_repo_dir=self.repo, log=io.StringIO())

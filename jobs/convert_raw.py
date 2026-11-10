@@ -782,6 +782,23 @@ def _stitch_done(dest: Path) -> bool:
         return False
 
 
+MONTAGES_IN_USE = "montages in use; previous set kept — try again"
+RENAME_WAITS = (0.5, 1, 2, 3, 4)         # a folder rename retried over ~10 s (Windows: a file in it held open)
+
+
+def _rename_retry(src: Path, dst: Path, waits=RENAME_WAITS) -> bool:
+    """os.replace(src, dst), retried on PermissionError (WinError 5: a reader holds a file in it). -> done."""
+    for w in (*waits, None):
+        try:
+            os.replace(src, dst)
+            return True
+        except PermissionError:
+            if w is None:
+                return False
+            time.sleep(w)
+    return False
+
+
 def stitch_dirs(dest: Path) -> tuple:
     """(work, old) beside dest: .<dest>.stitch_work (built here) and .<dest>_old (the set being replaced)."""
     return dest.parent / f".{dest.name}{STITCH_WORK}", dest.parent / f".{dest.name}_old"
@@ -836,10 +853,14 @@ def stitch_pass(core, cfg, montages, rows, dest: Path, tiles_dir: Path, log, nee
         else:
             _write_json(work / LAYOUT_JSON, {"schema": LAYOUT_SCHEMA, "montages": entries})
             _write_json(work / STITCH_JSON, doc)
-            if dest.exists():
-                os.replace(dest, old)
-            os.replace(work, dest)
-            shutil.rmtree(old, ignore_errors=True)
+            if dest.exists() and not _rename_retry(dest, old):
+                # a viewer (the gallery) holds a montage open: the previous set stays, nothing half-swapped
+                shutil.rmtree(work, ignore_errors=True)
+                doc = {**doc, "state": "failed", "kept_previous": True, "error": MONTAGES_IN_USE}
+            else:
+                if not _rename_retry(work, dest):
+                    raise OSError("the new montages could not be moved into place")
+                shutil.rmtree(old, ignore_errors=True)
     except Exception as ex:                      # the pass itself; a finished set in dest is never touched
         shutil.rmtree(work, ignore_errors=True)
         doc = {"state": "failed", "error": f"{type(ex).__name__}: {ex}"[:4000], "n": 0, "t": _now(),
@@ -856,7 +877,9 @@ def stitch_pass(core, cfg, montages, rows, dest: Path, tiles_dir: Path, log, nee
                     _write_json(dest / STITCH_JSON, doc)
         except OSError:
             pass
-    if doc["state"] == "failed":
+    if doc.get("error") == MONTAGES_IN_USE:
+        warns.append(f"montages: {MONTAGES_IN_USE}; the tiles are not affected")
+    elif doc["state"] == "failed":
         kept = "; the previous montages are kept" if doc.get("kept_previous") else ""
         warns.append(f"montages: stitching failed for some or all ({doc['error']}){kept}; "
                      f"the tiles are not affected")

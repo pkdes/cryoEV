@@ -1301,7 +1301,9 @@ class Montages(Base):
         self.assertEqual(self.form(base + "/register", {}, "advanced").status_code, 403)
         self.assertEqual(self.form(base + "/register", {}).status_code, 303)
         wait_for(lambda: self.status(cid).get("registered") is True, 30, what="registered again")
-        self.assertIn("Listed under Data → Sessions.", self.page(base + "/"))
+        page = self.page(base + "/")
+        self.assertIn("Listed under Data → Sessions.", page)
+        self.assertNotIn(f'action="{base}/register"', page)                 # registered: no "Register again"
         # a conversion made before round 7 (no stitch record) says the montages can be made
         st = self.status(cid)
         st.pop("stitch")
@@ -1377,11 +1379,26 @@ class Montages(Base):
         self.assertEqual(self.form(f"/predict/convert/{cid}/stitch", {}).status_code, 303)
         st = self.wait_stitch(cid, ("running",), 20)
         pid = st["stitch"]["pid"]
+        d = self.d(cid)
+        before = tree(d / "montages")
+        os.replace(d / "montages", d / ".montages_old")      # as if it was stopped between its two renames
         self.assertEqual(self.form(f"/predict/convert/{cid}/stop", {}).status_code, 303)
         st = self.status(cid)
         self.assertEqual((st["state"], st["stitch"]["state"], st["stitch"]["kind"]), ("done", "failed", "stopped"))
         wait_for(lambda: not P.PL.pid_alive(pid), 15, what="the stitcher killed")
-        self.assertTrue((self.d(cid) / "montages" / "grid1_1_stitched.jpg").is_file())   # the done set stays
+        self.assertEqual(tree(d / "montages"), before)                     # the done set is back, as it was
+        self.assertFalse((d / ".montages_old").exists())
+        # killed from outside (no stop): the runner records the end and puts the set back too
+        self.assertEqual(self.form(f"/predict/convert/{cid}/stitch", {}).status_code, 303)
+        st = self.wait_stitch(cid, ("running",), 20)
+        os.replace(d / "montages", d / ".montages_old")
+        self.assertTrue(P.kill_proc(st["stitch"]))
+        P.kick(None)
+        st = self.status(cid)
+        self.assertEqual((st["stitch"]["state"], st["stitch"]["error"]),
+                         ("failed", "The stitcher stopped without a result."))
+        self.assertEqual(tree(d / "montages"), before)
+        self.assertFalse((d / ".montages_old").exists())
 
     def test_retry_clears_montages_and_acquisition(self):
         os.environ["FAKE_CONVERT_MODE"] = "refuse"

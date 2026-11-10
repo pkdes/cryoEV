@@ -2634,10 +2634,26 @@ def can_stitch(meta: dict, d: Path, st: dict) -> bool:
             and inputs_present(meta, d))
 
 
+def restore_montages(d: Path) -> bool:
+    """A stitcher killed between its two renames leaves montages/ missing and .montages_old there: put it back.
+    -> restored."""
+    dest = d / CONVERT_MONTAGES
+    _work, old = CR.stitch_dirs(dest)
+    if dest.exists() or not old.is_dir():
+        return False
+    try:
+        os.replace(old, dest)
+    except OSError as e:
+        print(f"[predict] {d.name}: could not put the previous montages back: {e}", file=sys.stderr, flush=True)
+        return False
+    return True
+
+
 def _stitch_end(d: Path, st: dict, meta: dict, acquisition=False, **fields) -> dict:
     """Record a stitch job's end (fields: state, error, n, kind ...). An upload conversion is (re)registered when
     a backfill wrote its acquisition.json, or when it was never registered (made before round 7): registered false
     and the register_* bookkeeping reset, so the watcher registers it."""
+    restore_montages(d)
     s = {**(st.get("stitch") or {}), "pid": None, "finished": now_iso(), **fields}
     extra = {}
     if is_upload(meta) and ("registered" not in st or (acquisition and s.get("job") == "backfill")):
@@ -2712,8 +2728,10 @@ def needs_registration(meta: dict, st: dict) -> bool:
 
 
 def can_register_again(cfg, meta: dict, st: dict) -> bool:
-    """A done upload with upload sessions on (also while waiting: it retries now, the backoff reset)."""
-    return is_upload(meta) and st.get("state") == "done" and upload_sessions_module(cfg) is not None
+    """A done upload not registered yet, with upload sessions on (also while waiting: it retries now, the backoff
+    reset)."""
+    return (is_upload(meta) and st.get("state") == "done" and st.get("registered") is not True
+            and upload_sessions_module(cfg) is not None)
 
 
 def register_again(cfg, d: Path, meta: dict) -> str:
@@ -2958,6 +2976,7 @@ def stop_conversion(cfg, d: Path) -> str:
         if stitch_busy(st):                             # a stitch job: stopped, the conversion stays done
             if stitch_state(st) == "running":
                 kill_proc(st.get("stitch") or {})
+            restore_montages(d)
             s = {**st["stitch"], "state": "failed", "kind": "stopped", "pid": None, "finished": now_iso(),
                  "error": "Stopped by the admin."}
             write_conv_status(d, stitch=s)
