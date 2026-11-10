@@ -34,6 +34,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cjtest as T  # noqa: E402
 from portal import auth as A  # noqa: E402
 from portal.modules import predict as P  # noqa: E402
+from portal.predict_parts import common as COMMON  # noqa: E402
+from portal.predict_parts import create as CREATE  # noqa: E402
+from portal.predict_parts import disk as DISK  # noqa: E402
+from portal.predict_parts import pages as PAGES  # noqa: E402
+from portal.predict_parts import sets as SETS  # noqa: E402
 
 try:
     from playwright.sync_api import sync_playwright
@@ -550,7 +555,7 @@ class PixelTolerance(unittest.TestCase):
 
     def test_form_shows_range_and_refuses_mixed(self):
         t = P.tiles_of(self.src)
-        with mock.patch.object(P, "model_block", return_value=""):
+        with mock.patch.object(PAGES, "model_block", return_value=""):
             page = P.page_session_form(self.cfg, self.user, self.src, t)
         self.assertIn("1–1.009 nm/px across tiles, within 1 %; each tile keeps its own value", page)
         a_input = re.search(r'<input[^>]*name="nm_g0"[^>]*>', page).group(0)
@@ -577,8 +582,8 @@ class PixelTolerance(unittest.TestCase):
                 "how": "all", "model": MODEL}
         data.update(form)
         with mock.patch.object(P.PS, "create", side_effect=fake_create), \
-                mock.patch.object(P.PL, "start_detached"), mock.patch.object(P, "check_model", return_value=None), \
-                mock.patch.object(P, "check_active"):
+                mock.patch.object(P.PL, "start_detached"), mock.patch.object(CREATE, "check_model", return_value=None), \
+                mock.patch.object(CREATE, "check_active"):
             P.session_submit(self.cfg, self.user, self.src, data)
         return seen
 
@@ -651,7 +656,7 @@ class PixelTolerance(unittest.TestCase):
                                ("Liposomes · 352×250 tiles", 96, 1.47125, False, False),
                                ("Liposomes · 1440×1023 tiles", 297, 1.4724, False, False)])
         self.assertEqual(t["n"], 552)
-        with mock.patch.object(P, "model_block", return_value=""):
+        with mock.patch.object(PAGES, "model_block", return_value=""):
             page = P.page_session_form(self.cfg, self.user, {**self.src, "dir": d}, t)
         self.assertEqual(page.count('name="samples"'), 3)                # one tick per group
         self.assertIn("Liposomes · 352×250 tiles", page)
@@ -811,7 +816,7 @@ class Limits(Base):
         self.wait_state((set(self.sets()) - set(before)).pop())
 
     def test_unreadable_session_is_a_plain_refusal(self):
-        with mock.patch.object(P, "tiles_of", side_effect=OSError("[WinError 59] An unexpected network error")):
+        with mock.patch.object(SETS, "tiles_of", side_effect=OSError("[WinError 59] An unexpected network error")):
             st, _, body = self.get(f"/predict/new/session/{self.key_a}/", "basic")
             self.assertEqual(st, 503)
             self.assertIn("can’t be read right now", body.decode("utf-8"))
@@ -853,7 +858,7 @@ class Limits(Base):
         shutil.rmtree(new)
 
     def test_bounded_tables(self):
-        with mock.patch.object(P, "CACHE_MAX", 3):
+        with mock.patch.object(COMMON, "CACHE_MAX", 3):
             for i in range(6):
                 P._TASKS[("results", f"ps_x{i}")] = {"state": "failed", "error": "e", "started": 0}
             P.start_task("results", "ps_bounded", lambda: None)
@@ -913,11 +918,11 @@ class Upload(Base):
 
     def test_caps(self):
         before = self.sets()
-        with mock.patch.object(P, "MAX_FILES", 2):
+        with mock.patch.object(COMMON, "MAX_FILES", 2):
             st, _, body = self.up(self.ok_fields(), self.tiles(3))
             self.assertEqual(st, 413)
             self.assertIn("More than 2 files", body)
-        with mock.patch.object(P, "MAX_FILE_BYTES", 1000):
+        with mock.patch.object(COMMON, "MAX_FILE_BYTES", 1000):
             st, _, body = self.up(self.ok_fields(), self.tiles(1))
             self.assertEqual(st, 413)
             self.assertIn("is over", body)
@@ -963,13 +968,13 @@ class Upload(Base):
         before = self.sets()
         margin = P.FREE_MARGIN_BYTES
         # Content-Length known: refused before anything is stored when free - length < margin
-        with mock.patch.object(P, "disk_free", return_value=margin + 10):
+        with mock.patch.object(DISK, "disk_free", return_value=margin + 10):
             st, _, body = self.up(self.ok_fields(), self.tiles(1))
         self.assertEqual(st, 507)
         self.assertIn("Not enough disk space", body)
         # chunked (no length to hold ahead): fine at the start, refused at the first file start when space is low
         calls = iter([margin + 10 ** 9] + [margin - 1] * 50)
-        with mock.patch.object(P, "disk_free", side_effect=lambda p: next(calls)):
+        with mock.patch.object(DISK, "disk_free", side_effect=lambda p: next(calls)):
             st, _, body = self.up_chunked(self.ok_fields(), self.tiles(2))
         self.assertEqual(st, 507)
         self.assertIn("Not enough disk space", body)
@@ -994,8 +999,8 @@ class Upload(Base):
             n["calls"] += 1
             return P.FREE_MARGIN_BYTES + (10 ** 12 if n["calls"] < 3 else -1)   # 3rd check: the disk filled up
         sink = P.UploadSink(dest, res)
-        with mock.patch.object(P, "disk_free", side_effect=free), \
-                mock.patch.object(P, "DISK_CHECK_BYTES", 1000), mock.patch.object(P, "MAX_FILE_BYTES", 10 ** 6):
+        with mock.patch.object(DISK, "disk_free", side_effect=free), \
+                mock.patch.object(COMMON, "DISK_CHECK_BYTES", 1000), mock.patch.object(COMMON, "MAX_FILE_BYTES", 10 ** 6):
             sink.apply([("part", "files", "a.png"), ("data", b"x" * 600)])       # check 1 (file start)
             sink.apply([("data", b"x" * 600)])                                     # check 2 (1200 bytes)
             sink.apply([("data", b"x" * 600)])
@@ -1009,7 +1014,7 @@ class Upload(Base):
         self.addCleanup(shutil.rmtree, dest, True)
         big = P.Reservation(dest, 10 ** 9)                                  # another upload still streaming 1 GB
         try:
-            with mock.patch.object(P, "disk_free", return_value=P.FREE_MARGIN_BYTES + 5 * 10 ** 8):
+            with mock.patch.object(DISK, "disk_free", return_value=P.FREE_MARGIN_BYTES + 5 * 10 ** 8):
                 with self.assertRaises(P.Refusal) as cm:
                     P.Reservation(dest, 0).check()
                 self.assertEqual(cm.exception.status, 507)
@@ -1022,7 +1027,7 @@ class Upload(Base):
     def test_fields_checked_before_files(self):
         """The form's text fields come first: a missing tick is refused at the first file part, before a byte of
         a too-big file is counted (400 for the tick, not 413 for the size)."""
-        with mock.patch.object(P, "MAX_FILE_BYTES", 1000):
+        with mock.patch.object(COMMON, "MAX_FILE_BYTES", 1000):
             st, _, body = self.up(self.ok_fields(confirm=None), self.tiles(1))
             self.assertEqual(st, 400)
             self.assertIn("I confirm the pixel size", body)

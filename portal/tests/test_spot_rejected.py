@@ -13,6 +13,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cjtest as T  # noqa: E402,F401  (sets up the import path like the other portal tests)
 from portal.modules import predict as P  # noqa: E402
+from portal.predict_parts import sets as SETS  # noqa: E402
 
 
 class SpotSkipsRejected(unittest.TestCase):
@@ -29,7 +30,7 @@ class SpotSkipsRejected(unittest.TestCase):
         self.tmp.cleanup()
 
     def ids(self):
-        with mock.patch.object(P, "package_dir", return_value=self.pkg):
+        with mock.patch.object(SETS, "package_dir", return_value=self.pkg):
             return [r["image"] for r in P.spot_list(None, Path(self.tmp.name), "ps_x", self.rows)]
 
     def edit(self, name, edit):

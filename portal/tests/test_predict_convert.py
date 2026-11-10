@@ -42,6 +42,8 @@ from portal import app as APP  # noqa: E402
 from portal import auth as A  # noqa: E402
 from portal import predict_sources as PSRC  # noqa: E402
 from portal.modules import predict as P  # noqa: E402
+from portal.predict_parts import common as COMMON  # noqa: E402
+from portal.predict_parts import disk as DISK  # noqa: E402
 
 try:
     from starlette.testclient import TestClient
@@ -760,7 +762,7 @@ class Visibility(Base):
         os.environ["FAKE_CONVERT_N"] = "5"
         cid = self.converted("advanced", session="20261101", recipe="20261101")
         path = f"/predict/new/session/{self.src_key(cid)}/"
-        with mock.patch.object(P, "MAX_FILES", 4):
+        with mock.patch.object(COMMON, "MAX_FILES", 4):
             return self._tile_cap(path)
 
     def _tile_cap(self, path):
@@ -788,7 +790,7 @@ class Upload(Base):
         return not (tmp.exists() and any(tmp.iterdir()))
 
     def test_one_piece_per_request_to_a_set(self):
-        with mock.patch.object(P, "CHUNK_BYTES", 700):
+        with mock.patch.object(COMMON, "CHUNK_BYTES", 700):
             st, r = self.upload("basic", "tiles", self.fields(), self.tiles(3), chunk=700)
         self.assertEqual(st["chunk"], 700)
         self.assertEqual(r.status_code, 200, r.text[:600])
@@ -807,7 +809,7 @@ class Upload(Base):
 
     def test_resume_after_a_dropped_piece(self):
         files = self.tiles(2)
-        with mock.patch.object(P, "CHUNK_BYTES", 1000):
+        with mock.patch.object(COMMON, "CHUNK_BYTES", 1000):
             r = self.jpost("/predict/api/upload", {"kind": "tiles", "fields": self.fields(),
                                                    "files": [{"name": n, "size": len(b)} for n, b in files]}, "basic")
             st = r.json()
@@ -856,7 +858,7 @@ class Upload(Base):
             ("none", {}, self.fields(), [], 400, "Choose at least one image"),
         ]
         for why, patch, fields, files, status, text in cases:
-            with self.subTest(why=why), mock.patch.multiple(P, **(patch or {"REFRESH_S": P.REFRESH_S})):
+            with self.subTest(why=why), mock.patch.multiple(COMMON, **(patch or {"REFRESH_S": COMMON.REFRESH_S})):
                 st, _ = self.upload("basic", "tiles", fields, files, expect=status)
                 self.assertIn(text, st["error"])                       # JSON text: the page shows it as text
                 self.assertTrue(st["dropped"])
@@ -875,7 +877,7 @@ class Upload(Base):
         # a piece bigger than allowed, or past the declared size
         for why, piece_len, chunk, text, status in (("too big", 1500, 1000, "at most", 413),
                                                     ("past the end", 10, 10 ** 6, "more bytes than its size", 400)):
-            with self.subTest(why=why), mock.patch.object(P, "CHUNK_BYTES", chunk):
+            with self.subTest(why=why), mock.patch.object(COMMON, "CHUNK_BYTES", chunk):
                 data = tile_bytes(1)
                 r = self.jpost("/predict/api/upload", {"kind": "tiles", "fields": self.fields(),
                                                        "files": [{"name": "t.png", "size": len(data)}]}, "basic")
@@ -892,7 +894,7 @@ class Upload(Base):
     def test_disk_checked_at_start_and_at_each_piece(self):
         margin = P.FREE_MARGIN_BYTES
         files = self.tiles(2)
-        with mock.patch.object(P, "disk_free", return_value=margin + 10):      # the declared total does not fit
+        with mock.patch.object(DISK, "disk_free", return_value=margin + 10):      # the declared total does not fit
             st, _ = self.upload("basic", "tiles", self.fields(), files, expect=507)
         self.assertIn("Not enough disk space", st["error"])
         r = self.jpost("/predict/api/upload", {"kind": "tiles", "fields": self.fields(),
@@ -903,7 +905,7 @@ class Upload(Base):
         name, data = files[0]
         self.assertEqual(self.piece(uid, name, 0, data, "basic").status_code, 200)
         self.assertEqual(sum(P._RESERVED.values()), held - len(data))
-        with mock.patch.object(P, "disk_free", return_value=margin - 1):       # the disk filled up meanwhile
+        with mock.patch.object(DISK, "disk_free", return_value=margin - 1):       # the disk filled up meanwhile
             rr = self.piece(uid, files[1][0], 0, files[1][1], "basic")
         self.assertEqual(rr.status_code, 507)
         self.assertTrue(rr.json()["dropped"])
@@ -1103,7 +1105,7 @@ class NoJS(Base):
         r = self.tc.post("/predict/new/upload/", content=body, headers=self.h("basic", **{"Content-Type": ctype}))
         self.assertEqual(r.status_code, 303, r.text[:500])
         ps = r.headers["location"].strip("/").split("/")[-1]
-        with mock.patch.object(P, "NOJS_MAX_BYTES", 1000):
+        with mock.patch.object(COMMON, "NOJS_MAX_BYTES", 1000):
             r = self.tc.post("/predict/new/upload/", content=body, headers=self.h("basic", **{"Content-Type": ctype}))
         self.assertEqual(r.status_code, 413)
         self.assertIn("Without JavaScript, one upload is at most 0 MB in total", r.text)
@@ -1248,7 +1250,7 @@ class Stuck(Base):
             with self.subTest(patch=patch):
                 cid = self.gated()
                 pid = self.status(cid)["pid"]
-                with mock.patch.multiple(P, **patch):
+                with mock.patch.multiple(COMMON, **patch):
                     P.kick(None)
                 st = self.status(cid)
                 self.assertEqual((st["state"], st["kind"]), ("failed", "timeout"))
@@ -1348,7 +1350,7 @@ class Retention(Base):
         self.w.gate.touch()
 
     def test_disk_checked_before_converting(self):
-        with mock.patch.object(P, "disk_free", return_value=P.FREE_MARGIN_BYTES + 10):
+        with mock.patch.object(DISK, "disk_free", return_value=P.FREE_MARGIN_BYTES + 10):
             r = self.pick_session()
         self.assertEqual(r.status_code, 507)
         self.assertIn("Not enough disk space on the server to convert", r.text)
@@ -1479,7 +1481,7 @@ class Montages(Base):
         self.assertEqual(r.status_code, 409)
         self.assertIn("montages are being made", r.text)
         os.environ.update(CJ_RAW_KEEP_DAYS="0", CJ_RAW_MIN_FREE_GB="25")
-        with mock.patch.object(P, "disk_free", return_value=1):
+        with mock.patch.object(DISK, "disk_free", return_value=1):
             P.kick(None)
         self.assertTrue((d / "input").is_dir())
         os.environ.pop("CJ_RAW_KEEP_DAYS")
@@ -1668,7 +1670,7 @@ class Montages(Base):
             with P.runner_lock(None):                                               # only its own root
                 self.assertFalse(P.PS._THREAD_LOCKS[keys[1]].locked())
             os.environ.update(CJ_RAW_KEEP_DAYS="0", CJ_RAW_MIN_FREE_GB="25")
-            with mock.patch.object(P, "disk_free", return_value=1):
+            with mock.patch.object(DISK, "disk_free", return_value=1):
                 P.kick(None)
             self.assertTrue((self.d(cid) / "input").is_dir())                     # never swept by the preview
         finally:
@@ -1687,13 +1689,13 @@ class Montages(Base):
             st["finished"] = (datetime.now() - ago).isoformat(timespec="seconds")
             P.PS.write_json_atomic(self.d(cid) / "status.json", st)
         os.environ["CJ_RAW_KEEP_DAYS"] = "7"
-        with mock.patch.object(P, "disk_free", return_value=1):           # floor off (0): nothing goes early
+        with mock.patch.object(DISK, "disk_free", return_value=1):           # floor off (0): nothing goes early
             P.kick(None)
         self.assertTrue(all((self.d(c) / "input").is_dir() for c in (old, unstitched, new)))
         os.environ["CJ_RAW_MIN_FREE_GB"] = "25"
         frees = [10 * 2 ** 30, 30 * 2 ** 30]                               # below the floor, then above it
         err = io.StringIO()
-        with mock.patch.object(P, "disk_free", side_effect=lambda p: frees.pop(0) if frees else 100 * 2 ** 30), \
+        with mock.patch.object(DISK, "disk_free", side_effect=lambda p: frees.pop(0) if frees else 100 * 2 ** 30), \
                 mock.patch("sys.stderr", err):
             P.kick(None)
         self.assertFalse((self.d(old) / "input").exists())
@@ -1842,7 +1844,7 @@ class Browser(unittest.TestCase):
             ctx, page, rec = self.session(width)
             try:
                 # a raw upload through the page's script, one file (piece) per request, then the conversion page
-                with mock.patch.object(P, "CHUNK_BYTES", 1500):
+                with mock.patch.object(COMMON, "CHUNK_BYTES", 1500):
                     page.goto(self.p.origin + "/predict/new/raw/")
                     page.fill('input[name="session"]', "20260827-2")
                     page.select_option('select[name="recipe"]', "20260827_2")
@@ -1872,7 +1874,7 @@ class Browser(unittest.TestCase):
                 page.wait_for_selector("text=Analyse these tiles", timeout=20000)   # the page refreshed itself
                 self.shot(page, f"predict_convert_done_{width}")
                 # a tile upload the same way
-                with mock.patch.object(P, "CHUNK_BYTES", 1000):
+                with mock.patch.object(COMMON, "CHUNK_BYTES", 1000):
                     page.goto(self.p.origin + "/predict/new/upload/")
                     page.fill('input[name="sample_label"]', "Browser " + XSS)
                     page.fill('input[name="nm_per_px"]', "1.4724")
