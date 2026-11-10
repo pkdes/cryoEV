@@ -557,8 +557,8 @@ def fmt(v, unit="") -> str:
 SESSION_LABELS = {"instrument": "Instrument", "magnification": "Magnification", "pixel_size_a": "Pixel size (\u00c5/px)",
                   "defocus_um": "Defocus (\u00b5m)", "target_defocus_um": "Target defocus (\u00b5m)",
                   "dose": "Dose (e\u207b/\u00c5\u00b2)", "voltage_kv": "Voltage (kV)", "binning": "Binning",
-                  "acq_dates": "Acquired", "n_mdoc": "Montage / mdoc files", "n_imaging": "Files with imaging images",
-                  "n_other": "Files without", "other_magnification": "Other magnifications (search / overview)"}
+                  "acq_dates": "Acquired", "n_mdoc": "Montage / mdoc files", "n_imaging": "Files at imaging magnification",
+                  "n_other": "Files at search/overview magnification only", "other_magnification": "Other magnifications (search / overview)"}
 
 
 def nice(v) -> str:
@@ -619,7 +619,7 @@ def render_report(data, url, standalone=False, generated="", who="") -> str:
             h.append('<p class="cj-mut">No acquisition settings were recorded for this conversion.</p>')
         h.append('<div class="cj-gallery-tw"><table class="cj-gallery-tbl"><caption class="cj-gallery-sr">Acquisition per montage'
                  '</caption><thead><tr><th>Grid</th><th>Montage</th><th>Mag</th><th>Acquisition &Aring;/px</th>'
-                 '<th>Tile &Aring;/px</th><th>Defocus &micro;m</th><th>Dose</th><th>Acquired</th><th>Tiles</th></tr></thead><tbody>')
+                 '<th>Tile &Aring;/px</th><th>Defocus <span class="cj-gallery-unit">(&micro;m)</span></th><th>Dose <span class="cj-gallery-unit">(e&#8315;/&Aring;&sup2;)</span></th><th>Acquired</th><th>Tiles</th></tr></thead><tbody>')
         for m in d["montages"]:
             a = m["acq"] or {}
             tile_a = "mixed" if m["mixed_scale"] else fmt(m["tile_a_px"])

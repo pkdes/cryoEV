@@ -350,6 +350,7 @@ a.cj-data-graph-node:focus-visible{outline:2px solid var(--acc);outline-offset:1
 .cj-gallery-tbl{border-collapse:collapse;width:100%;font-size:.88rem;margin:6px 0 12px}
 .cj-gallery-tbl th,.cj-gallery-tbl td{text-align:left;padding:5px 10px 5px 0;border-bottom:1px solid var(--line);vertical-align:top}
 .cj-gallery-tbl th{font-size:.75rem;font-weight:600;color:var(--mut);text-transform:uppercase;letter-spacing:.03em;white-space:nowrap}
+.cj-gallery-unit{text-transform:none;letter-spacing:0}
 .cj-gallery-tbl td[data-col]{font-variant-numeric:tabular-nums}
 .cj-gallery-sub td{font-weight:600;background:var(--accbg)}
 .cj-gallery-tot td{font-weight:700;border-top:2px solid var(--fg)}
