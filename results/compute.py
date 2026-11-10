@@ -52,6 +52,15 @@ reviewed. `diam_hist` = {"bin_nm": 10, "max_nm": 500, "counts": [51]}: counts of
 (the same ones as the median), bin k = [10k, 10k+10) nm, the last bin = 500 nm and above; sum(counts) == ev_total.
 `diam_hist` is in results.json only, not in SAMPLE_FIELDS / per_sample.csv.
 
+Rejected images and low confidence (additive, results/1 unchanged; BUILD_CONTRACTS.md section 14). reviewed.json
+images may carry `rejected: true`, `reject_reason`, `note`; objects `low_conf: true`, `note` (read with .get). ONE rule:
+rejected images are dropped from a sample before the refusal check and every number (EV, non-EV, inner, reviewer %,
+nm/px min / max, n_images = counted images, refused_unsure, diam_hist). They stay in `images` / per_image.csv with
+`rejected`, `reject_reason`, `note`. Per sample `n_rejected` and `n_low_conf` (counted EVs that carry low conf: a
+low-conf non-EV or inner layer is not counted). A sample whose every image is rejected has all numbers null,
+n_images 0, n_rejected k and `all_rejected: true` (JSON only). CSV text cells starting with = + - @, tab or CR get a
+' prefix (`guard_cell`).
+
 Nullable fields: per sample diam_nm_median / diam_nm_q1 / diam_nm_q3 and pct_multilayer_geometry are null
 when the sample has no EV; pct_multilayer_reviewer is null with no reviewed image or no reviewer EV/MV call;
 per image nm_per_px is null when images.csv has no confirmed nm/px (that sample is then refused); `refused`
@@ -98,8 +107,9 @@ SAMPLE_FIELDS = ["n_images", "n_reviewed", "ev_total", "ev_per_image_mean", "dia
                  "diam_nm_q3", "pct_multilayer_geometry", "inner_layers_excluded", "nonev_total",
                  "reviewed_images", "ev_reviewed_geometry", "reviewer_ev", "reviewer_mv", "reviewer_inner",
                  "reviewer_nonev", "pct_multilayer_reviewer", "reviewer_geometry_disagree", "nm_per_px_min",
-                 "nm_per_px_max"]
-IMAGE_FIELDS = ["sample_label", "reviewed", "edited", "nm_per_px", "ev", "multilayer", "inner", "nonev"]
+                 "nm_per_px_max", "n_rejected", "n_low_conf"]
+IMAGE_FIELDS = ["sample_label", "reviewed", "edited", "nm_per_px", "ev", "multilayer", "inner", "nonev",
+                "rejected", "reject_reason", "note"]
 IMAGES_CSV_COLUMNS = {"image", "file", "sample_label", "nm_per_px", "nm_confirmed_by"}
 _TINY = 16   # below this many pixels, ask analysis.morphology whether the chain would keep the outline
 
@@ -148,6 +158,7 @@ class _Obj:
     mask: np.ndarray
     cls: int
     reviewer_class: str | None = None
+    low_conf: bool = False
 
 
 def _read_json(path: Path) -> dict:
@@ -213,7 +224,8 @@ def _objects_from_reviewed(entry: dict, image: str, w: int, h: int, to_mask) -> 
         rc = o.get("reviewer_class")
         if rc is not None and rc not in REVIEWER_CLASSES:
             raise ValueError(f"reviewed image {image} object {n}: unknown reviewer_class {rc!r}")
-        out.append(_Obj(to_mask([float(c) for xy in poly for c in xy], w, h), int(o["cls"]), rc))
+        out.append(_Obj(to_mask([float(c) for xy in poly for c in xy], w, h), int(o["cls"]), rc,
+                        bool(o.get("low_conf"))))
     return out
 
 
@@ -233,7 +245,7 @@ def _measure(objs: list[_Obj], nm_per_px: float | None, ev_ids, roles_for, compu
     ev_idx = [k for k, o in enumerate(objs) if ev_ids is None or o.cls in ev_ids]
     role, _ = roles_for([objs[k].mask for k in ev_idx])
     geo_role = {k: role[j] for j, k in enumerate(ev_idx)}
-    ev = ml = inner = 0
+    ev = ml = inner = low = 0
     diam = []
     for k in ev_idx:
         d = _diameter(objs[k].mask, nm_per_px, compute_morphology)
@@ -245,8 +257,9 @@ def _measure(objs: list[_Obj], nm_per_px: float | None, ev_ids, roles_for, compu
         ev += 1
         diam.append(d)
         ml += geo_role[k] == "multilayer"
+        low += bool(objs[k].low_conf)          # counted EVs only: a low-conf non-EV or inner layer is not here
     calls = [(o.reviewer_class, geo_role.get(k)) for k, o in enumerate(objs) if o.reviewer_class is not None]
-    return {"ev": ev, "multilayer": ml, "inner": inner, "nonev": len(objs) - len(ev_idx), "_diam": diam,
+    return {"ev": ev, "multilayer": ml, "inner": inner, "nonev": len(objs) - len(ev_idx), "_diam": diam, "_low_conf": low,
             "_rev_ev": sum(rc in ("EV", "MV") for rc, _ in calls),
             "_rev_mv": sum(rc == "MV" for rc, _ in calls),
             "_rev_inner": sum(rc == "inner" for rc, _ in calls),
@@ -269,7 +282,7 @@ def diam_hist(diams) -> dict:
     return {"bin_nm": HIST_BIN_NM, "max_nm": HIST_MAX_NM, "counts": counts}
 
 
-def _sample(imgs: list[dict]) -> dict:
+def _sample(imgs: list[dict], n_rejected: int = 0) -> dict:
     ev_total = sum(i["ev"] for i in imgs)
     ml = sum(i["multilayer"] for i in imgs)
     d = np.array([x for i in imgs for x in i["_diam"]], dtype=float)
@@ -297,10 +310,21 @@ def _sample(imgs: list[dict]) -> dict:
         "reviewer_geometry_disagree": sum(i["_disagree"] for i in rev),
         "nm_per_px_min": min(i["nm_per_px"] for i in imgs),
         "nm_per_px_max": max(i["nm_per_px"] for i in imgs),
+        "n_rejected": n_rejected,
+        "n_low_conf": sum(i["_low_conf"] for i in imgs),
         "n_checked": sum(1 for i in imgs if i["reviewed"] or i["edited"]),
         "n_unsure_open": None if any(i["_unsure"] is None for i in imgs) else sum(i["_unsure"] for i in imgs),
         "diam_hist": diam_hist(d),
     }
+
+
+def _all_rejected(n_rejected: int) -> dict:
+    """A sample whose every image was rejected: nothing is counted, so every number is null (not a crash on
+    min / max / a division by zero)."""
+    out = {f: None for f in SAMPLE_FIELDS}
+    out.update(n_images=0, n_reviewed=0, reviewed_images=0, n_rejected=n_rejected, n_low_conf=0, n_checked=0,
+               n_unsure_open=0, diam_hist=diam_hist([]), all_rejected=True)
+    return out
 
 
 def nm_spread(values) -> float:
@@ -379,33 +403,57 @@ def compute(ps_dir, reviewed_json=None) -> dict:
     per_image = {}
     for r in rows:
         image = r["image"]
-        w, h = _image_size(ps_dir, r["file"])
         nm = _nm_per_px(r)
         entry = reviewed["images"][image] if reviewed is not None else None
         is_rev = bool(entry and entry.get("reviewed"))
         is_edited = bool(entry and entry.get("edited", entry.get("reviewed")))   # no key: same as reviewed
-        if is_rev or is_edited:
-            objs, n_cand = _objects_from_reviewed(entry, image, w, h, to_mask), None
-        else:
-            objs, n_cand = _split_predictions(pred_dir, image, w, h, load)
-        # unsure candidates still open: Reviewed 0; edited = the package's own count (None = unknown, an old
-        # reviewed.json); untouched = all candidates (the package's count when it gives one, else the .txt's)
-        if is_rev:
+        rejected = bool(entry and entry.get("rejected"))
+        note = (entry.get("note") if entry else None) or None
+        try:
+            w, h = _image_size(ps_dir, r["file"])
+            if is_rev or is_edited:
+                objs, n_cand = _objects_from_reviewed(entry, image, w, h, to_mask), None
+            else:
+                objs, n_cand = _split_predictions(pred_dir, image, w, h, load)
+            # unsure candidates still open: Reviewed 0; edited = the package's own count (None = unknown, an old
+            # reviewed.json); untouched = all candidates (the package's count when it gives one, else the .txt's)
+            if is_rev:
+                unsure = 0
+            elif is_edited:
+                unsure = entry.get("n_candidates_open")
+            else:
+                unsure = entry["n_candidates_open"] if entry and entry.get("n_candidates_open") is not None else n_cand
+            m = _measure(objs, nm, ev_ids, roles_for, compute_morphology)
+        except Exception as e:  # noqa: BLE001
+            if not rejected:
+                raise                       # a counted image that can't be read is a real error
+            # a rejected image is not counted, so a broken file or a missing .txt must not fail the whole set:
+            # it is recorded on its own row (note) and left out of every number
+            w = h = None
             unsure = 0
-        elif is_edited:
-            unsure = entry.get("n_candidates_open")
-        else:
-            unsure = entry["n_candidates_open"] if entry and entry.get("n_candidates_open") is not None else n_cand
-        m = _measure(objs, nm, ev_ids, roles_for, compute_morphology)
+            m = {"ev": 0, "multilayer": 0, "inner": 0, "nonev": 0, "_diam": [], "_low_conf": 0, "_rev_ev": 0,
+                 "_rev_mv": 0, "_rev_inner": 0, "_rev_nonev": 0, "_disagree": 0}
+            note = (note + " | " if note else "") + f"not read ({type(e).__name__}: {e})"
+        if rejected:
+            unsure = 0                      # a rejected image has nothing left to decide
         per_image[image] = {"sample_label": r["sample_label"], "reviewed": is_rev, "edited": is_edited,
-                            "nm_per_px": nm,
+                            "nm_per_px": nm, "rejected": rejected,
+                            "reject_reason": (entry.get("reject_reason") if rejected else None),
+                            "note": note,
                             **m, "_unsure": unsure, "_size": (w, h), "_image": image}
 
     by_sample = {}
     for img in per_image.values():
         by_sample.setdefault(img["sample_label"], []).append(img)
     refusals = []
-    for label, imgs in by_sample.items():
+    for label, all_imgs in by_sample.items():
+        # ONE rule: rejected images leave the sample before the refusal check and every number (a rejected
+        # image with a bad nm/px or a different tile size neither refuses the sample nor moves a mean)
+        imgs = [i for i in all_imgs if not i["rejected"]]
+        n_rej = len(all_imgs) - len(imgs)
+        if not imgs:
+            result["samples"][label] = _all_rejected(n_rej)
+            continue
         why = _refusal(label, imgs)
         if why:
             refusals.append(why)
@@ -413,7 +461,7 @@ def compute(ps_dir, reviewed_json=None) -> dict:
             result.setdefault("refused_unsure", {})[label] = (
                 None if any(i["_unsure"] is None for i in imgs) else sum(i["_unsure"] for i in imgs))
         else:
-            result["samples"][label] = _sample(imgs)
+            result["samples"][label] = _sample(imgs, n_rej)
     result["images"] = {k: {f: v[f] for f in IMAGE_FIELDS} for k, v in per_image.items()}
     result["refused"] = "; ".join(refusals) or None
     return result
@@ -425,12 +473,19 @@ def _atomic_write(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def guard_cell(text: str) -> str:
+    """CSV formula guard: a cell a spreadsheet would read as a formula (starts with = + - @, a tab or a CR) gets a
+    ' prefix. Notes and sample labels are free text. (portal/modules/results.py has the same rule; a test pins
+    them equal.)"""
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
 def _cell(v):
     if v is None:
         return ""
     if isinstance(v, bool):
         return "true" if v else "false"
-    return v
+    return guard_cell(v) if isinstance(v, str) else v
 
 
 def _csv_text(header: list[str], rows: list[list]) -> str:
