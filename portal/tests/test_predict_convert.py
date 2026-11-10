@@ -422,12 +422,16 @@ class Base(unittest.TestCase):
         if expect != 200:
             return st, None
         step = chunk or st["chunk"]
+        cur = st
         for name, data in files:
+            if name in cur.get("done") or []:            # left out by the server (atlas, a bad sidecar's pair): as the page
+                continue
             off = 0
             while off < len(data):
                 part = data[off:off + step]
                 rr = self.piece(st["upload"], name, off, part, who)
                 self.assertEqual(rr.status_code, 200, rr.text[:600])
+                cur = rr.json()
                 off += len(part)
         if not create:
             return st, None
@@ -955,11 +959,79 @@ class Upload(Base):
                                "advanced")
                 uid = r.json()["upload"]
                 errs = [self.piece(uid, n, 0, b, "advanced") for n, b in files]
-                bad = [e for e in errs if e.status_code != 200]
-                self.assertEqual(bad[0].status_code, 400)
-                self.assertIn(text, bad[0].json()["error"])
+                # a file failing its content check is left out, not fatal for the upload (round 7) ...
+                self.assertEqual([e.status_code for e in errs], [200] * len(files))
+                self.assertTrue(any(text in x["why"] for x in errs[-1].json()["skipped"]), errs[-1].json())
+                # ... and with nothing convertible left, create refuses, saying why; nothing is kept
+                c = self.jpost(f"/predict/api/upload/{uid}/create", {}, "advanced")
+                self.assertEqual(c.status_code, 400, c.text)
+                self.assertIn("no montage is left to convert", c.json()["error"])
+                self.assertIn(text, c.json()["error"])
         self.assertEqual(self.convs(), [])
         self.assertTrue(self.scratch_empty())
+
+
+class RawLeftOut(Base):
+    """Live bug 2026-11-09 (678-file upload refused for one grid9-atlas.mrc.mdoc): a raw file that fails its content
+    check is left out (deleted, listed), not fatal; atlas files are left out at the start; nothing convertible left
+    -> refused with the reasons."""
+
+    def test_a_bad_mdoc_is_left_out_and_the_good_montage_converts(self):
+        files = self.raw_files() + [("grid2-pos1.mrc", mrc_bytes()), ("grid2-pos1.mrc.mdoc", b"hello, no tiles")]
+        st, r = self.upload("advanced", "raw", {"session": "20261101", "recipe": "20261101"}, files)
+        self.assertEqual(r.status_code, 200, r.text)
+        cid = CID_RE.match(r.json()["href"]).group(1)
+        self.assertEqual(self.wait_conv(cid)["state"], "done")
+        d = self.w.rawtiles / cid
+        self.assertEqual(sorted(p.name for p in (d / "input").iterdir()),
+                         ["grid1-pos1.mrc", "grid1-pos1.mrc.mdoc", "sample_key.csv"])
+        meta = json.loads((d / "convert.json").read_text(encoding="utf-8"))
+        why = {x["name"]: x["why"] for x in meta["skipped"]}
+        self.assertIn("not a SerialEM mdoc file", why["grid2-pos1.mrc.mdoc"])
+        self.assertEqual(why["grid2-pos1.mrc"], "its grid2-pos1.mrc.mdoc was left out")
+        self.assertEqual([Path(p).name for p in meta["inputs"]], ["grid1-pos1.mrc.mdoc"])
+        self.assertNotIn("grid2-pos1.mrc", meta["source"]["files"])
+        page = self.page(f"/predict/convert/{cid}/", "advanced")                     # the owner sees why
+        self.assertIn("Left out 2 file(s)", page)
+        self.assertIn(html.escape("grid2-pos1.mrc.mdoc: not a SerialEM mdoc file"), page)
+
+    def test_atlas_files_are_left_out_at_the_start(self):
+        atlas = [("grid9-Atlas.mrc", mrc_bytes()), ("grid9-Atlas.mrc.mdoc", b"no PixelSpacing here")]
+        st, r = self.upload("advanced", "raw", {"session": "20261101", "recipe": "20261101"},
+                            self.raw_files() + atlas)
+        self.assertEqual(sorted(st["done"]), ["grid9-Atlas.mrc", "grid9-Atlas.mrc.mdoc"])   # never sent
+        self.assertEqual({x["why"] for x in st["skipped"]}, {P.ATLAS_WHY})
+        self.assertEqual(r.status_code, 200, r.text)
+        cid = CID_RE.match(r.json()["href"]).group(1)
+        self.assertEqual(self.wait_conv(cid)["state"], "done")
+        meta = json.loads((self.w.rawtiles / cid / "convert.json").read_text(encoding="utf-8"))
+        self.assertEqual(sorted(x["name"] for x in meta["skipped"]), ["grid9-Atlas.mrc", "grid9-Atlas.mrc.mdoc"])
+        self.assertFalse(any("Atlas" in p.name for p in (self.w.rawtiles / cid / "input").iterdir()))
+        # only atlas files: refused before any byte, saying so
+        st, _ = self.upload("advanced", "raw", {"session": "20261101"}, atlas, expect=400)
+        self.assertIn("no montage", st["error"])
+        self.assertIn("atlas file(s) were left out", st["error"])
+
+    def test_everything_bad_is_refused_with_the_reasons(self):
+        files = [("grid1-pos1.mrc", mrc_bytes()), ("grid1-pos1.mrc.mdoc", b"junk one"),
+                 ("grid2-pos1.mrc", b"\0" * 2048), ("grid2-pos1.mrc.mdoc", MDOC.encode())]
+        before = self.convs()
+        st, r = self.upload("advanced", "raw", {"session": "20261101"}, files)
+        self.assertEqual(r.status_code, 400, r.text)
+        err = r.json()["error"]
+        self.assertIn("no montage is left to convert (4 file(s) left out)", err)
+        self.assertIn("grid1-pos1.mrc.mdoc: grid1-pos1.mrc.mdoc: not a SerialEM mdoc file", err)
+        self.assertIn("grid2-pos1.mrc: grid2-pos1.mrc: not an MRC file", err)
+        self.assertEqual(self.convs(), before)
+        self.assertEqual(r.json()["dropped"], True)                      # nothing kept
+
+    def test_left_out_helpers(self):
+        kept, left = P.raw_leave_out({"a.mrc": 1, "a.mrc.mdoc": 1, "g9-ATLAS.mrc.mdoc": 1, "g9-atlas.mrc": 1})
+        self.assertEqual(kept, {"a.mrc": 1, "a.mrc.mdoc": 1})
+        self.assertEqual(sorted(x["name"] for x in left), ["g9-ATLAS.mrc.mdoc", "g9-atlas.mrc"])
+        js = (REPO / "portal" / "static" / "predict.js").read_text(encoding="utf-8")
+        self.assertIn("/atlas/i.test(f.name)", js)                    # the page leaves them out before sending
+        self.assertIn("atlas file", js)
 
 
 class NoJS(Base):
@@ -1047,14 +1119,28 @@ class SidecarPaths(Base):
                 with self.subTest(why=why, sidecar=side):
                     files = [(side, idoc_with("t1.tif", ref))]
                     files.append(("grid1-pos1.mrc", mrc_bytes()) if side.endswith(".mrc.mdoc") else ("t1.tif", TIF))
-                    j = self.raw_up(files, expect_piece=400)
+                    # left out (deleted on arrival) -> nothing left to convert: create refuses, saying why
+                    j = self.raw_up(files, expect_create=400)
                     self.assertIn("not a plain file name", j["error"])
+                    self.assertIn("no montage is left to convert", j["error"])
                     self.assertTrue(j["dropped"])
         # a bare name that was not uploaded: refused at create, nothing kept
         j = self.raw_up([("grid3-1.idoc", idoc_with("t1.tif", "t2.tif")), ("t1.tif", TIF)], expect_create=400)
         self.assertIn("'t2.tif' that was not uploaded", j["error"])
         self.assertEqual(self.convs(), [])
         self.assertEqual(self.argv_lines(), [])                        # the converter never ran
+        # beside a good montage: the bad sidecar (a UNC path) is left out and deleted, the good one converts
+        unc = idoc_with("t1.tif", r"\\gpu-desktop\share\x.tif")
+        j = self.raw_up([("grid1-pos1.mrc", mrc_bytes()), ("grid1-pos1.mrc.mdoc", MDOC.encode()),
+                         ("grid2-pos1.mrc", mrc_bytes()), ("grid2-pos1.mrc.mdoc", unc)])
+        cid = CID_RE.match(j["href"]).group(1)
+        self.assertEqual(self.wait_conv(cid)["state"], "done")
+        d = self.w.rawtiles / cid
+        self.assertEqual(sorted(p.name for p in (d / "input").iterdir()), ["grid1-pos1.mrc", "grid1-pos1.mrc.mdoc"])
+        meta = json.loads((d / "convert.json").read_text(encoding="utf-8"))
+        self.assertEqual([Path(p).name for p in meta["inputs"]], ["grid1-pos1.mrc.mdoc"])
+        self.assertEqual({x["name"] for x in meta["skipped"]}, {"grid2-pos1.mrc", "grid2-pos1.mrc.mdoc"})
+        self.assertFalse(any("grid2-pos1" in a for ln in self.argv_lines() for a in ln["argv"]))
         # control: a valid idoc with its tiles converts
         j = self.raw_up([("grid3-1.idoc", idoc_with("t1.tif", "t2.tif")), ("t1.tif", TIF), ("t2.tif", TIF)])
         cid = CID_RE.match(j["href"]).group(1)
@@ -1717,9 +1803,12 @@ class Browser(unittest.TestCase):
                     (files / "grid1-pos1.mrc").write_bytes(mrc_bytes())
                     (files / "grid1-pos1.mrc.mdoc").write_text(MDOC, encoding="utf-8")
                     (files / "sample_key.csv").write_text(SAMPLE_KEY, encoding="utf-8")
+                    (files / "grid9-atlas.mrc").write_bytes(mrc_bytes())        # the page leaves these out
+                    (files / "grid9-atlas.mrc.mdoc").write_text("no PixelSpacing", encoding="utf-8")
                     page.set_input_files('input[name="files"]', [str(files / n) for n in
                                                                   ("grid1-pos1.mrc", "grid1-pos1.mrc.mdoc",
-                                                                   "sample_key.csv")])
+                                                                   "sample_key.csv", "grid9-atlas.mrc",
+                                                                   "grid9-atlas.mrc.mdoc")])
                     self.shot(page, f"predict_raw_upload_{width}")
                     page.click('button[type="submit"]')
                     page.wait_for_url(re.compile(r".*/predict/convert/20260827-2_[0-9a-f]{6}/$"), timeout=30000)
@@ -1729,6 +1818,8 @@ class Browser(unittest.TestCase):
                 self.assertTrue(all(len(b or b"") <= 1500 for m, u, b in rec["requests"]
                                     if m == "POST" and "/file?" in u))
                 self.assertFalse([u for m, u, _ in rec["requests"] if m == "POST" and u.endswith("/new/raw/")])
+                # the atlas pair was never declared nor sent
+                self.assertFalse([u for m, u, b in rec["requests"] if m == "POST" and "atlas" in (u + str(b or ""))])
                 self.assertEqual(self.wait_done(cid)["state"], "done")
                 page.wait_for_selector("text=Analyse these tiles", timeout=20000)   # the page refreshed itself
                 self.shot(page, f"predict_convert_done_{width}")

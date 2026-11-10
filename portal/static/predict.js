@@ -172,6 +172,16 @@
 
     function say(text) { if (box) { box.textContent = text || ''; box.hidden = !text; } }
     function progress(text) { if (info) info.textContent = text; }
+    var noteEl = null;
+    function note(text) {                                       // a lasting line under the progress (left-out files)
+      if (!noteEl && text && info) {
+        noteEl = document.createElement('p');
+        noteEl.className = 'cj-mut';
+        noteEl.setAttribute('data-cj-upload-note', '');
+        info.parentNode.insertBefore(noteEl, info.nextSibling);
+      }
+      if (noteEl) { noteEl.textContent = text || ''; noteEl.hidden = !text; }
+    }
     function busy(on) {
       if (!btn) return;
       btn.disabled = on;
@@ -220,6 +230,18 @@
       e.stopPropagation();                                      // not the plain-form handler below
       if (form.dataset.sending === '1') return;
       var files = Array.prototype.slice.call(input.files || []);
+      var leftOut = 0;
+      if (kind === 'raw') {                                     // whole-grid atlases are never converted: not sent
+        var out = {};
+        files.forEach(function (f) { if (/atlas/i.test(f.name)) out[f.name.toLowerCase()] = 1; });
+        files.forEach(function (f) {                            // an .mrc whose .mrc.mdoc is left out goes too
+          var lo = f.name.toLowerCase();
+          if (/\.mrc$/.test(lo) && out[lo + '.mdoc']) out[lo] = 1;
+        });
+        leftOut = files.filter(function (f) { return out[f.name.toLowerCase()]; }).length;
+        files = files.filter(function (f) { return !out[f.name.toLowerCase()]; });
+        note(leftOut ? leftOut + ' atlas file' + (leftOut === 1 ? '' : 's') + ' left out (not converted).' : '');
+      }
       var fields = {};
       new FormData(form).forEach(function (v, k) { if (typeof v === 'string') fields[k] = v; });
       form.dataset.sending = '1';
@@ -232,6 +254,8 @@
         .then(function (st) {
           if (st._status !== 200) throw st;
           remember(st.upload);
+          var skipped = (st.skipped || []).length;             // the server left some out too (it says which)
+          if (skipped > leftOut) note((skipped) + ' file' + (skipped === 1 ? '' : 's') + ' left out (not converted).');
           return sendAll(st, files);
         })
         .then(function (id) {
