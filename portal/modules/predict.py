@@ -1077,10 +1077,10 @@ def page_session_form(cfg, user, src: dict, t: dict, form=None, error=None) -> s
     admin = user.get("role") == "admin"
     form = form or {}
     picked = set(form["samples"] if "samples" in form else
-                 [f"g{i}" for i, g in enumerate(t["groups"]) if not g["mixed"]])
+                 [g.get("gid", f"g{i}") for i, g in enumerate(t["groups"]) if not g["mixed"]])
     rows = []
     for i, g in enumerate(t["groups"]):
-        gid = f"g{i}"
+        gid = g.get("gid", f"g{i}")
         nm_val = form.get(f"nm_{gid}", f"{g['nm']:g}" if g["nm"] else "")
         if g["mixed"]:
             note = ('<span class="cj-predict-warn">Pixel sizes in this sample differ by more than '
@@ -1123,7 +1123,7 @@ def page_session_form(cfg, user, src: dict, t: dict, form=None, error=None) -> s
     count = form.get("count", "")
     over = t["n"] > MAX_FILES
     err = msg_box("", extra=f'<div>{problem_list(error)}</div>') if error else ""
-    n0 = sum(len(g["names"]) for i, g in enumerate(t["groups"]) if f"g{i}" in picked and not g["mixed"])
+    n0 = sum(len(g["names"]) for i, g in enumerate(t["groups"]) if g.get("gid", f"g{i}") in picked and not g["mixed"])
     prefill = form["name_default"] if "name_default" in form else default_name_for(
         {"kind": "session", "session": src["session"]}, src["label"])
     name_val = form["name"] if "name" in form else prefill
@@ -1157,7 +1157,7 @@ def page_session_form(cfg, user, src: dict, t: dict, form=None, error=None) -> s
            f'ticked samples</label>') +
         f'<p class="cj-mut" id="cj-predict-sel" role="status"></p>'
         + estimate_html(cfg, min(n0, MAX_FILES))
-        + (f'<p class="cj-mut">At most {MAX_FILES} tiles per analysis: choose a number.</p>' if over else "")
+        + (f'<p class="cj-mut">At most {MAX_FILES} tiles per analysis: {"untick a sample, or reject some tiles in the Gallery" if kept else "choose a number"}.</p>' if over else "")
         + f'</fieldset>{name_field(name_val, prefill)}{model_block(cfg, user, form.get("model"))}'
         f'<p><button class="cj-predict-btn cj-predict-primary" type="submit" data-busy="Preparing your images… '
         f'this can take a minute">Start analysis</button></p></form></div>')
@@ -1608,6 +1608,10 @@ def check_active(cfg, user, exclude=None):
                       f"of them is done.", 429)
 
 
+KEPT_CHANGED = ("The kept tiles changed in the Gallery since this page was opened. The samples and pixel sizes below "
+                "are from the manifest again: check them, then confirm.")
+
+
 def kept_form(q) -> dict | None:
     """The gallery hand-over of a session form's query / posted fields: {which, from, kept_maybe}, else None."""
     if str(q.get("which") or "") != "kept":
@@ -1626,7 +1630,7 @@ def kept_scope(cfg, src: dict, q, t: dict) -> dict:
         raise Refusal("These kept tiles belong to a different conversion. Open the Gallery of this conversion and use "
                       "its “Analyse kept tiles” button.", 400)
     from portal.modules import gallery as G                 # lazily: gallery imports this module
-    d = conv_dir(cfg, k["from"])
+    d = Path(src["dir"]).parent                              # the source's own conversion folder (from == src["conversion"])
     meta = _read_json(d / CONVERT_JSON) if d else None
     if not isinstance(meta, dict):
         raise Refusal("This conversion can’t be read right now. Try again later.", 503)
@@ -1635,7 +1639,7 @@ def kept_scope(cfg, src: dict, q, t: dict) -> dict:
     flags = ("keep", "maybe") if k["kept_maybe"] else ("keep",)
     kept = {n for n in c.tiles if (state.get(n) or {}).get("flag") in flags}
     groups = []
-    for g in t["groups"]:
+    for i, g in enumerate(t["groups"]):
         names = [n for n in g["names"] if n in kept]
         if not names:
             continue
@@ -1644,7 +1648,7 @@ def kept_scope(cfg, src: dict, q, t: dict) -> dict:
         missing = len(names) - len(per_tile)
         vals = sorted(set(per_tile))
         mixed = len(vals) > 1 and not one_scale(per_tile)
-        groups.append({**g, "names": names, "nm_of": nm_of,
+        groups.append({**g, "gid": f"g{i}", "names": names, "nm_of": nm_of,
                        "nm": vals[0] if len(vals) == 1 and not missing else None, "nm_values": vals,
                        "nm_min": vals[0] if vals else None, "nm_max": vals[-1] if vals else None,
                        "nm_missing": missing, "nm_range": len(vals) > 1 and not mixed and not missing, "mixed": mixed})
@@ -1662,11 +1666,12 @@ def session_plan(cfg, user, src: dict, form: dict) -> dict:
         raise Refusal("Tick “I confirm the pixel size”: nothing was started.")
     t = kept_scope(cfg, src, form, read_tiles(src))
     if form.get("sig") != t["sig"]:
-        raise Refusal("The session’s tiles changed since this page was opened. Check the samples again.")
+        raise Refusal(KEPT_CHANGED if t.get("kept") else
+                      "The session’s tiles changed since this page was opened. Check the samples again.")
     problems = []
     chosen = []
     for i, g in enumerate(t["groups"]):
-        gid = f"g{i}"
+        gid = g.get("gid", f"g{i}")
         if gid not in (form.get("samples") or []):
             continue
         if g["mixed"]:
@@ -1707,6 +1712,9 @@ def session_plan(cfg, user, src: dict, form: dict) -> dict:
     if problems:
         raise Refusal(f"Please fix ({len(problems)}):\n" + "\n".join(problems))
     names = pick(chosen, count)
+    if len(names) > MAX_FILES and t.get("kept"):
+        raise Refusal(f"More than {MAX_FILES} kept tiles ({len(names)}): untick a sample, or reject some tiles in the "
+                      f"Gallery.")
     if len(names) > MAX_FILES:
         raise Refusal(f"{len(names)} tiles chosen; an analysis takes at most {MAX_FILES}. Choose “Only ... "
                       f"tiles” with a number up to {MAX_FILES}, or fewer samples.")
@@ -4234,6 +4242,10 @@ def routes(ctx) -> list:
                     t = kept_scope(cfg, src, form, read_tiles(src))
                 except Refusal as e2:
                     return refused_page(request, src["label"], unreadable_page(src, e2, user), e2.status)
+                if e.msg == KEPT_CHANGED:               # kept set changed: nothing posted is carried over
+                    form.pop("samples", None)
+                    for k in [k for k in form if k.startswith("nm_")]:
+                        del form[k]
                 return refused_page(request, src["label"], page_session_form(cfg, user, src, t, form, msg), status)
             return await run_in_threadpool(again)
         # the work runs in a task, keyed by the pick: pressing the button twice (or a retried request) joins it

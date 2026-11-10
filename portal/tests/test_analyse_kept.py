@@ -35,6 +35,7 @@ except Exception:                                            # noqa: BLE001
     sync_playwright = None
 
 CID, CID_Z = TG.CID_A, TG.CID_B
+CID_M, CID_F = "20261111_ffffff", "20261112_aabbcc"
 NAMES = [f"g1_Grid_1__m1_r{i // 4}c{i % 4}_t{i:02d}__denoised.png" for i in range(10)]
 KEEP, MAYBE, REJECT, FLIPPED, PLAIN = NAMES[0:3], NAMES[3:5], NAMES[5:7], NAMES[7], NAMES[8:10]
 MODEL = "v5_evnonev_y8m_20261029"
@@ -65,10 +66,21 @@ class World(TG.World):
             TG.make_conv = saved
         self.cfg = self.env.config()
         flag_tiles(self.a)                                        # CID_B (self.b) has no flags: 0 kept
+        # CID_M: two samples at different pixel sizes (A 0.5, B 2.0); CID_F: nothing flagged, for the browser test
+        self.m = TG.make_conv(self.raw, CID_M, "alyssia", names=NAMES, n=10, montage=False)
+        with open(self.m / "tiles" / "MANIFEST.csv", newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        for i, r in enumerate(rows):
+            r["sample_label"], r["nm_per_px"] = ("A", "0.5") if i < 5 else ("B", "2")
+        with open(self.m / "tiles" / "MANIFEST.csv", "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0]), lineterminator="\n")
+            w.writeheader()
+            w.writerows(rows)
+        self.f = TG.make_conv(self.raw, CID_F, "alyssia", names=NAMES, n=10, montage=False)
 
-    def source(self, cid=CID):
+    def source(self, cid=CID, user=None):
         can_see = lambda u, o: o == u["id"] or u["role"] == "admin"  # noqa: E731
-        return next(s for s in P.converted_sources(self.cfg, {"id": "alyssia", "role": "advanced"}, can_see)
+        return next(s for s in P.converted_sources(self.cfg, user or {"id": "alyssia", "role": "advanced"}, can_see)
                     if s["conversion"] == cid)
 
 
@@ -91,6 +103,10 @@ class Base(unittest.TestCase):
 
     def submit(self, cid=CID, **form):
         """session_submit (the server path of session_post) with PS.create captured -> the names it was given."""
+        return sorted(self.submit_rows(cid, **form))
+
+    def submit_rows(self, cid=CID, **form):
+        """-> {tile name: its MANIFEST row as handed to PS.create}."""
         src = self.w.source(cid)
         t = P.kept_scope(self.w.cfg, src, form, P.read_tiles(src))
         data = {"confirm": "yes", "sig": t["sig"], "samples": ["g0"], "nm_g0": "1.4724", "how": "all", "model": MODEL}
@@ -99,7 +115,7 @@ class Base(unittest.TestCase):
 
         def fake_create(d_from, **kw):
             with open(kw["manifest"], newline="", encoding="utf-8") as f:
-                seen["names"] = sorted(r["output_name"] for r in csv.DictReader(f))
+                seen["rows"] = {r["output_name"]: r for r in csv.DictReader(f)}
             d = Path(self.w.predict) / "ps_20261105_aaaaaa"
             d.mkdir(parents=True, exist_ok=True)
             return d
@@ -107,7 +123,7 @@ class Base(unittest.TestCase):
         with mock.patch.object(P.PS, "create", side_effect=fake_create), mock.patch.object(P.PL, "start_detached"), \
                 mock.patch.object(P, "check_model", return_value=None), mock.patch.object(P, "check_active"):
             P.session_submit(self.w.cfg, self.user, src, data)
-        return seen["names"]
+        return seen["rows"]
 
 
 class KnownAnswer(Base):
@@ -183,20 +199,74 @@ class Page(Base):
         st, _, body = self.w.get("owner", f"/gallery/{CID}/")
         html = body.decode()
         self.assertEqual(st, 200)
-        self.assertIn("Analyse kept tiles (3)", html)
-        self.assertIn("also include maybe (2)", html)
+        self.assertIn("Analyse kept tiles (<span data-n-keep>3</span>)", html)
+        self.assertIn("also include maybe (<span data-n-maybe>2</span>)", html)
         self.assertRegex(html, r'action="/predict/new/session/[0-9a-f]+/"')
         self.assertIn('name="which" value="kept"', html)
         self.assertIn(f'name="from" value="{CID}"', html)
 
     def test_admin_sees_it_non_owner_gets_404(self):
-        self.assertIn("Analyse kept tiles (3)", self.w.get("admin", f"/gallery/{CID}/")[2].decode())
+        self.assertIn("<span data-n-keep>3</span>", self.w.get("admin", f"/gallery/{CID}/")[2].decode())
         self.assertEqual(self.w.get("other", f"/gallery/{CID}/")[0], 404)
 
     def test_hidden_with_zero_kept(self):
         st, _, body = self.w.get("owner", f"/gallery/{CID_Z}/")
         self.assertEqual(st, 200)
-        self.assertNotIn("Analyse kept tiles", body.decode())
+        self.assertRegex(body.decode(), r'<form[^>]*id="cj-gallery-analyse"[^>]*\shidden>')     # there, for gallery.js, but hidden
+
+    def test_stable_group_ids_when_flags_change(self):
+        """M1: clearing A's keep must not renumber B (g1) nor carry A's pixel size to it."""
+        c = G.Conv(self.w.m, json.loads((self.w.m / "convert.json").read_text()), {})
+        for n in (NAMES[0], NAMES[1], NAMES[5], NAMES[6]):
+            G.append_event(c, "alyssia", n, "flag", "keep")
+        path = self.session_path(CID_M, "?which=kept&from=" + CID_M)
+        html = self.w.get("owner", path)[2].decode()
+        self.assertIn('name="nm_g0"', html)
+        self.assertIn('name="nm_g1"', html)
+        sig = tile_sig(html)
+        for n in (NAMES[0], NAMES[1]):
+            G.append_event(c, "alyssia", n, "flag", "")             # A is no longer kept; the form is stale
+        body = urllib.parse.urlencode([("sig", sig), ("which", "kept"), ("from", CID_M), ("confirm", "yes"),
+                                       ("samples", "g0"), ("samples", "g1"), ("nm_g0", "0.5"), ("nm_g1", "2"),
+                                       ("model", MODEL)]).encode()
+        with mock.patch.object(P, "check_model", return_value=None), mock.patch.object(P, "check_active"):
+            st, _, page = self.w.req("owner", "POST", path, body, extra=FORM)
+        page = page.decode()
+        self.assertEqual(st, 400)
+        self.assertIn("kept tiles changed in the Gallery", page)
+        self.assertNotIn('name="nm_g0"', page)                      # A has none left
+        self.assertRegex(page, r'name="nm_g1"[^>]*value="2"')       # B shows B's own pixel size
+        self.assertNotIn('value="0.5"', page)
+        # a fresh submit runs B at its own nm
+        seen = self.submit_rows(CID_M, which="kept", samples=["g1"], nm_g1="2", **{"from": CID_M})
+        self.assertEqual(sorted(seen), [NAMES[5], NAMES[6]])
+        self.assertEqual({r["nm_per_px"] for r in seen.values()}, {"2.0"})
+        # and the old numbering trap: g0 posted by a stale form never lands on B with A's value
+        with self.assertRaises(P.Refusal) as cm:
+            self.submit_rows(CID_M, which="kept", sig=sig, samples=["g0"], nm_g0="0.5", **{"from": CID_M})
+        self.assertIn("Gallery", cm.exception.msg)
+
+    def test_over_max_files_kept_message(self):
+        src = self.w.source()
+        with mock.patch.object(P, "MAX_FILES", 2), mock.patch.object(P, "check_model", return_value=None), \
+                mock.patch.object(P, "check_active"):
+            t = P.kept_scope(self.w.cfg, src, {"which": "kept", "from": CID}, P.read_tiles(src))
+            with self.assertRaises(P.Refusal) as cm:
+                P.session_plan(self.w.cfg, self.user, src, {"which": "kept", "from": CID, "confirm": "yes", "sig": t["sig"],
+                                                            "samples": ["g0"], "nm_g0": "1.4724", "model": MODEL})
+            self.assertIn("kept tiles", cm.exception.msg)
+            self.assertNotIn("Only", cm.exception.msg)
+            html = P.page_session_form(self.w.cfg, self.user, src, t, P.kept_form({"which": "kept", "from": CID}))
+            self.assertIn("reject some tiles in the Gallery", html)
+            self.assertNotIn("choose a number", html)
+
+    def test_other_users_own_key_with_owners_cid_same_400(self):
+        bob = {"id": "bob", "role": "advanced"}
+        key = self.w.source(TG.CID_C, bob)["key"]
+        a = self.w.get("other", f"/predict/new/session/{key}/?which=kept&from={CID}")
+        b = self.w.get("other", f"/predict/new/session/{key}/?which=kept&from=20269999_000000")
+        self.assertEqual((a[0], a[2]), (b[0], b[2]))
+        self.assertEqual(a[0], 400)
 
     def test_form_preselects_and_says_so(self):
         for q, n in (("?which=kept&from=" + CID, 3), ("?which=kept&from=" + CID + "&kept_maybe=1", 5)):
@@ -299,6 +369,24 @@ class Browser(Base):
         if getattr(cls, "pw", None):
             cls.pw.stop()
         super().tearDownClass()
+
+    def test_button_appears_when_a_tile_is_marked_keep(self):
+        """S1: in a fresh Gallery nothing is flagged, the button is hidden; marking one tile keep shows it with N=1."""
+        origin = self.w.portal.origin
+        ctx = self.browser.new_context(viewport={"width": 1280, "height": 900})
+        page = ctx.new_page()
+        page.goto(f"{origin}/login?k={self.w.keys['owner']}")
+        page.goto(f"{origin}/gallery/{CID_F}/")
+        form = page.locator("#cj-gallery-analyse")
+        self.assertFalse(form.is_visible())
+        page.locator(".cj-gallery-tile").first.click()
+        page.keyboard.press("k")
+        page.wait_for_function("!document.getElementById('cj-gallery-analyse').hidden", timeout=10000)
+        self.assertTrue(page.get_by_role("button", name="Analyse kept tiles (1)").is_visible())
+        self.assertFalse(page.locator("[data-maybe-label]").is_visible())
+        page.keyboard.press("m")                                    # keep -> maybe: no kept tile left
+        page.wait_for_function("document.getElementById('cj-gallery-analyse').hidden", timeout=10000)
+        ctx.close()
 
     def test_button_to_preselected_form(self):
         origin = self.w.portal.origin

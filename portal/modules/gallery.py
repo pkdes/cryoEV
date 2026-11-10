@@ -880,16 +880,18 @@ def options(values, label_all) -> str:
 
 
 def analyse_kept_html(c: Conv, state, src_key) -> str:
-    """Owner / admin (the page is only served to them): the form to Analyse kept tiles (N), N >= 1 flagged keep.
-    Goes to the session form, which re-derives the list from events.jsonl on the server. Hidden otherwise."""
-    t = tally(list(c.tiles), state)
-    if not src_key or t["keep"] < 1:
+    """Owner / admin (the page is only served to them): the form to Analyse kept tiles (N). Rendered whenever the
+    conversion can be analysed, `hidden` while no tile is flagged keep; gallery.js keeps N, the maybe count and the
+    visibility current from the same tally as the counts line. The session form re-derives the list on the server."""
+    if not src_key:
         return ""
-    return (f'<form class="cj-gallery-acts cj-gallery-analyse" method="get" action="/predict/new/session/{esc(src_key)}/">'
+    t = tally(list(c.tiles), state)
+    return (f'<form class="cj-gallery-acts cj-gallery-analyse" id="cj-gallery-analyse" data-cid="{esc(c.cid)}" method="get" '
+            f'action="/predict/new/session/{esc(src_key)}/"{"" if t["keep"] >= 1 else " hidden"}>'
             f'<input type="hidden" name="which" value="kept"><input type="hidden" name="from" value="{esc(c.cid)}">'
-            f'<button class="cj-gallery-btn" type="submit">Analyse kept tiles ({t["keep"]})</button>'
-            + (f' <label class="cj-mut"><input type="checkbox" name="kept_maybe" value="1"> also include maybe '
-               f'({t["maybe"]})</label>' if t["maybe"] else "") + '</form>')
+            f'<button class="cj-gallery-btn" type="submit">Analyse kept tiles (<span data-n-keep>{t["keep"]}</span>)</button>'
+            f' <label class="cj-mut" data-maybe-label{"" if t["maybe"] else " hidden"}><input type="checkbox" '
+            f'name="kept_maybe" value="1"> also include maybe (<span data-n-maybe>{t["maybe"]}</span>)</label></form>')
 
 
 def page_gallery(convs, states, who, cids_q: str, compare: bool, analyse_key=None) -> str:
