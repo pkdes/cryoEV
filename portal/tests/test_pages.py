@@ -42,7 +42,7 @@ PAGES = (("home", "/", "#cj-bar .cj-nav a"), ("history", "/history/history.html"
 _MODS = __import__("json").loads((__import__("pathlib").Path(__file__).resolve().parents[1] / "modules.json")
                                  .read_text(encoding="utf-8"))["modules"]
 NAV_LINKS = [m["name"] for m in _MODS if m.get("nav") and m["status"] == "on" and "admin" in m["roles"]]  # admin, on
-NAV_ALL = ["Home", "Data", "Jobs", "Review", "Predict", "Gallery", "Results", "My reviews", "Train", "Admin", "Sandbox"]   # + greyed "coming"
+NAV_ALL = ["Home", "Data", "Jobs", "Gallery", "Predict", "Label review", "Results", "My reviews", "Train", "Admin", "Sandbox"]   # + greyed "coming"
 
 
 class Pages(unittest.TestCase):

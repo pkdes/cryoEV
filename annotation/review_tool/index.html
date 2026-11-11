@@ -934,9 +934,13 @@ function setMode(m) {
   hint(); renderSide(); draw();
 }
 function hint() {
-  const how = mode === "draw" ? "drag around the object" : "tap points · tap the first point or Enter to close";
+  const how = mode === "draw" ? "drag around the object · release to save" : "tap points · tap the first point or Enter to close";
   $("hint").textContent = mode === "select" ? "" : (redrawKey != null ? "Redraw (keeps class): " : `New ${curCls}: `) + how + " · Esc cancels";
   $("hint").style.display = mode === "select" ? "none" : "block";
+}
+let hintT = null;
+function flashHint() {  // Enter in Draw mode: nothing to close, so show what to do (the outline saves on release)
+  hint(); const h = $("hint"); h.style.fontWeight = "700"; clearTimeout(hintT); hintT = setTimeout(() => { h.style.fontWeight = ""; }, 1500);
 }
 function startRedraw() {
   if (!selObj()) return;
@@ -1250,6 +1254,7 @@ document.addEventListener("keydown", ev => {
   const k = ev.key;
   if (k === "Escape") { draft = null; if (mode !== "select") setMode("select"); else { sel = null; renderSide(); draw(); } }
   else if (k === "Enter" && mode === "tap") finishDraft();
+  else if (k === "Enter" && mode === "draw") flashHint();
   else if ((k === "Delete" || k === "Backspace") && mode === "select") { ev.preventDefault(); deleteSel(); }
   else if (k === "n" || k === "N" || k === "ArrowRight") step(1);
   else if (k === "p" || k === "P" || k === "ArrowLeft") step(-1);
@@ -1408,7 +1413,7 @@ function applyBrand() {
   const b = brand(); $("logoName").textContent = b.name; $("logoTag").textContent = b.tag;
   const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   $("tri").style.setProperty("--hot", dark ? b.hotD : b.hot); $("tri").style.setProperty("--hot2", dark ? b.hotD2 : b.hot2);
-  if (isPredPkg) { const t = $("toTri"); t.textContent = "Quick check"; const sm = document.createElement("small"); sm.textContent = b.name; t.append(sm); } else $("toTri").textContent = b.name;
+  if (isPredPkg || D.kind === "compare") { const t = $("toTri"); t.textContent = "Quick check"; const sm = document.createElement("small"); sm.textContent = b.name; t.append(sm); } else $("toTri").textContent = b.name;
   document.title = $("tri").hidden ? "EV Label Review" : b.name;
 }
 $("logo").onclick = () => { brandI = (brandI + 1) % BRANDS.length; try { localStorage.setItem("cryoev-review:brand", brandI); } catch (e) {} applyBrand(); triRender(); };
@@ -1462,7 +1467,7 @@ async function postClaim(id) {
   if (!server || !id || !me()) return;  // no claims under "anonymous": only once the reviewer has a name
   claimT = Date.now();
   try {
-    const r = await fetch("api/claim?c=" + encodeURIComponent(id) + "&who=" + encodeURIComponent(me()), {method: "POST"});
+    const r = await tfetch("api/claim?c=" + encodeURIComponent(id) + "&who=" + encodeURIComponent(me()), {method: "POST"});
     if (r.ok) { claims = (await r.json()).claims || {}; leaveTaken(); }  // a refused claim: someone else has the card
   } catch (e) {}
 }
@@ -1489,7 +1494,7 @@ function nearestPred(im, ring) {  // the prediction overlapping this outline mos
 }
 async function pullClaims() {
   if (!server) return;
-  try { const r = await fetch("api/claims", {cache: "no-store"}); if (r.ok) claims = (await r.json()).claims || {}; } catch (e) {}
+  try { const r = await tfetch("api/claims", {cache: "no-store"}); if (r.ok) claims = (await r.json()).claims || {}; } catch (e) {}
 }
 function nextOpen(from) { for (let n = from; n < tri.queue.length; n++) if (!resolved(tri.queue[n]) && !takenByOther(tri.queue[n])) return n; return -1; }
 function advance() {
@@ -2043,6 +2048,11 @@ window.addEventListener("popstate", () => {  // Back after "Open in editor": ret
 
 // ---------- server sync (only when served by review_server.py) ----------
 let syncTimer = null, syncing = false;
+// A server fetch that never settles (laptop asleep, network change) must not wedge sync: abort after 20 s (tests: window.CJ_SYNC_TIMEOUT_MS).
+function tfetch(url, opt) {
+  const ac = new AbortController(), tm = setTimeout(() => ac.abort(), window.CJ_SYNC_TIMEOUT_MS || 20000);
+  return fetch(url, Object.assign({}, opt, {signal: ac.signal})).finally(() => clearTimeout(tm));  // headers arrived: no abort mid-body
+}
 function syncBadge(err) {
   const b = $("sync");
   if (!server) { b.textContent = "local only"; b.style.color = ""; $("sync2").textContent = b.textContent; return; }
@@ -2058,13 +2068,14 @@ const noteSrv = (file, s) => { const m = migrate(clone(s || {})); srvT[file] = O
 const blankOwn = file => Object.entries((edits[file] && edits[file].dec) || {}).filter(([k, d]) => d && !d.who && !(srvT[file] && srvT[file][k] === d.t));
 async function sync() {
   if (!server || syncing) return; syncing = true; let err = false;
+  try {
   const blank = new Set([...dirty].filter(f => blankOwn(f).length));
   if (blank.size && !me()) needWho(() => scheduleSync(100));
   else if (blank.size) { for (const f of blank) for (const [, d] of blankOwn(f)) d.who = me(); blank.clear(); persist(); }
   for (const file of [...dirty]) {
     if (blank.has(file)) continue;  // waits for a name
     try {
-      const r = await fetch("api/edits?f=" + encodeURIComponent(file), {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(edits[file])});
+      const r = await tfetch("api/edits?f=" + encodeURIComponent(file), {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(edits[file])});
       if (r.status === 400) { err = true; banner(`The server rejected the edits for ${file}. Export them and tell the lab.`); continue; }
       if (!r.ok) { err = true; break; }
       const merged = (await r.json()).edit;  // server merged our record with everyone else's
@@ -2073,12 +2084,13 @@ async function sync() {
       if (!newerThan(local, merged)) dirty.delete(file);
     } catch (e) { err = true; break; }
   }
-  syncing = false; persist(); syncBadge(err); renderList();
+  } finally { syncing = false; }
+  persist(); syncBadge(err); renderList();
   if (err) scheduleSync(15000);
 }
 async function pull() {  // bring in other reviewers' decisions (and who is looking at what)
   await pullClaims();
-  const r = await fetch("api/edits", {cache: "no-store"}); if (!r.ok) throw new Error(r.status);
+  const r = await tfetch("api/edits", {cache: "no-store"}); if (!r.ok) throw new Error(r.status);
   const remote = await r.json();
   for (const [file, s] of Object.entries(remote)) {
     noteSrv(file, s);

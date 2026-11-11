@@ -394,5 +394,40 @@ class SharedFileTests(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
 
 
+class AdminNoteTests(unittest.TestCase):
+    """Admins get "N new reports from everyone. See All reports" above My reports; nobody else does."""
+
+    def setUp(self):
+        self.w = World()
+        self.addCleanup(self.w.stop)
+        self.f = FS.feedback_path(self.w.env.state)
+
+    def note(self, who):
+        st, page = self.w.get(who, "/feedback/")
+        self.assertEqual(st, 200)
+        return page
+
+    def test_count_is_new_reports_from_everyone(self):
+        FS.create(self.f, "someone-a", "bug", "text-of-a-AAA")
+        FS.create(self.f, "someone-b", "question", "text-of-b-BBB")
+        c = FS.create(self.f, "someone-c", "bug", "text-of-c-CCC")
+        FS.set_status(self.f, c["id"], "admin1", "Done")
+        page = self.note("admin")
+        self.assertIn("2 new reports from everyone.", page)          # 2 New + 1 Done
+        self.assertIn('<a href="/feedback/all">See All reports</a>', page)
+        self.assertNotIn("text-of-a-AAA", page)                      # a count only, no other user's text
+        page = self.note("basic")                                    # control: same data, not an admin
+        self.assertNotIn("new report", page)
+        self.assertNotIn("See All reports", page)
+        self.assertNotIn("text-of-a-AAA", page)
+
+    def test_singular_and_none(self):
+        self.assertNotIn("new report", self.note("admin"))           # N = 0: no note
+        a = FS.create(self.f, "someone-a", "bug", "x")
+        self.assertIn("1 new report from everyone.", self.note("admin"))
+        FS.set_status(self.f, a["id"], "admin1", "Planned")
+        self.assertNotIn("new report", self.note("admin"))
+
+
 if __name__ == "__main__":
     unittest.main()
