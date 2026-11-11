@@ -208,6 +208,50 @@ class QuickLowTests(CardBase):
         self.check_js_equals_python(page)
 
 
+class QuickLowSeedTests(CardBase):
+    """#12 controls: L never rewrites a class decision, and a September n/g seed's outline survives it."""
+    F = "fixC_old.png"
+    RING = lambda cx, cy, r: [v for k in range(12) for v in (round((cx + r * math.cos(2 * math.pi * k / 12)) / 360, 5),
+                                                             round((cy + r * math.sin(2 * math.pi * k / 12)) / 256, 5))]
+    N1 = [RING(60, 200, 15)]
+    G1 = [RING(120, 100, 30)]
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        t = int(time.time() * 1000)
+        seeds = {"nsept1": {"v": "new:EV", "p": cls.N1, "t": t, "who": "Pujan", "seed": "september:old_c.png:n1"},
+                 "g301": {"v": "keep:non-EV", "p": cls.G1, "t": t, "who": "Pujan", "seed": "september:old_c.png:g9"}}
+        assert cls.srv.put(cls.F, {"t": t, "dec": seeds})[0] == 200
+
+    def test_seeded_n_and_g_keep_their_outline(self):
+        page = self.open("&who=lowseed&mode=cards", **DESK)
+        self.wait_card(page)
+        for key, want_v, want_p in (("nsept1", "new:EV", self.N1), ("g301", "keep:non-EV", self.G1)):
+            self.go_card(page, self.F, key)
+            page.keyboard.press("l")
+            self.synced(page)
+            d = self.saved_dec(self.F)
+            self.assertEqual(d["t:" + key]["v"], "lowconf")
+            self.assertEqual((d[key]["v"], d[key]["p"], d[key]["who"], "seed" in d[key]), (want_v, want_p, "lowseed", False))
+
+    def test_l_on_a_decided_card_writes_only_the_tag(self):
+        page = self.open("&who=lowctl&mode=classes", **DESK)
+        self.wait_card(page)
+        f, key = "fixB_old.png", "g202"
+        self.go_card(page, f, key)
+        page.locator("#triCls button:has-text('MV')").first.click()  # a class decision first
+        self.synced(page)
+        before = dict(self.saved_dec(f)[key])
+        self.assertEqual((before["v"], before["who"]), ("keep:MV", "lowctl"))
+        time.sleep(0.05)
+        page.keyboard.press("l")
+        self.synced(page)
+        d = self.saved_dec(f)
+        self.assertEqual(d["t:" + key]["v"], "lowconf")
+        self.assertEqual(d[key], before)  # v, t and who untouched
+
+
 # ---------- #11: the canvas follows the stage when only the header grows ----------
 class StageResizeTests(Base):
     SIZE = "(() => { const c = document.getElementById('cv'), r = c.getBoundingClientRect(); return {w: c.width, h: c.height, cw: r.width, ch: r.height, dpr: devicePixelRatio}; })()"
@@ -271,6 +315,13 @@ class WhereBarTests(Base):
         self.assertEqual(page.evaluate("document.querySelector('#whereBar b').textContent"), XSS)
         self.assertEqual(page.title(), XSS)
         self.assertIsNone(page.evaluate("window.__xss"))
+
+    def test_source_name_skips_a_split_folder(self):
+        for src in ("/data/roboflow - X/train/_annotations.coco.json", r"D:\data\roboflow - X\valid\_annotations.coco.json"):
+            page = self.open(setup=with_fields(kind="compare", source=src), **DESK)
+            t = self.bar(page)
+            self.assertEqual(t, f"Working on: roboflow - X · 4 images · {LAB_TAIL}")
+            self.assertNotIn("train", t)
 
     def test_prediction_package(self):
         page = self.open(setup=with_fields(kind="prediction", cand_conf=0.3, label_conf=0.5,

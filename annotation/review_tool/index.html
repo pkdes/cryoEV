@@ -184,6 +184,7 @@ button.lowTog.on{background:#f59e0b;border-color:#f59e0b;color:#1c1300;font-weig
 #aLow small{font-size:11px;font-weight:500}
 #triBio p.lowc{color:#fbbf24;font-weight:700}
 @media (max-width:900px){
+  #whereBar{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   #app{grid-template-columns:minmax(0,1fr)}
   header{min-width:0}
   header input[type=range]{width:60px!important}
@@ -405,6 +406,7 @@ function sourceName() {
   if (typeof D.source_title === "string" && D.source_title.trim()) return D.source_title.trim();
   const parts = String(D.source || "").replace(/^prediction_set:/, "").split(/[\\/]+/).filter(Boolean);
   if (parts.length > 1 && /\.[A-Za-z0-9]+$/.test(parts[parts.length - 1])) parts.pop();  // a file: its folder
+  while (parts.length > 1 && /^(train|valid|val|test)$/i.test(parts[parts.length - 1])) parts.pop();  // a split folder: the export
   return parts.length ? parts[parts.length - 1] : PKG_TITLE;
 }
 function renderWhere() {
@@ -992,7 +994,7 @@ function acceptPred(cls) {  // A / "Accept": no class given = the predicted clas
 // outline already there (reshaped: e.gt, else its decision's p) is kept: only an unaccepted one takes the prediction's.
 function acceptedItem(im, e, key, cls) {
   const was = e.gt.find(g => g.src === key), d = e.dec[key];
-  const p = was ? was.p : d && d.p ? d.p : im.pr[+key.slice(1)].p;
+  const p = was ? was.p : d && d.p && /^add:/.test(d.v || "") ? d.p : im.pr[+key.slice(1)].p;  // only an accept's own outline
   e.gt = e.gt.filter(g => g.src !== key);
   const g = {id: null, c: cls, p: clone(p), src: key}; e.gt.push(g);
   return g;
@@ -2165,7 +2167,7 @@ setInterval(async () => {  // claims: cards poll; the Editor renews its claim on
 setInterval(() => { if (server) pull().then(() => { if (dirty.size) sync(); }).catch(() => syncBadge(true)); }, 20000);
 window.addEventListener("online", () => scheduleSync(100));
 
-window.addEventListener("resize", resize);
+if (!window.ResizeObserver) window.addEventListener("resize", resize);  // else the observer below covers it
 // The stage is the grid's 1fr row under a header that can wrap (the where bar, a narrow window, a sandbox bar): a
 // change in its height alone is no window resize, so the canvas's backing store follows the stage's own box.
 if (window.ResizeObserver) new ResizeObserver(() => resize()).observe(stage);
