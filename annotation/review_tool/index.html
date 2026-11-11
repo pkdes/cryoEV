@@ -1552,7 +1552,7 @@ async function pullClaims() {
 }
 function nextOpen(from) { for (let n = from; n < tri.queue.length; n++) if (!resolved(tri.queue[n]) && !takenByOther(tri.queue[n])) return n; return -1; }
 function advance(noHist) {
-  const cur = tri.queue[tri.pos]; if (cur && noHist !== true) (tri.hist = tri.hist || []).push(tri.pos);
+  const cur = tri.queue[tri.pos]; if (cur && noHist !== true) { (tri.hist = tri.hist || []).push(tri.pos); if (tri.hist.length > 200) tri.hist.shift(); }  // Back remembers the last 200 cards
   tri.picked = null; tri.back = null;
   if (tri.adj) { tri.adj = null; updAdjBar(); }
   let n = nextOpen(tri.pos + 1); if (n < 0) n = nextOpen(0);
@@ -1974,7 +1974,7 @@ tcv.addEventListener("contextmenu", ev => ev.preventDefault());
 function toggleOutlines() { tri.hideOutline = !tri.hideOutline; triDraw(); }
 $("triEye").onclick = toggleOutlines;
 function triKey(ev) {
-  if (ev.target.tagName === "SELECT") return;
+  if (ev.target.tagName === "SELECT" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "INPUT" && ev.target.type === "text") return;  // typing: no card keys
   if (tri.adj) {
     if (ev.key === "Enter") saveAdjust(); else if (ev.key === "Escape") endAdjust();
     else if (ev.key === "r" || ev.key === "R") $("adjRedraw").onclick();
