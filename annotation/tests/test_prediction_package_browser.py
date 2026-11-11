@@ -120,7 +120,7 @@ class PredictionWordsTests(trb.Base):
         self.assertFalse(page.is_visible("#showSept"))
         self.assertTrue(w["btn"].startswith("Quick check"), w["btn"])
         self.assertEqual(w["btnTip"], "Go through unsure outlines one at a time: accept or reject")
-        self.assertEqual(w["title"], "EV Label Review")
+        self.assertEqual(w["title"], "fixture_review")  # the package (D.title || D.id), no longer the fixed "EV Label Review"
         page.click("#toTri")
         w = page.evaluate(WORDS)
         self.assertIn(w["title"], BRANDS)  # document.title is still the brand

@@ -285,6 +285,8 @@ def build(args):
             "created": built, "categories": categories, "images": images, "flag_conf": args.flag_conf,
             "cand_conf": args.flag_conf,
             "class_groups": {k: groups[k] for k in ("file", "groups", "model_classes")}}
+    if getattr(args, "source_title", None):  # the label set's name on the page's "Working on" bar (else its folder)
+        data["source_title"] = args.source_title
     B.write_packages(out, data, 0, zip_it=False)
     if args.index_html:
         shutil.copy(args.index_html, out / "index.html")
@@ -356,6 +358,7 @@ def main():
     ap.add_argument("--b-preds", type=Path, help="Set B: folder of <stem>.txt YOLO-seg predictions")
     ap.add_argument("--b-coco", type=Path, help="Set B: a second COCO label set (human vs human)")
     ap.add_argument("--b-label", default="", help="How set B is named on the page")
+    ap.add_argument("--source-title", help="How set A (the label set) is named on the page (default: its folder name)")
     ap.add_argument("--imgsz", type=int, default=1440)
     ap.add_argument("--nms", type=float, default=0.7)
     ap.add_argument("--max-det", type=int, default=1000)

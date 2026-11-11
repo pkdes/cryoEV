@@ -13,6 +13,7 @@ import math
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from PIL import Image
@@ -56,13 +57,13 @@ class CompareKnownAnswer(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def build(self, decoys, name):
+    def build(self, decoys, name, source_title=None):
         a = argparse.Namespace(labels=self.labels, images_root=[self.t / "imgs"], select_csv=None, where=None,
                                split_csv=None, b_model=None, b_preds=self.t / "preds", b_coco=None, b_label="B",
                                imgsz=1440, nms=0.7, max_det=1000, device="cpu", pred_classes="EV,non-EV",
                                class_groups=CP.B.CLASS_GROUPS, flag_conf=0.55, decoys=decoys, seed=0, owner="tester",
                                reviewer=None, reuse_key=None, index_html=None, width=1440, quality=72, force=False,
-                               out=self.t / "review" / name)
+                               out=self.t / "review" / name, source_title=source_title)
         out, work = CP.build(a)
         data = json.loads((out / "data.js").read_text(encoding="utf-8").split("=", 1)[1].rstrip().rstrip(";"))
         return out, work, data
@@ -101,6 +102,19 @@ class CompareKnownAnswer(unittest.TestCase):
         self.assertNotIn("decoy", served)
         self.assertNotIn("answer", served)
         self.assertFalse(any(out.rglob("decoys.json")))
+
+    def test_source_title(self):
+        """--source-title lands in data.js as source_title; without it (control) data.js has no such key."""
+        _, _, data = self.build(0, "lab_cmp_plain")
+        self.assertNotIn("source_title", data)
+        self.assertEqual(data["source"], str(self.labels))
+        _, _, data = self.build(0, "lab_cmp_titled", source_title="lv_20261030_0909 (cell)")
+        self.assertEqual(data["source_title"], "lv_20261030_0909 (cell)")
+        argv = ["compare_package.py", "--labels", "l.json", "--images-root", "i", "--owner", "o", "--out", "x"]
+        for extra, want in (([], None), (["--source-title", "lv_x"], "lv_x")):  # the CLI flag reaches build()
+            with mock.patch.object(CP, "build") as b, mock.patch.object(sys, "argv", argv + extra):
+                CP.main()
+            self.assertEqual(b.call_args[0][0].source_title, want)
 
 
 if __name__ == "__main__":
