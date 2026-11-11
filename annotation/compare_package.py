@@ -347,6 +347,66 @@ def read_compare_package(pkg: Path, work: Path):
     return rows
 
 
+def strip_decoys(edits_dir: Path, work: Path, out_dir: Path, now_ms=None) -> dict:
+    """Copy every edit record from edits_dir to out_dir with the decoy answers taken out, so a known-answer card
+    can never reach the labels. Reject decoy p<k> (a synthetic outline): its t:p<k> tag goes; its decision is
+    removed, or, when the record's saved polygon list holds an item with src p<k> (that item would otherwise
+    survive without a decision), replaced by "no" stamped newer than anything in the record. Accept decoy g<id>
+    is a real label: its corrections (reshape, class, tag) stay; only a "del" is removed. Other records are
+    copied byte for byte. -> {"files", "changed": [file], "reject_dropped", "reject_no", "accept_del_dropped"}."""
+    key = json.loads((Path(work) / "decoys.json").read_text(encoding="utf-8"))["decoys"]
+    by_file = {}
+    for d in key:
+        by_file.setdefault(d["file"], []).append(d)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=False)
+    stats = {"files": 0, "changed": [], "reject_dropped": 0, "reject_no": 0, "accept_del_dropped": 0}
+    for f in sorted(Path(edits_dir).glob("*.json")):
+        raw = f.read_bytes()
+        stats["files"] += 1
+        rec = json.loads(raw.decode("utf-8"))
+        e = rec.get("edit", rec)
+        dec = e.get("dec") or {}
+        touched = False
+        for d in by_file.get(rec.get("file"), []):
+            obj = d["obj"]
+            if d["kind"] == "reject":
+                if dec.pop("t:" + obj, None) is not None:
+                    touched = True
+                in_list = any(isinstance(it, dict) and it.get("src") == obj for it in (e.get("gt") or []))
+                if in_list:
+                    stamps = [v.get("t", 0) for v in dec.values() if isinstance(v, dict)] + [
+                        v.get("server_t", 0) for v in dec.values() if isinstance(v, dict)] + [
+                        e.get("gtT") or 0, e.get("t") or 0, now_ms or 0]
+                    t = max(x for x in stamps if isinstance(x, (int, float))) + 1
+                    dec[obj] = {"v": "no", "t": t, "server_t": t, "who": "decoy-strip"}
+                    stats["reject_no"] += 1
+                    touched = True
+                elif dec.pop(obj, None) is not None:
+                    stats["reject_dropped"] += 1
+                    touched = True
+            elif (dec.get(obj) or {}).get("v") == "del":
+                dec.pop(obj)
+                stats["accept_del_dropped"] += 1
+                touched = True
+        if touched:
+            e["dec"] = dec
+            (out_dir / f.name).write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
+            stats["changed"].append(f.name)
+        else:
+            (out_dir / f.name).write_bytes(raw)
+    return stats
+
+
+def edits_sha256(edits_dir: Path) -> str:
+    """One fingerprint for a folder of edit records: sha256 over the sorted names and their bytes."""
+    import hashlib
+    h = hashlib.sha256()
+    for f in sorted(Path(edits_dir).glob("*.json")):
+        h.update(f.name.encode("utf-8") + b"\x00" + f.read_bytes() + b"\x00")
+    return h.hexdigest()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--labels", type=Path, required=True, help="Set A: COCO label set (the base decisions apply to)")

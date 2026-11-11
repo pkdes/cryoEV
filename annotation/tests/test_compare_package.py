@@ -117,5 +117,68 @@ class CompareKnownAnswer(unittest.TestCase):
             self.assertEqual(b.call_args[0][0].source_title, want)
 
 
+class StripDecoys(unittest.TestCase):
+    """Known answer, checked through the reference applier (review_server.effective_labels): after the strip no
+    decoy answer changes the labels, real decisions are untouched, and a reject decoy accepted into a saved
+    polygon list (the case where deleting the key is not enough) is gone."""
+
+    IMG = {"file": "a.png", "gt": [{"id": 1, "c": "EV", "p": [[0.1, 0.1, 0.2, 0.1, 0.2, 0.2]]},
+                                   {"id": 2, "c": "EV", "p": [[0.5, 0.5, 0.6, 0.5, 0.6, 0.6]]}],
+           "pr": [{"s": 0.9, "c": "EV", "p": [[0.3, 0.3, 0.4, 0.3, 0.4, 0.4]]},   # p0 real FP card
+                  {"s": 0.9, "c": "EV", "p": [[0.7, 0.7, 0.8, 0.7, 0.8, 0.8]]}]}  # p1 reject decoy
+
+    def run_strip(self, recs):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            (td / "edits").mkdir()
+            (td / "work").mkdir()
+            (td / "work" / "decoys.json").write_text(json.dumps({"decoys": [
+                {"kind": "reject", "answer": "no", "file": "a.png", "obj": "p1"},
+                {"kind": "accept", "answer": "keep", "file": "a.png", "obj": "g2"}]}), encoding="utf-8")
+            for name, rec in recs.items():
+                (td / "edits" / name).write_text(json.dumps(rec), encoding="utf-8")
+            sha_before = CP.edits_sha256(td / "edits")
+            stats = CP.strip_decoys(td / "edits", td / "work", td / "out")
+            self.assertEqual(CP.edits_sha256(td / "edits"), sha_before)  # source untouched
+            out = {f.name: json.loads(f.read_text(encoding="utf-8")) for f in (td / "out").glob("*.json")}
+            same = {n: (td / "out" / n).read_bytes() == (td / "edits" / n).read_bytes() for n in recs}
+            return stats, out, same
+
+    def labels(self, rec):
+        import review_server as RS
+        return sorted(((o.get("id"), o.get("src"), o["c"]) for o in RS.effective_labels(self.IMG, rec["edit"])),
+                      key=lambda x: (x[0] is None, x[0] or 0, x[1] or ""))
+
+    def test_decision_only_record(self):
+        rec = {"file": "a.png", "edit": {"dec": {
+            "p0": {"v": "add:EV", "t": 10, "who": "x", "server_t": 10},
+            "p1": {"v": "add:EV", "t": 11, "who": "x", "server_t": 11},       # wrong answer on a reject decoy
+            "t:p1": {"v": "lowconf", "t": 11, "who": "x", "server_t": 11},
+            "g2": {"v": "del", "t": 12, "who": "x", "server_t": 12}}}}       # wrong answer on an accept decoy
+        other = {"file": "b.png", "edit": {"dec": {"p0": {"v": "no", "t": 1, "who": "x"}}}}
+        stats, out, same = self.run_strip({"a.png.json": rec, "b.png.json": other})
+        self.assertEqual(self.labels(rec), [(1, None, "EV"), (None, "p0", "EV"), (None, "p1", "EV")])  # control
+        self.assertEqual(self.labels(out["a.png.json"]), [(1, None, "EV"), (2, None, "EV"), (None, "p0", "EV")])
+        self.assertEqual((stats["reject_dropped"], stats["reject_no"], stats["accept_del_dropped"]), (1, 0, 1))
+        self.assertTrue(same["b.png.json"])            # a record without decoys is copied byte for byte
+        self.assertEqual(stats["changed"], ["a.png.json"])
+
+    def test_saved_list_record(self):
+        lst = [{"id": 1, "c": "EV", "p": [[0.1, 0.1, 0.2, 0.1, 0.2, 0.2]], "t": 20},
+               {"id": 2, "c": "MV", "p": [[0.5, 0.5, 0.65, 0.5, 0.65, 0.65]], "t": 20},
+               {"id": None, "c": "EV", "p": [[0.7, 0.7, 0.8, 0.7, 0.8, 0.8]], "src": "p1", "t": 20}]
+        rec = {"file": "a.png", "edit": {"gt": lst, "gtT": 20, "dec": {
+            "p1": {"v": "add:EV", "t": 19, "who": "x", "server_t": 19},
+            "g2": {"v": "keep:MV", "t": 19, "who": "x", "server_t": 19,
+                   "p": [[0.5, 0.5, 0.65, 0.5, 0.65, 0.65]]}}}}
+        stats, out, _ = self.run_strip({"a.png.json": rec})
+        self.assertIn((None, "p1", "EV"), self.labels(rec))  # control: the decoy is in the labels before
+        after = self.labels(out["a.png.json"])
+        self.assertNotIn((None, "p1", "EV"), after)
+        self.assertIn((2, None, "MV"), after)                # the accept decoy's real correction stays
+        self.assertEqual(stats["reject_no"], 1)
+        self.assertEqual(out["a.png.json"]["edit"]["dec"]["p1"]["v"], "no")
+
+
 if __name__ == "__main__":
     unittest.main()
