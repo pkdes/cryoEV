@@ -41,8 +41,8 @@ def _on(role):
 NAV = {"admin": (["Home", "Data", "Jobs", "Gallery", "Predict", "Label review", "Results", "My reviews", "Train", "Admin", "Sandbox"], _on("admin")),
        "advanced": (["Home", "Data", "Jobs", "Gallery", "Predict", "Results", "My reviews", "Train"], _on("advanced")),
        "basic": (["Home", "Predict", "Results", "My reviews"], _on("basic"))}
-CARDS = {"admin": ["data", "jobs", "review", "predict", "gallery", "results", "reviews", "train", "admin", "sandbox"],
-         "advanced": ["data", "jobs", "predict", "gallery", "results", "reviews", "train"],
+CARDS = {"admin": ["data", "jobs", "gallery", "predict", "review", "results", "reviews", "train", "admin", "sandbox"],
+         "advanced": ["data", "jobs", "gallery", "predict", "results", "reviews", "train"],
          "basic": ["predict", "results", "reviews"]}
 TOKENS = {"light": {"bg": "rgb(243, 245, 247)", "card": "rgb(255, 255, 255)", "hist_bg": "rgb(250, 250, 249)"},
           "dark": {"bg": "rgb(15, 21, 27)", "card": "rgb(23, 32, 41)", "hist_bg": "rgb(20, 19, 18)"}}

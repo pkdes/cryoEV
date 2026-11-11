@@ -130,7 +130,7 @@ class Home(unittest.TestCase):
         run = self.live["queues"][0]["running"]
         self.assertEqual((run["epoch"], run["epochs"]), (4, 300))           # control: the snapshot says so
         self.assertIn("From live.json", page)
-        self.assertIn('<span class="cj-dot up" aria-hidden="true"></span><b>Label review</b>', page)
+        self.assertIn('<span class="cj-dot up" aria-hidden="true"></span><b>Review</b>', page)
         self.assertIn('<span class="cj-dot down" aria-hidden="true"></span><b>Sandbox</b>', page)
         self.assertIn("1 <small>of 2 up</small>", page)
         self.assertIn("alive · heartbeat", page)
@@ -164,14 +164,14 @@ class Home(unittest.TestCase):
         self.assertEqual(page.count('class="cj-mod off"'), coming)
         self.assertEqual(page.count(">coming<"), coming)
         order = re.findall(r'class="cj-mod[^"]*" data-id="([a-z]+)"', page)
-        self.assertEqual(order, ["data", "jobs", "review", "predict", "gallery", "results", "reviews", "train", "admin", "sandbox"])
+        self.assertEqual(order, ["data", "jobs", "gallery", "predict", "review", "results", "reviews", "train", "admin", "sandbox"])
         page = self.home("box.example.ts.net:8446")
         self.assertIn('href="https://box.example.ts.net:8443/"', page)
 
     def test_roles_see_their_modules_only(self):
         keys = {r: A.add_key(self.env.roster, f"user-{r}", r) for r in ("advanced", "basic")}
         try:
-            want = {"advanced": ["data", "jobs", "predict", "gallery", "results", "reviews", "train"],
+            want = {"advanced": ["data", "jobs", "gallery", "predict", "results", "reviews", "train"],
                     "basic": ["predict", "results", "reviews"]}
             for role, key in keys.items():
                 tok = T.login(self.p.port, key)
