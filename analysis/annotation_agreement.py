@@ -45,9 +45,9 @@ blind_name are renamed to `tile` and flipped back before matching.
 
 Writes (refuses an existing --out): per_tile.csv, per_class.csv,
 confusion.csv, pairs.csv (every outline's fate), REPORT.md, and with
---image-dir overlays/<tile>.jpg (pre in blue, post in orange; an outline with
-no partner drawn thick, a class change medium). With --crops as well:
-crops/<category>_p<N>.jpg contact sheets, one cell per disagreement (only in
+--image-dir overlays/<tile>.jpg (green = both passes, same class; magenta = both,
+class differs; thick blue = only pre; thick orange = only post). With --crops as well:
+crops/<category>_p<N>.jpg contact sheets, one cell per disagreement (pre's outlines left, post's right; only in
 pre, only in post, class differs), sorted by class, plus crops/index.csv
 (sheet, cell, tile, classes, IoU, centre and size in px, and nm with
 --nm-per-px, given for the image files' resolution).
@@ -282,6 +282,7 @@ def compare(pre_data, post_data, tiles=None):
 
 # ---------------------------------------------------------------- outputs
 PRE_BGR, POST_BGR = (214, 118, 31), (14, 127, 255)     # blue, orange
+AGREE_BGR, RECLASS_BGR = (90, 190, 90), (190, 60, 190)  # green, magenta (overlays)
 
 
 def overlay(img_path, pre, post, rows, out_path, pre_label, post_label, max_w=1800):
@@ -293,17 +294,21 @@ def overlay(img_path, pre, post, rows, out_path, pre_label, post_label, max_w=18
     if s < 1:
         im = cv2.resize(im, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
     H, W = im.shape[:2]
-    lost = {r["pre_idx"] for r in rows if r["op"] == "deleted"}
-    new = {r["post_idx"] for r in rows if r["op"] == "added"}
-    recl = {r["post_idx"] for r in rows if r["op"] == "reclassed"}
-    for i, (_, p) in enumerate(pre):
-        cv2.polylines(im, [np.round(p * (W, H)).astype(np.int32)], True, PRE_BGR, 4 if i in lost else 1, cv2.LINE_AA)
-    for j, (_, q) in enumerate(post):
-        th = 4 if j in new else 2 if j in recl else 1
-        cv2.polylines(im, [np.round(q * (W, H)).astype(np.int32)], True, POST_BGR, th, cv2.LINE_AA)
+    def poly(p, col, th):
+        cv2.polylines(im, [np.round(p * (W, H)).astype(np.int32)], True, col, th, cv2.LINE_AA)
+    for r in rows:                       # shared first, differences on top
+        if r["op"] in ("kept", "reshaped"):
+            poly(post[r["post_idx"]][1], AGREE_BGR, 1)
+    for r in rows:
+        if r["op"] == "reclassed":
+            poly(post[r["post_idx"]][1], RECLASS_BGR, 2)
+        elif r["op"] == "deleted":
+            poly(pre[r["pre_idx"]][1], PRE_BGR, 3)
+        elif r["op"] == "added":
+            poly(post[r["post_idx"]][1], POST_BGR, 3)
     bar = np.full((44, W, 3), 255, np.uint8)
-    txt = [(f"{pre_label} (thick = only in this pass)", PRE_BGR),
-           (f"{post_label} (thick = only in this pass, medium = class differs)", POST_BGR)]
+    txt = [("both, same class", AGREE_BGR), ("both, class differs", RECLASS_BGR),
+           (f"only {pre_label}", PRE_BGR), (f"only {post_label}", POST_BGR)]
     x = 10
     for t, col in txt:
         cv2.rectangle(bar, (x, 14), (x + 24, 30), col, -1)
@@ -313,7 +318,8 @@ def overlay(img_path, pre, post, rows, out_path, pre_label, post_label, max_w=18
     return True
 
 
-CROP_CELL, CROP_CAP, CROP_COLS, CROP_ROWS = 224, 38, 6, 6
+CROP_PANEL, CROP_GAP, CROP_CAP, CROP_COLS, CROP_ROWS = 200, 6, 38, 3, 8
+CROP_CELL_W = 2 * CROP_PANEL + 2 * CROP_GAP
 CROP_ORDER = ("only_pre", "only_post", "class_differs")
 
 
@@ -330,9 +336,11 @@ def _put(img, text, org, scale, col, th=1):
     cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, col, th, cv2.LINE_AA)
 
 
-def crop_cell(im, pre, post, row, caption, sub):
-    """One disagreement: the object(s) centred in a square crop, context outlines thin,
-    the disagreeing outline(s) thick; caption strip underneath."""
+def crop_cell(im, pre, post, row, caption, sub, pre_label="pre", post_label="post"):
+    """One disagreement as two side-by-side panels of the same crop: the first pass's
+    outlines on the left (blue), the second pass's on the right (orange), so outlines
+    the passes share never hide each other. The object in question is thick and its
+    neighbours thin; caption strip underneath."""
     H, W = im.shape[:2]
     subj = []
     if row["pre_idx"] != "":
@@ -348,30 +356,31 @@ def crop_cell(im, pre, post, row, caption, sub):
     X0, Y0 = int(max(0, cx - half)), int(max(0, cy - half))
     X1, Y1 = int(min(W, cx + half)), int(min(H, cy + half))
     crop = im[Y0:Y1, X0:X1]
-    s = CROP_CELL / max(crop.shape[:2])
+    s = CROP_PANEL / max(crop.shape[:2])
     crop = cv2.resize(crop, (max(1, round(crop.shape[1] * s)), max(1, round(crop.shape[0] * s))),
                       interpolation=cv2.INTER_CUBIC if s > 1 else cv2.INTER_AREA)
-    cell = np.full((CROP_CELL + CROP_CAP, CROP_CELL, 3), 255, np.uint8)
-    oy, ox = (CROP_CELL - crop.shape[0]) // 2, (CROP_CELL - crop.shape[1]) // 2
-    cell[oy:oy + crop.shape[0], ox:ox + crop.shape[1]] = crop
-
-    def draw(p, col, th):
-        q = np.round((p * (W, H) - (X0, Y0)) * s + (ox, oy)).astype(np.int32)
-        cv2.polylines(cell[:CROP_CELL], [q], True, col, th, cv2.LINE_AA)
+    oy, ox = (CROP_PANEL - crop.shape[0]) // 2, (CROP_PANEL - crop.shape[1]) // 2
     box = np.array([X0, Y0, X1, Y1])
-    for objs, col, side_name in ((pre, PRE_BGR, "pre"), (post, POST_BGR, "post")):
+    panels = []
+    for objs, col, side_name, label in ((pre, PRE_BGR, "pre", pre_label), (post, POST_BGR, "post", post_label)):
+        pan = np.full((CROP_PANEL, CROP_PANEL, 3), 255, np.uint8)
+        pan[oy:oy + crop.shape[0], ox:ox + crop.shape[1]] = crop
         for i, (_, p) in enumerate(objs):
-            if (side_name, i) in subj:
-                continue
             pp = p * (W, H)
             if pp[:, 0].max() < box[0] or pp[:, 0].min() > box[2] or pp[:, 1].max() < box[1] or pp[:, 1].min() > box[3]:
                 continue
-            draw(p, col, 1)
-    for (side_name, i) in subj:     # pre first and thicker, so a same-shape post outline leaves it visible
-        draw((pre if side_name == "pre" else post)[i][1], PRE_BGR if side_name == "pre" else POST_BGR,
-             4 if side_name == "pre" and len(subj) == 2 else 2)
-    _put(cell, caption, (4, CROP_CELL + 15), 0.42, (30, 30, 30))
-    _put(cell, sub, (4, CROP_CELL + 32), 0.36, (110, 110, 110))
+            q = np.round((pp - (X0, Y0)) * s + (ox, oy)).astype(np.int32)
+            cv2.polylines(pan, [q], True, col, 3 if (side_name, i) in subj else 1, cv2.LINE_AA)
+        tw = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)[0][0]
+        cv2.rectangle(pan, (0, 0), (tw + 8, 16), col, -1)
+        _put(pan, label, (4, 12), 0.42, (255, 255, 255))
+        panels.append(pan)
+    gap = np.full((CROP_PANEL, CROP_GAP, 3), 255, np.uint8)
+    cell = np.full((CROP_PANEL + CROP_CAP, CROP_CELL_W, 3), 255, np.uint8)
+    cell[:CROP_PANEL, :2 * CROP_PANEL + CROP_GAP] = np.hstack([panels[0], gap, panels[1]])
+    _put(cell, caption, (4, CROP_PANEL + 15), 0.42, (30, 30, 30))
+    _put(cell, sub, (4, CROP_PANEL + 32), 0.36, (110, 110, 110))
+    cell[:, -CROP_GAP:] = 255
     return cell, (X0, Y0, X1, Y1), side
 
 
@@ -405,8 +414,8 @@ def write_crops(res, pre, post, image_dir, out_dir, pre_label, post_label, nm_pe
                 n = page + k + 1
                 cap = (f"{pre_label}: {a}  >  {post_label}: {b}" if cat == "class_differs"
                        else f"{names[cat]}: {a if cat == 'only_pre' else b}")
-                cell, (X0, Y0, X1, Y1), side = crop_cell(im, pre[t]["objs"], post[t]["objs"], r, cap[:44],
-                                                         f"#{n} {t}"[:48])
+                cell, (X0, Y0, X1, Y1), side = crop_cell(im, pre[t]["objs"], post[t]["objs"], r, cap[:58],
+                                                         f"#{n} {t}"[:60], pre_label, post_label)
                 cells.append(cell)
                 H, W = im.shape[:2]
                 idx = int(r["pre_idx"] if cat != "only_post" else r["post_idx"])
@@ -429,8 +438,8 @@ def write_crops(res, pre, post, image_dir, out_dir, pre_label, post_label, nm_pe
             _put(head, f"{names[cat]}  ({page + 1}-{page + len(chunk)} of {len(cat_items)})", (10, 22), 0.65,
                  (20, 20, 20), 2)
             x = 10
-            for t_, col in ((f"{pre_label} outline", PRE_BGR), (f"{post_label} outline", POST_BGR),
-                            ("thick = the object in question (both: blue under orange), thin = neighbours", (120, 120, 120))):
+            for t_, col in ((f"left: {pre_label}'s outlines", PRE_BGR), (f"right: {post_label}'s outlines", POST_BGR),
+                            ("thick = the object in question, thin = neighbours", (120, 120, 120))):
                 cv2.rectangle(head, (x, 32), (x + 18, 44), col, -1)
                 _put(head, t_, (x + 24, 44), 0.45, (60, 60, 60))
                 x += 40 + cv2.getTextSize(t_, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0][0]
