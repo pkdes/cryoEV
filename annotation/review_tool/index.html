@@ -23,6 +23,8 @@ button:disabled{opacity:.45;cursor:default}
 select{padding:3px 6px}
 label.tg{display:inline-flex;gap:4px;align-items:center;cursor:pointer;user-select:none}
 #title{font-weight:600;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#whereBar{flex:1 1 100%;min-width:0;font-size:11.5px;color:var(--mute);overflow-wrap:anywhere}
+#whereBar b{color:var(--ink)}
 #list{overflow:auto;border-right:1px solid var(--line);background:var(--panel)}
 #list .ctl{position:sticky;top:0;background:var(--panel);padding:6px;border-bottom:1px solid var(--line);display:flex;gap:6px;flex-wrap:wrap}
 #list .it{display:flex;gap:6px;align-items:center;padding:5px 8px;border-bottom:1px solid var(--line);cursor:pointer}
@@ -217,13 +219,14 @@ button.lowTog.on{background:#f59e0b;border-color:#f59e0b;color:#1c1300;font-weig
   <label class="tg"><input type="checkbox" id="showFlags" checked> Flags</label>
   <label class="tg" title="Tag labels whose decision was carried from the September review"><input type="checkbox" id="showSept" checked> Sept</label>
   <span class="sep"></span>
-  <button id="reviewed" title="Mark reviewed and go to next (R)">✓ Reviewed</button>
+  <button id="reviewed" title="Marks this image as done. It does not apply anything to a label set by itself.">✓ Reviewed</button>
   <button id="export" title="Download all edits as JSON">Export</button>
   <button id="importBtn" title="Load an edits JSON exported earlier">Import</button>
   <input type="file" id="importFile" accept=".json,application/json" hidden>
   <span id="sync" class="badge" title="Where your edits are saved">local only</span>
   <button id="whoBtn" class="badge" title="Reviewer name saved with your edits: tap to change">👤</button>
   <button id="sideBtn" title="Details">ⓘ</button>
+  <div id="whereBar" role="note"></div>
 </header>
 <nav id="list">
   <div class="ctl">
@@ -394,6 +397,22 @@ function applyPredictionWording() {
   $("showSept").closest("label").style.display = "none";  // prediction packages carry no September decisions
   $("toTri").title = "Go through unsure outlines one at a time: accept or reject";
   $("toTri").classList.add("quick");
+}
+// "Where this goes": which package this is and what the decisions do. The name is D.source_title, else the label set's
+// folder from D.source (the lv_… or pull folder holding the COCO file; never the full local path). Text only.
+const PKG_TITLE = String(D.title || D.id || "EV Label Review");
+function sourceName() {
+  if (typeof D.source_title === "string" && D.source_title.trim()) return D.source_title.trim();
+  const parts = String(D.source || "").replace(/^prediction_set:/, "").split(/[\\/]+/).filter(Boolean);
+  if (parts.length > 1 && /\.[A-Za-z0-9]+$/.test(parts[parts.length - 1])) parts.pop();  // a file: its folder
+  return parts.length ? parts[parts.length - 1] : PKG_TITLE;
+}
+function renderWhere() {
+  const bar = $("whereBar"), b = document.createElement("b"), n = D.images.length;
+  b.textContent = sourceName();
+  bar.textContent = "Working on: "; bar.append(b, ` · ${n} image${n === 1 ? "" : "s"} · ` + (isPredPkg
+    ? "Your decisions update this analysis' results."
+    : "Your decisions are saved in this package. They become labels when an admin applies them to a new label set."));
 }
 const clone = o => JSON.parse(JSON.stringify(o));
 // Anything from an edit record or a claim (who, seed, a decision's class) is escaped before it goes into HTML.
@@ -965,10 +984,18 @@ function deleteSel() {
 function acceptPred(cls) {  // A / "Accept": no class given = the predicted class (else the current class)
   if (!sel || sel.kind !== "pr" || !needWho(() => acceptPred(cls))) return;
   const im = curImg(), key = "p" + sel.i, p = im.pr[sel.i]; cls = cls || predCls(p); pushUndo();
-  const e = ensureEdit(im); e.gt = e.gt.filter(g => g.src !== key);  // accepting twice must not duplicate it
-  e.gt.push({id: null, c: cls, p: clone(p.p), src: key});
-  setDec(e, key, "add:" + cls); aliasTag(e, im.file, key, cls);
+  const e = ensureEdit(im), g = acceptedItem(im, e, key, cls);
+  setDec(e, key, "add:" + cls, ownPoly(im, g)); aliasTag(e, im.file, key, cls);
   sel = {kind: "gt", key}; changed();
+}
+// The list item an Editor accept writes for prediction `key`. Accepting twice must not duplicate it, and an accepted
+// outline already there (reshaped: e.gt, else its decision's p) is kept: only an unaccepted one takes the prediction's.
+function acceptedItem(im, e, key, cls) {
+  const was = e.gt.find(g => g.src === key), d = e.dec[key];
+  const p = was ? was.p : d && d.p ? d.p : im.pr[+key.slice(1)].p;
+  e.gt = e.gt.filter(g => g.src !== key);
+  const g = {id: null, c: cls, p: clone(p), src: key}; e.gt.push(g);
+  return g;
 }
 function rejectPred() {  // X / "Reject": a selected prediction is not an object; an accepted one is rejected again (as Del)
   if (!sel || mode !== "select") return;
@@ -1007,9 +1034,8 @@ function setObjNote(text) {  // the selected object's note: kept with its tag (l
 function acceptLow() {  // a selected unaccepted candidate: accept as its predicted class with the Low conf tag
   if (!capOn("t") || !sel || sel.kind !== "pr" || mode !== "select" || !needWho(acceptLow)) return;
   const im = curImg(), key = "p" + sel.i, p = im.pr[sel.i], cls = predCls(p); pushUndo();
-  const e = ensureEdit(im); e.gt = e.gt.filter(g => g.src !== key);
-  e.gt.push({id: null, c: cls, p: clone(p.p), src: key});
-  setDec(e, key, "add:" + cls); setDec(e, "t:" + key, "lowconf", undefined, tagOf(im.file, key).note);
+  const e = ensureEdit(im), g = acceptedItem(im, e, key, cls);
+  setDec(e, key, "add:" + cls, ownPoly(im, g)); setDec(e, "t:" + key, "lowconf", undefined, tagOf(im.file, key).note);
   sel = {kind: "gt", key}; changed();
 }
 function reclassKey(e, im, key, cls) {  // cards: the object's class decision, keeping its own outline
@@ -1121,8 +1147,9 @@ function markReviewed() {
 }
 function hitTest(sx, sy) {
   const [x, y] = toImg(sx, sy), im = curImg(); let best = null, ba = Infinity;
-  if ($("showGt").checked) gtOf(im).forEach((g, k) => g.p.forEach(rg => { if (pip(x, y, rg)) { const a = area(rg); if (a < ba) { ba = a; best = {kind: "gt", key: selKey(g)}; } } }));
-  if ($("showPr").checked) im.pr.forEach((p, k) => { if (p.s < conf()) return; p.p.forEach(rg => { if (pip(x, y, rg)) { const a = area(rg) * 1.001; if (a < ba) { ba = a; best = {kind: "pr", i: k}; } } }); });
+  const acc = new Set();  // accepted predictions with their label shown: a click picks the label (it may be reshaped)
+  if ($("showGt").checked) gtOf(im).forEach((g, k) => { if (g.src) acc.add(g.src); g.p.forEach(rg => { if (pip(x, y, rg)) { const a = area(rg); if (a < ba) { ba = a; best = {kind: "gt", key: selKey(g)}; } } }); });
+  if ($("showPr").checked) im.pr.forEach((p, k) => { if (p.s < conf() || acc.has("p" + k)) return; p.p.forEach(rg => { if (pip(x, y, rg)) { const a = area(rg) * 1.001; if (a < ba) { ba = a; best = {kind: "pr", i: k}; } } }); });
   return best;
 }
 function selRings() {  // the outline whose handles are shown: the selected label, or a selected unaccepted prediction
@@ -1414,7 +1441,7 @@ function applyBrand() {
   const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   $("tri").style.setProperty("--hot", dark ? b.hotD : b.hot); $("tri").style.setProperty("--hot2", dark ? b.hotD2 : b.hot2);
   if (isPredPkg || D.kind === "compare") { const t = $("toTri"); t.textContent = "Quick check"; const sm = document.createElement("small"); sm.textContent = b.name; t.append(sm); } else $("toTri").textContent = b.name;
-  document.title = $("tri").hidden ? "EV Label Review" : b.name;
+  document.title = $("tri").hidden ? PKG_TITLE : b.name;
 }
 $("logo").onclick = () => { brandI = (brandI + 1) % BRANDS.length; try { localStorage.setItem("cryoev-review:brand", brandI); } catch (e) {} applyBrand(); triRender(); };
 function resolved(c) {  // decided, unless the decision is September's (seed): a reviewer still has to confirm it
@@ -1544,7 +1571,7 @@ function openTri() {
 }
 function closeTri() {
   $("tri").hidden = true; try { localStorage.setItem("cryoev-review:mode", "editor"); } catch (e) {}
-  document.title = "EV Label Review";
+  document.title = PKG_TITLE;
   const c = tri.queue[tri.pos];
   if (!c) { resize(); return; }
   focusObj(c.i, c.key);
@@ -1642,6 +1669,9 @@ function lowCard() {
   tri.undo.push({i: c.i, snap: snapOf(e), pos: tri.pos});
   if (!isLowObj(im.file, now)) setDec(e, "t:" + c.key, "lowconf", undefined, note);
   else { setDec(e, "t:" + c.key, note ? "plain" : null, undefined, note); if (now.c === "Low conf EV") reclassKey(e, im, c.key, "EV"); }
+  // An undecided card (no decision, or only September's): the tag also decides it, as it stands (keep / add / new
+  // with its class and own outline), in the same undo step. Else Accept moves on undecided and the card comes back.
+  if (!resolved(c)) reclassKey(e, im, c.key, now.c);
   e.modified = true; touch(im.file); renderList();
   tri.picked = caseId(c); triRender();
 }
@@ -2136,8 +2166,11 @@ setInterval(() => { if (server) pull().then(() => { if (dirty.size) sync(); }).c
 window.addEventListener("online", () => scheduleSync(100));
 
 window.addEventListener("resize", resize);
+// The stage is the grid's 1fr row under a header that can wrap (the where bar, a narrow window, a sandbox bar): a
+// change in its height alone is no window resize, so the canvas's backing store follows the stage's own box.
+if (window.ResizeObserver) new ResizeObserver(() => resize()).observe(stage);
 const deep = parseDeep();
-applyPredictionWording(); legend(); renderList(); resize(); if (deep) openDeep(deep); else go(order.length ? order[0] : 0); hint(); connect();
+renderWhere(); applyPredictionWording(); legend(); renderList(); resize(); if (deep) openDeep(deep); else go(order.length ? order[0] : 0); hint(); connect();
 peopleP = loadPeople(); peopleP.then(() => { if (!me()) openWho(); });  // asked once; the name is then remembered
 let startMode = null; try { startMode = localStorage.getItem("cryoev-review:mode"); } catch (e) {}
 { const m = new URLSearchParams(location.search).get("mode");  // a link with &mode=classes|cards|editor picks the view
