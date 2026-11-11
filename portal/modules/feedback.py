@@ -176,9 +176,10 @@ def routes(ctx) -> list:
     def render_index(request, page, kind, text, steps, msg, status=200):
         opts = "".join(f'<option value="{k}"{" selected" if k == kind else ""}>{esc(KIND_WORD[k])}</option>'
                        for k in FS.KINDS)
-        mine = sorted((r for r in FS.read_all(path()).values() if r["who"] == me(request)), key=lambda r: -r["id"])
+        allr = FS.read_all(path()).values()
+        mine = sorted((r for r in allr if r["who"] == me(request)), key=lambda r: -r["id"])
         cards = "".join(report_card(r, request) for r in mine) or '<p class="cj-feedback-meta">Nothing sent yet.</p>'
-        n_new = sum(1 for r in FS.read_all(path()).values() if r["status"] == "New") if is_admin(request) else 0
+        n_new = sum(1 for r in allr if r["status"] == "New") if is_admin(request) else 0
         admin_note = (f'<p class="cj-feedback-meta cj-feedback-admin-note">{n_new} new report{"" if n_new == 1 else "s"} '
                       f'from everyone. <a href="{PREFIX}/all">See All reports</a></p>') if n_new else ""
         f = (f'<form class="cj-feedback-form" method="post" action="{PREFIX}/">'

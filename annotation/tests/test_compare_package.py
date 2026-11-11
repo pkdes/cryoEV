@@ -61,7 +61,7 @@ class CompareKnownAnswer(unittest.TestCase):
                                split_csv=None, b_model=None, b_preds=self.t / "preds", b_coco=None, b_label="B",
                                imgsz=1440, nms=0.7, max_det=1000, device="cpu", pred_classes="EV,non-EV",
                                class_groups=CP.B.CLASS_GROUPS, flag_conf=0.55, decoys=decoys, seed=0, owner="tester",
-                               reviewer=None, reuse_key=None, index_html=None, width=1440, quality=72,
+                               reviewer=None, reuse_key=None, index_html=None, width=1440, quality=72, force=False,
                                out=self.t / "review" / name)
         out, work = CP.build(a)
         data = json.loads((out / "data.js").read_text(encoding="utf-8").split("=", 1)[1].rstrip().rstrip(";"))

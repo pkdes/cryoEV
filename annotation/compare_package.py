@@ -113,11 +113,14 @@ def ring_box(r):
     return a[:, 0].min(), a[:, 1].min(), a[:, 0].max(), a[:, 1].max()
 
 
-def circle(cx, cy, rad_x, rad_y, n=24, rng=None, jitter=0.08):
-    """A closed ring; with rng, each vertex's radius wobbles by up to ±jitter so it looks like a model outline."""
+def circle(cx, cy, rad_x, rad_y, n=24, rng=None, jitter=0.06):
+    """A closed ring; with rng, the radius wobbles smoothly (low harmonics + a little noise) like a model outline."""
     out = []
+    ph = [rng.uniform(0, 2 * math.pi) for _ in range(3)] if rng else [0, 0, 0]
+    amp = [rng.uniform(0, jitter) for _ in range(3)] if rng else [0, 0, 0]
     for k in range(n):
-        f = 1 + (rng.uniform(-jitter, jitter) if rng else 0)
+        a = 2 * math.pi * k / n
+        f = 1 + sum(amp[h] * math.sin((h + 2) * a + ph[h]) for h in range(3)) + (rng.uniform(-0.01, 0.01) if rng else 0)
         out += [round(cx + rad_x * f * math.cos(2 * math.pi * k / n), 5),
                 round(cy + rad_y * f * math.sin(2 * math.pi * k / n), 5)]
     return out
@@ -138,6 +141,8 @@ def refine_cards(rec, groups):
 
 def add_decoys(images, groups, frac, rng, flag_conf):
     """Mix in known-answer cards; return the answer key (never written into data.js)."""
+    if not images:
+        return []
     n_real = sum(r["fg"] + r["fp"] for r in images)
     n_each = max(5, round(n_real * frac / 2)) if frac > 0 else 0
     lg, key = groups["label_group"], []
@@ -192,7 +197,7 @@ def add_decoys(images, groups, frac, rng, flag_conf):
             continue
         s = round(rng.uniform(flag_conf, min(0.9, flag_conf + 0.3)), 3)
         did = len(key)
-        r["pr"].append({"s": s, "sr": s, "c": "EV", "k": 0, "p": [circle(cx, cy, rx, ry, n=rng.choice((10, 12, 14)), rng=rng)],
+        r["pr"].append({"s": s, "sr": s, "c": "EV", "k": 0, "p": [circle(cx, cy, rx, ry, n=rng.randint(28, 44), rng=rng)],
                         "u": 1, "_decoy": did})
         key.append({"kind": "reject", "answer": "no", "file": r["file"], "obj": None, "_decoy": did})
     for r in images:
@@ -207,6 +212,9 @@ def add_decoys(images, groups, frac, rng, flag_conf):
 
 
 def build(args):
+    if any((args.out / "edits").glob("*.json")) and not args.force:
+        raise SystemExit(f"{args.out} already has review edits: a rebuild would point them at different objects. "
+                         "Build into a new folder, or pass --force.")
     coco = json.loads(args.labels.read_text(encoding="utf-8"))
     groups = B.load_class_groups(args.class_groups)
     name = args.out.name
@@ -219,9 +227,15 @@ def build(args):
         sys.path.insert(0, str(HERE.parent / "training"))
         from train_yolo import export_predictions_for_split
         pred_dir = work / "preds"
+        want = {"weights": str(args.b_model), "imgsz": args.imgsz, "nms": args.nms, "max_det": args.max_det,
+                "images": staged}
+        stamp = pred_dir / "_settings.json"
+        if pred_dir.exists() and (not stamp.exists() or json.loads(stamp.read_text(encoding="utf-8")) != want):
+            shutil.rmtree(pred_dir)  # cached predictions were made with other settings or images
         if not any(pred_dir.glob("*.txt")):
             export_predictions_for_split(str(args.b_model), str(flat), pred_dir, args.imgsz, 0.25, args.nms,
                                          args.device, max_det=args.max_det)
+            stamp.write_text(json.dumps(want), encoding="utf-8")
         b_desc = {"kind": "model", "weights": str(args.b_model), "imgsz": args.imgsz, "nms": args.nms,
                   "max_det": args.max_det, "conf_floor": 0.25}
     elif args.b_preds:
@@ -358,6 +372,7 @@ def main():
     ap.add_argument("--width", type=int, default=1440)
     ap.add_argument("--quality", type=int, default=72)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--force", action="store_true", help="Rebuild even though <out>/edits/ has decisions")
     build(ap.parse_args())
 
 

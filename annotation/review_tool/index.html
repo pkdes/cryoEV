@@ -2050,8 +2050,8 @@ window.addEventListener("popstate", () => {  // Back after "Open in editor": ret
 let syncTimer = null, syncing = false;
 // A server fetch that never settles (laptop asleep, network change) must not wedge sync: abort after 20 s (tests: window.CJ_SYNC_TIMEOUT_MS).
 function tfetch(url, opt) {
-  const ac = new AbortController(); setTimeout(() => ac.abort(), window.CJ_SYNC_TIMEOUT_MS || 20000);
-  return fetch(url, Object.assign({}, opt, {signal: ac.signal}));
+  const ac = new AbortController(), tm = setTimeout(() => ac.abort(), window.CJ_SYNC_TIMEOUT_MS || 20000);
+  return fetch(url, Object.assign({}, opt, {signal: ac.signal})).finally(() => clearTimeout(tm));  // headers arrived: no abort mid-body
 }
 function syncBadge(err) {
   const b = $("sync");
