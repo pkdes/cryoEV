@@ -457,3 +457,12 @@ a.cj-data-graph-node:focus-visible{outline:2px solid var(--acc);outline-offset:1
 .cj-feedback-note{padding:8px 12px;border-radius:6px;background:var(--prodbg);color:var(--prod);margin:8px 0}
 .cj-feedback-warn{background:var(--warnbg);color:var(--warn)}
 /* cj-feedback:end */
+
+/* ---- cj-vis-*: readable titles, ids underneath, waiting-on lists, review-package progress (Data, Jobs) ---- */
+.cj-vis-id { display: block; font-size: 0.8rem; font-family: ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }
+.cj-vis-wait .cj-vis-id { display: inline-block; margin: 0 0.6rem; }
+.cj-vis-pkgs { margin: 0 0 1rem; }
+.cj-vis-pkg { list-style: none; padding: 0.6rem 0.9rem; border-top: 1px solid var(--cj-line, rgba(127, 127, 127, 0.25)); }
+.cj-vis-pkg:first-child { border-top: 0; }
+.cj-vis-pkg-top { display: flex; flex-wrap: wrap; gap: 0.4rem 0.8rem; align-items: baseline; justify-content: space-between; }
+.cj-vis-pkg-meta { display: flex; flex-wrap: wrap; gap: 0.2rem 1rem; margin-top: 0.25rem; }

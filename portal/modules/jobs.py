@@ -48,6 +48,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from starlette.requests import Request
 from starlette.responses import Response
@@ -502,11 +503,36 @@ def summary(cfg, user: dict, can_see, now=None) -> dict:
         if reg_err is not None:
             reg_info["problem"] = "not readable"
     return {"schema": SCHEMA, "now_utc": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds"),
-            "admin": admin, "asof": asof, "snapshot": snap, "registry": reg_info, "queues": queues,
+            "pkgs": review_packages(cfg) if admin else None, "admin": admin, "asof": asof, "snapshot": snap, "registry": reg_info, "queues": queues,
             "running": running, "queue": queue, "attention": attention, "review": review, "finished": finished,
             "counts": {"running": len(running), "queued": sum(1 for x in queue if x["state"] == "queued"),
                        "held": sum(1 for x in queue if x["state"] != "queued"), "attention": len(attention),
                        "review_open": len(review), "finished": len(finished)}}
+
+
+def review_packages(cfg) -> list:
+    """Admin only: lab labeling and compare packages under the review root with live progress (cards decided / total,
+    images reviewed / total, last edit and by whom, ready / in progress / applied). Computed on view by portal.titles
+    (cached by the edits folder's mtime); never prediction packages, never decoys.json."""
+    from portal import names as NM
+    from portal import titles as TT
+    from portal.modules import data as DATA
+    from portal.modules import results as RES
+    root = RES.review_root(cfg)
+    if root is None:
+        return []
+    records, _err = DATA.read_registry(getattr(cfg, "registry", None))
+    rows = []
+    for p in TT.scan_packages(root, records):
+        last = p["last"]
+        rows.append({"id": p["id"], "title": p["title"], "kind": p["kind"], "cards": p["cards"],
+                     "decided": p["decided"], "images": p["images"], "reviewed": p["reviewed"],
+                     "last": NM.when(datetime.fromtimestamp(last).isoformat()) if last else None, "_ts": last or 0,
+                     "who": p["who"], "status": p["status"], "applied_by": p["applied_by"]})
+    rows.sort(key=lambda r: (r["status"] == "applied", -r["_ts"], r["id"]))
+    for r in rows:
+        del r["_ts"]
+    return rows
 
 
 # ---------------------------------------------------------------- html (every text through esc)
@@ -734,7 +760,34 @@ def render(s: dict) -> dict:
                     f'{chip(x["label"], x["tone"])}</li>')
     parts.append(f'<ul class="cj-card cj-jobs-rows">{"".join(rows)}</ul>' if rows else empty("Nothing finished yet."))
     out["finished"] = "".join(parts)
+    if admin and s.get("pkgs") is not None:
+        out["finished"] += render_packages(s["pkgs"])
     return out
+
+
+PKG_STATUS = {"ready": ("Ready", "wait"), "in_progress": ("In progress", "run"), "applied": ("Applied", "ok")}
+
+
+def render_packages(pkgs: list) -> str:
+    parts = [sec_head("pkgs", "Review packages", len(pkgs))]
+    items = []
+    for r in pkgs:
+        label, tone = PKG_STATUS.get(r["status"], (r["status"], "wait"))
+        status = chip(label, tone)
+        if r["status"] == "applied" and r.get("applied_by"):
+            status += (f' <a href="/data/labels/{esc(quote(str(r["applied_by"]), safe=""))}">'
+                       f'{esc(str(r["applied_by"]))}</a>')
+        last = f"last edit {r['last']}" + (f" by {r['who']}" if r.get("who") else "") if r["last"] else "no edits yet"
+        meta = (f"{r['decided']} of {r['cards']} cards decided", f"{r['reviewed']} of {r['images']} images reviewed",
+                last)
+        items.append(f'<li class="cj-vis-pkg"><div class="cj-vis-pkg-top"><span><b>{esc(r["title"])}</b>'
+                     f'<span class="cj-mut cj-vis-id">{esc(r["id"])}</span></span><span>{status}</span></div>'
+                     f'<div class="cj-vis-pkg-meta cj-mut">' + "".join(f"<span>{esc(m)}</span>" for m in meta)
+                     + "</div>"
+                     + bar(r["decided"], r["cards"], "cards decided") + "</li>")
+    parts.append(f'<ul class="cj-card cj-vis-pkgs">{"".join(items)}</ul>' if items
+                 else empty("No lab labeling or compare packages."))
+    return "".join(parts)
 
 
 _PH = re.compile(r"\{\{(head|running|queue|attention|review|finished)\}\}")
