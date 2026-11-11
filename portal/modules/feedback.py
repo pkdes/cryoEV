@@ -178,6 +178,9 @@ def routes(ctx) -> list:
                        for k in FS.KINDS)
         mine = sorted((r for r in FS.read_all(path()).values() if r["who"] == me(request)), key=lambda r: -r["id"])
         cards = "".join(report_card(r, request) for r in mine) or '<p class="cj-feedback-meta">Nothing sent yet.</p>'
+        n_new = sum(1 for r in FS.read_all(path()).values() if r["status"] == "New") if is_admin(request) else 0
+        admin_note = (f'<p class="cj-feedback-meta cj-feedback-admin-note">{n_new} new report{"" if n_new == 1 else "s"} '
+                      f'from everyone. <a href="{PREFIX}/all">See All reports</a></p>') if n_new else ""
         f = (f'<form class="cj-feedback-form" method="post" action="{PREFIX}/">'
              f'<label>What is it?<select name="kind" id="cj-fb-kind">{opts}</select></label>'
              f'<label>What happened, or what you would like<textarea name="text" rows="6" maxlength="{FS.TEXT_MAX}" '
@@ -188,7 +191,7 @@ def routes(ctx) -> list:
              f'<button type="submit">Send</button></form>')
         content = (f'<h1>Feedback</h1>{sub(request, "mine")}{msg}{flash(request)}'
                    f'<p class="cj-feedback-meta">Bugs, ideas and questions go to the people who run the portal. '
-                   f'Do not put passwords or keys in here.</p>{f}<h2>My reports</h2>{cards}')
+                   f'Do not put passwords or keys in here.</p>{f}{admin_note}<h2>My reports</h2>{cards}')
         return show(request, "Feedback", content, status)
 
     async def create(request: Request):

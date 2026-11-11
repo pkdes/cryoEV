@@ -1391,5 +1391,44 @@ class PrelipoPackageTests(RealPackageTests):
             self.assertEqual(norm(js[f]), norm(rs.effective_labels(data[f], rec)), f)
 
 
+class HungPutBrowser(Base):
+    """Lab feedback #2: a PUT that never settles must not wedge sync (the edits sat in the browser for 78 minutes)."""
+
+    def test_hung_put_does_not_block_later_saves(self):
+        f = "fixA_new.png"
+        puts = []
+
+        def route(r):
+            if r.request.method == "PUT":
+                puts.append(1)
+                if len(puts) == 1:
+                    return  # the first PUT never gets an answer (asleep laptop, network change)
+            r.continue_()
+
+        page = self.open(setup=lambda ctx, pg: (pg.add_init_script("window.CJ_SYNC_TIMEOUT_MS = 500;"),
+                                                pg.route("**/api/edits?f=*", route)))
+        self.go(page, f)
+        page.keyboard.press("r")  # edit 1: its PUT hangs, then aborts after 500 ms
+        page.wait_for_function("__review.state().dirty === 1", timeout=10000)
+        page.wait_for_timeout(1500)  # past the 500 ms timeout
+        page.keyboard.press("r")  # edit 2 (toggles reviewed back): must reach the server without a reload
+        page.wait_for_function("__review.state().dirty === 0 && document.getElementById('sync').textContent.includes('saved')",
+                               timeout=8000)  # well inside the 15 s retry: the fresh edit, not the retry
+        self.assertGreaterEqual(len(puts), 2)
+        self.assertIn(f, self.srv.request("GET", "/api/edits")[1])
+
+    def test_draw_hint_says_release_saves(self):
+        page = self.open()
+        page.keyboard.press("d")
+        self.assertIn("release to save", page.inner_text("#hint"))
+        page.evaluate("document.getElementById('hint').textContent = ''")
+        page.keyboard.press("Enter")  # Draw mode: Enter re-shows the hint
+        self.assertIn("release to save", page.inner_text("#hint"))
+        page.keyboard.press("Escape")
+        page.keyboard.press("v")
+        page.keyboard.press("Enter")  # Vertex mode keeps its own wording
+        self.assertIn("tap the first point or Enter to close", page.inner_text("#hint"))
+
+
 if __name__ == "__main__":
     unittest.main()
