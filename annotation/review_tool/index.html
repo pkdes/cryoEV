@@ -57,6 +57,8 @@ body.sandbox{padding-top:var(--sbh,0px)}
 body.sandbox #tri{top:var(--sbh,0px);height:calc(100dvh - var(--sbh,0px));padding-top:0}
 body.sandbox #list,body.sandbox #side{top:var(--sbh,0px)}
 #banner{position:absolute;left:8px;top:8px;right:8px;background:var(--warn);color:#fff;padding:6px 10px;border-radius:6px;display:none}
+#redrawBan{position:absolute;left:50%;top:8px;transform:translateX(-50%);background:#2563eb;color:#fff;padding:6px 12px;border-radius:8px;font-size:13px;font-weight:600;pointer-events:none;z-index:5}
+#redrawBan[hidden]{display:none}
 #hint{position:absolute;left:8px;bottom:44px;background:rgba(0,0,0,.6);color:#fff;padding:4px 8px;border-radius:6px;font-size:12px;pointer-events:none}
 #edToast{position:absolute;left:50%;top:44px;transform:translateX(-50%);background:rgba(0,0,0,.82);color:#fff;padding:6px 8px 6px 12px;border-radius:8px;font-size:13px;display:flex;gap:8px;align-items:center;z-index:2}
 #edToast[hidden]{display:none}
@@ -114,6 +116,7 @@ body.sandbox #list,body.sandbox #side{top:var(--sbh,0px)}
 #triActions.pcard #aYes{background:#16a34a;border-color:#16a34a}
 #triActions.pcard #aNope{background:#dc2626;border-color:#dc2626}
 #aYes small{font-size:11px;font-weight:500;opacity:.9}
+#triBack{width:40px;height:40px;font-size:20px}
 #triUndo{width:40px;height:40px;font-size:20px;color:#f59e0b}
 #triExit{border-radius:18px}
 #tri button{touch-action:manipulation}
@@ -218,6 +221,7 @@ button.lowTog.on{background:#f59e0b;border-color:#f59e0b;color:#1c1300;font-weig
   <label class="tg" id="lblPrWrap"><input type="checkbox" id="showPr" checked> <span id="lblPr">Predictions ≥</span> <output id="confOut">0.45</output></label>
   <input type="range" id="conf" min="0.25" max="0.95" step="0.05" value="0.45" style="width:90px">
   <label class="tg"><input type="checkbox" id="showFlags" checked> Flags</label>
+  <label class="tg" title="Tint the selected object (off by default: the outline alone keeps the object visible)"><input type="checkbox" id="showFill"> Fill</label>
   <label class="tg" title="Tag labels whose decision was carried from the September review"><input type="checkbox" id="showSept" checked> Sept</label>
   <span class="sep"></span>
   <button id="reviewed" title="Marks this image as done. It does not apply anything to a label set by itself.">✓ Reviewed</button>
@@ -238,7 +242,7 @@ button.lowTog.on{background:#f59e0b;border-color:#f59e0b;color:#1c1300;font-weig
   </div>
   <div id="items"></div>
 </nav>
-<main id="stage"><canvas id="cv"></canvas><div id="banner"></div><div id="hint"></div><div id="edToast" role="status" hidden><span id="edToastMsg">Accepted (edited) —</span><button id="edToastUndo" title="Restore the previous decision (Z)">Undo</button></div><div id="chipBar" title="Class: a tap or 1–8 reclasses the selection and is used for new shapes"></div></main>
+<main id="stage"><canvas id="cv"></canvas><div id="banner"></div><div id="hint"></div><div id="redrawBan" role="status" hidden></div><div id="edToast" role="status" hidden><span id="edToastMsg">Accepted (edited) —</span><button id="edToastUndo" title="Restore the previous decision (Z)">Undo</button></div><div id="chipBar" title="Class: a tap or 1–8 reclasses the selection and is used for new shapes"></div></main>
 <aside id="side">
   <div id="progress"></div>
   <div id="imgSec" hidden>
@@ -273,6 +277,7 @@ button.lowTog.on{background:#f59e0b;border-color:#f59e0b;color:#1c1300;font-weig
   <div class="tbar">
     <button id="triExit" title="Open this object in the full editor">Editor</button>
     <div class="logo" id="logo" title="Tap to switch app"><b id="logoName">eVHarmony</b><small id="logoTag">Find your perfect membrane match</small></div>
+    <button id="triBack" class="round" title="Back to the previous card, its decision stays editable (B or Backspace)" disabled>←</button>
     <button id="triUndo" class="round" title="Rewind (Z)">↺</button>
   </div>
   <div class="tfil">
@@ -308,7 +313,7 @@ button.lowTog.on{background:#f59e0b;border-color:#f59e0b;color:#1c1300;font-weig
   <div id="triCls" hidden></div>
   <div id="triAdjBar" hidden>
     <button id="adjCancel" title="Stop editing, keep the original shape (Esc)">Cancel</button>
-    <button id="adjRedraw" title="Trace a new outline with one stroke (R)">✏️ Redraw</button>
+    <button id="adjRedraw" title="Trace a new outline with one stroke (R)">✏️ Redraw outline</button>
     <button id="adjSave" title="Save this shape (Enter)">✓ Save shape</button>
   </div>
   <div id="triActions">
@@ -727,6 +732,10 @@ function path(ring) {
   ctx.closePath();
 }
 const conf = () => parseFloat($("conf").value);
+try { $("showFill").checked = localStorage.getItem("cryoev-review:fill") === "1"; } catch (e) {}
+$("showFill").onchange = () => { try { localStorage.setItem("cryoev-review:fill", $("showFill").checked ? "1" : "0"); } catch (e) {} draw(); };
+let showOrig = false;  // Editor: draw the selected object's original outline dashed under the current one
+const origRing = (im, g) => g.src && g.src[0] === "p" ? (im.pr[+g.src.slice(1)] || {}).p : g.id != null ? (im.gt.find(o => o.id === g.id) || {}).p : null;
 function handles(rings) {  // the white vertex handles of the selection
   ctx.fillStyle = "#fff"; ctx.strokeStyle = "#000"; ctx.lineWidth = 1;
   rings.forEach(rg => { for (let i = 0; i < rg.length; i += 2) { const [x, y] = toScr(rg[i], rg[i+1]); ctx.beginPath(); ctx.arc(x, y, 3.5, 0, 7); ctx.fill(); ctx.stroke(); } });
@@ -746,14 +755,16 @@ function draw() {
       ctx.setLineDash(only ? PRED_ONLY_DASH : xd ? [2, 3] : [5, 4]);
       ctx.lineWidth = miss || xd ? 2.5 : only ? 1.8 : 1.3; ctx.strokeStyle = miss ? FLAG.pu : xd ? FLAG.x : "#22d3ee";
       p.p.forEach(rg => { path(rg); ctx.stroke(); });
-      if (sel && sel.kind === "pr" && sel.i === k) { ctx.fillStyle = "rgba(250,204,21,.25)"; p.p.forEach(rg => { path(rg); ctx.fill(); }); }
+      if (sel && sel.kind === "pr" && sel.i === k && $("showFill").checked) { ctx.fillStyle = "rgba(250,204,21,.25)"; p.p.forEach(rg => { path(rg); ctx.fill(); }); }
     });
     ctx.setLineDash([]);
   }
   const septTags = [], lowTags = [];
   if ($("showGt").checked) {
     const halo = (g, col, w, dash) => { ctx.setLineDash(dash); ctx.lineWidth = w; ctx.strokeStyle = col; g.p.forEach(rg => { path(rg); ctx.stroke(); }); ctx.setLineDash([]); };
+    const fade = redrawKey != null && sel && sel.kind === "gt" ? sel.key : null;  // redrawing: the old outline fades so the object shows
     gtOf(im).forEach(g => {
+      if (fade != null && selKey(g) === fade) { ctx.globalAlpha = 0.25; ctx.lineWidth = 1.6; ctx.strokeStyle = catColor(g.c); g.p.forEach(rg => { path(rg); ctx.stroke(); }); ctx.globalAlpha = 1; return; }
       if (flags && (g.u || g.x || g.lc) && !decided(im, keyOf(g))) {
         if (g.u) halo(g, FLAG.gu, 6, []);
         if (g.x) halo(g, FLAG.x, 5, [2, 4]);
@@ -781,9 +792,12 @@ function draw() {
   if (sel && sel.kind === "gt") {
     const g = selObj();
     if (g) {
-      ctx.fillStyle = "rgba(39,100,197,.28)"; g.p.forEach(rg => { path(rg); ctx.fill(); });
-      ctx.lineWidth = 2.2; ctx.strokeStyle = "#fff"; g.p.forEach(rg => { path(rg); ctx.stroke(); });
-      handles(g.p);
+      const og = showOrig ? origRing(im, g) : null;
+      if (og) { ctx.setLineDash([6, 4]); ctx.lineWidth = 1.8; ctx.strokeStyle = "#facc15"; og.forEach(rg => { path(rg); ctx.stroke(); }); ctx.setLineDash([]); }
+      const redr = redrawKey != null;
+      if ($("showFill").checked && !redr) { ctx.fillStyle = "rgba(39,100,197,.28)"; g.p.forEach(rg => { path(rg); ctx.fill(); }); }
+      ctx.lineWidth = 2.2; ctx.strokeStyle = "#fff"; ctx.globalAlpha = redr ? 0.3 : 1; g.p.forEach(rg => { path(rg); ctx.stroke(); }); ctx.globalAlpha = 1;
+      if (!redr) handles(g.p);
     }
   }
   if (sel && sel.kind === "pr" && $("showPr").checked && prEditable(im, sel.i)) handles(im.pr[sel.i].p);  // editing them accepts it
@@ -869,9 +883,18 @@ function renderSide() {
     CATS.forEach((c, k) => { const o = new Option(`${k+1}. ${c}${c === "Low conf EV" && capOn("t") ? " (= EV + Low conf)" : ""}`, c); o.selected = c === a.c; s.add(o); });
     s.onchange = () => setCat(s.value);
     const del = document.createElement("button"); del.textContent = "Delete label"; del.onclick = deleteSel;
-    const rd = document.createElement("button"); rd.textContent = "Redraw outline (E)"; rd.title = "Trace a new outline for this label (keeps its class and id)";
+    const rd = document.createElement("button"); rd.id = "redrawBtn"; rd.textContent = "Redraw outline (E)"; rd.title = "Trace a new outline for this label (keeps its class and id)";
     rd.onclick = startRedraw;
     box.append(s, del, rd);
+    const og = origRing(im, a);
+    if (og) {  // where this outline came from (package label / model prediction), and whether the server has the change
+      const lab = document.createElement("label"); lab.className = "tg"; lab.id = "origTog"; lab.title = "Draw the original outline dashed under the current one";
+      const cb = document.createElement("input"); cb.type = "checkbox"; cb.id = "showOrig"; cb.checked = showOrig;
+      cb.onchange = () => { showOrig = cb.checked; draw(); };
+      lab.append(cb, " Show original");
+      const sv = document.createElement("div"); sv.id = "savedSt"; sv.className = "decst";
+      box.append(lab, sv); savedState();
+    }
     if (capOn("t")) {  // the Low conf tag and a note on this object (its t:<key> decision)
       const low = isLowObj(im.file, a), lb = document.createElement("button");
       lb.id = "lowBtn"; lb.className = "lowTog" + (low ? " on" : ""); lb.textContent = low ? "◐ Low conf: on" : "◐ Low conf";
@@ -958,6 +981,8 @@ function hint() {
   const how = mode === "draw" ? "drag around the object · release to save" : "tap points · tap the first point or Enter to close";
   $("hint").textContent = mode === "select" ? "" : (redrawKey != null ? "Redraw (keeps class): " : `New ${curCls}: `) + how + " · Esc cancels";
   $("hint").style.display = mode === "select" ? "none" : "block";
+  const rb = $("redrawBan"), ro = redrawKey != null && mode !== "select" ? findKey(gtOf(curImg()), redrawKey) : null;
+  rb.hidden = !ro; if (ro) rb.textContent = `Replacing the outline of ${ro.c} … (Esc cancels)`;
 }
 let hintT = null;
 function flashHint() {  // Enter in Draw mode: nothing to close, so show what to do (the outline saves on release)
@@ -1090,7 +1115,7 @@ function saveImg() {
   closeImg();
   if (!n) return;
   touch(im.file); renderList(); renderSide(); draw();
-  if (!$("tri").hidden) { const c = tri.queue[tri.pos]; if (c && c.i === i && rejectOf(im.file)) advance(); else triRender(); }
+  if (!$("tri").hidden) { const c = tri.queue[tri.pos]; if (c && c.i === i && rejectOf(im.file)) advance(true); else triRender(); }
 }
 $("imgNote").oninput = noteCount; $("imgCancel").onclick = closeImg; $("imgSave").onclick = saveImg;
 $("imgDlg").onclick = ev => { if (ev.target === $("imgDlg")) closeImg(); };
@@ -1355,7 +1380,7 @@ const tri = {queue: [], pos: 0, zoom: 0, undo: [], img: null, imgI: -1, ready: f
 try { tri.mode = localStorage.getItem("cryoev-review:triMode") === "cls" ? "cls" : "tri"; } catch (e) {}
 { const m = new URLSearchParams(location.search).get("mode"); if (m === "classes" || m === "cls") tri.mode = "cls"; else if (m === "cards") tri.mode = "tri"; }
 const clsMode = () => tri.mode === "cls";
-const ZOOMS = [3, 7, 0];  // crop = object size x this; 0 = whole image
+const ZOOMS = [3, 7, 0, 1.5];  // crop = object size x this; 0 = whole image; 1.5 = closest (last, so the default and the first taps are unchanged)
 // Bios are assembled from an opener + a closer (+ sometimes a line about the object itself),
 // chosen by a hash of the image and object, so each card is stable but repeats are rare.
 const BIO = {
@@ -1503,7 +1528,7 @@ async function postClaim(id) {
 function leaveTaken() {  // the card on screen is another reviewer's, or was decided elsewhere: move on (not off my own pick)
   if ($("tri").hidden || g0 || tri.adj || !$("whoDlg").hidden) return false;
   const c = tri.queue[tri.pos];
-  if (c && tri.picked !== caseId(c) && (takenByOther(c) || resolved(c))) { advance(); return true; }
+  if (c && tri.picked !== caseId(c) && (takenByOther(c) || (resolved(c) && tri.back !== caseId(c)))) { advance(true); return true; }
   return false;
 }
 const triSig = () => { const c = tri.queue[tri.pos], im = c && D.images[c.i];  // what the card screen shows
@@ -1526,8 +1551,9 @@ async function pullClaims() {
   try { const r = await tfetch("api/claims", {cache: "no-store"}); if (r.ok) claims = (await r.json()).claims || {}; } catch (e) {}
 }
 function nextOpen(from) { for (let n = from; n < tri.queue.length; n++) if (!resolved(tri.queue[n]) && !takenByOther(tri.queue[n])) return n; return -1; }
-function advance() {
-  tri.picked = null;
+function advance(noHist) {
+  const cur = tri.queue[tri.pos]; if (cur && noHist !== true) { (tri.hist = tri.hist || []).push(tri.pos); if (tri.hist.length > 200) tri.hist.shift(); }  // Back remembers the last 200 cards
+  tri.picked = null; tri.back = null;
   if (tri.adj) { tri.adj = null; updAdjBar(); }
   let n = nextOpen(tri.pos + 1); if (n < 0) n = nextOpen(0);
   tri.pos = n < 0 ? tri.queue.length : n; tri.zoom = 0; triRender();
@@ -1555,8 +1581,8 @@ function setTriMode(m) {
 }
 function triKeysText(cm) {
   const low = capOn("t") ? (cm ? " · L low conf" : " · L accept as low conf / low conf") : "";
-  return cm ? `1–${Math.min(9, CATS.length)} pick class · → / A keep · ← / ↑ / S next${low} · Z undo · Esc close`
-            : `→ / A accept · ← / X reject · ↑ / S skip${low} · Z undo · Esc close`;
+  return cm ? `1–${Math.min(9, CATS.length)} pick class · → / A keep · ← / ↑ / S next${low} · B back · Z undo · Esc close`
+            : `→ / A accept · ← / X reject · ↑ / S skip${low} · B back · Z undo · Esc close`;
 }
 function openTri() {
   const cm = clsMode();
@@ -1565,7 +1591,7 @@ function openTri() {
   $("triChips").hidden = cm; $("triCls").hidden = !cm; $("triAdj").hidden = cm; $("aNope").hidden = cm;
   $("aYes").textContent = cm ? "✓" : "♥"; $("aSkip").title = cm ? "Next: decide later (swipe left or up)" : "Maybe later";
   // flag order from the top for everyone; claims make other reviewers' queues skip the card on this screen
-  buildQueue(); const n = nextOpen(0); tri.pos = n < 0 ? tri.queue.length : n; tri.zoom = 0; tri.picked = null;
+  buildQueue(); const n = nextOpen(0); tri.pos = n < 0 ? tri.queue.length : n; tri.zoom = 0; tri.picked = null; tri.hist = []; tri.back = null;
   $("autoNext").checked = autoNext();
   $("tri").hidden = false; try { localStorage.setItem("cryoev-review:mode", "tri"); } catch (e) {}
   applyBrand();
@@ -1582,7 +1608,7 @@ function triRender() {
   const left = tri.queue.filter(c => !resolved(c)).length, c = tri.queue[tri.pos];
   const others = new Set(Object.values(claims).filter(w => w !== meName())).size;
   $("triProg").textContent = `${left} of ${tri.queue.length} ${clsMode() ? "labels to check" : "singles left"}` + (others ? ` · ${others} other swiper${others > 1 ? "s" : ""} online` : "");
-  $("triUndo").disabled = !tri.undo.length;
+  $("triUndo").disabled = !tri.undo.length; $("triBack").disabled = !(tri.hist && tri.hist.length);
   const bio = $("triBio"), chips = $("triChips"); chips.innerHTML = ""; $("triCls").innerHTML = "";
   ["aNope", "aSkip", "aYes", "aNext"].forEach(id => $(id).disabled = !c);
   $("aNext").hidden = autoNext(); $("aNext").classList.toggle("on", !!c && decided(D.images[c.i], c.key));
@@ -1761,6 +1787,12 @@ function confirmSept(c) {  // ✓ on a September card: the same decision again, 
   if (d.v === "del" || /^(add|new):/.test(d.v) || d.p || (d.v.startsWith("keep:") && o && d.v.slice(5) !== o.c)) e.modified = true;
   touch(im.file); renderList(); advance();
 }
+function triBack() {  // the previous card, its decision untouched and editable (pick again, Adjust); other decisions stay
+  let p; while (tri.hist && tri.hist.length && ((p = tri.hist.pop()) === tri.pos || !tri.queue[p]));
+  if (p === undefined || p === tri.pos || !tri.queue[p]) return;
+  if (tri.adj) { tri.adj = null; updAdjBar(); }
+  tri.pos = p; tri.zoom = 0; tri.picked = null; tri.back = caseId(tri.queue[p]); triRender();
+}
 function triUndo() {
   const u = tri.undo.pop(); if (!u) return;
   restoreSnap(D.images[u.i], u.snap); touch(D.images[u.i].file); renderList();
@@ -1771,7 +1803,7 @@ function triDraw() {
   tcv.width = Math.max(1, box.width * dpr); tcv.height = Math.max(1, box.height * dpr);
   tctx.setTransform(dpr, 0, 0, dpr, 0, 0); tctx.fillStyle = "#000"; tctx.fillRect(0, 0, box.width, box.height);
   const c = tri.queue[tri.pos];
-  $("triZoom").textContent = !c ? "" : tri.adj ? (tri.adj.redraw ? "trace around the object in one stroke" : "drag the dots · tap here to zoom") : ["close-up", "wider", "whole image"][tri.zoom] + " · tap to zoom";
+  $("triZoom").textContent = !c ? "" : tri.adj ? (tri.adj.redraw ? "trace around the object in one stroke" : "drag the dots · tap here to zoom") : ["close-up", "wider", "whole image", "closest"][tri.zoom] + " · tap to zoom";
   $("triEye").classList.toggle("off", tri.hideOutline);
   if (!c || !tri.ready) return;
   const im = D.images[c.i], Wi = tri.img.naturalWidth, Hi = tri.img.naturalHeight, r = caseRing(c);
@@ -1779,9 +1811,11 @@ function triDraw() {
   const z = ZOOMS[tri.zoom], size = Math.max((x1 - x0) * Wi, (y1 - y0) * Hi);
   const vh = box.height * 0.72;  // keep the object above the bio overlay
   let s, cx, cy;
-  if (z) { s = Math.min(box.width, vh) / Math.max(size * z, z === 3 ? 240 : 520); cx = (x0 + x1) / 2 * Wi; cy = (y0 + y1) / 2 * Hi; }
+  if (z) { s = Math.min(box.width, vh) / Math.max(size * z, z === 3 ? 240 : z < 3 ? 120 : 520); cx = (x0 + x1) / 2 * Wi; cy = (y0 + y1) / 2 * Hi; }
   else { s = Math.min(box.width / Wi, box.height / Hi); cx = Wi / 2; cy = Hi / 2; }
-  const ox = box.width / 2 - cx * s, oy = (z ? vh / 2 + 8 : box.height / 2) - cy * s;
+  let ox = box.width / 2 - cx * s, oy = (z ? vh / 2 + 8 : box.height / 2) - cy * s;
+  const wkey = caseId(c) + ":" + tri.zoom; if (tri.wtKey !== wkey) { tri.wt = null; tri.wtKey = wkey; }  // wheel zoom resets with the card / zoom step
+  if (tri.wt) { s *= tri.wt.k; ox = ox * tri.wt.k + tri.wt.tx; oy = oy * tri.wt.k + tri.wt.ty; }
   tctx.imageSmoothingEnabled = s < 2;
   tctx.drawImage(tri.img, ox, oy, Wi * s, Hi * s);
   const ring = rg => { tctx.beginPath(); for (let k = 0; k < rg.length; k += 2) { const X = rg[k] * Wi * s + ox, Y = rg[k+1] * Hi * s + oy; k ? tctx.lineTo(X, Y) : tctx.moveTo(X, Y); } tctx.closePath(); };
@@ -1859,7 +1893,7 @@ function updAdjBar() {
   const on = !!tri.adj;
   $("triActions").hidden = on; $("triAdjBar").hidden = !on; $("triAdj").classList.toggle("off", on);
   $("adjRedraw").classList.toggle("on", on && tri.adj.redraw);
-  $("adjRedraw").textContent = on && tri.adj.redraw ? "Trace it now…" : "✏️ Redraw";
+  $("adjRedraw").textContent = on && tri.adj.redraw ? "Trace it now…" : "✏️ Redraw outline";
 }
 $("triAdj").onclick = () => tri.adj ? endAdjust() : startAdjust();
 $("adjCancel").onclick = endAdjust;
@@ -1929,11 +1963,18 @@ tcv.addEventListener("pointerup", ev => {
   else cardReset(true);
 });
 tcv.addEventListener("pointercancel", () => { clearTimeout(pressT); g0 = null; if (tri.held) { tri.held = false; tri.hideOutline = tri.peekPrev; triDraw(); } cardReset(true); });
+tcv.addEventListener("wheel", ev => {  // desktop: wheel zooms about the cursor (pinch is not handled)
+  if (!tri.xf || !tri.queue[tri.pos]) return;
+  ev.preventDefault();
+  const b = tcv.getBoundingClientRect(), px = ev.clientX - b.left, py = ev.clientY - b.top, w = tri.wt || {k: 1, tx: 0, ty: 0};
+  const f = Math.exp(-Math.sign(ev.deltaY) * 0.2), k = Math.min(8, Math.max(0.5, w.k * f)), g = k / w.k;
+  tri.wt = {k, tx: (w.tx - px) * g + px, ty: (w.ty - py) * g + py}; triDraw();
+}, {passive: false});
 tcv.addEventListener("contextmenu", ev => ev.preventDefault());
 function toggleOutlines() { tri.hideOutline = !tri.hideOutline; triDraw(); }
 $("triEye").onclick = toggleOutlines;
 function triKey(ev) {
-  if (ev.target.tagName === "SELECT") return;
+  if (ev.target.tagName === "SELECT" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "INPUT" && ev.target.type === "text") return;  // typing: no card keys
   if (tri.adj) {
     if (ev.key === "Enter") saveAdjust(); else if (ev.key === "Escape") endAdjust();
     else if (ev.key === "r" || ev.key === "R") $("adjRedraw").onclick();
@@ -1951,6 +1992,7 @@ function triKey(ev) {
   else if (k === "ArrowRight" || k === "Enter" || k === "a" || k === "A") react("yes", swipeYes);  // A: accept
   else if (!cm && (k === "ArrowLeft" || k === "x" || k === "X" || k === "Delete")) react("nope", swipeNo);
   else if (k === "ArrowUp" || k === "s" || k === "S" || k === "n" || k === "N" || (cm && k === "ArrowLeft")) react("skip", advance);
+  else if (k === "b" || k === "B" || k === "Backspace") { ev.preventDefault(); triBack(); }
   else if (k === "z" || k === "Z") triUndo();
   else if (k === " ") { ev.preventDefault(); tri.zoom = (tri.zoom + 1) % ZOOMS.length; triDraw(); }
   else if (k === "o" || k === "O" || k === "h" || k === "H") toggleOutlines();
@@ -1958,7 +2000,7 @@ function triKey(ev) {
 }
 if (D.kind === "compare") $("toTri").classList.add("quick");  // compare packages: the same "Quick check" button
 $("toTri").onclick = openTri; applyBrand();
-$("triWho").onclick = () => openWho(); $("triExit").onclick = closeTri; $("triUndo").onclick = triUndo;
+$("triWho").onclick = () => openWho(); $("triExit").onclick = closeTri; $("triUndo").onclick = triUndo; $("triBack").onclick = triBack;
 $("aNext").onclick = () => react("skip", advance);
 $("autoNext").onchange = () => { try { localStorage.setItem("cryoev-review:autoNext", $("autoNext").checked ? "1" : "0"); } catch (e) {} triRender(); };
 $("triOpen").onclick = ev => {  // same tab: open in place (the link itself stays bookmarkable / copyable)
@@ -2086,12 +2128,19 @@ function tfetch(url, opt) {
   const ac = new AbortController(), tm = setTimeout(() => ac.abort(), window.CJ_SYNC_TIMEOUT_MS || 20000);
   return fetch(url, Object.assign({}, opt, {signal: ac.signal})).finally(() => clearTimeout(tm));  // headers arrived: no abort mid-body
 }
+function savedState() {  // side panel: "Saved ✓" once the server has this outline change, "Saving…" while it is pending
+  const el = $("savedSt"), im = curImg(), g = el && selObj(); if (!el) return;
+  const og = g && origRing(im, g), changed = !!og && JSON.stringify(og) !== JSON.stringify(g.p);
+  el.textContent = !changed || !server ? "" : dirty.has(im.file) ? "Saving…" : "Saved ✓";
+  el.dataset.state = !el.textContent ? "" : dirty.has(im.file) ? "pending" : "saved";
+}
 function syncBadge(err) {
   const b = $("sync");
   if (!server) { b.textContent = "local only"; b.style.color = ""; $("sync2").textContent = b.textContent; return; }
   b.textContent = err ? `offline · ${dirty.size} pending` : dirty.size ? `saving ${dirty.size}…` : "saved to lab PC";
   b.style.color = err ? "var(--warn)" : dirty.size ? "" : "#16a34a";
   $("sync2").textContent = b.textContent; $("sync2").style.color = b.style.color;
+  savedState();
 }
 function scheduleSync(ms = 800) { if (!server) return; clearTimeout(syncTimer); syncTimer = setTimeout(sync, ms); syncBadge(); }
 // Entries saved without a name (older versions allowed it) that the server doesn't have yet: they are this browser's,
@@ -2180,7 +2229,7 @@ let startMode = null; try { startMode = localStorage.getItem("cryoev-review:mode
 if (deep) startMode = "editor";  // a deep link always opens the Editor on its object
 if (startMode === "tri" || (!startMode && window.matchMedia("(max-width: 700px)").matches)) openTri();
 window.__review = {D, CATS, effGt, gtOf, mergeEdit, pull, materialize, edits: () => edits, caps: () => [...caps], openImg, statusOf, triGo: n => { tri.pos = n; tri.zoom = 0; tri.picked = null; triRender(); }, render: () => { renderList(); renderSide(); draw(); if (!$("tri").hidden) triRender(); }, state: () => ({mode, sel, curCls, redrawKey, cur, order, view: {...view}, W, H, imgReady, server, dirty: dirty.size,
-  who: me(), tri: {mode: tri.mode, pos: tri.pos, queue: tri.queue, ready: tri.ready, picked: tri.picked || null}})};  // for annotation/tests
+  who: me(), tri: {mode: tri.mode, pos: tri.pos, queue: tri.queue, ready: tri.ready, picked: tri.picked || null, zoom: tri.zoom, wk: tri.wt ? tri.wt.k : 1, xfs: tri.xf ? tri.xf.s : 0, hist: (tri.hist || []).length}})};  // for annotation/tests
 })();
 </script>
 </body>
