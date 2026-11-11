@@ -274,6 +274,7 @@ class StageResizeTests(Base):
         cx, cy = sum(ring[0::2]) / n, sum(ring[1::2]) / n
         self.click_obj(page, ring)
         self.assertEqual(self.state(page)["sel"], {"kind": "gt", "key": "g302"})
+        page.evaluate("(() => { const f = document.getElementById('showFill'); if (!f.checked) f.click(); })()")  # fill is off by default
         # what is shown at the clicked point is the selected outline's blue fill (the image itself is grey)
         x, y = self.scr(page, cx, cy)
         box = page.locator("#cv").bounding_box()
