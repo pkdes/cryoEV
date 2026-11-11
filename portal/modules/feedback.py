@@ -23,6 +23,7 @@ import hmac
 import html
 import secrets
 import threading
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, quote
 
 from starlette.concurrency import run_in_threadpool
@@ -68,6 +69,20 @@ def notify_new(rid: int, kind: str) -> threading.Thread:
 
 def fmt_time(t) -> str:
     return esc(str(t or "")[:16].replace("T", " ") + " UTC") if t else ""
+
+
+def local_time(t) -> str:
+    """UTC ISO -> this computer's local time, readable ("11 Nov 2026 14:03"). Unparseable -> the raw text, escaped."""
+    try:
+        d = datetime.fromisoformat(str(t))
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        return esc(d.astimezone().strftime("%d %b %Y %H:%M"))
+    except (TypeError, ValueError):
+        return esc(str(t or ""))
+
+
+SNIP = 140
 
 
 def routes(ctx) -> list:
@@ -161,6 +176,38 @@ def routes(ctx) -> list:
                     f'<button type="submit">Save reply</button></form>')
         return f'<article class="cj-feedback-card" id="r{r["id"]}">{head}{body}{acts}</article>'
 
+    def report_table(rows, request) -> str:
+        """Admin's All reports: one row per report. Everything escaped; the status / reply forms keep their token."""
+        trs = []
+        for r in rows:
+            text = r["text"]
+            snip = text if len(text) <= SNIP else text[:SNIP].rstrip() + "…"
+            full = ""
+            if len(text) > SNIP or r["steps"]:
+                inner = f'<p class="cj-feedback-text">{esc(text)}</p>'
+                if r["steps"]:
+                    inner += f'<p class="cj-feedback-meta">Steps to reproduce</p><p class="cj-feedback-text">{esc(r["steps"])}</p>'
+                full = f'<details><summary>{esc(snip)}</summary>{inner}</details>'
+            what = full or esc(snip)
+            opts = "".join(f'<option{" selected" if s == r["status"] else ""}>{esc(s)}</option>' for s in FS.STATUSES)
+            st = (f'<span class="cj-feedback-st" data-st="{esc(r["status"])}">{esc(r["status"])}</span>'
+                  f'<form class="cj-feedback-acts" method="post" action="{PREFIX}/{r["id"]}/status">'
+                  f'{hidden_token(request)}<select name="status" aria-label="Status of #{r["id"]}">{opts}</select>'
+                  f'<button type="submit">Set status</button></form>')
+            rp = ((f'<p class="cj-feedback-text">{esc(r["reply"])}</p>') if r["reply"] else "") + (
+                f'<form class="cj-feedback-acts" method="post" action="{PREFIX}/{r["id"]}/reply">'
+                f'{hidden_token(request)}<textarea name="reply" rows="2" maxlength="{FS.REPLY_MAX}" '
+                f'aria-label="Reply to #{r["id"]}">{esc(r["reply"])}</textarea>'
+                f'<button type="submit">Save reply</button></form>')
+            page_cell = f'<code>{esc(r["page"])}</code>' if r["page"] else ""
+            trs.append(f'<tr id="r{r["id"]}"><td>{r["id"]}</td><td>{esc(r["who"])}</td><td>{local_time(r["t"])}</td>'
+                       f'<td>{esc(KIND_WORD.get(r["kind"], r["kind"]))}</td><td>{page_cell}</td>'
+                       f'<td class="cj-fbt-text">{what}</td><td>{st}</td><td>{rp}</td></tr>')
+        head = "".join(f"<th scope=\"col\">{h}</th>" for h in
+                       ("#", "From", "When", "Type", "Page", "What they wrote", "Status", "Reply"))
+        return (f'<div class="cj-fbt-wrap" tabindex="0" role="region" aria-label="All reports">'
+                f'<table class="cj-fbt"><thead><tr>{head}</tr></thead><tbody>{"".join(trs)}</tbody></table></div>')
+
     def sub(request, active):
         a = '<a href="/feedback/all"{}>All reports</a>'.format(' aria-current="page"' if active == "all" else "") \
             if is_admin(request) else ""
@@ -232,9 +279,12 @@ def routes(ctx) -> list:
         flt = (f'<form class="cj-feedback-filter" method="get" action="{PREFIX}/all"><select name="kind" '
                f'aria-label="Kind">{ko}</select><select name="status" aria-label="Status">{so}</select>'
                f'<button type="submit">Filter</button></form>')
-        cards = "".join(report_card(r, request, True) for r in rows) or '<p class="cj-feedback-meta">No reports.</p>'
+        cards = report_table(rows, request) if rows else '<p class="cj-feedback-meta">No reports.</p>'
+        n_new = sum(1 for r in allr.values() if r["status"] == "New")
+        newnote = (f'<p class="cj-feedback-meta cj-feedback-admin-note">{n_new} new report{"" if n_new == 1 else "s"} '
+                   f'from everyone.</p>') if n_new else ""
         return show(request, "All feedback",
-                    f'<h1>All reports</h1>{sub(request, "all")}{flash(request)}{flt}{cards}')
+                    f'<h1>All reports</h1>{sub(request, "all")}{flash(request)}{newnote}{flt}{cards}')
 
     async def admin_action(request: Request, what: str):
         if not is_admin(request):

@@ -1188,15 +1188,23 @@ def render_health(h: dict) -> str:
             f'{panel("dsk", "Disk space", dsk)}</div>')
 
 
+def read_audit_all(cfg, n=AUDIT_SHOW) -> tuple:
+    """This door's log plus the other doors' ($CJ_AUDIT_EXTRA, read only), merged by time. -> (entries with "door",
+    list of problem notes)."""
+    return PA.read_merged(cfg.state_dir, None, n)
+
+
 def render_audit(entries, problem) -> str:
-    if problem:
-        body = note(problem, "warn")
-    elif not entries:
-        body = '<p class="cj-mut">Nothing logged yet.</p>'
+    problems = [problem] if isinstance(problem, str) and problem else list(problem or [])
+    multi = any(e.get("door") not in (None, "this door") for e in entries if isinstance(e, dict))
+    warn = "".join(note(p, "warn") for p in problems)
+    if not entries:
+        body = warn + ('<p class="cj-mut">Nothing logged yet.</p>' if not problems else "")
     else:
         items = []
-        for e in entries:
-            e = PA.normalise(_d(e))
+        for e0 in entries:
+            e0 = _d(e0)
+            e = PA.normalise(e0)
             t = parse_time(_s(e.get("t")))
             act = str(e.get("action") or "?")
             detail = e.get("detail")
@@ -1210,15 +1218,17 @@ def render_audit(entries, problem) -> str:
             else:
                 dtext = "" if detail is None else str(detail)
             dspan = f' <span class="cj-mut">({esc(dtext)})</span>' if dtext else ""
+            door = (f'<span class="cj-mut cj-admin-door">[{esc(str(e0.get("door") or "this door"))}]</span> '
+                    if multi else "")
             items.append(f'<li class="cj-admin-aud"><span class="cj-mut cj-num">'
                          f'{esc(datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S") if t else "?")}</span>'
-                         f'<span><b class="cj-wrap">{esc(str(e.get("actor") or "-"))}</b> '
+                         f'<span>{door}<b class="cj-wrap">{esc(str(e.get("actor") or "-"))}</b> '
                          f'{esc(word)} '
                          f'<b class="cj-wrap">{esc(str(e.get("target") or ""))}</b>'
                          f'{dspan}</span></li>')
-        body = f'<ol class="cj-card cj-admin-auds">{"".join(items)}</ol>'
+        body = warn + f'<ol class="cj-card cj-admin-auds">{"".join(items)}</ol>'
     return (f'<h1>Recent actions</h1><p class="cj-mut">The last {AUDIT_SHOW} actions in the portal (people, job '
-            f'cancels and releases), newest first. Times are this computer\'s.</p>{body}')
+            f'cancels and releases; both doors when CJ_AUDIT_EXTRA is set), newest first. Times are this computer\'s.</p>{body}')
 
 
 _PH = re.compile(r"\{\{(sub|content)\}\}")
@@ -1455,12 +1465,13 @@ def routes(ctx) -> list:
         return ctx.json(await asyncio.to_thread(health, ctx.cfg))
 
     def audit_page(request: Request):
-        entries, prob = read_audit(ctx.cfg)
+        entries, prob = read_audit_all(ctx.cfg)
         return show(request, "Recent actions", "audit", render_audit(entries, prob))
 
     def api_audit(request: Request):
-        entries, prob = read_audit(ctx.cfg)
-        return ctx.json({"schema": "cj_admin_audit/1", "entries": entries, "problem": prob})
+        entries, prob = read_audit_all(ctx.cfg)
+        return ctx.json({"schema": "cj_admin_audit/1", "entries": entries, "problem": prob[0] if prob else None,
+                         "problems": prob})
 
     def api_people(request: Request):
         try:

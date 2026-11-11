@@ -701,6 +701,25 @@ def pred_mount(proxy: P.ReviewProxy, root: Path | None, title: str = "Review") -
             Route(REVIEW_BASE + "/{pkg_id}/app/{path:path}", tool, methods=["GET", "HEAD", "PUT", "POST", "DELETE"])]
 
 
+VERSION_UNKNOWN = "version unknown"
+
+
+def version_stamp(repo: Path = REPO) -> str:
+    """"Updated <date time> . <short commit>" of the repo the portal runs from; computed once at startup. Never shows
+    a path. git missing / slow / not a repo -> "version unknown"."""
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", str(repo), "log", "-1", "--format=%h|%cI"], capture_output=True, text=True,
+                           timeout=3, check=True)
+        sha, _, iso = r.stdout.strip().partition("|")
+        when = datetime.fromisoformat(iso.strip()).strftime("%Y-%m-%d %H:%M")
+        if not re.fullmatch(r"[0-9a-f]{4,40}", sha):
+            return VERSION_UNKNOWN
+        return f"Updated {when} · {sha}"
+    except Exception:                                   # noqa: BLE001  any failure: a quiet fallback
+        return VERSION_UNKNOWN
+
+
 def create_app(cfg: Config) -> Gate:
     """Raises ValueError when modules.json can't be read (the Gate's rules come from it), or for an access mode
     without its config: refuse to start."""
@@ -716,6 +735,7 @@ def create_app(cfg: Config) -> Gate:
         origins += (cfg.access.origin,)
         access_admin = cfg.access_admin if cfg.access_admin is not None else AX.admin_allowed()
     auth = A.Auth(cfg.roster, cfg.state_dir)
+    version = version_stamp()
     rules_box: list = []                            # the Gate's rules, filled below; home asks them, not the file
     proxy = P.ReviewProxy(cfg.review_upstream, cfg.review_key, cfg.review_timeout, cfg.max_body,
                           prefix=REVIEW_BASE + "/app")
@@ -763,6 +783,9 @@ def create_app(cfg: Config) -> Gate:
         mods = [m for m in manifest(cfg.manifest) if role in (m.get("roles") or [])
                 and not (access and m.get("external"))]            # no host:port links through the tunnel
         return no_store(JSONResponse({"schema": "cj_modules/1", "modules": mods}))
+
+    async def version_json(request: Request):
+        return no_store(JSONResponse({"version": version}))
 
     async def me(request: Request):
         u = request.scope["cj_user"]
@@ -812,6 +835,7 @@ def create_app(cfg: Config) -> Gate:
         *[Route(f"/cj/{n}", static(n), methods=["GET"]) for n in STATIC],
         Route("/cj/modules.json", modules, methods=["GET"]),
         Route("/cj/me.json", me, methods=["GET"]),
+        Route("/cj/version.json", version_json, methods=["GET"]),
         Route("/history", redirect("/history/"), methods=["GET"]),
         Route("/history/", redirect("history.html"), methods=["GET"]),
         Route("/history/history.html", history_html, methods=["GET"]),

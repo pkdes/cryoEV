@@ -85,7 +85,67 @@ def normalise(rec: dict) -> dict:
 def read_audit(state_dir, n=SHOW) -> tuple:
     """-> (the last n entries, newest first, normalised; problem or None). Reads the file's tail only; lines that
     are not JSON objects are skipped."""
-    path = audit_path(state_dir)
+    return read_file(audit_path(state_dir), n)
+
+
+EXTRA_ENV = "CJ_AUDIT_EXTRA"
+
+
+def extra_paths(env=None) -> list:
+    """The other doors' audit files named in $CJ_AUDIT_EXTRA: absolute paths separated by ';'. Read only."""
+    raw = (os.environ if env is None else env).get(EXTRA_ENV) or ""
+    out = []
+    for part in raw.split(";"):
+        part = part.strip().strip('"')
+        if part and Path(part).is_absolute():
+            out.append(Path(part))
+    return out
+
+
+def door_label(path) -> str:
+    """A label for an extra file without showing a path: its state folder's name (<state>/audit/portal.jsonl)."""
+    p = Path(path)
+    name = p.parent.parent.name if p.parent.name == "audit" else p.parent.name
+    return (name or "other")[:40]
+
+
+def _t_key(e) -> str:
+    try:
+        return datetime.fromisoformat(str(e.get("t"))).astimezone(timezone.utc).isoformat()
+    except (TypeError, ValueError):
+        return ""
+
+
+def read_merged(state_dir, extras=None, n=SHOW) -> tuple:
+    """-> (the last n entries of this door and the extra doors, newest first, each with a "door" key: "this door" or
+    the extra file's label; list of problem notes). An unreadable extra file is a note, never an error."""
+    own = audit_path(state_dir)
+    entries, problems = [], []
+    rows, prob = read_file(own, n)
+    if prob:
+        problems.append(prob)
+    entries += [dict(e, door="this door") for e in rows]
+    seen = {str(own.resolve())}
+    for x in (extra_paths() if extras is None else [Path(e) for e in extras]):
+        try:
+            key = str(x.resolve())
+        except OSError:
+            key = str(x)
+        if key in seen:
+            continue
+        seen.add(key)
+        label = door_label(x)
+        rows, prob = read_file(x, n)
+        if not prob and not x.exists():
+            prob = "missing"
+        if prob:
+            problems.append(f"The {label} log can't be read.")
+        entries += [dict(e, door=label) for e in rows]
+    entries.sort(key=_t_key, reverse=True)
+    return entries[:n], problems
+
+
+def read_file(path, n=SHOW) -> tuple:
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
