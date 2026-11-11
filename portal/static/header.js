@@ -135,6 +135,14 @@
     }
     return bar;
   }
+  // the running code's version ("Updated <date time> . <commit>"), small, at the foot of every page
+  function stamp(ver, bar) {
+    if (!ver || !ver.version || document.getElementById('cj-version')) return;
+    var v = el('div', 'cj-version', ver.version);
+    v.id = 'cj-version';
+    if (document.getElementById('cj-review-frame')) { v.className = 'cj-version cj-version-bar'; bar.appendChild(v); }   // the full-height frame page: no room below
+    else document.body.appendChild(v);
+  }
   function dots(bar, live) {
     if (!bar || !live) return;
     var age = (Date.now() - Date.parse(live.generated_utc)) / 1000;
@@ -156,6 +164,7 @@
       .then(function (r) {
         var mods = (r[1] || {}).modules || [], me = r[2] || {};
         fill(bar, r[0], mods, me);
+        getJSON('/cj/version.json').then(function (ver) { stamp(ver, bar); }, function () {});
         hideSrv();
         var hist = mods.filter(function (m) { return m.id === 'history'; })[0];
         if (!hist || (hist.roles || []).indexOf(me.role) < 0) return null;   // the snapshot is History's data
