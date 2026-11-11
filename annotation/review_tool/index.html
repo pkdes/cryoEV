@@ -1413,7 +1413,7 @@ function applyBrand() {
   const b = brand(); $("logoName").textContent = b.name; $("logoTag").textContent = b.tag;
   const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   $("tri").style.setProperty("--hot", dark ? b.hotD : b.hot); $("tri").style.setProperty("--hot2", dark ? b.hotD2 : b.hot2);
-  if (isPredPkg) { const t = $("toTri"); t.textContent = "Quick check"; const sm = document.createElement("small"); sm.textContent = b.name; t.append(sm); } else $("toTri").textContent = b.name;
+  if (isPredPkg || D.kind === "compare") { const t = $("toTri"); t.textContent = "Quick check"; const sm = document.createElement("small"); sm.textContent = b.name; t.append(sm); } else $("toTri").textContent = b.name;
   document.title = $("tri").hidden ? "EV Label Review" : b.name;
 }
 $("logo").onclick = () => { brandI = (brandI + 1) % BRANDS.length; try { localStorage.setItem("cryoev-review:brand", brandI); } catch (e) {} applyBrand(); triRender(); };

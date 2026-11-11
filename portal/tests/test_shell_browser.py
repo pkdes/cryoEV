@@ -38,8 +38,8 @@ def _on(role):
     return [m["name"] for m in _MODS if m.get("nav") and m["status"] == "on" and role in m["roles"]]
 
 
-NAV = {"admin": (["Home", "Data", "Jobs", "Review", "Predict", "Gallery", "Results", "My reviews", "Train", "Admin", "Sandbox"], _on("admin")),
-       "advanced": (["Home", "Data", "Jobs", "Predict", "Gallery", "Results", "My reviews", "Train"], _on("advanced")),
+NAV = {"admin": (["Home", "Data", "Jobs", "Gallery", "Predict", "Label review", "Results", "My reviews", "Train", "Admin", "Sandbox"], _on("admin")),
+       "advanced": (["Home", "Data", "Jobs", "Gallery", "Predict", "Results", "My reviews", "Train"], _on("advanced")),
        "basic": (["Home", "Predict", "Results", "My reviews"], _on("basic"))}
 CARDS = {"admin": ["data", "jobs", "review", "predict", "gallery", "results", "reviews", "train", "admin", "sandbox"],
          "advanced": ["data", "jobs", "predict", "gallery", "results", "reviews", "train"],

@@ -35,7 +35,7 @@ class Manifests(unittest.TestCase):
         for i in on:                                                         # anything on has a real route
             self.assertTrue(by[i]["route"] or by[i].get("external"), i)
         self.assertEqual([by[i]["name"] for i in ids if by[i].get("nav")],     # the nav, in order
-                         ["Home", "Data", "Jobs", "Review", "Predict", "Gallery", "Results", "My reviews", "Train", "Admin", "Sandbox"])
+                         ["Home", "Data", "Jobs", "Gallery", "Predict", "Label review", "Results", "My reviews", "Train", "Admin", "Sandbox"])
         self.assertFalse(by["history"]["nav"])                               # History: hidden "classic" page
         self.assertEqual((by["home"]["route"], by["history"]["route"], by["review"]["route"]), ("/", "/history/", "/review/"))
         for m in mods:
@@ -130,7 +130,7 @@ class Home(unittest.TestCase):
         run = self.live["queues"][0]["running"]
         self.assertEqual((run["epoch"], run["epochs"]), (4, 300))           # control: the snapshot says so
         self.assertIn("From live.json", page)
-        self.assertIn('<span class="cj-dot up" aria-hidden="true"></span><b>Review</b>', page)
+        self.assertIn('<span class="cj-dot up" aria-hidden="true"></span><b>Label review</b>', page)
         self.assertIn('<span class="cj-dot down" aria-hidden="true"></span><b>Sandbox</b>', page)
         self.assertIn("1 <small>of 2 up</small>", page)
         self.assertIn("alive · heartbeat", page)
