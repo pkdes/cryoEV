@@ -168,15 +168,18 @@ def _data_js(pdir: Path):
 
 
 def _sig(pdir: Path):
+    """Cache key: data.js plus every edit record's name, size and mtime. The folder's own mtime alone can miss a
+    change made within the same clock tick (and never changes when a record is rewritten in place)."""
     try:
-        e, d = (Path(pdir) / "edits").stat(), (Path(pdir) / "data.js").stat()
+        d = (Path(pdir) / "data.js").stat()
     except OSError:
-        try:
-            d = (Path(pdir) / "data.js").stat()
-        except OSError:
-            return None
-        return (None, d.st_mtime_ns, d.st_size)
-    return (e.st_mtime_ns, d.st_mtime_ns, d.st_size)
+        return None
+    try:
+        edits = tuple(sorted((f.name, s.st_size, s.st_mtime_ns) for f in (Path(pdir) / "edits").iterdir()
+                             if f.suffix == ".json" for s in (f.stat(),)))
+    except OSError:
+        edits = None
+    return (edits, d.st_mtime_ns, d.st_size)
 
 
 def package_progress(pkg_dir) -> dict | None:
@@ -247,10 +250,14 @@ def _scan_packages(root, records) -> list:
     except OSError:
         return []
     applied = {}
-    for lv, rec in sorted(_dict(records.get("label_version")).items()):
+    for lv, rec in sorted(_dict(records.get("label_version")).items()):  # ids sort by time: the newest wins
         pkg = _text(_dict(rec).get("pkg"))
-        if pkg:
-            applied.setdefault(pkg, lv)
+        if not pkg:
+            continue
+        if _dict(rec).get("status") != "superseded":
+            applied[pkg] = lv          # the current label set built from this package
+        else:
+            applied.setdefault(pkg, lv)  # only if nothing current exists
     out = []
     for d in dirs:
         prog = package_progress(d)
