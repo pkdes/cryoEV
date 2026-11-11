@@ -13,7 +13,7 @@
   },
   "base": {
    "type": "string",
-   "pattern": "^roboflow_pull_\\d{8}_\\d{4}$"
+   "pattern": "^(roboflow_pull_\\d{8}_\\d{4}|lv_\\d{8}_\\d{4})$"
   },
   "pkg": {
    "type": "string",

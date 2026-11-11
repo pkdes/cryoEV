@@ -904,8 +904,10 @@ class Importer:
             superseded = d.name in SUPERSEDED or (d / "SUPERSEDED.md").exists() or d.name in named
             inputs = []
             if v.get("base"):
+                b = str(v["base"])        # a pull, an earlier label version (a review applied on top), or an export
                 inputs.append({"id": v["base"], "role": "base",
-                               "entity": "pull" if str(v["base"]).startswith("roboflow_pull_") else "roboflow_export"})
+                               "entity": "pull" if b.startswith("roboflow_pull_") else
+                               "label_version" if re.fullmatch(r"lv_\d{8}_\d{4}", b) else "roboflow_export"})
             if v.get("pkg"):
                 inputs.append({"id": v["pkg"], "role": "edits", "entity": "review_package"})
             self.add("label_version", id=d.name, owner=str(vj), supersedes=sup, inputs=inputs or None,
