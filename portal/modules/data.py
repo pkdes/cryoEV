@@ -94,6 +94,8 @@ from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
 
+from portal import names as NM
+from portal import titles as TT
 from portal import upload_sessions as US
 
 PREFIX = "/data"
@@ -623,6 +625,40 @@ def image_count_of(record):
     return n
 
 
+def package_meta(records, package_id) -> dict:
+    """The package's review_package.json (read-only, cached like the other file reads); {} when not on disk."""
+    def compute():
+        folder = package_folder(package_id, records["review_package"].get(package_id) or {})
+        return read_small_json(folder / "review_package.json") if folder else {}
+    return cached(_files_cache, ("pkgmeta", str(package_id)), compute)
+
+
+def pred_display_name(package_id) -> str:
+    """The prediction set's display name for pred_<ps> (callers apply the privacy rule first)."""
+    root, ps = predict_folder(), str(package_id)[len("pred_"):]
+    req = read_small_json(root / ps / "request.json") if root is not None and PREDICTION_SET_ID.match(ps) else {}
+    return NM.display_name(req) if req else ""
+
+
+def package_visible(records, viewer, package_id) -> bool:
+    record = {**(records["review_package"].get(package_id) or {}), "id": package_id}
+    return set_is_visible(viewer, "review_package", record)
+
+
+def label_title(records, label_id, viewer) -> str:
+    """Readable title; a review package this viewer may not see is left out of it (never named)."""
+    return TT.label_title(records, label_id, lambda pid: package_meta(records, pid),
+                          pkg_visible=lambda pid: package_visible(records, viewer, pid))
+
+
+def set_title(records, entity, record) -> str:
+    """Readable title of an image set (review packages by kind; other sets keep their id). Call only for sets the
+    viewer may see."""
+    if entity != "review_package":
+        return record["id"]
+    return TT.package_title(records, record["id"], package_meta(records, record["id"]), pred_display_name)
+
+
 def make_row(kind, entity_id, title, sub, tags=(), highlight=False) -> dict:
     quoted = quote(str(entity_id), safe="")
     return {"kind": kind, "id": entity_id, "title": title, "sub": sub, "url": entity_href(kind, entity_id),
@@ -672,17 +708,17 @@ def image_set_rows(records, viewer) -> list:
         sub = join_bits(SET_KIND_NAMES[entity], plural(n, "image") if n is not None else None,
                         short_date(_when(record)),
                         status_word(record["status"]) if _text(record.get("status")) else None)
-        rows.append(make_row("images", record["id"], record["id"], sub))
+        rows.append(make_row("images", record["id"], set_title(records, entity, record), sub))
     return rows
 
 
-def label_rows(records) -> list:
+def label_rows(records, viewer) -> list:
     rows = []
     for record in sorted(records["label_version"].values(), key=lambda r: (_when(r), r["id"]), reverse=True):
         n = record.get("n_images_applied")
         sub = join_bits(review_note(record)[0], plural(n, "image") + " changed" if n is not None else None,
                         short_date(_when(record)))
-        rows.append(make_row("labels", record["id"], record["id"], sub, status_tags(record)))
+        rows.append(make_row("labels", record["id"], label_title(records, record["id"], viewer), sub, status_tags(record)))
     return rows
 
 
@@ -712,8 +748,9 @@ def model_rows(records) -> list:
 def rows_for(records, kind, viewer) -> list:
     if kind == "images":
         return image_set_rows(records, viewer)
-    builder = {"sessions": session_rows, "grids": grid_rows, "labels": label_rows, "datasets": dataset_rows,
-               "models": model_rows}[kind]
+    if kind == "labels":
+        return label_rows(records, viewer)
+    builder = {"sessions": session_rows, "grids": grid_rows, "datasets": dataset_rows, "models": model_rows}[kind]
     return builder(records)
 
 
@@ -1061,12 +1098,29 @@ def detail_images(records, entity, record, viewer, page) -> dict:
         open_review = f"/review/{quote(set_id, safe='')}/"
     elif package_shown and PREDICTION_PACKAGE_ID.match(package_shown):
         open_review = f"/review/{quote(package_shown, safe='')}/"
-    detail = make_detail("images", set_id, set_id, [(SET_KIND_NAMES[entity], "acc")], fields,
+    detail = make_detail("images", set_id, set_title(records, entity, record), [(SET_KIND_NAMES[entity], "acc")], fields,
                          set_kind=entity, review_url=open_review)
     if entity == "roboflow_export":
         detail["note"] = "Thumbnails are not shown for Roboflow exports."
     detail.update(thumbnails("images", set_id, set_images(records, set_id, viewer), page))
     return detail
+
+
+def waiting_on(records, label_id, viewer) -> list:
+    """Review packages whose base is this label version and that hold decisions not applied yet (applied = some label
+    version record has that package as its pkg): [{id, title, n, url or None}]. Read-only; the package folders are
+    scanned through portal.titles (cached by the edits folder's mtime)."""
+    root = review_folder()
+    out = []
+    for p in TT.scan_packages(root, records) if root is not None else []:
+        if p["base_lv"] != label_id or not p["waiting"]:
+            continue
+        if not set_is_visible(viewer, "review_package", {**p["meta"], "id": p["id"]}):
+            continue
+        known = p["id"] in records["review_package"]
+        out.append({"id": p["id"], "title": p["title"], "n": p["waiting"],
+                    "url": entity_href("images", p["id"]) if known else None})
+    return sorted(out, key=lambda x: x["id"])
 
 
 def detail_labels(records, record, viewer, page) -> dict:
@@ -1076,6 +1130,8 @@ def detail_labels(records, record, viewer, page) -> dict:
     package_allowed = bool(package) and set_is_visible(viewer, "review_package", package_record)
     note, tone = review_note(record)
     built = sorted(d["id"] for d in records["dataset"].values() if d.get("label_version") == label_id)
+    trained = sorted({m["id"] for m in records["model"].values() if m.get("dataset") in built})
+    waiting = waiting_on(records, label_id, viewer)
     ops = {k: v for k, v in _dict(record.get("counts_by_op")).items() if _number(v)}
     replaces = _text(record.get("supersedes"))
     shown_package = package if package_allowed else None
@@ -1090,8 +1146,9 @@ def detail_labels(records, record, viewer, page) -> dict:
               entity_href("images", shown_package) if shown_package in records["review_package"] else None),
         field("Replaces", replaces, entity_href("labels", replaces) if replaces in records["label_version"] else None),
         field("Created", short_date(_when(record))), field("Note", _text(record.get("note"))))
-    detail = make_detail("labels", label_id, label_id, [(note, tone)] + status_tags(record), fields,
-                         datasets=[{"id": i, "url": entity_href("dataset", i)} for i in built])
+    detail = make_detail("labels", label_id, label_title(records, label_id, viewer), [(note, tone)] + status_tags(record),
+                         fields, datasets=[{"id": i, "url": entity_href("dataset", i)} for i in built],
+                         models=[{"id": i, "url": entity_href("model", i)} for i in trained], waiting=waiting)
     files = package_images_for(records, package, viewer) if package else []
     detail.update(thumbnails("labels", label_id, files, page))
     return detail
@@ -2302,6 +2359,8 @@ def render_rows(rows) -> str:
     for r in rows:
         tags = "".join(chip(t, tone) for t, tone in r["tags"])
         sub = f'<span class="cj-mut">{esc(r["sub"])}</span>' if r["sub"] else ""
+        if r["title"] != r["id"]:
+            sub = f'<span class="cj-mut cj-vis-id">{esc(r["id"])}</span>' + sub
         items.append(f'<li class="cj-data-row"><span class="cj-data-top"><a href="{esc(r["url"])}">'
                      f'{esc(r["title"])}</a>{tags}<a class="cj-data-lnk" href="{esc(r["lineage"])}">Lineage</a>'
                      f'</span>{sub}</li>')
@@ -2482,6 +2541,25 @@ def link_list(heading, items) -> str:
             + ", ".join(f'<a href="{esc(m["url"])}">{esc(m["id"])}</a>' for m in items) + "</p>")
 
 
+def render_used_by(d) -> str:
+    """Label version page: what was built from it, and which review packages wait on it (all text escaped)."""
+    out = []
+    if d["datasets"]:
+        out.append(link_list("Datasets built from it", d["datasets"]))
+    if d.get("models"):
+        out.append(link_list("Models trained from those datasets", d["models"]))
+    if d.get("waiting"):
+        items = "".join(
+            '<li class="cj-data-row">' + (f'<a href="{esc(w["url"])}">{esc(w["title"])}</a>' if w.get("url")
+                                          else f'<span>{esc(w["title"])}</span>')
+            + f'<span class="cj-mut cj-vis-id">{esc(w["id"])}</span>'
+            f'<span class="cj-mut">{esc(plural(w["n"], "decision") + " not applied yet")}</span></li>'
+            for w in d["waiting"])
+        out.append(f'<h2 class="cj-sec">Waiting on it</h2><div class="cj-card"><ul class="cj-data-rows cj-vis-wait">'
+                   f'{items}</ul></div>')
+    return "".join(out)
+
+
 def render_detail(d, error, extra="") -> str:
     kind = d["kind"]
     list_kind = DETAIL_LIST[kind]
@@ -2489,6 +2567,7 @@ def render_detail(d, error, extra="") -> str:
     out = [breadcrumb(("Data", PREFIX + "/"), (KIND_TITLES[list_kind], f"{PREFIX}/list/{list_kind}")),
            f'<div class="cj-data-top"><h1 class="cj-wrap">{esc(d["title"])}</h1>'
            + "".join(chip(t, tone) for t, tone in d["chips"]) + "</div>",
+           (f'<p class="cj-mut cj-vis-id">{esc(d["id"])}</p>' if d["title"] != d["id"] else ""),
            banner(error), f'<div class="{card_cls}">{render_fields(d["fields"])}</div>']
     if d.get("review_url"):
         out.append(f'<p class="cj-data-more"><a href="{esc(d["review_url"])}">Open in review</a></p>')
@@ -2506,8 +2585,8 @@ def render_detail(d, error, extra="") -> str:
             out.append(link_list("Imaged in", [{"id": f"Session {s['id']}", "url": s["url"]} for s in d["sessions"]]))
         if kind == "dataset" and d["models"]:
             out.append(link_list("Models trained on it", d["models"]))
-        if kind == "labels" and d["datasets"]:
-            out.append(link_list("Datasets built from it", d["datasets"]))
+        if kind == "labels":
+            out.append(render_used_by(d))
         heading = "Example images" if kind == "dataset" else "Images"
         out.append(f'<h2 class="cj-sec">{heading} ({d["n_images"]})</h2>' + render_thumbs(d))
     return "".join(out)
