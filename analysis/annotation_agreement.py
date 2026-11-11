@@ -26,8 +26,16 @@ Per matched pair:  kept (same class, IoU >= KEPT_IOU 0.98), reshaped (same
 class, IoU < 0.98), reclassed (class differs, whatever the shape).
 Unmatched pre -> deleted; unmatched post -> added.
 
-  agreement F1 = 2 * matched / (n_pre + n_post); recall = matched / n_pre
-  (pre as reference), precision = matched / n_post.
+Neither pass is ground truth, so the headline is a breakdown of every object
+found by EITHER pass (n_union = matched + only_pre + only_post):
+  agreed        both passes have it, same class (kept + reshaped)
+  class_differs both passes have it, different class
+  only_pre      only the first pass has it   (op "deleted")
+  only_post     only the second pass has it  (op "added")
+each also as a fraction of n_union. Secondary, symmetric summary:
+  Dice (= "F1") = 2 * matched / (n_pre + n_post), class-agnostic.
+  recall / precision are kept in the CSVs as "% of pre found by post" and
+  "% of post found by pre"; they are not accuracy against a truth.
   per-class F1 = 2 * (matched with class c on both sides) / (n_pre_c + n_post_c)
   kappa = Cohen's kappa on the classes of matched pairs.
 
@@ -38,7 +46,11 @@ blind_name are renamed to `tile` and flipped back before matching.
 Writes (refuses an existing --out): per_tile.csv, per_class.csv,
 confusion.csv, pairs.csv (every outline's fate), REPORT.md, and with
 --image-dir overlays/<tile>.jpg (pre in blue, post in orange; an outline with
-no partner drawn thick, a class change medium).
+no partner drawn thick, a class change medium). With --crops as well:
+crops/<category>_p<N>.jpg contact sheets, one cell per disagreement (only in
+pre, only in post, class differs), sorted by class, plus crops/index.csv
+(sheet, cell, tile, classes, IoU, centre and size in px, and nm with
+--nm-per-px, given for the image files' resolution).
 """
 import argparse
 import csv
@@ -207,7 +219,21 @@ def summarize(rows):
             "kept": ops["kept"], "reshaped": ops["reshaped"], "reclassed": ops["reclassed"],
             "deleted": ops["deleted"], "added": ops["added"],
             "class_agree": round(sum(r["pre_cls"] == r["post_cls"] for r in matched) / k, 4) if k else None,
-            "kappa": round(kap, 4) if kap is not None else None}
+            "kappa": round(kap, 4) if kap is not None else None,
+            **breakdown(rows)}
+
+
+def breakdown(rows):
+    """Every object found by either pass, split by what the two passes say about it."""
+    b = {"agreed": sum(r["op"] in ("kept", "reshaped") for r in rows),
+         "class_differs": sum(r["op"] == "reclassed" for r in rows),
+         "only_pre": sum(r["op"] == "deleted" for r in rows),
+         "only_post": sum(r["op"] == "added" for r in rows)}
+    n = sum(b.values())
+    out = {"n_union": n, **b}
+    for k in list(b):
+        out[f"pct_{k}"] = round(b[k] / n, 4) if n else None
+    return out
 
 
 def per_class(rows):
@@ -221,7 +247,15 @@ def per_class(rows):
                     "to_other_class": sum(r["pre_cls"] == c and r["post_cls"] not in (c, NONE) for r in rows),
                     "deleted": sum(r["pre_cls"] == c and r["op"] == "deleted" for r in rows),
                     "added": sum(r["post_cls"] == c and r["op"] == "added" for r in rows),
-                    "f1": round(2 * both / (n_pre + n_post), 4) if n_pre + n_post else None})
+                    "f1": round(2 * both / (n_pre + n_post), 4) if n_pre + n_post else None,
+                    # objects that EITHER pass calls c
+                    "union": sum(c in (r["pre_cls"], r["post_cls"]) for r in rows),
+                    "agreed": both,
+                    "class_differs": sum(r["op"] == "reclassed" and c in (r["pre_cls"], r["post_cls"]) for r in rows),
+                    "only_pre": sum(r["pre_cls"] == c and r["op"] == "deleted" for r in rows),
+                    "only_post": sum(r["post_cls"] == c and r["op"] == "added" for r in rows)})
+        u = out[-1]["union"]
+        out[-1]["pct_agreed"] = round(both / u, 4) if u else None
     return out
 
 
@@ -279,6 +313,133 @@ def overlay(img_path, pre, post, rows, out_path, pre_label, post_label, max_w=18
     return True
 
 
+CROP_CELL, CROP_CAP, CROP_COLS, CROP_ROWS = 224, 38, 6, 6
+CROP_ORDER = ("only_pre", "only_post", "class_differs")
+
+
+def crop_category(op):
+    return {"deleted": "only_pre", "added": "only_post", "reclassed": "class_differs"}.get(op)
+
+
+def find_image(image_dir, tile):
+    return next(iter(sorted(image_dir.glob(f"*__{tile}__*"))), None) or \
+        next(iter(sorted(image_dir.glob(f"{tile}*"))), None)
+
+
+def _put(img, text, org, scale, col, th=1):
+    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, col, th, cv2.LINE_AA)
+
+
+def crop_cell(im, pre, post, row, caption, sub):
+    """One disagreement: the object(s) centred in a square crop, context outlines thin,
+    the disagreeing outline(s) thick; caption strip underneath."""
+    H, W = im.shape[:2]
+    subj = []
+    if row["pre_idx"] != "":
+        subj.append(("pre", row["pre_idx"]))
+    if row["post_idx"] != "":
+        subj.append(("post", row["post_idx"]))
+    polys = [(pre if s == "pre" else post)[i][1] * (W, H) for s, i in subj]
+    pts = np.vstack(polys)
+    (x0, y0), (x1, y1) = pts.min(0), pts.max(0)
+    side = max(x1 - x0, y1 - y0)
+    half = max(side * 0.5 + max(0.6 * side, 24), 40)
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    X0, Y0 = int(max(0, cx - half)), int(max(0, cy - half))
+    X1, Y1 = int(min(W, cx + half)), int(min(H, cy + half))
+    crop = im[Y0:Y1, X0:X1]
+    s = CROP_CELL / max(crop.shape[:2])
+    crop = cv2.resize(crop, (max(1, round(crop.shape[1] * s)), max(1, round(crop.shape[0] * s))),
+                      interpolation=cv2.INTER_CUBIC if s > 1 else cv2.INTER_AREA)
+    cell = np.full((CROP_CELL + CROP_CAP, CROP_CELL, 3), 255, np.uint8)
+    oy, ox = (CROP_CELL - crop.shape[0]) // 2, (CROP_CELL - crop.shape[1]) // 2
+    cell[oy:oy + crop.shape[0], ox:ox + crop.shape[1]] = crop
+
+    def draw(p, col, th):
+        q = np.round((p * (W, H) - (X0, Y0)) * s + (ox, oy)).astype(np.int32)
+        cv2.polylines(cell[:CROP_CELL], [q], True, col, th, cv2.LINE_AA)
+    box = np.array([X0, Y0, X1, Y1])
+    for objs, col, side_name in ((pre, PRE_BGR, "pre"), (post, POST_BGR, "post")):
+        for i, (_, p) in enumerate(objs):
+            if (side_name, i) in subj:
+                continue
+            pp = p * (W, H)
+            if pp[:, 0].max() < box[0] or pp[:, 0].min() > box[2] or pp[:, 1].max() < box[1] or pp[:, 1].min() > box[3]:
+                continue
+            draw(p, col, 1)
+    for (side_name, i) in subj:     # pre first and thicker, so a same-shape post outline leaves it visible
+        draw((pre if side_name == "pre" else post)[i][1], PRE_BGR if side_name == "pre" else POST_BGR,
+             4 if side_name == "pre" and len(subj) == 2 else 2)
+    _put(cell, caption, (4, CROP_CELL + 15), 0.42, (30, 30, 30))
+    _put(cell, sub, (4, CROP_CELL + 32), 0.36, (110, 110, 110))
+    return cell, (X0, Y0, X1, Y1), side
+
+
+def write_crops(res, pre, post, image_dir, out_dir, pre_label, post_label, nm_per_px=None,
+                categories=CROP_ORDER):
+    """Contact sheets of every disagreement, by category, sorted by class."""
+    out_dir.mkdir()
+    items = []
+    for t, rows in res.items():
+        for r in rows:
+            cat = crop_category(r["op"])
+            if cat in categories:
+                items.append((cat, r["pre_cls"], r["post_cls"], t, r))
+    order = {c: k for k, c in enumerate(CROP_ORDER)}
+    items.sort(key=lambda x: (order[x[0]], x[1], x[2], x[3], str(x[4]["pre_idx"]), str(x[4]["post_idx"])))
+    names = {"only_pre": f"only {pre_label}", "only_post": f"only {post_label}", "class_differs": "class differs"}
+    images, index, per_page = {}, [], CROP_COLS * CROP_ROWS
+    for cat in CROP_ORDER:
+        cat_items = [x for x in items if x[0] == cat]
+        for page in range(0, len(cat_items), per_page):
+            chunk = cat_items[page:page + per_page]
+            sheet_name = f"{cat}_p{page // per_page + 1}.jpg"
+            cells = []
+            for k, (_, a, b, t, r) in enumerate(chunk):
+                if t not in images:
+                    p = find_image(image_dir, t)
+                    images[t] = cv2.imread(str(p), cv2.IMREAD_COLOR) if p else None
+                im = images[t]
+                if im is None:
+                    continue
+                n = page + k + 1
+                cap = (f"{pre_label}: {a}  >  {post_label}: {b}" if cat == "class_differs"
+                       else f"{names[cat]}: {a if cat == 'only_pre' else b}")
+                cell, (X0, Y0, X1, Y1), side = crop_cell(im, pre[t]["objs"], post[t]["objs"], r, cap[:44],
+                                                         f"#{n} {t}"[:48])
+                cells.append(cell)
+                H, W = im.shape[:2]
+                idx = int(r["pre_idx"] if cat != "only_post" else r["post_idx"])
+                poly = (pre if cat != "only_post" else post)[t]["objs"][idx][1] * (W, H)
+                area = cv2.contourArea(poly.astype(np.float32))
+                rec = {"sheet": sheet_name, "n": n, "row": k // CROP_COLS + 1, "col": k % CROP_COLS + 1,
+                       "category": cat, "tile": t, "pre_cls": a, "post_cls": b, "iou": r["iou"],
+                       "pre_idx": r["pre_idx"], "post_idx": r["post_idx"],
+                       "cx_px": round(float(poly[:, 0].mean()), 1), "cy_px": round(float(poly[:, 1].mean()), 1),
+                       "diam_px": round(2 * float(np.sqrt(area / np.pi)), 1)}
+                if nm_per_px:
+                    rec["diam_nm"] = round(rec["diam_px"] * nm_per_px, 1)
+                index.append(rec)
+            if not cells:
+                continue
+            while len(cells) % CROP_COLS:
+                cells.append(np.full_like(cells[0], 255))
+            grid = np.vstack([np.hstack(cells[i:i + CROP_COLS]) for i in range(0, len(cells), CROP_COLS)])
+            head = np.full((52, grid.shape[1], 3), 255, np.uint8)
+            _put(head, f"{names[cat]}  ({page + 1}-{page + len(chunk)} of {len(cat_items)})", (10, 22), 0.65,
+                 (20, 20, 20), 2)
+            x = 10
+            for t_, col in ((f"{pre_label} outline", PRE_BGR), (f"{post_label} outline", POST_BGR),
+                            ("thick = the object in question (both: blue under orange), thin = neighbours", (120, 120, 120))):
+                cv2.rectangle(head, (x, 32), (x + 18, 44), col, -1)
+                _put(head, t_, (x + 24, 44), 0.45, (60, 60, 60))
+                x += 40 + cv2.getTextSize(t_, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0][0]
+            cv2.imwrite(str(out_dir / sheet_name), np.vstack([head, grid]), [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if index:
+        write_csv(out_dir / "index.csv", index)
+    return index
+
+
 def write_csv(path, rows, fields=None):
     rows = list(rows)
     with open(path, "w", newline="", encoding="utf-8") as fh:
@@ -304,7 +465,13 @@ def main():
     ap.add_argument("--mirror-map", default=None, type=Path)
     ap.add_argument("--image-dir", default=None, type=Path)
     ap.add_argument("--title", default="Annotation agreement")
+    ap.add_argument("--crops", action="store_true", help="contact sheets of every disagreement (needs --image-dir)")
+    ap.add_argument("--crop-categories", default=",".join(CROP_ORDER),
+                    help="subset of only_pre,only_post,class_differs (e.g. skip class_differs vs a 1-class model)")
+    ap.add_argument("--nm-per-px", type=float, default=None, help="for diam_nm in crops/index.csv (image-file px)")
     args = ap.parse_args()
+    if args.crops and not args.image_dir:
+        sys.exit("--crops needs --image-dir")
     if args.out.exists():
         sys.exit(f"{args.out} exists; reports are never overwritten")
 
@@ -337,29 +504,63 @@ def main():
     if args.image_dir:
         (args.out / "overlays").mkdir()
         for t, rows in res.items():
-            img = next(iter(sorted(args.image_dir.glob(f"*__{t}__*"))), None) or \
-                next(iter(sorted(args.image_dir.glob(f"{t}*"))), None)
+            img = find_image(args.image_dir, t)
             if img:
                 overlay(img, pre[t]["objs"], post[t]["objs"], rows, args.out / "overlays" / f"{t}.jpg",
                         args.pre_label, args.post_label)
 
+    n_crops = None
+    if args.crops:
+        n_crops = len(write_crops(res, pre, post, args.image_dir, args.out / "crops",
+                                  args.pre_label, args.post_label, args.nm_per_px,
+                                  tuple(c.strip() for c in args.crop_categories.split(","))))
+
+    A, B = args.pre_label, args.post_label
+    bcols = ["tile", "n_pre", "n_post", "n_union", "agreed", "class_differs", "only_pre", "only_post",
+             "pct_agreed", "f1", "mean_iou", "kappa"]
     cols = ["tile", "n_pre", "n_post", "matched", "f1", "recall", "precision", "mean_iou",
             "kept", "reshaped", "reclassed", "deleted", "added", "class_agree", "kappa"]
+
+    def pct(v):
+        return "" if v is None else f"{100 * v:.1f}%"
     md = [f"# {args.title}\n",
-          f"- **pre ({args.pre_label}):** `{args.pre}`",
-          f"- **post ({args.post_label}):** `{args.post}`"]
+          f"- **pre ({A}):** `{args.pre}`",
+          f"- **post ({B}):** `{args.post}`"]
     if args.mirror_map:
         md.append(f"- **Mirror map:** `{args.mirror_map.name}` (pre tiles flipped back to the post frame)")
     if only_pre or only_post:
         md.append(f"- **Not compared:** only in pre {only_pre or '-'}; only in post {only_post or '-'}")
-    md += ["", f"Matching: class-agnostic Hungarian on mask IoU >= {MATCH_IOU}; kept = same class and "
-               f"IoU >= {KEPT_IOU}; recall uses pre as the reference.", "",
-           "## Per tile", md_table(tile_rows + [total], cols),
-           "## Per class", md_table(pc, list(pc[0])),
-           f"## Confusion (rows {args.pre_label}, columns {args.post_label})",
-           md_table([{"": c, **dict(zip(classes, r))} for c, r in zip(classes, cm)], [""] + classes)]
+    md += ["", "## Agreement breakdown",
+           f"Neither pass is treated as truth. Every object found by either pass ({total['n_union']}) "
+           "falls in exactly one row:", "",
+           "| | objects | share |", "|---|--:|--:|",
+           f"| Both, same class | {total['agreed']} | {pct(total['pct_agreed'])} |",
+           f"| Both, class differs | {total['class_differs']} | {pct(total['pct_class_differs'])} |",
+           f"| Only {A} | {total['only_pre']} | {pct(total['pct_only_pre'])} |",
+           f"| Only {B} | {total['only_post']} | {pct(total['pct_only_post'])} |", "",
+           f"- Of {A}'s {total['n_pre']} objects, {B} also has {pct(total['recall'])}; "
+           f"of {B}'s {total['n_post']}, {A} also has {pct(total['precision'])}.",
+           f"- Dice (the f1 column) = 2 x both / ({A} + {B}) = {total['f1']}: one symmetric number for "
+           "\"found the same objects\", ignoring class. Class agreement on shared objects: "
+           f"kappa {total['kappa']}. Shape agreement on shared objects: mean IoU {total['mean_iou']} "
+           f"({total['reshaped']} same-class pairs below IoU {KEPT_IOU}).",
+           f"- Matching: class-agnostic Hungarian on mask IoU >= {MATCH_IOU}.", ""]
+    if n_crops is not None:
+        md += [f"- Crops ({args.crop_categories}): {n_crops} disagreements in `crops/` (sheets by category, sorted by class; "
+               "`crops/index.csv` maps each sheet cell to tile, classes, position, size).", ""]
+    bpc = [{"class": r["class"], "either pass": r["union"], "both, same class": r["agreed"],
+            "both, class differs": r["class_differs"], f"only {A}": r["only_pre"], f"only {B}": r["only_post"],
+            "% agreed": pct(r["pct_agreed"])} for r in pc]
+    md += ["## By class (objects either pass calls this class)",
+           "An object reclassed from X to Y counts under both X and Y.", "", md_table(bpc, list(bpc[0])),
+           "## Per tile", md_table(tile_rows + [total], bcols),
+           f"## Confusion (rows {A}, columns {B})",
+           md_table([{"": c, **dict(zip(classes, r))} for c, r in zip(classes, cm)], [""] + classes),
+           "## Detail (edit-style terms: pre = first pass)",
+           f"kept = same class and IoU >= {KEPT_IOU}; deleted = only in pre; added = only in post.", "",
+           md_table(tile_rows + [total], cols), md_table(pc, list(pc[0]))]
     (args.out / "REPORT.md").write_text("\n".join(md), encoding="utf-8")
-    print(md_table([total], cols))
+    print(md_table([total], bcols))
     print(f"-> {args.out}")
 
 
