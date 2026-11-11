@@ -16,9 +16,11 @@ Callers escape every text they render.
 """
 from __future__ import annotations
 
+import copy
 import json
 import re
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +28,8 @@ LV_RE = re.compile(r"lv_\d{8}_\d{4}")
 PULL_RE = re.compile(r"roboflow_pull_(\d{4})(\d{2})(\d{2})_\d{4}")
 MAX_DATA_BYTES = 64_000_000
 MAX_DEPTH = 4
+MAX_JSON_BYTES = 1_000_000  # review_package.json and friends are tiny; a larger file is skipped, not parsed
+SCAN_TTL = 15.0  # seconds a scan_packages result is reused (admin polls, label pages)
 SKIP_DIRS = ("pred_", "_", "SANDBOX")
 SKIP_KINDS = ("part", "prediction")
 
@@ -43,7 +47,10 @@ def _text(x):
 
 def read_json(path: Path):
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+        path = Path(path)
+        if path.stat().st_size > MAX_JSON_BYTES:
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
 
@@ -93,7 +100,7 @@ def _base_title(records, ref, depth) -> str:
     lv = lv_from_path(ref)
     if lv and lv in _dict(records.get("label_version")) and depth < MAX_DEPTH:
         return label_title(records, lv, None, short=True, _depth=depth + 1)
-    return ref
+    return "Earlier labels"  # never a raw path or ref
 
 
 def label_title(records, lv_id, meta_of=None, short=False, _depth=0, pkg_visible=None) -> str:
@@ -222,6 +229,19 @@ def scan_packages(root, records) -> list:
     base_lv, waiting (decisions not applied yet, 0 when applied)}]; status ready / in_progress / applied."""
     if root is None:
         return []
+    key = ("scan", str(root), hash(repr([_dict(records).get(k) for k in ("label_version", "review_package", "pull")])))
+    now = time.monotonic()
+    with _lock:
+        hit = _cache.get(key)
+    if hit and now - hit[0] < SCAN_TTL:
+        return copy.deepcopy(hit[1])
+    out = _scan_packages(root, records)
+    with _lock:
+        _cache[key] = (now, copy.deepcopy(out))
+    return out
+
+
+def _scan_packages(root, records) -> list:
     try:
         dirs = sorted(d for d in Path(root).iterdir() if d.is_dir() and not d.name.startswith(SKIP_DIRS))
     except OSError:

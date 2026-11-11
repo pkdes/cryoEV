@@ -132,6 +132,46 @@ class TitleTests(Base):
         self.assertEqual(TT.package_title(self.recs, "pred_ps_1", {"kind": "prediction"}), "Prediction review")
 
 
+    def test_base_title_unknown_ref_never_a_path(self):
+        recs = {"label_version": {"lv_x": {"base": r"C:\Users\someone\roboflow - X\train\a.json", "created": "2026-10-30T09:00"}}}
+        t = TT.label_title(recs, "lv_x")
+        self.assertEqual(t, "Earlier labels · 30 Oct")
+        self.assertNotIn("Users", t)
+        self.assertEqual(TT._base_title({}, "/some/path", 0), "Earlier labels")
+        self.assertEqual(TT._base_title({}, PULL, 0), "Roboflow pull 29 Oct")  # a pull id stays readable
+
+    def test_read_json_caps_size(self):
+        f = self.tmp / "big.json"
+        f.write_text('{"a": "' + "x" * (TT.MAX_JSON_BYTES + 10) + '"}', encoding="utf-8")
+        self.assertIsNone(TT.read_json(f))
+        g = self.tmp / "ok.json"
+        g.write_text('{"a": 1}', encoding="utf-8")
+        self.assertEqual(TT.read_json(g), {"a": 1})
+        self.assertIsNone(TT.read_json(self.tmp / "missing.json"))
+        put(self.root / "lab_pkg_ready" / "review_package.json", f.read_text(encoding="utf-8"))  # scan survives it
+        self.assertIn("lab_pkg_ready", [p["id"] for p in TT.scan_packages(self.root, self.recs)])
+
+    def test_scan_packages_cached_for_the_ttl(self):
+        clock = [1000.0]
+        with mock.patch.object(TT.time, "monotonic", lambda: clock[0]):
+            first = TT.scan_packages(self.root, self.recs)
+            self.assertEqual(len(first), 3)
+            first[0]["title"] = "mutated"  # a caller's edit must not reach the cache
+            new = self.root / "lab_pkg_new"
+            (new / "edits").mkdir(parents=True)
+            put(new / "data.js", data_js("lab_pkg_new", "x", [image("n.png", [1], [])]))
+            with mock.patch.object(TT, "_scan_packages", side_effect=AssertionError("re-scanned")):
+                again = TT.scan_packages(self.root, self.recs)  # 5 s later: served from the cache
+                clock[0] += 5
+                again = TT.scan_packages(self.root, self.recs)
+            self.assertEqual(len(again), 3)
+            self.assertNotEqual(again[0]["title"], "mutated")
+            clock[0] += TT.SCAN_TTL
+            self.assertEqual(len(TT.scan_packages(self.root, self.recs)), 4)  # expired: the new package shows
+            other = dict(self.recs, label_version={})  # different records: not the same cache entry
+            self.assertEqual(len(TT.scan_packages(self.root, other)), 4)
+
+
 class ProgressTests(Base):
     def test_progress_counts(self):
         p = TT.package_progress(self.root / "lab_compare_x")
