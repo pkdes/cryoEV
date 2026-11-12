@@ -103,6 +103,47 @@ class CompareKnownAnswer(unittest.TestCase):
         self.assertNotIn("answer", served)
         self.assertFalse(any(out.rglob("decoys.json")))
 
+    def test_extra_models_union_known_answer(self):
+        """B (reference, 0.55) + C (0.60) + D (0.50). Known answer:
+        FN cards: g12 (B and D miss it; C finds it) and g11 (C misses it) -> 2.
+        FP cards: B's 0.70 find at (300,300), also found by C -> one card [B, C]; C's find at (50,350) -> [C];
+        C's EV at (200,200) over B's non-EV outline (not a card) -> replaces it [C]; C's 0.50 find is under C's conf;
+        D's second outline on label 11 overlaps B's matched outline -> not carded. -> 3.
+        Control: without extras the same fixture gives 1 FP + 1 FN (test_cards_known_answer_without_decoys)."""
+        (self.t / "preds_c").mkdir()
+        (self.t / "preds_c" / "tile_a_png.txt").write_text("\n".join([
+            yolo(0, 0.80, 300, 100, 20), yolo(0, 0.75, 300, 300, 20), yolo(0, 0.65, 50, 350, 15),
+            yolo(0, 0.90, 200, 200, 20), yolo(0, 0.50, 350, 350, 15)]), encoding="utf-8")
+        (self.t / "preds_d").mkdir()
+        (self.t / "preds_d" / "tile_a_png.txt").write_text("\n".join([
+            yolo(0, 0.85, 100, 100, 20), yolo(0, 0.70, 100, 100, 23)]), encoding="utf-8")
+        a = argparse.Namespace(labels=self.labels, images_root=[self.t / "imgs"], select_csv=None, where=None,
+                               split_csv=None, b_model=None, b_preds=self.t / "preds", b_coco=None, b_label="B",
+                               imgsz=1440, nms=0.7, max_det=1000, device="cpu", pred_classes="EV,non-EV",
+                               class_groups=CP.B.CLASS_GROUPS, flag_conf=0.55, decoys=0, seed=0, owner="tester",
+                               reviewer=None, reuse_key=None, index_html=None, width=1440, quality=72, force=False,
+                               out=self.t / "review" / "lab_cmp_multi", source_title=None,
+                               b_extra=[f"C={self.t / 'preds_c'}@0.60", f"D={self.t / 'preds_d'}@0.50"])
+        out, work = CP.build(a)
+        data = json.loads((out / "data.js").read_text(encoding="utf-8").split("=", 1)[1].rstrip().rstrip(";"))
+        im = data["images"][0]
+        self.assertEqual(sorted(g["id"] for g in im["gt"] if g.get("u")), [11, 12])
+        fp = sorted((round(p["s"], 2), p["c"]) for p in im["pr"] if p.get("u"))
+        self.assertEqual(fp, [(0.65, "EV"), (0.7, "EV"), (0.9, "EV")])
+        self.assertFalse(any(p["c"] == "non-EV" for p in im["pr"]))     # replaced by C's card
+        served = (out / "data.js").read_text(encoding="utf-8")
+        self.assertNotIn("\"_m\"", served)                               # who found what is never served
+        info = json.loads((work / "cards_models.json").read_text(encoding="utf-8"))
+        self.assertEqual(info["union"], {"fn": 1, "fp": 2, "merged": 1, "skipped": 1})
+        by = {(c["card"], round(im["pr"][int(c["obj"][1:])]["s"], 2) if c["card"] == "fp" else c["obj"]):
+              c.get("models") or c.get("missed_by") for c in info["cards"]}
+        self.assertEqual(by[("fp", 0.7)], ["B", "C"])
+        self.assertEqual(by[("fp", 0.65)], ["C"])
+        self.assertEqual(by[("fn", "g12")], ["B", "D"])
+        self.assertEqual(by[("fn", "g11")], ["C"])
+        meta = json.loads((out / "review_package.json").read_text(encoding="utf-8"))
+        self.assertEqual([e["name"] for e in meta["compare"]["b"]["extra"]], ["C", "D"])
+
     def test_source_title(self):
         """--source-title lands in data.js as source_title; without it (control) data.js has no such key."""
         _, _, data = self.build(0, "lab_cmp_plain")
