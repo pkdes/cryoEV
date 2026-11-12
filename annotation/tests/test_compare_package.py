@@ -158,6 +158,16 @@ class CompareKnownAnswer(unittest.TestCase):
             self.assertEqual(b.call_args[0][0].source_title, want)
 
 
+class ImageKey(unittest.TestCase):
+    """Export COCO names (`x.png`) and label-version names (`x_png`) give the same key; the lv form is unchanged."""
+
+    def test_keys(self):
+        k = CP.B.image_key
+        self.assertEqual(k({"file_name": "a_b_png.rf.123.jpg", "extra": {"name": "a_b.png"}}), "a_b_png")
+        self.assertEqual(k({"file_name": "a_b_png.rf.123.jpg", "extra": {"name": "a_b_png"}}), "a_b_png")
+        self.assertEqual(k({"file_name": "a_b_png.rf.123.jpg"}), "a_b_png")
+        self.assertEqual(k({"file_name": "x", "extra": {"name": "g6_7p36Apx_png"}}), "g6_7p36Apx_png")
+
 class StripDecoys(unittest.TestCase):
     """Known answer, checked through the reference applier (review_server.effective_labels): after the strip no
     decoy answer changes the labels, real decisions are untouched, and a reject decoy accepted into a saved

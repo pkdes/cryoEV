@@ -82,6 +82,9 @@ def load_class_groups(path=CLASS_GROUPS):
             "model_classes": {int(k): v for k, v in y["model_classes"].items()}, "label_group": label_group}
 
 
+IMG_EXT = re.compile(r"\.(png|jpe?g|tiff?)$", re.I)
+
+
 def stem_of(file_name):
     """Export name `x_png.rf.<hash>.jpg` -> `x_png`; Roboflow name `x.png` -> `x_png`."""
     name = Path(file_name).name
@@ -89,6 +92,16 @@ def stem_of(file_name):
         return RF_SUFFIX.sub("", name)
     p = Path(name)
     return f"{p.stem}_{p.suffix[1:]}" if p.suffix else name
+
+
+def image_key(img):
+    """A COCO image's lookup key: its extra.name, else stem_of(file_name). A Roboflow export stores the original
+    file name there (`x.png`), a label version the key itself (`x_png`): a name ending in an image extension is
+    normalized by stem_of, any other is used as is."""
+    name = (img.get("extra") or {}).get("name")
+    if not name:
+        return stem_of(img["file_name"])
+    return stem_of(name) if IMG_EXT.search(name) else name
 
 
 def rasterize(ring_norm, w, h):
@@ -195,7 +208,7 @@ def direct_inputs(args):
     images_by_stem = {p.stem: p for p in args.images_dir.iterdir()
                       if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".tif", ".tiff")}
     for img in coco["images"]:
-        stem = (img.get("extra") or {}).get("name") or stem_of(img["file_name"])
+        stem = image_key(img)
         if stem not in images_by_stem:
             print(f"[skip] no image for {stem}")
             continue

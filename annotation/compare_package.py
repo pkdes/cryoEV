@@ -70,7 +70,7 @@ def stage_images(coco, roots, stems, work):
     """Copy the selected images into one flat folder named <stem>.<ext> (the builder's lookup key)."""
     flat = work / "images"
     flat.mkdir(parents=True, exist_ok=True)
-    want = {((im.get("extra") or {}).get("name") or B.stem_of(im["file_name"])) for im in coco["images"]}
+    want = {B.image_key(im) for im in coco["images"]}
     if stems is not None:
         want &= stems
     found = {}
