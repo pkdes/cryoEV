@@ -70,7 +70,7 @@ def stage_images(coco, roots, stems, work):
     """Copy the selected images into one flat folder named <stem>.<ext> (the builder's lookup key)."""
     flat = work / "images"
     flat.mkdir(parents=True, exist_ok=True)
-    want = {((im.get("extra") or {}).get("name") or B.stem_of(im["file_name"])) for im in coco["images"]}
+    want = {B.image_key(im) for im in coco["images"]}
     if stems is not None:
         want &= stems
     found = {}
@@ -211,6 +211,83 @@ def add_decoys(images, groups, frac, rng, flag_conf):
     return key
 
 
+DEDUP_IOU = 0.5  # two models' finds at mask IoU >= this are one object (one card)
+
+
+def parse_extra(text):
+    """NAME=WEIGHTS@CONF[@CLASSES] -> (name, weights, conf, classes). WEIGHTS may be a folder of <stem>.txt
+    predictions instead. CLASSES: comma list (default EV,non-EV)."""
+    name, _, rest = text.partition("=")
+    parts = rest.split("@")
+    if not name or len(parts) < 2:
+        raise SystemExit(f"--b-extra {text!r}: expected NAME=WEIGHTS@CONF[@CLASSES]")
+    return name, Path(parts[0]), float(parts[1]), parts[2] if len(parts) > 2 else "EV,non-EV"
+
+
+def predict_cached(weights, flat, pred_dir, staged, args):
+    """Predictions for the staged images (conf floor 0.25), re-made when the weights, settings or images change."""
+    sys.path.insert(0, str(HERE.parent / "training"))
+    from train_yolo import export_predictions_for_split
+    want = {"weights": str(weights), "imgsz": args.imgsz, "nms": args.nms, "max_det": args.max_det, "images": staged}
+    stamp = pred_dir / "_settings.json"
+    if pred_dir.exists() and (not stamp.exists() or json.loads(stamp.read_text(encoding="utf-8")) != want):
+        shutil.rmtree(pred_dir)  # cached predictions were made with other settings or images
+    if not any(pred_dir.glob("*.txt")):
+        export_predictions_for_split(str(weights), str(flat), pred_dir, args.imgsz, 0.25, args.nms, args.device,
+                                     max_det=args.max_det)
+        stamp.write_text(json.dumps(want), encoding="utf-8")
+    return pred_dir
+
+
+def add_model_cards(rec, pr_other, name, conf, ref_conf, w, h, groups, dedup_iou=DEDUP_IOU):
+    """Union another model's disagreements into an image record already flagged against set B (the reference):
+    a set-A label this model misses becomes a card too; this model's unmatched EV finds (>= its own conf) become cards,
+    merged with an overlapping reference card (IoU >= dedup_iou) instead of duplicating it. A find overlapping a
+    reference EV outline that matched a label is not carded (the object is labeled); one overlapping a reference outline
+    that is not a card (below the reference conf, or another class) replaces that outline. Who found each card goes in
+    the item's "_m" (set of model names; written to the work folder, never data.js). -> (new FN cards, new FP cards,
+    merged, skipped)."""
+    g2 = [{k: v for k, v in g.items() if k not in ("u", "x", "lc")} for g in rec["gt"]]
+    p2 = [{k: v for k, v in p.items() if k not in ("u", "x")} for p in pr_other]
+    B.flag_image(g2, p2, w, h, groups, conf)
+    tmp = {"gt": g2, "pr": p2}
+    refine_cards(tmp, groups)
+    n_fn = 0
+    for g, go in zip(rec["gt"], g2):
+        if go.get("u"):
+            if not g.get("u"):
+                g["u"] = 1
+                n_fn += 1
+            g.setdefault("_m", set()).add(name)
+    masks = [B.rasterize(p["p"][0], w, h) for p in rec["pr"]]
+    n_fp = merged = skipped = 0
+    for p in sorted((p for p in p2 if p.get("u")), key=lambda p: -p.get("sr", p["s"])):
+        m = B.rasterize(p["p"][0], w, h)
+        hit = None
+        for j, mk in enumerate(masks):
+            if rec["pr"][j].get("_drop"):
+                continue
+            inter = np.logical_and(m, mk).sum()
+            if inter and inter / np.logical_or(m, mk).sum() >= dedup_iou:
+                hit = j
+                break
+        if hit is not None and rec["pr"][hit].get("u"):
+            rec["pr"][hit].setdefault("_m", set()).add(name)
+            merged += 1
+            continue
+        if hit is not None:
+            ref = rec["pr"][hit]
+            if ref.get("k") == 0 and ref.get("sr", ref["s"]) >= ref_conf:
+                skipped += 1  # the reference's EV outline here matched a label
+                continue
+            ref["_drop"] = True  # a non-card reference outline: this model's card replaces it
+        q = dict(p, u=1, _m={name})
+        rec["pr"].append(q)
+        masks.append(m)
+        n_fp += 1
+    return n_fn, n_fp, merged, skipped
+
+
 def build(args):
     if any((args.out / "edits").glob("*.json")) and not args.force:
         raise SystemExit(f"{args.out} already has review edits: a rebuild would point them at different objects. "
@@ -224,18 +301,7 @@ def build(args):
     flat, staged, missing = stage_images(coco, args.images_root, stems, work)
     print(f"[images] {len(staged)} staged" + (f", {len(missing)} selected but not found: {missing[:5]}" if missing else ""))
     if args.b_model:
-        sys.path.insert(0, str(HERE.parent / "training"))
-        from train_yolo import export_predictions_for_split
-        pred_dir = work / "preds"
-        want = {"weights": str(args.b_model), "imgsz": args.imgsz, "nms": args.nms, "max_det": args.max_det,
-                "images": staged}
-        stamp = pred_dir / "_settings.json"
-        if pred_dir.exists() and (not stamp.exists() or json.loads(stamp.read_text(encoding="utf-8")) != want):
-            shutil.rmtree(pred_dir)  # cached predictions were made with other settings or images
-        if not any(pred_dir.glob("*.txt")):
-            export_predictions_for_split(str(args.b_model), str(flat), pred_dir, args.imgsz, 0.25, args.nms,
-                                         args.device, max_det=args.max_det)
-            stamp.write_text(json.dumps(want), encoding="utf-8")
+        pred_dir = predict_cached(args.b_model, flat, work / "preds", staged, args)
         b_desc = {"kind": "model", "weights": str(args.b_model), "imgsz": args.imgsz, "nms": args.nms,
                   "max_det": args.max_det, "conf_floor": 0.25}
     elif args.b_preds:
@@ -247,6 +313,17 @@ def build(args):
     else:
         raise SystemExit("give --b-model, --b-preds or --b-coco")
 
+    extras = []
+    for text in getattr(args, "b_extra", None) or []:
+        if not (args.b_model or args.b_preds):
+            raise SystemExit("--b-extra needs a reference model (--b-model or --b-preds)")
+        ename, weights, econf, eclasses = parse_extra(text)
+        edir = weights if weights.is_dir() else predict_cached(weights, flat, work / f"preds_{ename}", staged, args)
+        extras.append((ename, edir, econf, eclasses, str(weights)))
+    if extras:
+        b_desc = dict(b_desc, flag_conf=args.flag_conf, extra=[{"name": e[0], "weights": e[4], "flag_conf": e[2],
+                                                                "classes": e[3]} for e in extras])
+    union = {"fn": 0, "fp": 0, "merged": 0, "skipped": 0}
     ns = argparse.Namespace(coco_json=args.labels, images_dir=flat, pred_dir=Path(pred_dir), split_csv=args.split_csv)
     images, categories = [], None
     for file, split, w, h, anns, cat_names, img_path, pred_path, _coco, extra in B.direct_inputs(ns):
@@ -258,17 +335,38 @@ def build(args):
         rec = {"file": file, "split": split, "w": w, "h": h, "src": f"images/{extra['stem']}.jpg", "gt": gt, "pr": pr,
                "fg": fg, "fp": fp, "fx": fx, "flc": flc, "_img": img_path, "_stem": extra["stem"]}
         refine_cards(rec, groups)
+        if extras:
+            ref_name = args.b_label or "B"
+            for o in rec["pr"] + rec["gt"]:
+                if o.get("u"):
+                    o["_m"] = {ref_name}
+            for ename, edir, econf, eclasses, _w in extras:
+                epr = [p for p in B.load_predictions(Path(edir) / Path(pred_path).name, eclasses.split(","))
+                       if len(p["p"][0]) >= 6]
+                for k, v in zip(("fn", "fp", "merged", "skipped"),
+                                add_model_cards(rec, epr, ename, econf, args.flag_conf, w, h, groups)):
+                    union[k] += v
+            rec["fg"] = sum(1 for g in rec["gt"] if g.get("u"))
+            rec["fp"] = sum(1 for p in rec["pr"] if p.get("u") and not p.get("_drop"))
         images.append(rec)
     real = {"fp": sum(r["fp"] for r in images), "fn": sum(r["fg"] for r in images)}
     real_by = {r["file"]: (r["fp"], r["fg"], r["split"]) for r in images}
     rng = random.Random(args.seed)
     key = add_decoys(images, groups, args.decoys, rng, args.flag_conf)
+    found_by = []
     for r in images:
         r["fg"] = sum(1 for g in r["gt"] if g.get("u"))
         r["fp"] = sum(1 for p in r["pr"] if p.get("u"))
-        for p in r["pr"]:
+        for i, p in enumerate(r["pr"]):
             p.pop("k", None)
             p.pop("sr", None)
+            m = p.pop("_m", None)
+            if m and p.get("u"):
+                found_by.append({"file": r["file"], "obj": f"p{i}", "card": "fp", "models": sorted(m)})
+        for g in r["gt"]:
+            m = g.pop("_m", None)
+            if m and g.get("u"):
+                found_by.append({"file": r["file"], "obj": f"g{g['id']}", "card": "fn", "missed_by": sorted(m)})
     images.sort(key=lambda r: -(r["fg"] + r["fp"]))
 
     out = args.out
@@ -303,6 +401,11 @@ def build(args):
         "base": str(args.labels), "base_kind": "label_version", "n_images": len(images), "built": built,
         "tool": TOOL, "status": "built", "owner": args.owner, "reviewers": args.reviewer or [],
         "cards": {"fp": real["fp"], "fn": real["fn"], "decoys": n_dec}}, indent=1), encoding="utf-8")
+    if extras:
+        (work / "cards_models.json").write_text(json.dumps({"package": name, "union": union, "cards": found_by},
+                                                           indent=1), encoding="utf-8")
+        print(f"[union] extra models add FN {union['fn']}, FP {union['fp']}; merged with a reference card "
+              f"{union['merged']}; not carded (reference matched a label) {union['skipped']}")
     (work / "decoys.json").write_text(json.dumps({"package": name, "seed": args.seed, "decoys": key}, indent=1),
                                       encoding="utf-8")
     with open(work / "cards_per_image.csv", "w", newline="", encoding="utf-8") as fh:
@@ -418,6 +521,9 @@ def main():
     ap.add_argument("--b-preds", type=Path, help="Set B: folder of <stem>.txt YOLO-seg predictions")
     ap.add_argument("--b-coco", type=Path, help="Set B: a second COCO label set (human vs human)")
     ap.add_argument("--b-label", default="", help="How set B is named on the page")
+    ap.add_argument("--b-extra", action="append", metavar="NAME=WEIGHTS@CONF[@CLASSES]",
+                    help="Another model whose disagreements are carded too (repeatable; with --b-model). Cards: any "
+                         "label a model misses; every model's unmatched EV finds, merged where they overlap")
     ap.add_argument("--source-title", help="How set A (the label set) is named on the page (default: its folder name)")
     ap.add_argument("--imgsz", type=int, default=1440)
     ap.add_argument("--nms", type=float, default=0.7)
