@@ -4,6 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
+<script>
+const PAGE_VERSION = "2026-11-12.2";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
+  const h = document.querySelector("header"), inPortal = /^\/review\//.test(location.pathname), v = document.createElement("span");
+  v.id = "pageVer"; v.style.cssText = "font-size:11px;color:var(--mute);white-space:nowrap"; v.textContent = "Review page " + PAGE_VERSION;
+  if (inPortal) { const a = document.createElement("a"); a.href = "/changes"; a.target = "_top"; a.textContent = "what's new"; a.style.color = "inherit"; v.append(" · ", a); }
+  if (h) h.insertBefore(v, document.getElementById("whereBar"));
+});
+</script>
 <style>
 :root{--bg:#f6f6f4;--panel:#fff;--ink:#1d1d1b;--mute:#6b6b66;--line:#dcdcd6;--acc:#2764c5;--warn:#c2410c;color-scheme:light}
 @media (prefers-color-scheme:dark){:root{--bg:#161615;--panel:#20201f;--ink:#ecece8;--mute:#9a9a94;--line:#353532;--acc:#6ea0f0;--warn:#fb923c;color-scheme:dark}}
