@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cjtest as T  # noqa: E402
 from portal import auth as A  # noqa: E402
 from portal.modules import data as D  # noqa: E402
+from portal.modules.data import lineage as DL  # noqa: E402  (the part that defines LINEAGE_MAX_DEPTH)
 
 try:
     from playwright.sync_api import sync_playwright
@@ -970,12 +971,12 @@ class Lineage(LineageBase):
                     f"/data/lineage/{kind}/{eid.replace(' ', '%20')}/")))
 
     def test_depth_and_size_caps(self):
-        old = D.LINEAGE_MAX_DEPTH
-        D.LINEAGE_MAX_DEPTH = 2
+        old = DL.LINEAGE_MAX_DEPTH
+        DL.LINEAGE_MAX_DEPTH = 2
         try:
             t = self.tree("model", "m_chain")
         finally:
-            D.LINEAGE_MAX_DEPTH = old
+            DL.LINEAGE_MAX_DEPTH = old
         cut = [n for n in walk(t["root"]) if n["status"] == "cut"]
         self.assertTrue(cut)
         self.assertEqual([(n["type"], n["id"], n["parents"]) for n in cut], [("dataset", "ds_chain", [])])
@@ -1154,12 +1155,12 @@ class Lineage(LineageBase):
         self.assertTrue(any(n["status"] == "more" for n in walk(t["root"])))
 
     def test_cut_step_without_a_page_has_no_dead_hint(self):
-        old = D.LINEAGE_MAX_DEPTH
-        D.LINEAGE_MAX_DEPTH = 1
+        old = DL.LINEAGE_MAX_DEPTH
+        DL.LINEAGE_MAX_DEPTH = 1
         try:
             t = self.tree("model", "m_chain")
         finally:
-            D.LINEAGE_MAX_DEPTH = old
+            DL.LINEAGE_MAX_DEPTH = old
         cut = next(n for n in walk(t["root"]) if n["status"] == "cut")
         self.assertEqual((cut["type"], cut["note"]), ("run", "Not shown: limit reached."))
 

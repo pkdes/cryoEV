@@ -6,6 +6,8 @@ file), visibility (advanced never gets the admin-only section; no private predic
 
   python -m unittest portal.tests.test_vis -v
 """
+import contextlib
+import importlib
 import json
 import os
 import shutil
@@ -21,12 +23,25 @@ from portal import titles as TT  # noqa: E402
 from portal.modules import data as D  # noqa: E402
 from portal.modules import jobs as J  # noqa: E402
 
+DR = importlib.import_module("portal.modules.data.routes")   # the routes part (D.routes is the function)
+
 LV = "lv_20261030_0909"
 LV0 = "lv_20261030_0846"
 PULL = "roboflow_pull_20261029_1811"
 XSS = "<script>alert(1)</script>"
 AUDIT = "Audit: v5 at conf 0.55 vs Roboflow pull 29 Oct, edited 30 Oct"
 LV_TITLE = "Roboflow pull 29 Oct + Lab labeling: lab_pkg_applied · 28 images changed · 30 Oct"
+
+
+@contextlib.contextmanager
+def fake_registry(recs):
+    """read_registry answers `recs`, patched where it is looked up at call time: on the package (jobs.py reads
+    DATA.read_registry) and on the routes part (the Data routes' own lookup), the two places one patch of data.py
+    reached before the round 11 split (portal/tests/test_data_patch_guard.py)."""
+    def fake(root, now=None):
+        return recs, None
+    with mock.patch.object(D, "read_registry", fake), mock.patch.object(DR, "read_registry", fake):
+        yield
 
 
 def records():
@@ -204,7 +219,7 @@ class ProgressTests(Base):
             return real(self_, *a, **k)
         with mock.patch.object(Path, "read_text", spy):
             TT.scan_packages(self.root, self.recs)
-            with mock.patch.object(D, "read_registry", lambda root, now=None: (self.recs, None)):
+            with fake_registry(self.recs):
                 J.review_packages(SimpleNamespace(review_root=self.root, registry=None))
         self.assertNotIn("decoys.json", opened)
         self.assertIn("data.js", opened)
@@ -286,7 +301,7 @@ class DataPageTests(Base):
 class JobsTests(Base):
     def test_summary_admin_vs_advanced(self):
         cfg = SimpleNamespace(review_root=self.root, registry=None)
-        with mock.patch.object(D, "read_registry", lambda root, now=None: (self.recs, None)):
+        with fake_registry(self.recs):
             adm = J.summary(cfg, {"id": "a", "role": "admin"}, lambda u, o: True)
             adv = J.summary(cfg, {"id": "b", "role": "advanced"}, lambda u, o: o == "b")
         self.assertIsNone(adv["pkgs"])
