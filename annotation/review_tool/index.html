@@ -216,6 +216,15 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 /* #10 vertex eraser (card adjust): selected points, the box being dragged */
 #adjDel{background:#dc2626;border-color:#dc2626;color:#fff}
 #adjDel[hidden],#adjUndo[hidden]{display:none}
+/* a phone's card bar holds ☰ Editor logo ← ↺ ⚙: smaller round buttons, the logo on one line */
+#tri .logo.nofun b{white-space:nowrap}
+@media (max-width:480px){
+  #tri .tbar{gap:5px;padding:8px 8px 4px}
+  #triListBtn,#triBack,#triUndo,#triSet{width:34px;height:34px;font-size:16px;flex:none}
+  #triExit{padding:4px 7px}
+  #tri .logo{min-width:0}#tri .logo b{font-size:25px}#tri .logo.nofun b{font-size:19px}
+  #tri .logo small{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+}
 @media (max-width:900px){
   #whereBar{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   #app{grid-template-columns:minmax(0,1fr)}
