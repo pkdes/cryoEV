@@ -23,8 +23,8 @@ off by the exclude (below, fail-closed) and by the package lock.
     * the --package of every annotation/review_server.py service in the services config (tools/services.py's file:
       $CRYOEV_SERVICES_CONFIG, else $CRYOEV_SERVICES, else ~/.cryoev/services.json; read only), enabled or not;
     * --exclude (repeatable) and $CJ_REVIEW_EXCLUDE (comma-separated), by id or folder path.
-  Fail-closed: a services config that exists but can't be read (bad JSON, a review_server.py service without
-  --package) means no lab_ package is served at all. A server started before the lock existed holds no lock, so
+  Fail-closed: unless the services config reads and names at least one review_server.py service with a package
+  (in any argv element, a whole command line included), no lab_ package is served at all; pred_ is unaffected. A server started before the lock existed holds no lock, so
   the exclude is what keeps this server off its package. An excluded id gets the unknown-id answer (403); main()
   warns about an excluded name that is no folder under --root.
 - Auth: each package keeps its own key (<pkg>/.review_key; no key, not served): ?k=<key> once, then a cookie
@@ -60,6 +60,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import sys
 import threading
 from http.cookies import SimpleCookie
@@ -135,13 +136,13 @@ _svc_cache: dict = {}
 
 def single_server_packages(environ=None) -> tuple:
     """(lower-case folder names, ok): the --package of every annotation/review_server.py service in the services
-    config, enabled or not (read only). ok is False when the file exists but can't be read, or such a service has no
-    --package: then nothing is known, and serving() serves no lab_ package (fail-closed). No file: (empty, True)."""
+    config, enabled or not (read only). ok is True only when the file reads and lists at least one such service, each
+    with a package: anything else (no file, unreadable, {}, no / empty services list, no review_server.py service, one
+    whose package can't be parsed) leaves the single server's package unknown, and serving() then serves no lab_
+    package (fail-closed). pred_ serving never depends on ok."""
     path = services_config(environ)
     try:
         st = path.stat()
-    except FileNotFoundError:
-        return frozenset(), True
     except OSError:
         return frozenset(), False
     key = (str(path), st.st_mtime_ns, st.st_size)
@@ -152,13 +153,34 @@ def single_server_packages(environ=None) -> tuple:
     return val
 
 
+SINGLE_RE = re.compile(r"(?<![\w.-])(?:annotation[\\/])?review_server\.py\b|-m\s+annotation\.review_server\b", re.I)
+
+
+def _tokens(argv) -> list:
+    """Elements holding a whole command line (e.g. ["cmd", "/c", "python annotation/review_server.py --package X"])
+    split on whitespace, quoted parts kept together and their quotes dropped."""
+    out = []
+    for a in argv:
+        try:
+            parts = shlex.split(a, posix=False) if re.search(r"\s", a) else [a]
+        except ValueError:
+            parts = a.split()
+        out += [t[1:-1] if len(t) > 1 and t[0] == t[-1] and t[0] in "\"'" else t for t in parts]
+    return out
+
+
+def _package_arg(tok):
+    return next((b for a, b in zip(tok, tok[1:]) if a == "--package"), None) or next(
+        (a.split("=", 1)[1] for a in tok if a.startswith("--package=")), None)
+
+
 def _parse_services(path: Path) -> tuple:
     try:
         raw = path.read_bytes()
         text = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig")
         data = json.loads(text)
-        services = data.get("services") or []
-        if not isinstance(services, list):
+        services = data.get("services")
+        if not isinstance(services, list) or not services:
             return frozenset(), False
     except (OSError, ValueError, UnicodeError, AttributeError):
         return frozenset(), False
@@ -167,16 +189,15 @@ def _parse_services(path: Path) -> tuple:
         argv = svc.get("argv") if isinstance(svc, dict) else None
         if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
             return frozenset(), False
-        is_single = any(re.split(r"[\\/]+", a)[-1].lower() == "review_server.py" for a in argv) or any(
-            a == "-m" and b == "annotation.review_server" for a, b in zip(argv, argv[1:]))
-        if not is_single:
+        if not any(SINGLE_RE.search(a) for a in argv) and not SINGLE_RE.search(" ".join(argv)):
             continue
-        pkg = next((b for a, b in zip(argv, argv[1:]) if a == "--package"), None) or next(
-            (a.split("=", 1)[1] for a in argv if a.startswith("--package=")), None)
-        if not pkg or not pkg.strip():
+        pkg = _package_arg(argv)  # argv as given: a path element may hold spaces
+        if not pkg:               # else a whole command line in one element: split it (quotes kept together)
+            pkg = _package_arg(_tokens([a for a in argv if SINGLE_RE.search(a) or "--package" in a]))
+        if not pkg or not pkg.strip() or pkg.startswith("-"):
             return frozenset(), False
         names.add(_name(os.path.expanduser(os.path.expandvars(pkg.replace("{repo}", str(REPO))))))
-    return frozenset(names), True
+    return (frozenset(names), True) if names else (frozenset(), False)
 
 
 def excluded_names(values=(), environ=None) -> frozenset:
@@ -465,9 +486,10 @@ def main(argv=None):
     if gone:
         print(f"[OK] Removed {', '.join(gone)} from this server's environment (reviewers' saves are their own)", flush=True)
     prefix, exclude = serving(a.prefix, a.exclude)
-    if not single_server_packages()[1]:
-        print(f"[WARN] The services config {services_config()} can't be read: no lab_ package is served "
-              "(the single-package review server's package is unknown)", flush=True)
+    asked = _prefixes(a.prefix) if a.prefix else served_prefixes()
+    if any(p.startswith(LAB_PREFIX) for p in asked) and not single_server_packages()[1]:
+        print(f"[WARN] The services config {services_config()} names no single-package review server with a "
+              "package (missing, unreadable or none listed): no lab_ package is served", flush=True)
     if a.root is None:
         from data_utils import config
         a.root = config.laptop_root() / "review"

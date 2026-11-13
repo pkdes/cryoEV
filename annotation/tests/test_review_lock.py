@@ -46,14 +46,6 @@ NO_SERVICES = str(Path(tempfile.gettempdir()) / "cj_no_such_services_config.json
 BOTH = {mrs.PREFIX_ENV: "pred_,lab_"}
 
 
-def clean_env(**extra):
-    """No CRYOEV_* / CJ_* from this shell; a services config that doesn't exist; lab_ asked for (BOTH) unless given."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("CRYOEV_", "CJ_"))}
-    env.update({"CRYOEV_SERVICES_CONFIG": NO_SERVICES, **BOTH})
-    env.update(extra)
-    return {k: v for k, v in env.items() if v is not None}
-
-
 def services_json(path: Path, *packages, extra=()):
     """A services config with a single-package review_server.py service per package (one disabled)."""
     svcs = [{"name": f"review{i}", "enabled": i == 0, "port": 9900 + i, "cwd": "{repo}",
@@ -63,11 +55,25 @@ def services_json(path: Path, *packages, extra=()):
     return path
 
 
+# a readable services config whose single-package server has some other package: lab_ may be served
+SERVICES_OK = str(services_json(Path(tempfile.mkdtemp(prefix="cj_lock_svc_")) / "services.json",
+                                Path("C:/elsewhere/review/SANDBOX_unrelated_pkg")))
+
+
+def clean_env(**extra):
+    """No CRYOEV_* / CJ_* from this shell; a readable services config (SERVICES_OK); lab_ asked for (BOTH) unless
+    given otherwise."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("CRYOEV_", "CJ_"))}
+    env.update({"CRYOEV_SERVICES_CONFIG": SERVICES_OK, **BOTH})
+    env.update(extra)
+    return {k: v for k, v in env.items() if v is not None}
+
+
 def own_env(test):
     """Unset CRYOEV_* / CJ_* in this process for the test (restored after)."""
     for k in [k for k in os.environ if k.startswith(("CRYOEV_", "CJ_"))]:
         test.addCleanup(os.environ.__setitem__, k, os.environ.pop(k))
-    os.environ["CRYOEV_SERVICES_CONFIG"] = NO_SERVICES
+    os.environ["CRYOEV_SERVICES_CONFIG"] = SERVICES_OK
     test.addCleanup(os.environ.pop, "CRYOEV_SERVICES_CONFIG", None)
 
 
@@ -229,13 +235,31 @@ class TwoServersOneLock(unittest.TestCase):
     def test_unreadable_services_config_serves_no_lab(self):
         build_pkg(self.root, "pred_ps_20261112_abcdef")
         bad = self.tmp / "services.json"
-        for text in ("{not json", json.dumps({"services": [{"name": "review", "argv": ["py", "annotation/review_server.py"]}]})):
-            bad.write_text(text, encoding="utf-8")
+        web = {"name": "web", "argv": ["py", "-m", "http.server"]}
+        cases = [None, "{not json", "{}", '{"services": null}', '{"services": []}', json.dumps({"services": [web]}),
+                 json.dumps({"services": [{"name": "review", "argv": ["py", "annotation/review_server.py"]}]}),
+                 json.dumps({"services": [{"name": "r", "argv": ["cmd", "/c", "python annotation/review_server.py --port 1"]}]})]
+        for text in cases:  # missing, unreadable, {}, null / empty list, no review_server.py, one with no package
+            if text is None:
+                bad.unlink(missing_ok=True)
+            else:
+                bad.write_text(text, encoding="utf-8")
             m = self.multi(env=clean_env(CRYOEV_SERVICES_CONFIG=str(bad)))
             self.assertEqual(request(m.port, "GET", f"/{PKG}/api/ping")[0], 403, text)
-            self.assertEqual(request(m.port, "GET", "/pred_ps_20261112_abcdef/api/ping")[0], 200)
-            self.assertIn("can't be read: no lab_ package is served", m.log())
+            self.assertEqual(request(m.port, "GET", "/pred_ps_20261112_abcdef/api/ping")[0], 200)   # pred_ as before
+            self.assertIn("no lab_ package is served", m.log())
             m.stop()  # it holds the pred_ package's lock
+        m = self.multi(env=clean_env(CRYOEV_SERVICES_CONFIG=str(bad), **{mrs.PREFIX_ENV: None}))  # pred_ only: no warning
+        self.assertNotIn("no lab_ package is served", m.log())
+
+    def test_command_line_in_one_argv_element(self):
+        """["cmd", "/c", "python annotation/review_server.py --package <pkg>"]: the package is still excluded."""
+        cfg = self.tmp / "services.json"
+        cfg.write_text(json.dumps({"services": [{"name": "review", "argv": [
+            "cmd", "/c", f'python annotation/review_server.py --package "{self.pkg}" --port 8766']}]}), encoding="utf-8")
+        m = self.multi(env=clean_env(CRYOEV_SERVICES_CONFIG=str(cfg)))
+        self.assertEqual(request(m.port, "GET", f"/{PKG}/api/ping")[0], 403)
+        self.assertNotIn("no lab_ package is served", m.log())
 
     def test_main_strips_agent_env(self):
         m = self.multi(env=clean_env(CRYOEV_VIA="claude", CRYOEV_FOR="pujan"))
@@ -302,12 +326,28 @@ class InProcess(unittest.TestCase):
     def test_services_parsing(self):
         cfg = self.tmp / "s.json"
         env = {"CRYOEV_SERVICES_CONFIG": str(cfg)}
-        self.assertEqual(mrs.single_server_packages(env), (frozenset(), True))          # no file: nothing, ok
+        self.assertEqual(mrs.single_server_packages(env), (frozenset(), False))         # no file: unknown
+        for text in ("{}", '{"services": null}', '{"services": []}', '{"services": {}}',
+                     json.dumps({"services": [{"name": "w", "argv": ["py", "-m", "annotation.multi_review_server"]}]})):
+            cfg.write_text(text, encoding="utf-8")                                       # none listed: unknown
+            self.assertEqual(mrs.single_server_packages(env), (frozenset(), False), text)
         services_json(cfg, "C:\\r\\lab_A\\", "{repo}/x/pred_b", extra=[
             {"name": "m", "argv": ["py", "-m", "annotation.review_server", "--package=D:/q/lab_C"]},
+            {"name": "cmd", "argv": ["cmd", "/c", 'python annotation\\review_server.py --package "D:/a b/lab_D" --port 1']},
+            {"name": "cmd2", "argv": ["cmd", "/c", "python C:/x/annotation/review_server.py --package=D:/q/lab_E"]},
+            {"name": "spaced", "argv": ["py", "annotation/review_server.py", "--package", "D:/a b c/lab_F"]},
             {"name": "multi", "argv": ["py", "-m", "annotation.multi_review_server", "--root", "D:/q"]},
+            {"name": "multi2", "argv": ["cmd", "/c", "python annotation/multi_review_server.py --root D:/q"]},
             {"name": "web", "argv": ["py", "-m", "http.server"]}])
-        self.assertEqual(mrs.single_server_packages(env), (frozenset({"lab_a", "pred_b", "lab_c"}), True))
+        want = frozenset({"lab_a", "pred_b", "lab_c", "lab_d", "lab_e", "lab_f"})
+        self.assertEqual(mrs.single_server_packages(env), (want, True))
+        cfg.write_text(json.dumps({"services": [{"name": "c", "argv": ["cmd", "/c", "python annotation/review_server.py"]},
+                                                {"name": "r", "argv": ["py", "annotation/review_server.py", "--package", "x/lab_z"]}]}))
+        self.assertEqual(mrs.single_server_packages(env), (frozenset(), False))           # one without a package
+        services_json(cfg, "C:\\r\\lab_A\\", "{repo}/x/pred_b", extra=[
+            {"name": "m", "argv": ["py", "-m", "annotation.review_server", "--package=D:/q/lab_C"]}])
+        want = frozenset({"lab_a", "pred_b", "lab_c"})
+        self.assertEqual(mrs.single_server_packages(env), (want, True))
         raw = cfg.read_text(encoding="utf-8")
         cfg.write_bytes(raw.encode("utf-16"))                                            # PowerShell 5.1's `>`
         self.assertEqual(mrs.single_server_packages(env)[0], frozenset({"lab_a", "pred_b", "lab_c"}))

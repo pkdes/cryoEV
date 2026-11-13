@@ -57,7 +57,9 @@ class PickerTests(unittest.TestCase):
             self.addCleanup(os.environ.__setitem__, k, os.environ.pop(k))
         self.tmp = Path(tempfile.mkdtemp(prefix="cj_picker_"))
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.svc = self.tmp / "services.json"   # not there yet: no single-package server known
+        self.svc = self.tmp / "services.json"   # a single-package server on some other package: lab_ may be listed
+        self.svc.write_text(json.dumps({"services": [{"name": "review", "argv": [
+            "py", "annotation/review_server.py", "--package", "C:/elsewhere/SANDBOX_unrelated"]}]}), encoding="utf-8")
         for k, v in (("CRYOEV_SERVICES_CONFIG", str(self.svc)), (MRS.PREFIX_ENV, "pred_,lab_")):
             os.environ[k] = v
             self.addCleanup(os.environ.pop, k, None)
@@ -118,8 +120,19 @@ class PickerTests(unittest.TestCase):
         self.svc.write_text(json.dumps({"services": [{"name": "review", "argv": [
             "py", "annotation/review_server.py", "--package", str(self.lab)]}]}), encoding="utf-8")
         self.assertEqual(set(self.rows(user("bas"))), {PRED})
-        self.svc.write_text("{nope", encoding="utf-8")                        # unreadable: no lab_ at all
+        for text in ("{nope", "{}", '{"services": []}', '{"services": null}',               # no lab_ at all
+                     json.dumps({"services": [{"name": "w", "argv": ["py", "-m", "http.server"]}]}),
+                     json.dumps({"services": [{"name": "r", "argv": ["cmd", "/c", "python annotation/review_server.py"]}]})):
+            self.svc.write_text(text, encoding="utf-8")
+            self.assertEqual(set(self.rows(user("bas"))), {PRED}, text)
+        self.svc.unlink()                                                     # missing: no lab_ either
         self.assertEqual(set(self.rows(user("bas"))), {PRED})
+        self.svc.write_text(json.dumps({"services": [{"name": "r", "argv": [  # a whole command line in one element
+            "cmd", "/c", f'python annotation/review_server.py --package "{self.lab}"']}]}), encoding="utf-8")
+        self.assertEqual(set(self.rows(user("bas"))), {PRED})
+        self.svc.write_text(json.dumps({"services": [{"name": "r", "argv": [
+            "cmd", "/c", "python annotation/review_server.py --package C:/x/SANDBOX_other"]}]}), encoding="utf-8")
+        self.assertEqual(set(self.rows(user("bas"))), {PRED, LAB})            # control: another package, lab_ listed
 
     def test_follows_the_multi_servers_prefixes(self):
         os.environ.pop(MRS.PREFIX_ENV)                                        # its default: pred_ only
