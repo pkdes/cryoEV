@@ -206,7 +206,10 @@ def act(rs, edits_dir: Path, pkg_id: str, images: dict, body: dict, who: str, no
             entry.pop("note", None)
         log["n"] = len(files)
     else:
-        records = _read_records(edits_dir, images if action == "undo" else files)
+        try:
+            records = _read_records(edits_dir, images if action == "undo" else files)
+        except (OSError, ValueError) as e:  # nothing is written: a half-applied group is what the lock prevents
+            return 409, {"error": f"an edit record can't be read ({type(e).__name__}): nothing was changed"}
         if action == "reject":
             reason = body["reason"]
             for f in files:
@@ -260,7 +263,10 @@ def _read_records(edits_dir: Path, files) -> dict:
     out = {}
     for f in files:
         p = Path(edits_dir) / f"{f}.json"
-        out[f] = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+        rec = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+        if not isinstance(rec, dict) or not isinstance(rec.get("edit", {}), dict):
+            raise ValueError(f"{f}: not an edit record")
+        out[f] = rec
     return out
 
 

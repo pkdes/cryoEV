@@ -393,6 +393,15 @@ class GroupTests(ServerCase):
         self.assertTrue(all(self.rej(f) == (None, None) for f in EV_FILES))
         self.assertEqual(self.req("GET", "/api/groups")[1]["groups"], {})
 
+    def test_unreadable_record_changes_nothing(self):
+        self.put_reject("0001.png", "empty")
+        (self.pkg / "edits" / "0008.png.json").write_text("{broken", encoding="utf-8")
+        before = {f.name: f.read_bytes() for f in (self.pkg / "edits").iterdir()}
+        st, ans = self.group(action="reject", kind="sample", sample=HEK, reason="empty")
+        self.assertEqual(st, 409, ans)
+        self.assertIn("nothing was changed", ans["error"])
+        self.assertEqual({f.name: f.read_bytes() for f in (self.pkg / "edits").iterdir()}, before)
+
     def test_reason_change_and_repeat(self):
         self.group(action="reject", kind="sample", sample=HEK, reason="empty")
         ans = self.group(action="reject", kind="sample", sample=HEK, reason="empty")[1]   # the same again: no-op
