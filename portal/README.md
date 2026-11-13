@@ -5,7 +5,8 @@ The lab's multi-user web platform for cryo-EM EV analysis: a home page, the revi
 
 Two doors, one roster (`~/.cryoev/portal_roster.json`), never mixed on one port:
 - **Tailnet** (`--auth key`, default): key links -> session cookie, behind `tailscale serve :8446`.
-- **Internet** (`--auth access`, port 8448): Cloudflare Tunnel + Cloudflare Access (email one-time PIN); the portal trusts
+- **Internet** (`--auth access`, port 8448): Cloudflare Tunnel + Cloudflare Access (Google sign-in, or an email one-time
+  PIN as the fallback); the portal trusts
   only the verified Access JWT, and the email must be an active roster person's. See "Cloudflare access mode" below.
 
 Nothing about today's links (443 / 8443 / 8445) changes.
@@ -238,7 +239,8 @@ data-cj-live-src="/history/live/live.json" data-cj-live-every="30">`. History ke
 
 ## Cloudflare access mode (`--auth access`, port 8448)
 For lab members on the internet: a Cloudflare Tunnel (`cloudflared`) in front, guarded by Cloudflare Access
-(one-time PIN email login). The same app; the default `--auth key` (above) is unchanged, and the two never share a port.
+(Google sign-in, or an email one-time PIN as the fallback). The same app; the default `--auth key` (above) is unchanged,
+and the two never share a port.
 ```
 python -m portal.app --auth access --port 8448 [--access-config <path>] [--state-dir ...] [--roster ...]
 ```
@@ -251,6 +253,10 @@ python -m portal.app --auth access --port 8448 [--access-config <path>] [--state
 - **People:** the roster's `email` field. Set it on **Admin > People** (the add form, or Set / Change email per person)
   or `python -m portal.auth set-email --id <id> --email <address>` (`add-key --email` too; re-keying keeps it).
   Emails are lower-cased and unique among active people.
+- **Login methods** (set in Cloudflare Zero Trust, not in this code): Google and email PIN are both enabled on the
+  portal and preview Access apps; session duration 1 month. Either method yields the same signed JWT with an
+  `email` claim, so the portal needs no code per method. Google works for any address that is a Google account;
+  others use the PIN. The roster `email` must be the address the person signs in with (no aliases).
 
 **Security model**
 - Only the `Cf-Access-Jwt-Assertion` **header** counts (no cookie fallback; `CF_Authorization` and the key-link
