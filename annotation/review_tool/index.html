@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-12.2";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-13.1";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const h = document.querySelector("header"), inPortal = /^\/review\//.test(location.pathname), v = document.createElement("span");
   v.id = "pageVer"; v.style.cssText = "font-size:11px;color:var(--mute);white-space:nowrap"; v.textContent = "Review page " + PAGE_VERSION;
@@ -246,6 +246,43 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
   #menuBtn,#sideBtn{display:inline-block}
   #title{max-width:150px}
 }
+/* Round 12: image info (/api/meta, cap m) and sample / montage groups (/api/group, cap g). Text via textContent only. */
+#infoSec,#grpSec{margin:8px 0 0}
+#infoSec[hidden],#grpSec[hidden],#thMeta[hidden],#grpDlg[hidden],#grpReasons[hidden],#grpNoteWrap[hidden]{display:none}
+#infoSec>summary,#grpSec>summary{cursor:pointer;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute);margin:6px 0;list-style-position:inside}
+#infoBox{display:grid;grid-template-columns:auto minmax(0,1fr);gap:2px 8px;font-size:12px}
+#infoBox dt{color:var(--mute);white-space:nowrap}
+#infoBox dd{margin:0;overflow-wrap:anywhere}
+#infoBox dd.nr{color:var(--mute);font-style:italic}
+#infoBox .sub{grid-column:1/-1;margin-top:4px;font-size:11px;color:var(--mute);text-transform:uppercase;letter-spacing:.04em}
+#grpBox{display:flex;flex-direction:column;gap:6px;font-size:12.5px}
+#grpBox .gl{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+#grpBox .gn{font-weight:600;overflow-wrap:anywhere}
+#grpBox .gc{color:var(--mute)}
+#grpBox .grej{color:#dc2626;font-weight:600}
+#grpBox .gnote{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 6px;max-height:8em;overflow:auto}
+#grpBox .gnote small{display:block;color:var(--mute);font-size:11px}
+#grpBox button{padding:3px 8px;font-size:12px}
+#grpBox button.danger{border-color:#dc2626;color:#dc2626}
+#grpBox .gpart{border-top:1px solid var(--line);padding-top:6px}
+#list .gh{position:sticky;top:44px;z-index:1;display:flex;gap:6px;align-items:center;padding:4px 8px;background:color-mix(in srgb,var(--panel) 88%,var(--ink));border-bottom:1px solid var(--line);font-size:11.5px;font-weight:600}
+#list .gh.m{position:static;font-weight:500;padding-left:18px;background:var(--panel);color:var(--mute)}
+#list .gh .nm2{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#list .gh.rej{color:#dc2626}
+#thMeta{padding:0 12px 2px;font-size:11.5px;color:var(--mute);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#grpDlg{position:fixed;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.55)}
+#grpDlg .box{width:min(440px,100%);max-height:100%;overflow:auto;background:var(--panel);color:var(--ink);border-radius:14px;padding:16px;box-shadow:0 8px 30px rgba(0,0,0,.4)}
+#grpDlg h2{margin:0 0 4px;font-size:18px;overflow-wrap:anywhere}
+#grpDlg p{margin:0 0 8px;color:var(--mute);overflow-wrap:anywhere}
+#grpDlg #grpCount{color:var(--ink);font-weight:600}
+#grpReasons{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+#grpReasons button{border-radius:16px;min-height:38px;font-size:14px}
+#grpReasons button.on{background:#dc2626;border-color:#dc2626;color:#fff}
+#grpNote{width:100%;min-height:4em;font:inherit;font-size:15px;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;resize:vertical}
+#grpDlg .row{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}
+#grpDlg .row button{min-height:44px;font-size:15px;padding:4px 16px}
+#grpOk.danger{background:#dc2626;border-color:#dc2626;color:#fff}
+#grpErr{color:var(--warn)}
 </style>
 </head>
 <body>
@@ -285,7 +322,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 <nav id="list">
   <div class="ctl">
     <select id="fSplit"><option value="">All splits</option></select>
-    <select id="fSort"><option value="flags">Most flags first</option><option value="pkg">Package order</option><option value="name">By name</option></select>
+    <select id="fSort"><option value="flags">Most flags first</option><option value="pkg">Package order</option><option value="name">By name</option><option value="sample">Sample · montage · tile</option></select>
     <select id="fStat"><option value="">Any status</option><option value="unreviewed">Unreviewed</option><option value="edited">Edited</option><option value="todo">Not reviewed</option><option value="reviewed">Reviewed</option><option value="rejected" hidden>Rejected</option></select>
     <div id="qSum"></div>
   </div>
@@ -298,6 +335,8 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
     <h3>Image</h3>
     <div id="imgBox" class="row"></div>
   </div>
+  <details id="grpSec" open hidden><summary>Sample</summary><div id="grpBox"></div></details>
+  <details id="infoSec" open hidden><summary>Image info</summary><dl id="infoBox"></dl></details>
   <h3>Selection</h3>
   <div id="selBox" class="row" style="color:var(--mute)">Click a polygon to select it.</div>
   <h3>Legend</h3>
@@ -352,6 +391,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
   </div>
   <div id="triHead"><b id="thName"></b><span id="thObj"></span><span id="thSept" class="sept" hidden>Sept</span><button id="triImgBtn" class="badge" title="Reject this whole image, or add a note to it" hidden>⚑ Image</button><a id="triOpen" href="#" title="Open this object in the Editor. Long-press to copy or bookmark the link">Open in editor ↗</a></div>
   <div id="thPos"></div>
+  <div id="thMeta" hidden></div>
   <div id="triStage">
     <div id="card">
       <canvas id="tcv"></canvas>
@@ -392,6 +432,18 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
     <textarea id="imgNote" maxlength="1000" placeholder="Anything about this image (optional)"></textarea>
     <div id="imgNoteN"></div>
     <div class="row"><button id="imgCancel" type="button">Cancel</button><button id="imgSave" type="button" class="on">Save</button></div>
+  </div>
+</div>
+<div id="grpDlg" role="dialog" aria-modal="true" aria-labelledby="grpTitle" hidden>
+  <div class="box">
+    <h2 id="grpTitle">Sample</h2>
+    <p id="grpWhat"></p>
+    <div id="grpReasons"></div>
+    <div id="grpNoteWrap"><label class="lbl" for="grpNote" id="grpNoteLbl">Comment</label>
+      <textarea id="grpNote" maxlength="1000"></textarea></div>
+    <p id="grpCount"></p>
+    <p id="grpErr" hidden></p>
+    <div class="row"><button id="grpCancel" type="button">Cancel</button><button id="grpOk" type="button" class="on">OK</button></div>
   </div>
 </div>
 <div id="setPop" role="dialog" aria-labelledby="setTitle" hidden>
@@ -919,10 +971,18 @@ function renderList() {
   });
   if (srt === "flags") order.sort((a, b) => flagRank(D.images[b]) - flagRank(D.images[a]) || a - b);
   else if (srt === "name") order.sort((a, b) => D.images[a].file.localeCompare(D.images[b].file));
+  else if (srt === "sample") order.sort(bySampleTile);
+  renderSampleOpts();
   const box = $("items"); box.innerHTML = "";
   const frag = document.createDocumentFragment();
+  let lastS = null, lastM = null;
   for (const i of order) {
     const im = D.images[i], s = statusOf(im), who = claimedBy(im.file);
+    if (srt === "sample") {  // headers: each sample, and each montage in it (when the server knows montages)
+      const mo = montageOf(im);
+      if (im.split !== lastS) { frag.appendChild(groupHead("sample", im.split)); lastS = im.split; lastM = null; }
+      if (mo && mo !== lastM) { frag.appendChild(groupHead("montage", im.split, mo)); lastM = mo; }
+    }
     const fl = FLAG_COUNTS.filter(([k]) => im[k]).map(([k, col, t]) => `<b style="color:${col}" title="${t}">${im[k]}</b>`).join("");
     const d = document.createElement("div"); d.className = "it" + (i === cur ? " cur" : "");
     d.innerHTML = `<span class="ok ${s}" title="${s}">${s === "reviewed" ? "✓" : s === "edited" ? "•" : s === "rejected" ? "✕" : ""}</span>` +
@@ -932,7 +992,7 @@ function renderList() {
       `<span class="badge">${esc(im.split)}</span><span class="fl" title="flags: ${FLAG_COUNTS.map(([k, , t]) => `${im[k] || 0} ${t}`).join(" · ")}">${fl}</span>`;
     const rj = rejectOf(im.file), nt = noteOf(im.file), at = d.querySelector(".badge");  // text: textContent / title only
     if (nt) { const m = document.createElement("span"); m.className = "notem"; m.textContent = "✎"; m.title = nt; d.insertBefore(m, at); }
-    if (rj) { const b = document.createElement("span"); b.className = "rejb"; b.textContent = "Rejected"; b.title = "Rejected: " + rj; d.insertBefore(b, at); }
+    if (rj) { const b = document.createElement("span"), gk = grpKind(rejGrpOf(im.file)); b.className = "rejb"; b.textContent = "Rejected"; b.title = "Rejected: " + rj + (gk ? ` (whole ${gk})` : ""); d.insertBefore(b, at); }
     d.onclick = () => { go(i); $("list").classList.remove("show"); };
     frag.appendChild(d);
   }
@@ -957,7 +1017,7 @@ function renderSide() {
   const e = edits[im.file]; $("reviewed").classList.toggle("on", !!(e && e.reviewed));
   $("undo").disabled = !(undoStacks[im.file] && undoStacks[im.file].length);
   $("bClose").hidden = !(mode === "tap" && draft && draft.length >= 6);
-  renderImgBox();
+  renderImgBox(); renderGroupBox(); renderInfo();
   renderChips();
   if (!sel) { box.innerHTML = `${g.length} ${PW.lab}, ${im.pr.filter(p => p.s >= conf()).length} ${PW.pr} shown.<br>Click a polygon to select it.`; return; }
   if (sel.kind === "gt") {
@@ -1159,17 +1219,221 @@ function reclassKey(e, im, key, cls) {  // cards: the object's class decision, k
   aliasTag(e, im.file, key, cls);
 }
 function renderImgBox() {  // Editor: the header's Rejected tag and the side panel's reject state and note (textContent only)
-  const im = curImg(), rj = rejectOf(im.file), tag = $("rejTag");
-  tag.hidden = !rj; tag.textContent = rj ? "Rejected: " + rj : ""; tag.title = tag.textContent;
+  const im = curImg(), rj = rejectOf(im.file), tag = $("rejTag"), gk = grpKind(rejGrpOf(im.file));
+  tag.hidden = !rj; tag.textContent = rj ? (gk ? `Rejected (${gk}): ` : "Rejected: ") + rj : ""; tag.title = tag.textContent;
   const sec = $("imgSec"); sec.hidden = !capOn("i"); if (sec.hidden) return;
   const box = $("imgBox"), nt = noteOf(im.file), d = decOf(im.file, "i:reject");
   box.textContent = "";
   const st = document.createElement("div"); st.className = "st" + (rj ? " rej" : "");
-  st.textContent = rj ? "Rejected: " + rj + (d && d.who ? " · " + dispName(d.who) : "") : "Not rejected"; box.append(st);
+  st.textContent = rj ? "Rejected: " + rj + (d && d.who ? " · " + dispName(d.who) : "") + (gk ? ` · by the ${gk} reject` : "") : "Not rejected"; box.append(st);
   if (rj) { const t = document.createElement("div"); t.className = "tip"; t.textContent = "Left out of the results; its outlines stay (no training effect)."; box.append(t); }
   if (nt) { const n = document.createElement("div"); n.id = "imgNoteShow"; n.textContent = "✎ " + nt; box.append(n); }
   const b = document.createElement("button"); b.id = "imgEdit"; b.textContent = rj || nt ? "Change reject / note…" : "Reject image or add a note…";
   b.onclick = () => openImg(cur); box.append(b);
+}
+// ---------- round 12: image info (/api/meta, cap m) and sample / montage groups (/api/groups, /api/group, cap g) ----------
+// meta: annotation/review_meta.py, derived on the server from the prediction set and its conversion (read only); a
+// value it can't find is absent and shows as "not recorded". groups: annotation/review_groups.py. A group reject is the
+// image reject on every image of the group, each decision tagged grp = the group id; undo clears only those. Group
+// ids are review_groups.group_id: a compact JSON array, ["sample", s] or ["montage", s, m]. All text: textContent.
+let meta = null, groups = {};
+const imMeta = im => (meta && meta.images && meta.images[im.file]) || null;
+const montageOf = im => { const m = imMeta(im); return m && typeof m.montage === "string" ? m.montage : null; };
+const gidOf = (kind, s, m) => JSON.stringify(kind === "montage" ? [kind, s, m] : [kind, s]);
+const grpKind = gid => { try { const v = JSON.parse(gid); return Array.isArray(v) && (v[0] === "sample" || v[0] === "montage") ? v[0] : null; } catch (e) { return null; } };
+const grpRej = gid => (groups[gid] && groups[gid].reject) || null;
+const grpNote = gid => (groups[gid] && groups[gid].note && groups[gid].note.text) ? groups[gid].note : null;
+const rejGrpOf = file => { const d = decOf(file, "i:reject"); return d && rejectOf(file) && typeof d.grp === "string" ? d.grp : null; };
+const groupFiles = (kind, s, m) => D.images.filter(im => im.split === s && (kind === "sample" || (m != null && montageOf(im) === m)));
+const natCmp = (a, b) => String(a).localeCompare(String(b), undefined, {numeric: true, sensitivity: "base"});
+const fmtN = (v, d) => typeof v === "number" && isFinite(v) ? String(+v.toFixed(d)) : null;
+const withUnit = (v, d, u) => { const s = fmtN(v, d); return s == null ? null : s + u; };
+const whenTxt = t => { const d = new Date(t); return isNaN(d) ? "" : d.toLocaleString([], {dateStyle: "medium", timeStyle: "short"}); };
+function tileText(t) {
+  if (!t || typeof t !== "object") return null;
+  if (typeof t.row === "number" && typeof t.col === "number") return `row ${t.row}, col ${t.col}` + (typeof t.piece === "number" ? ` (piece ${t.piece})` : "");
+  if (typeof t.x0 === "number" && typeof t.y0 === "number") return `x ${t.x0}, y ${t.y0}` + (typeof t.size === "number" ? ` (${t.size} px)` : "");
+  return null;
+}
+const tileKey = im => { const t = (imMeta(im) || {}).tile || {}; return typeof t.row === "number" ? [t.row, t.col] : typeof t.y0 === "number" ? [t.y0, t.x0] : [Infinity, Infinity]; };
+function bySampleTile(a, b) {  // the "Sample · montage · tile" order: sample, montage (natural order), row then column
+  const A = D.images[a], B = D.images[b], ma = montageOf(A), mb = montageOf(B), ta = tileKey(A), tb = tileKey(B);
+  return natCmp(A.split, B.split) || (ma == null) - (mb == null) || natCmp(ma || "", mb || "") || ta[0] - tb[0] || ta[1] - tb[1] || a - b;
+}
+function recipeText(r) {
+  if (!r || typeof r !== "object") return null;
+  const p = r.params || {}, out = [];
+  if (r.id) out.push("recipe " + r.id);
+  if (typeof p.clip_lo_pct === "number" || typeof p.clip_hi_pct === "number") out.push(`contrast clip ${fmtN(p.clip_lo_pct, 2) ?? "?"}–${fmtN(p.clip_hi_pct, 2) ?? "?"} %`);
+  if (typeof p.denoise === "boolean") out.push(p.denoise ? "denoise on" + (typeof p.bandpass_nm === "number" ? `, bandpass ${fmtN(p.bandpass_nm, 2)} nm` : "") : "denoise off");
+  if (r.variant) out.push(r.variant + " tiles");
+  if (r.overrides && Object.keys(r.overrides).length) out.push("changed from the recipe: " + Object.keys(r.overrides).join(", "));
+  if (r.gpu === true) out.push("GPU");
+  if (!r.params) out.push("settings not recorded");
+  return out.join(" · ");
+}
+const rangeText = (v, u) => v && typeof v === "object" && !Array.isArray(v) && typeof v.min === "number" ? `${fmtN(v.min, 2)} to ${fmtN(v.max, 2)}${u} (median ${fmtN(v.median, 2)})` : Array.isArray(v) ? v.join(", ") + u : null;
+function renderInfo() {  // Editor side panel: what is known about the open image; missing values say "not recorded"
+  const sec = $("infoSec"), box = $("infoBox"), im = curImg(), mm = imMeta(im) || {}, P = (meta && meta.package) || {};
+  sec.hidden = !capOn("m") || !meta; if (sec.hidden) return;
+  box.textContent = "";
+  const row = (k, v) => {
+    const dt = document.createElement("dt"), dd = document.createElement("dd"); dt.textContent = k;
+    if (v == null || v === "") { dd.textContent = "not recorded"; dd.className = "nr"; } else { dd.textContent = v; dd.title = v; }
+    box.append(dt, dd);
+  };
+  const sub = t => { const d = document.createElement("div"); d.className = "sub"; d.textContent = t; box.append(d); };
+  row("Sample", mm.sample || im.split);
+  row("Montage", mm.montage || mm.parent_image);
+  row("Tile", tileText(mm.tile));
+  if (typeof mm.grid === "number") row("Grid", String(mm.grid));
+  row("Defocus", withUnit(mm.defocus_um, 2, " µm"));
+  row("Magnification", typeof mm.mag === "number" ? mm.mag.toLocaleString("en-US") + "×" : null);
+  row("Pixel size", [withUnit(mm.pixel_A, 3, " Å/px acquired"), withUnit(mm.nm_per_px, 4, " nm/px here")].filter(Boolean).join(" · ") || null);
+  row("Dose", withUnit(mm.dose, 2, " e⁻/Å²"));
+  row("Exposure", withUnit(mm.exposure_s, 2, " s"));
+  row("Acquired", typeof mm.acquired === "string" ? mm.acquired.replace("T", " ") : null);
+  sub("Session and processing");
+  row("Session", P.session);
+  if (P.conversion) row("Conversion", P.conversion);
+  if (P.source_folder) row("Tiles from", P.source_folder);
+  row("Processing", recipeText(P.recipe));
+  const sa = P.session_acquisition;
+  if (sa && sa.defocus_um) row("Session defocus", rangeText(sa.defocus_um, " µm"));
+  if (mm.orig_name) row("File name", mm.orig_name);
+  if (P.note) row("Set note", P.note);
+  const pv = P.provenance || {};
+  if (Array.isArray(pv.steps) && pv.steps.length) row("How made", pv.steps.join(" · "));
+  if (Array.isArray(pv.derived_from) && pv.derived_from.length) row("Derived from", pv.derived_from.map(d => d && d.id ? `${d.kind || ""} ${d.id}`.trim() : "").filter(Boolean).join(", "));
+}
+function groupHead(kind, s, m) {  // a list header ("Sample · montage · tile" order): name, size, rejected / note marks
+  const gid = gidOf(kind, s, m), rj = grpRej(gid), nt = grpNote(gid), d = document.createElement("div");
+  d.className = "gh" + (kind === "montage" ? " m" : "") + (rj ? " rej" : ""); d.dataset.gid = gid;
+  const nm = document.createElement("span"); nm.className = "nm2"; nm.textContent = (kind === "montage" ? "Montage " + m : "Sample " + s) + ` · ${groupFiles(kind, s, m).length}`;
+  d.append(nm);
+  if (nt) { const n = document.createElement("span"); n.className = "notem"; n.textContent = "✎"; n.title = nt.text; d.append(n); }
+  if (rj) { const b = document.createElement("span"); b.className = "rejb"; b.textContent = "Rejected"; b.title = `${kind === "montage" ? "Montage" : "Sample"} rejected: ${rj.reason}`; d.append(b); }
+  return d;
+}
+function renderSampleOpts() {  // the sample switcher (fSplit) in a prediction package: "All samples", each with its size
+  if (!isPredPkg) return;
+  const sel = $("fSplit"), n = {};
+  D.images.forEach(im => { n[im.split] = (n[im.split] || 0) + 1; });
+  sel.options[0].textContent = "All samples"; sel.title = "Show one sample (N / P then step through it)";
+  for (const o of [...sel.options].slice(1)) o.textContent = `${o.value} · ${n[o.value] || 0}` + (grpRej(gidOf("sample", o.value)) ? " · rejected" : "");
+  $("triSplit").options[0].textContent = "all samples";
+}
+function sampleSwitch() {  // a sample picked: the list shows it; the Editor moves into it when the open image is elsewhere
+  renderList();
+  if ($("fSplit").value && order.length && !order.includes(cur)) go(order[0]); else renderSide();
+}
+function stepSample(d) {  // the side panel's ◀ / ▶: the previous / next sample, opened at its first image
+  const opts = [...$("fSplit").options].map(o => o.value).filter(Boolean); if (!opts.length) return;
+  const k = opts.indexOf($("fSplit").value || curImg().split);
+  $("fSplit").value = opts[((k < 0 ? 0 : k + d) % opts.length + opts.length) % opts.length];
+  renderList(); if (order.length) go(order[0]);
+}
+function renderGroupBox() {  // Editor side panel (prediction packages): the open image's sample and montage, their notes and rejects
+  const sec = $("grpSec"), box = $("grpBox");
+  sec.hidden = !isPredPkg; if (sec.hidden) return;
+  box.textContent = "";
+  const im = curImg(), acts = capOn("g") && server, el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
+  const btn = (id, txt, fn, cls) => { const b = el("button", cls || "", txt); b.id = id; b.type = "button"; b.onclick = fn; return b; };
+  const part = (kind, s, m) => {
+    const gid = gidOf(kind, s, m), files = groupFiles(kind, s, m), rj = grpRej(gid), nt = grpNote(gid), word = kind === "sample" ? "sample" : "montage";
+    const wrap = el("div", kind === "montage" ? "gpart" : ""), head = el("div", "gl");
+    wrap.dataset.kind = kind;
+    head.append(el("span", "gn", (kind === "sample" ? "Sample " : "Montage ") + (kind === "sample" ? s : m)),
+      el("span", "gc", `${files.length} image${files.length === 1 ? "" : "s"} · ${files.filter(x => rejectOf(x.file)).length} rejected`));
+    wrap.append(head);
+    if (rj) wrap.append(el("div", "grej", `${kind === "sample" ? "Sample" : "Montage"} rejected: ${rj.reason}` + (rj.who ? ` · ${dispName(rj.who)}` : "") + (rj.t ? ` · ${whenTxt(rj.t)}` : "") + (rj.note ? ` · “${rj.note}”` : "")));
+    if (nt) { const n = el("div", "gnote", "✎ " + nt.text); n.append(el("small", "", [nt.who ? dispName(nt.who) : "", nt.t ? whenTxt(nt.t) : ""].filter(Boolean).join(" · "))); wrap.append(n); }
+    if (acts) {
+      const row = el("div", "gl");
+      row.append(btn(`grpNote_${word}`, nt ? `Edit ${word} comment…` : `Comment on ${word}…`, () => openGroup("comment", kind, s, m)));
+      row.append(rj ? btn(`grpUndo_${word}`, `Undo ${word} reject`, () => openGroup("undo", kind, s, m), "danger")
+                    : btn(`grpRej_${word}`, `Reject ${word}…`, () => openGroup("reject", kind, s, m), "danger"));
+      wrap.append(row);
+    }
+    return wrap;
+  };
+  const nav = el("div", "gl");
+  nav.append(btn("smpPrev", "◀ Sample", () => stepSample(-1)), btn("smpNext", "Sample ▶", () => stepSample(1)));
+  nav.firstChild.title = "Previous sample"; nav.lastChild.title = "Next sample";
+  box.append(part("sample", im.split));
+  const m = montageOf(im);
+  if (m) box.append(part("montage", im.split, m));
+  box.append(nav);
+}
+// The group dialog: reject (a reason is required; shows how many images it changes), undo, comment.
+let gdlg = null;  // {action, kind, s, m, reason}
+function openGroup(action, kind, s, m) {
+  if (!capOn("g") || !server) return;
+  if (!needWho(() => openGroup(action, kind, s, m))) return;
+  gdlg = {action, kind, s, m: kind === "montage" ? m : undefined, reason: null};
+  const what = kind === "sample" ? `sample ${s}` : `montage ${m} (sample ${s})`, nt = grpNote(gidOf(kind, s, m));
+  $("grpTitle").textContent = action === "reject" ? `Reject ${what}` : action === "undo" ? `Undo the reject of ${what}` : `Comment on ${what}`;
+  $("grpWhat").textContent = action === "reject" ? "Every image of the group is rejected: they drop out of the results (their outlines stay). Images already rejected keep their own reason. Undo brings back only the images this rejects."
+    : action === "undo" ? "Only the images rejected by this group reject go back to not rejected. Images rejected one by one stay rejected."
+    : "A note on the whole group, saved with your name. Leave it empty to remove it.";
+  $("grpReasons").hidden = action !== "reject"; renderGrpReasons();
+  $("grpNoteWrap").hidden = action === "undo";
+  $("grpNoteLbl").textContent = action === "reject" ? "Details (optional)" : "Comment";
+  $("grpNote").value = action === "comment" && nt ? nt.text : ""; $("grpNote").placeholder = action === "reject" ? "Why, in your words (optional)" : "Anything about this " + kind;
+  $("grpErr").hidden = true; $("grpOk").disabled = false; renderGrpCount(); $("grpDlg").hidden = false;
+}
+function renderGrpReasons() {
+  const box = $("grpReasons"); box.textContent = "";
+  REJECT_REASONS.forEach(r => { const b = document.createElement("button"); b.type = "button"; b.textContent = r; b.className = gdlg && gdlg.reason === r ? "on" : "";
+    b.onclick = () => { gdlg.reason = r; renderGrpReasons(); renderGrpCount(); }; box.append(b); });
+}
+function renderGrpCount() {  // the confirm line: N images affected, from this page's copy of the decisions
+  const {action, kind, s, m, reason} = gdlg, gid = gidOf(kind, s, m), files = groupFiles(kind, s, m), ok = $("grpOk");
+  const pl = n => `${n} image${n === 1 ? "" : "s"}`;
+  ok.className = action === "comment" ? "on" : "danger";
+  if (action === "reject") {
+    const fresh = files.filter(im => !rejectOf(im.file)).length, mine = files.filter(im => rejGrpOf(im.file) === gid).length, kept = files.length - fresh - mine;
+    $("grpCount").textContent = `${pl(fresh)} of ${files.length} will be rejected` + (mine ? `; ${pl(mine)} already rejected by this ${kind}` : "") + (kept ? `; ${pl(kept)} already rejected ${kept === 1 ? "stays as it is" : "stay as they are"}` : "") + ".";
+    ok.textContent = reason ? `Reject ${pl(fresh)}` : "Pick a reason"; ok.disabled = !reason;
+  } else if (action === "undo") {
+    const n = D.images.filter(im => rejGrpOf(im.file) === gid).length;
+    $("grpCount").textContent = `${pl(n)} rejected by this ${kind} go back (an image another group reject covers stays rejected by that one).`;
+    ok.textContent = `Undo for ${pl(n)}`; ok.disabled = false;
+  } else { $("grpCount").textContent = `${pl(files.length)} in this ${kind}.`; ok.textContent = "Save comment"; ok.disabled = false; }
+}
+function closeGroup() { $("grpDlg").hidden = true; gdlg = null; }
+async function sendGroup() {
+  const g = gdlg; if (!g) return;
+  if (g.action === "reject" && !g.reason) return;
+  const note = $("grpNote").value.trim().slice(0, NOTE_MAX);
+  const body = {action: g.action, kind: g.kind, sample: g.s, ...(g.kind === "montage" ? {montage: g.m} : {}),
+    ...(g.action === "reject" ? {reason: g.reason, ...(note ? {note} : {})} : g.action === "comment" ? {note} : {})};
+  $("grpOk").disabled = true;
+  let j = null, r = null;
+  try {
+    r = await tfetch("api/group?who=" + encodeURIComponent(me()), {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    j = await r.json();
+  } catch (e) { j = {error: "the server could not be reached; nothing was changed"}; }
+  if (!r || !r.ok) { $("grpErr").textContent = (j && j.error) || "refused"; $("grpErr").hidden = false; $("grpOk").disabled = false; return; }
+  for (const [file, s] of Object.entries(j.edits || {})) {  // the records the server changed, merged like a pull
+    noteSrv(file, s); const l = edits[file]; edits[file] = mergeEdit(l, s); if (newerThan(l, s)) dirty.add(file);
+  }
+  if (j.groups && typeof j.groups === "object") groups = j.groups;
+  persist(); closeGroup(); renderList(); renderSide(); draw();
+  const busy = (j.claimed_by_others || []).map(c => dispName(c.who));
+  flashMsg((g.action === "reject" ? `Rejected ${j.n_changed} image${j.n_changed === 1 ? "" : "s"}` : g.action === "undo" ? `Reject undone on ${j.n_changed} image${j.n_changed === 1 ? "" : "s"}` : "Comment saved")
+    + (j.kept_individual ? ` · ${j.kept_individual} rejected one by one kept` : "") + (j.kept_other_group ? ` · ${j.kept_other_group} kept by another group reject` : "")
+    + (busy.length ? ` · open on ${[...new Set(busy)].join(", ")}'s screen: they see it on their next sync` : ""));
+}
+$("grpCancel").onclick = closeGroup; $("grpOk").onclick = sendGroup; $("grpDlg").onclick = ev => { if (ev.target === $("grpDlg")) closeGroup(); };
+async function loadMeta() {  // once per connect: ~0.3 KB per image
+  if (!capOn("m")) return;
+  try { const r = await tfetch("api/meta", {cache: "no-store"}); if (r.ok) { const j = await r.json(); if (j && typeof j.images === "object") meta = j; } } catch (e) {}
+  if (!$("tri").hidden) triRender(); else { renderList(); renderSide(); }
+}
+async function loadGroups() {
+  if (!capOn("g")) return;
+  try { const r = await tfetch("api/groups", {cache: "no-store"}); if (r.ok) { const j = await r.json(); if (j && j.groups && typeof j.groups === "object") groups = j.groups; } } catch (e) {}
 }
 // The image dialog: which image, the reason picked (null = not rejected), and both values as the dialog opened
 // (pick0, note0). Save writes only what this reviewer changed in the dialog: a reject or note that arrived from another
@@ -1413,6 +1677,7 @@ cv.addEventListener("contextmenu", ev => ev.preventDefault());
 document.addEventListener("keydown", ev => {
   if (!$("whoDlg").hidden) { if (ev.key === "Escape") $("whoCancel").click(); return; }  // typing a name: no hotkeys
   if (!$("imgDlg").hidden) { if (ev.key === "Escape") closeImg(); return; }  // the image's reject / note: no hotkeys
+  if (!$("grpDlg").hidden) { if (ev.key === "Escape") closeGroup(); return; }  // a sample / montage action: no hotkeys
   if (!$("setPop").hidden) { if (ev.key === "Escape") $("setPop").hidden = true; return; }  // settings open: no hotkeys
   if (!$("tri").hidden) return triKey(ev);
   if (ev.target.tagName === "SELECT" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "INPUT" && ev.target.type !== "checkbox" && ev.target.type !== "range") return;
@@ -1443,10 +1708,12 @@ $("bClose").onclick = finishDraft;
 $("undo").onclick = undo; $("reviewed").onclick = markReviewed; $("vDel").onclick = eraseVerts;
 ["showGt", "showPr", "showFlags", "showSept"].forEach(id => $(id).onchange = draw);
 $("conf").oninput = () => { $("confOut").textContent = conf().toFixed(2); if (sel && sel.kind === "pr") sel = null; renderSide(); draw(); };
-["fSplit", "fSort", "fStat"].forEach(id => $(id).onchange = renderList);
+["fSort", "fStat"].forEach(id => $(id).onchange = renderList);
+$("fSplit").onchange = sampleSwitch;
 $("menuBtn").onclick = () => $("list").classList.toggle("show");
 $("sideBtn").onclick = () => $("side").classList.toggle("show");
-[...new Set(D.images.map(im => im.split))].forEach(s => { $("fSplit").add(new Option(s, s)); $("triSplit").add(new Option(s, s)); });
+{ const sp = [...new Set(D.images.map(im => im.split))]; if (isPredPkg) sp.sort(natCmp);  // samples: natural order
+  sp.forEach(s => { $("fSplit").add(new Option(s, s)); $("triSplit").add(new Option(s, s)); }); }
 
 $("export").onclick = () => {
   const out = {format: "cryoev-review-edits-v1", package: D.id, source: D.source, exported: new Date().toISOString(), images: {}};
@@ -1890,12 +2157,14 @@ function deepLink(file, key) {  // a bookmarkable Editor link to one object; kee
 function triHeader(c) {
   const open = $("triOpen");
   $("triImgBtn").hidden = !c || !capOn("i");
-  if (!c) { $("thSept").hidden = true; $("thName").textContent = ""; $("thObj").textContent = ""; $("thPos").textContent = "order: most flags first"; open.hidden = true; return; }
+  if (!c) { $("thSept").hidden = true; $("thName").textContent = ""; $("thObj").textContent = ""; $("thPos").textContent = "order: most flags first"; $("thMeta").hidden = true; open.hidden = true; return; }
   const im = D.images[c.i], same = tri.queue.filter(q => q.i === c.i);
   $("thName").textContent = shortName(im.file); $("thName").title = im.file;
   $("thObj").textContent = `object ${same.indexOf(c) + 1} of ${same.length}`; $("thObj").title = `decision key ${c.key}`;
   const sd = seedOf(im.file, c.key); $("thSept").hidden = !sd; $("thSept").title = sd ? "Carried from the September review: " + sd : "";
   $("thPos").textContent = `card ${tri.pos + 1} of ${tri.queue.length} · order: most flags first`;
+  const mm = imMeta(im), bits = mm ? [mm.montage || mm.parent_image, tileText(mm.tile), mm.defocus_um != null ? "defocus " + withUnit(mm.defocus_um, 2, " µm") : ""].filter(Boolean) : [];
+  $("thMeta").hidden = !bits.length; $("thMeta").textContent = bits.join(" · "); $("thMeta").title = bits.length ? "Image info (the Editor's side panel has the rest)" : "";
   open.hidden = false; open.href = deepLink(im.file, c.key);
 }
 // After a pick on this card (auto-next off), a swipe or ♥ / ✕ / Enter only moves on: it never overwrites the pick.
@@ -2449,6 +2718,7 @@ async function sync() {
 }
 async function pull() {  // bring in other reviewers' decisions (and who is looking at what)
   await pullClaims();
+  await loadGroups();
   const r = await tfetch("api/edits", {cache: "no-store"}); if (!r.ok) throw new Error(r.status);
   const remote = await r.json();
   for (const [file, s] of Object.entries(remote)) {
@@ -2480,7 +2750,7 @@ function applyCaps() {
 }
 async function connect() {
   if (!location.protocol.startsWith("http")) return;
-  try { await pull(); await loadCaps(); server = true; if (deep && cur === deep.i) openDeep(deep); else go(cur); syncBadge(); sync(); if (!$("tri").hidden) { rebuildQueue(); tri.claimed = null; triRender(); } }
+  try { await pull(); await loadCaps(); await loadGroups(); server = true; loadMeta(); if (deep && cur === deep.i) openDeep(deep); else go(cur); syncBadge(); sync(); if (!$("tri").hidden) { rebuildQueue(); tri.claimed = null; triRender(); } }
   catch (e) { syncBadge(); }
 }
 setInterval(async () => {  // claims: cards poll; the Editor renews its claim on the open image and shows others' in the queue
@@ -2505,7 +2775,8 @@ let startMode = null; try { startMode = localStorage.getItem("cryoev-review:mode
   if (m === "classes" || m === "cls" || m === "cards") startMode = "tri"; else if (m === "editor") startMode = "editor"; }
 if (deep) startMode = "editor";  // a deep link always opens the Editor on its object
 if (startMode === "tri" || (!startMode && window.matchMedia("(max-width: 700px)").matches)) openTri();
-window.__review = {D, CATS, effGt, gtOf, mergeEdit, pull, materialize, edits: () => edits, caps: () => [...caps], openImg, statusOf, triGo: n => { tri.pos = n; tri.zoom = 0; tri.picked = null; triRender(); }, render: () => { renderList(); renderSide(); draw(); if (!$("tri").hidden) triRender(); }, state: () => ({mode, sel, curCls, redrawKey, cur, vsel: [...vSel()], order, view: {...view}, W, H, imgReady, server, dirty: dirty.size,
+window.__review = {D, CATS, effGt, gtOf, mergeEdit, pull, materialize, edits: () => edits, caps: () => [...caps], openImg, statusOf,
+  meta: () => meta, groups: () => groups, openGroup, stepSample, loadMeta, triGo: n => { tri.pos = n; tri.zoom = 0; tri.picked = null; triRender(); }, render: () => { renderList(); renderSide(); draw(); if (!$("tri").hidden) triRender(); }, state: () => ({mode, sel, curCls, redrawKey, cur, vsel: [...vSel()], order, view: {...view}, W, H, imgReady, server, dirty: dirty.size,
   who: me(), tri: {mode: tri.mode, pos: tri.pos, queue: tri.queue, ready: tri.ready, picked: tri.picked || null, zoom: tri.zoom, wk: tri.wt ? tri.wt.k : 1, xfs: tri.xf ? tri.xf.s : 0, hist: (tri.hist || []).length,
   histIds: (tri.hist || []).slice(), busy: !!tri.busy, xf: tri.xf ? {...tri.xf} : null,
   adj: tri.adj ? {ring: tri.adj.ring.slice(), sel: [...tri.adj.sel].map(k => k / 2).sort((a, b) => a - b), undo: tri.adj.undo.length, msg: tri.adj.msg} : null}, fun: funOn()})};  // for annotation/tests
