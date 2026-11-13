@@ -50,9 +50,19 @@ class Actor(unittest.TestCase):
         self.assertEqual(A.label("pujan", None), "pujan")
         self.assertEqual(A.label(None, "claude"), "claude")
         self.assertEqual(A.label(None, None), "")
-        self.assertEqual(A.label_of({"status_by": "pujan", "via": "claude"}), "claude for pujan")
+        self.assertEqual(A.label_of({"status_by": "pujan", "status_via": "claude"}), "claude for pujan")
+        # status_by pairs with status_via, not with the line writer's via (e.g. an agent's import re-carrying a
+        # person's status)
+        self.assertEqual(A.label_of({"status_by": "pujan", "via": "claude"}), "pujan")
+        self.assertEqual(A.label_of({"status_by": "au1", "status_via": "claude", "via": "bot2"}), "claude for au1")
+        self.assertEqual(A.label_of({"who": "au1", "via": "claude", "status_by": "pujan"}), "claude for au1")
+        self.assertEqual(A.label_of({"via": "claude"}), "claude")
+        self.assertEqual(A.label_of({"status_by": "pujan", "via": "x9"}, who_key="status_by"), "pujan")
+        self.assertEqual(A.label_of({"status_by": "pujan", "status_via": "claude", "via": "x9"}, who_key="status_by"),
+                         "claude for pujan")
         self.assertEqual(A.label_of({"created_by": "pujan", "created_via": "claude"}), "claude for pujan")
         self.assertTrue(A.is_agent({"via": "claude"}))
+        self.assertTrue(A.is_agent({"status_by": "pujan", "status_via": "claude"}))
         self.assertFalse(A.is_agent({"who": "pujan"}))
 
     def test_strip_env(self):

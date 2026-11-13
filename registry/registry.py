@@ -31,6 +31,10 @@ person's write. The CLI commands (import, set-status, job new) take it from $CRY
 else $CRYOEV_FOR (set-status: one of the two is required; job new: else none, as before). An agent never promotes:
 a model line with `via` that would make it production is refused (re-appending an already-production model is not a
 promotion and stays allowed).
+`status_via` = the agent that set the explicit status (next to `status_by`): written by set-status (absent when a
+person sets it), carried with `status_by` wherever that is carried (set-status's own copy, the importers), so an
+agent-set status still reads "claude for pujan" after later lines; a person's new status clears it. append() never
+strips it (only the top-level `via`).
 """
 import argparse
 import hashlib
@@ -54,7 +58,7 @@ from validate import ENTITIES, EXCLUDED_SESSIONS, read_json  # noqa: E402
 
 PEOPLE = REPO / "annotation" / "people.json"
 POINTER = {"inference_check", "label_version"}
-ENVELOPE = {"schema", "id", "logged", "recorded_by", "note", "owner", "status_by", "via"}
+ENVELOPE = {"schema", "id", "logged", "recorded_by", "note", "owner", "status_by", "status_via", "via"}
 PRODUCTION_WHO = "pujan"
 LOCK, LOCK_WAIT = ".registry.lock", 30.0          # OS write lock in the registry folder (append holds it per line)
 UPLOAD_LOCK = ".upload_session.lock"              # session read -> merge -> append (= importers / upload_sessions)
@@ -254,6 +258,8 @@ def append(record, root=None, _via_set_status=False, new_only=False, files=None,
         if not actor.VIA_RE.match(str(via)):
             raise RegistryError(f"refused: via {via!r} is not a short lower-case id")
         rec["via"] = via
+    if rec.get("status_via") is not None and not actor.VIA_RE.match(str(rec["status_via"])):
+        raise RegistryError(f"refused: status_via {rec['status_via']!r} is not a short lower-case id")
     rec.setdefault("logged", now())
     _guard(root)
     root.mkdir(parents=True, exist_ok=True)
@@ -313,6 +319,9 @@ def _set_status(id, status, who, note=None, root=None, reason=None, via=None):
     rec = {k: v for k, v in cur.items()} if e not in POINTER else \
         {k: v for k, v in _lines_last(root, e, id).items()}
     rec.update(status=status, status_by=who, logged=now(), recorded_by="registry.py set-status")
+    rec.pop("status_via", None)                         # this status's agent only: a person's status clears it
+    if via:
+        rec["status_via"] = via
     if note:
         rec["note"] = note
     if e == "job":

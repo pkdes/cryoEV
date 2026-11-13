@@ -54,7 +54,8 @@ Attribution (round 9): `via` (the agent that ran the import, from `registry.py i
 the lines this run appends and is IGNOREd by the no-change check, like logged / recorded_by: a record that differs
 only in who ran the import is unchanged, so an agent's import followed by anyone's import appends 0 (and the other
 way round). Records carried forward from the current line drop it (registry.append drops it too). The production
-line restated from PRODUCTION is the user's recorded decision: it is never stamped with via.
+line restated from PRODUCTION is the user's recorded decision: it is never stamped with via. `status_via` (the agent
+that set an explicit status) is carried with `status_by`, so an agent-set status keeps its "claude for pujan".
 """
 import hashlib
 import importlib.util
@@ -1025,6 +1026,9 @@ class Importer:
                 continue
             if old and old.get("status_by"):                      # explicit status lines beat derived ones
                 rec = dict(rec, status=old.get("status"), status_by=old["status_by"])
+                rec.pop("status_via", None)                       # status_via travels with status_by (round 9)
+                if old.get("status_via"):
+                    rec["status_via"] = old["status_via"]
                 if old.get("note") and not rec.get("note"):
                     rec["note"] = old["note"]
                 if old.get("blocked_reason") and not rec.get("blocked_reason"):     # job: blocked by hand

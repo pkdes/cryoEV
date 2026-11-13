@@ -140,6 +140,63 @@ class AppendVia(Base):
         self.assertEqual((cur["created_by"], cur["created_via"], cur["status_by"]), ("pujan", "claude", "au1"))
 
 
+class StatusVia(Base):
+    """status_via travels with status_by: an agent-set status keeps "claude for pujan" after later import lines (written
+    by anyone); a person's new status clears it. The importer is driven with a fixed scan output (one changed field)."""
+
+    def import_run(self, rec, via=None):
+        def scan(imp):
+            imp.out = [("run", dict(rec))]
+            return imp
+        t = Path(self.tmp.name)
+        with mock.patch.object(importers.Importer, "scan", scan):
+            return sum(importers.run(self.root, laptop=t, cache=t, processing=None, via=via)["appended"].values())
+
+    def test_agent_status_survives_imports_and_a_person_clears_it(self):
+        import actor as A                                                     # registry/actor.py (REG on sys.path)
+        run = sample("run")
+        registry.append(run, root=self.root)                                  # a person's line
+        with mock.patch.dict(os.environ, AGENT):
+            self.assertEqual(cli(["--root", str(self.root), "set-status", run["id"], "failed"])[0], 0)
+        last = lines(self.root, "run")[-1]
+        self.assertEqual((last["status_by"], last["status_via"], last["via"]), ("pujan", "claude", "claude"))
+        # a person's import that changes another field: a new line, no via, the agent-set status kept with its agent
+        self.assertEqual(self.import_run(dict(run, machine="laptop")), 1)
+        last = lines(self.root, "run")[-1]
+        self.assertEqual((last["machine"], last["status"], last["status_by"], last["status_via"]),
+                         ("laptop", "failed", "pujan", "claude"))
+        self.assertNotIn("via", last)
+        cur = registry.current(root=self.root)[run["id"]]
+        self.assertEqual(A.label_of(cur, who_key="status_by"), "claude for pujan")
+        # no-change control in both env states: 0 appended
+        self.assertEqual(self.import_run(dict(run, machine="laptop")), 0)
+        self.assertEqual(self.import_run(dict(run, machine="laptop"), via="claude"), 0)
+        # a person's new status clears status_via (set-status's own copy carries it otherwise)
+        self.assertEqual(cli(["--root", str(self.root), "set-status", run["id"], "finished", "--who", "au1"])[0], 0)
+        last = lines(self.root, "run")[-1]
+        self.assertEqual(last["status_by"], "au1")
+        self.assertNotIn("status_via", last)
+        self.assertNotIn("via", last)
+        self.assertEqual(A.label_of(registry.current(root=self.root)[run["id"]], who_key="status_by"), "au1")
+        # and the importer then carries no status_via either
+        self.assertEqual(self.import_run(dict(run, machine="desktop")), 1)
+        self.assertNotIn("status_via", lines(self.root, "run")[-1])
+
+    def test_agent_status_kept_through_set_status_copy(self):
+        run = sample("run")
+        registry.append(run, root=self.root)
+        registry.set_status(run["id"], "failed", "pujan", root=self.root, via="claude")
+        registry.set_status(run["id"], "finished", "pujan", root=self.root, via="claude")   # agent again: kept
+        self.assertEqual(lines(self.root, "run")[-1]["status_via"], "claude")
+
+    def test_append_keeps_status_via(self):
+        line = registry.append(dict(sample("run"), status_by="pujan", status_via="claude", via="claude"),
+                               root=self.root)
+        self.assertEqual((line["status_via"], line.get("via")), ("claude", None))   # only the top-level via is dropped
+        with self.assertRaises(registry.RegistryError):
+            registry.append(dict(sample("run"), status_by="pujan", status_via="Claude!"), root=self.root)
+
+
 class Production(Base):
     def setUp(self):
         super().setUp()

@@ -80,15 +80,21 @@ def label(who_=None, via_=None) -> str:
 
 
 def label_of(rec: dict, who_key="who") -> str:
-    """label() from a record's own fields (who_key, then status_by / created_by / owner), plus via / created_via."""
+    """label() from a record's own fields: the person from who_key, else status_by, else created_by; the agent that
+    goes with that person: status_by -> status_via (who set the status, which may differ from the line's writer
+    `via`), created_by -> created_via, who_key -> via, else created_via."""
     if not isinstance(rec, dict):
         return ""
-    w = rec.get(who_key) or rec.get("status_by") or rec.get("created_by")
-    return label(w, rec.get("via") or rec.get("created_via"))
+    pair = {"status_by": ("status_via",), "created_by": ("created_via",)}
+    for key in (who_key, "status_by", "created_by"):
+        if rec.get(key):
+            via_keys = pair.get(key, ("via", "created_via"))
+            return label(rec[key], next((rec[v] for v in via_keys if rec.get(v)), None))
+    return label(None, rec.get("via") or rec.get("created_via"))
 
 
 def is_agent(rec: dict) -> bool:
-    return isinstance(rec, dict) and bool(rec.get("via") or rec.get("created_via"))
+    return isinstance(rec, dict) and bool(rec.get("via") or rec.get("created_via") or rec.get("status_via"))
 
 
 def strip_env(environ=None) -> list:
