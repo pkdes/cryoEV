@@ -49,6 +49,13 @@ rebuilds a session record it carries them forward from the current line, as it c
 on the record stays the lab's. write() holds <registry>/.upload_session.lock (UPLOAD_LOCK, the portal's
 read-merge-append lock) from reading the current records to its last append, so a portal registration can't land in
 between and be dropped.
+
+Attribution (round 9): `via` (the agent that ran the import, from `registry.py import` under $CRYOEV_VIA) is set on
+the lines this run appends and is IGNOREd by the no-change check, like logged / recorded_by: a record that differs
+only in who ran the import is unchanged, so an agent's import followed by anyone's import appends 0 (and the other
+way round). Records carried forward from the current line drop it (registry.append drops it too). The production
+line restated from PRODUCTION is the user's recorded decision: it is never stamped with via. `status_via` (the agent
+that set an explicit status) is carried with `status_by`, so an agent-set status keeps its "claude for pujan".
 """
 import hashlib
 import importlib.util
@@ -73,7 +80,7 @@ SUPERSEDED = {"lv_20261030_0846": "lv_20261030_0909"}          # old -> new (SUP
 LEGACY_MODELS = {"allLayer_run14_20260713": "v0_alllayer_y8n_20260713",   # legacy id -> canonical id
                  "yifei_202512": "v0_yifei_y8n_20251201"}                 # (day unknown: 01)
 PRODUCTION = ("v5_evnonev_y8m_20261029", "pujan")
-IGNORE = {"logged", "recorded_by"}
+IGNORE = {"logged", "recorded_by", "via"}     # who ran the import is not a change (round 9)
 DROPPED = "DROPPED"                      # split_assignment.csv `split` values like DROPPED-duplicate: not trained
 SPLIT_ORDER = {"train": 0, "valid": 1, "test": 2}
 LISTS = "lists"                          # <registry>/lists/<dataset>.tsv  (stem \t split)
@@ -419,9 +426,11 @@ def grid_fields(rows):
 
 
 class Importer:
-    def __init__(self, root, laptop=None, cache=None, processing=PROCESSING, parser=None):
-        """`parser`: parse_metadata-compatible callable; default = the canonical one (load_metadata_parser)."""
+    def __init__(self, root, laptop=None, cache=None, processing=PROCESSING, parser=None, via=None):
+        """`parser`: parse_metadata-compatible callable; default = the canonical one (load_metadata_parser).
+        `via`: the agent running the import (actor.via()), stamped on appended lines; None for a person."""
         self.root = Path(root)
+        self.via = via
         self.laptop = Path(laptop) if laptop else config.laptop_root(required=False)
         self.cache = Path(cache) if cache else config.cryoai_root(required=False)
         self.proc = Path(processing) if processing else None
@@ -769,7 +778,7 @@ class Importer:
             rec = lv_provenance(folder)
         if rec is None:
             return None
-        for k in ("schema", "logged", "recorded_by"):
+        for k in ("schema", "logged", "recorded_by", "via"):
             rec.pop(k, None)
         if d["runs"] and rec.get("status") == "frozen":
             rec["status"] = "trained"
@@ -1017,6 +1026,9 @@ class Importer:
                 continue
             if old and old.get("status_by"):                      # explicit status lines beat derived ones
                 rec = dict(rec, status=old.get("status"), status_by=old["status_by"])
+                rec.pop("status_via", None)                       # status_via travels with status_by (round 9)
+                if old.get("status_via"):
+                    rec["status_via"] = old["status_via"]
                 if old.get("note") and not rec.get("note"):
                     rec["note"] = old["note"]
                 if old.get("blocked_reason") and not rec.get("blocked_reason"):     # job: blocked by hand
@@ -1034,7 +1046,7 @@ class Importer:
             try:
                 n_files = self.changed_files(files)
                 if not dry_run:
-                    registry.append(rec, root=self.root, files=files, replace_files=True)
+                    registry.append(rec, root=self.root, files=files, replace_files=True, via=self.via)
             except registry.RegistryError as e:
                 self.refuse(f"{entity}: {str(e)[:90]}", rid)
                 continue
@@ -1050,6 +1062,7 @@ class Importer:
         prod_id, who = PRODUCTION
         cur = registry.current(root=self.root)
         if not dry_run and prod_id in cur and cur[prod_id].get("status") != "production":
+            # the user's recorded decision, restated: never via (an agent never promotes; registry._check)
             registry.set_status(prod_id, "production", who, note="user decision 2026-10-30", root=self.root)
             appended["model (set-status production)"] += 1
         return appended

@@ -51,12 +51,14 @@ REPO = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "registry"))
+import actor  # noqa: E402  (registry/actor.py: who + via)
 import common as C  # noqa: E402
 import dataset_cache  # noqa: E402
 from data_utils import config  # noqa: E402
 from data_utils.path_guard import protected_problem  # noqa: E402
 
 REGISTRY_PY = REPO / "registry" / "registry.py"
+DEFAULT_WHO = "pujan"                            # the old default; actor.who(): --who flag > $CRYOEV_FOR > this
 LEDGER = Path("jobs") / "pulled.jsonl"          # under <CryoAI-laptop>
 PULL_TMP = ".pull_tmp"                           # <CryoAI>/training outputs/<dataset>/.pull_tmp/<run> while copying
 EPOCH_CKPT = "epoch*.pt"                         # runs/<run>/weights/: left on the share by pull unless --all-weights
@@ -302,6 +304,7 @@ def _push_predict_locked(ps_dir, reg, share, job_id, copier, check_origin, max_h
     import ids
     import predict_set as PS
     import registry
+    me = actor.current(None, default=None)             # the new job's who + via; a bad env fails before the push
     try:
         req, st, rows = PS.read_request(ps_dir), PS.read_status(ps_dir), PS.read_images(ps_dir)
     except (OSError, ValueError) as e:
@@ -349,10 +352,10 @@ def _push_predict_locked(ps_dir, reg, share, job_id, copier, check_origin, max_h
                 lst = Path(td) / "images.txt"
                 lst.write_text("".join(r["image"] + "\n" for r in rows), encoding="utf-8")
                 registry.new_job("predict", "desktop", ps_id, images=lst, root=reg, date=jid[4:12],
-                                 note=f"prediction set {ps_id}")
+                                 note=f"prediction set {ps_id}", who=me["who"], via=me.get("via"))
         except Exception as e:                         # roll back without deleting: the runner skips a CANCELled job
             try:
-                cancel(jid, share, who="pujan", reason=f"push-predict: the registry job was not created ({e})")
+                cancel(jid, share, reason=f"push-predict: the registry job was not created ({e})")
             except Exception as ce:                    # never hides the first error: both are reported
                 raise SyncError(f"{jid} was queued but its registry job was not created ({e}), and writing its "
                                 f"CANCEL failed too ({type(ce).__name__}: {ce}): cancel it by hand "
@@ -380,8 +383,9 @@ def release(job_id, share):
     return qd
 
 
-def stop(share, who="pujan"):
-    """The watcher finishes its current job, then pauses (it stays running)."""
+def stop(share, who=None):
+    """The watcher finishes its current job, then pauses (it stays running). who: actor.who() (flag > env > pujan)."""
+    who = actor.who(who, default=DEFAULT_WHO)
     p = Path(share) / C.STOP
     p.write_text(f"{C.now()} {who} {platform.node()}\n", encoding="utf-8")
     return p
@@ -417,9 +421,11 @@ def watch_state(share):
     return w
 
 
-def cancel(job_id, share, who="pujan", reason=None):
+def cancel(job_id, share, who=None, reason=None):
     """Ask the runner to stop a queued or running job: writes q/<job>/CANCEL (a new file; nothing is deleted).
-    A running job is stopped within ~10 s (its partial run is kept); a queued one is never started."""
+    A running job is stopped within ~10 s (its partial run is kept); a queued one is never started.
+    who: actor.who() (flag > $CRYOEV_FOR > pujan); the CANCEL file is not stamped with via."""
+    who = actor.who(who, default=DEFAULT_WHO)
     qd = Path(share) / C.Q / job_id
     if not (qd / C.JOB_FILE).is_file():
         raise SyncError(f"{job_id} is not in {qd.parent}")
@@ -554,6 +560,8 @@ def predict_pulled(job_id, done, target, reason):
 
 
 def registry_cmd(*args):
+    """registry.py as a child process. It inherits this process's env, so it reads $CRYOEV_VIA itself and stamps
+    `via` once (nothing here passes it); the person always goes as an explicit --who."""
     r = subprocess.run([sys.executable, str(REGISTRY_PY), *args], cwd=REPO, capture_output=True, text=True)
     print((r.stdout + r.stderr).strip())
     if r.returncode:
@@ -561,9 +569,11 @@ def registry_cmd(*args):
     return r.stdout
 
 
-def pull(share, who="pujan", copier="auto", all_weights=False):
+def pull(share, who=None, copier="auto", all_weights=False):
     """-> list of {job, status, copied, skipped, not_pulled}. Raises SyncError after logging what succeeded.
-    weights/epoch*.pt stay on the share unless all_weights; not_pulled = {files, bytes, paths} (also in the ledger)."""
+    weights/epoch*.pt stay on the share unless all_weights; not_pulled = {files, bytes, paths} (also in the ledger).
+    who: the set-status person, actor.who() (flag > $CRYOEV_FOR > pujan)."""
+    who = actor.who(who, default=DEFAULT_WHO)
     share = Path(share)
     dd = share / C.D
     led_path = ledger_path()
@@ -728,12 +738,13 @@ def retry(job_id, share, force=False):
 
 
 # ---------------------------------------------------------------- local (the laptop trains its own job)
-def local(job_id, bundle, queue=LOCAL_QUEUE, allow_big=False, who="pujan", runner_argv=None, max_hours=None,
+def local(job_id, bundle, queue=LOCAL_QUEUE, allow_big=False, who=None, runner_argv=None, max_hours=None,
           all_weights=False):
     """push to a local queue folder, run jobs/run_job.py on it for this job, pull. -> pull() output ([] when
     the runner refused to start). The same code paths as the desktop; only the folder is local."""
     from run_job import is_network_path
     queue = Path(queue)
+    who = actor.who(who, default=DEFAULT_WHO)            # resolved before anything runs: a bad $CRYOEV_FOR fails here
     if not max_hours:
         raise SyncError("local needs --max-hours (the runner stops the trainer then; the partial run is kept)")
     if is_network_path(queue):
@@ -761,7 +772,8 @@ def main(argv=None):
     lp.add_argument("--queue", type=Path, default=LOCAL_QUEUE, help=f"local queue folder (default {LOCAL_QUEUE})")
     lp.add_argument("--allow-big", action="store_true", help="y8m/l/x or imgsz > 640 on a small GPU (needs --max-hours)")
     lp.add_argument("--max-hours", type=float, help="the runner stops the trainer after this many hours")
-    lp.add_argument("--who", default="pujan", help="people.json id for the set-status lines")
+    lp.add_argument("--who", default=None, help="people.json id for the set-status lines (default: $CRYOEV_FOR, "
+                    "else pujan)")
     lp.add_argument("--all-weights", action="store_true", help="also copy weights/epoch*.pt when pulling")
     pp = sub.add_parser("push-predict", help=f"queue a prediction set for the desktop (needs {C.PREDICT_ENV}=1)")
     pp.add_argument("--ps", required=True, help="prediction set id or folder")
@@ -776,7 +788,7 @@ def main(argv=None):
             p.add_argument("job_id")
         if name == "cancel":
             p.add_argument("--reason", help="why (shown on the Live tab and in the registry)")
-            p.add_argument("--who", default="pujan")
+            p.add_argument("--who", default=None, help="default: $CRYOEV_FOR, else pujan")
         p.add_argument("--share", required=True, type=Path, help="queue root on the desktop, e.g. \\\\desktop\\cj")
         if name in ("push", "push-pack", "pull"):
             p.add_argument("--copier", choices=["auto", "robocopy", "shutil"], default="auto")
@@ -787,7 +799,8 @@ def main(argv=None):
                            "(default on the watcher: 48)")
             p.add_argument("--hold", action="store_true", help="queue without READY; `release` starts it")
         if name in ("pull", "stop"):
-            p.add_argument("--who", default="pujan", help="people.json id for the set-status lines")
+            p.add_argument("--who", default=None, help="people.json id for the set-status lines (default: "
+                           "$CRYOEV_FOR, else pujan)")
         if name == "pull":
             p.add_argument("--all-weights", action="store_true", help="also copy runs/<run>/weights/epoch*.pt "
                            "(~209 MB each; by default they stay on the share)")
@@ -822,7 +835,7 @@ def main(argv=None):
             status(a.share)
         else:
             retry(a.job_id, a.share, a.force)
-    except (SyncError, config.ConfigError, OSError) as e:
+    except (SyncError, config.ConfigError, OSError, actor.ActorError) as e:
         print(f"[{a.cmd}] {e}", file=sys.stderr)
         return 2
     return 0

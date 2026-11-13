@@ -20,6 +20,10 @@ the ones recorded at start. Anything else (a hand-started server on the port, a 
 unrelated program) is never touched. Children of our process (e.g. the real python behind a venv launcher)
 are stopped with it; a child is only counted if it was created after our process.
 
+Child environment: this process's env plus PYTHONUNBUFFERED=1 and the entry's `env`, WITHOUT the agent identity
+variables CRYOEV_VIA / CRYOEV_FOR (registry/actor.py; round 9). A service started or restarted from an agent session
+must never credit lab members' actions to the agent; they are dropped even when an entry's `env` sets them.
+
 Exit codes: 0 ok; 1 a service failed to start/stop or its port is busy (not ours); 2 bad config or usage.
 """
 import argparse
@@ -37,6 +41,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from data_utils.oslock import acquire_lock  # noqa: E402
+from registry import actor  # noqa: E402
 
 HOME_DIR = Path.home() / ".cryoev"
 DEFAULT_CONFIG = HOME_DIR / "services.json"
@@ -476,6 +481,13 @@ def log_tail(log: Path, n: int = 8) -> str:
     return "\n".join("    | " + ln for ln in lines)
 
 
+def child_env(svc: Service, environ=None) -> dict:
+    """The env a service starts with: ours + PYTHONUNBUFFERED + the entry's env, minus CRYOEV_VIA / CRYOEV_FOR."""
+    env = dict(os.environ if environ is None else environ, PYTHONUNBUFFERED="1", **svc.env)
+    actor.strip_env(env)
+    return env
+
+
 def spawn(svc: Service) -> subprocess.Popen:
     rotate_log(svc.log)
     logf = open(svc.log, "ab")
@@ -483,7 +495,7 @@ def spawn(svc: Service) -> subprocess.Popen:
         logf.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} services.py start {svc.name}: "
                    f"{cmdline_of(svc.argv).replace(chr(0), ' ')}\n".encode("utf-8"))
         logf.flush()
-        env = dict(os.environ, PYTHONUNBUFFERED="1", **svc.env)
+        env = child_env(svc)
         kw = dict(cwd=str(svc.cwd), env=env, stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT)
         if os.name != "nt":
             return subprocess.Popen(svc.argv, start_new_session=True, **kw)
