@@ -68,11 +68,11 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
-import ids
-import registry
-from validate import (EXCLUDED_SESSIONS, REPO, Scan, find_sibling, lv_provenance, read_csv, read_datajs, read_json,
-                      read_jsonl, sha256_file)
-from validate import config  # data_utils.config (validate puts the repo on sys.path)
+from registry import ids
+from registry import store as registry
+from registry.validate import (EXCLUDED_SESSIONS, REPO, Scan, find_sibling, lv_provenance, read_csv, read_datajs,
+                               read_json, read_jsonl, sha256_file)
+from registry.validate import config  # data_utils.config
 
 PROCESSING = config.processing_root()   # optional: None when not found
 GENERIC = re.compile(r"^(blind|label|labeling)_\d+_[A-Za-z0-9]+$")

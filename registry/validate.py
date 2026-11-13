@@ -24,16 +24,20 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
-import ids  # noqa: E402
-from schema_check import check_record, load_schemas  # noqa: E402
+if __name__ == "__main__":     # run by path: registry/ off sys.path (it would shadow the package), the repo on it
+    import os as _os
+    _here = _os.path.dirname(_os.path.abspath(__file__))
+    sys.path[:] = [p for p in sys.path if _os.path.normcase(_os.path.abspath(p or ".")) != _os.path.normcase(_here)]
+    sys.path.insert(0, _os.path.dirname(_here))
 
-REPO = HERE.parent
-sys.path.insert(0, str(REPO))
 from data_utils import config  # noqa: E402
 from data_utils.config import find_sibling  # noqa: E402,F401  (re-exported for importers, registry, tests)
 from data_utils.path_guard import protected_problem  # noqa: E402
+from registry import ids  # noqa: E402
+from registry.schema_check import check_record, load_schemas  # noqa: E402
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent
 
 PROTECTED = list(config.protected_roots())  # processing datasets, Box
 EXCLUDED_SESSIONS = {"20261012"}

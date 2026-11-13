@@ -20,9 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import jobtest as T  # noqa: E402
 from jobtest import C  # noqa: E402
 
-sys.path.insert(0, str(T.REPO / "registry"))
 import predict_set as PS  # noqa: E402
-import registry  # noqa: E402
+from registry import store as registry  # noqa: E402
 
 GOLDEN = T.REPO / "tests" / "fixtures" / "cj_golden" / "predict" / "ps_20261105_abc123"
 MODEL = "v5_evnonev_y8m_20261029"

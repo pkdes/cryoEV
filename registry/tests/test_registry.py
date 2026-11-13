@@ -8,9 +8,9 @@ from pathlib import Path
 from unittest import mock
 
 REG = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REG))
-import importers  # noqa: E402
-import registry  # noqa: E402
+sys.path.insert(0, str(REG.parent))                   # the repo root: `from registry import ...`
+from registry import importers  # noqa: E402
+from registry import store as registry  # noqa: E402
 
 
 def sample(entity):

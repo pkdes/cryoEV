@@ -20,10 +20,10 @@ from unittest import mock
 
 REG = Path(__file__).resolve().parents[1]
 REPO = REG.parent
-sys.path.insert(0, str(REG))
+sys.path.insert(0, str(REG.parent))                   # the repo root: `from registry import ...`
 sys.path.insert(0, str(REPO / "data_utils" / "tests"))
-import importers  # noqa: E402
-import registry  # noqa: E402
+from registry import importers  # noqa: E402
+from registry import store as registry  # noqa: E402
 from test_dataset_from_lv import D, make_export, make_pull, write_lv  # noqa: E402
 
 AGENT = {"CRYOEV_VIA": "claude", "CRYOEV_FOR": "pujan"}
@@ -153,7 +153,7 @@ class StatusVia(Base):
             return sum(importers.run(self.root, laptop=t, cache=t, processing=None, via=via)["appended"].values())
 
     def test_agent_status_survives_imports_and_a_person_clears_it(self):
-        import actor as A                                                     # registry/actor.py (REG on sys.path)
+        from registry import actor as A                                       # registry/actor.py (the shim)
         run = sample("run")
         registry.append(run, root=self.root)                                  # a person's line
         with mock.patch.dict(os.environ, AGENT):

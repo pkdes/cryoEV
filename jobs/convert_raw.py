@@ -1052,25 +1052,12 @@ def stitch_pass(core, cfg, montages, rows, dest: Path, tiles_dir: Path, log, nee
 # ---------------------------------------------------------------- acquisition.json
 def load_importers():
     """cryoEV's registry/importers.py (the same file_summary / session_acquisition / scope_model the registry uses),
-    loaded by path; sys.path restored afterwards."""
-    mod = sys.modules.get("importers")
-    path = Path(__file__).resolve().parent.parent / "registry" / "importers.py"
-    if mod is not None and Path(getattr(mod, "__file__", "") or ".").resolve() == path:
-        return mod
-    saved = list(sys.path)
-    sys.path.insert(0, str(path.parent))
-    try:
-        spec = importlib.util.spec_from_file_location("importers", path)
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules["importers"] = mod
-        try:
-            spec.loader.exec_module(mod)
-        except BaseException:
-            sys.modules.pop("importers", None)
-            raise
-    finally:
-        sys.path[:] = saved
-    return mod
+    imported as the package module registry.importers (the repo root goes on sys.path when this runs as a script)."""
+    repo = str(Path(__file__).resolve().parent.parent)
+    if repo not in sys.path:
+        sys.path.append(repo)
+    from registry import importers
+    return importers
 
 
 def _median(values, nd=4):

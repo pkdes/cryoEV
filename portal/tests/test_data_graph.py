@@ -34,8 +34,7 @@ from portal import auth as A  # noqa: E402
 from portal.modules import Ctx  # noqa: E402
 from portal.modules import data as D  # noqa: E402
 
-sys.path.insert(0, str(T.REPO / "registry"))
-import history_page as hp  # noqa: E402
+from registry import history_page as hp  # noqa: E402
 
 try:
     from playwright.sync_api import sync_playwright

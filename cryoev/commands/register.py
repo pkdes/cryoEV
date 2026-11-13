@@ -20,12 +20,12 @@ def add(sub):
 
 
 def _history():
-    return CM.load("cj_history_page", "registry/history_page.py")
+    from registry import history_page
+    return history_page
 
 
 def _importers():
-    CM.registry()                                     # puts registry/ on sys.path, as registry.py main does
-    import importers
+    from registry import importers
     return importers
 
 

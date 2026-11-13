@@ -16,8 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cjtest as T  # noqa: E402
 from portal import app as APP  # noqa: E402
 
-sys.path.insert(0, str(T.REPO / "registry"))
-import history_page as hp  # noqa: E402
+from registry import history_page as hp  # noqa: E402
 
 
 class History(unittest.TestCase):

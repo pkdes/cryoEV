@@ -44,8 +44,7 @@ from portal.modules import predict as P  # noqa: E402
 from portal.predict_parts import raw as RAW  # noqa: E402
 
 REPO = T.REPO
-sys.path.insert(0, str(REPO / "registry"))
-import importers  # noqa: E402
+from registry import importers  # noqa: E402
 
 XSS = '<img src=x onerror=alert(1)>'
 NOTE_XSS = '<script>alert("n")</script> & notes'

@@ -54,10 +54,9 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / "registry"))
-import actor  # noqa: E402  (registry/actor.py: who + via)
 import common as C  # noqa: E402
 import dataset_cache  # noqa: E402
+from data_utils import actor  # noqa: E402  (who + via)
 from data_utils import config  # noqa: E402
 from data_utils.path_guard import protected_problem  # noqa: E402
 
@@ -75,7 +74,7 @@ class SyncError(RuntimeError):
 
 def registry_job(job_id, root=None):
     """The job's current registry record (read only), or None. root: the registry folder (default the configured one)."""
-    import registry
+    from registry import store as registry
     return registry.current("job", Path(root) if root else config.registry_root()).get(job_id)
 
 
@@ -102,7 +101,7 @@ def push(job_id, bundle, share, copier="auto", check_registry=True, check_origin
          job_type="train", extra=None):
     """Queue a bundle. job_type / extra are for push_predict (a predict job's job.json gets type predict and
     extra = {ps, model, n_images}); a train job's job.json is the same as ever."""
-    import ids
+    from registry import ids
     bundle, share = Path(bundle), Path(share)
     if not share.is_dir():                         # never create a queue root: a typo would make a stray folder
         raise SyncError(f"share {share} not found: a desktop share is \\\\host\\cj (two leading backslashes), "
@@ -241,7 +240,7 @@ def queue_train(job_id, dataset_dir, exp_args, share, max_hours, hold=False, che
     no dataset.yaml, an unknown run_experiments flag, ...); the bundle's dataset_sha256 differing from expect_sha256;
     the commit not on origin/main (check_origin); the share's ds/<sha>/ holding another pack (push_pack).
     The checks that need no bundle run before it is made. -> q/<job> (READY written unless hold)."""
-    import ids
+    from registry import ids
     from training import make_job_bundle as MB
     share = Path(share)
     if not share.is_dir():                         # as push: never create a queue root
@@ -305,9 +304,9 @@ def push_predict(ps, share, job_id=None, copier="auto", check_origin=True, max_h
 
 def _push_predict_locked(ps_dir, reg, share, job_id, copier, check_origin, max_hours, hold):
     import tempfile
-    import ids
+    from registry import ids
     import predict_set as PS
-    import registry
+    from registry import store as registry
     me = actor.current(None, default=None)             # the new job's who + via; a bad env fails before the push
     try:
         req, st, rows = PS.read_request(ps_dir), PS.read_status(ps_dir), PS.read_images(ps_dir)
@@ -425,8 +424,8 @@ def push_eval(share, bundle=None, weights=None, dataset=None, job_id=None, model
 def _push_eval_locked(share, bundle, weights, dataset, job_id, model, copier, check_origin, max_hours, hold, out,
                       allow_dirty):
     import tempfile
-    import ids
-    import registry
+    from registry import ids
+    from registry import store as registry
     me = actor.current(None, default=None)             # the new job's who + via; a bad env fails before the push
     reg = config.registry_root()
     if bundle is None:
@@ -865,7 +864,7 @@ def status(share):
 def retry(job_id, share, force=False):
     """Move d/<job> aside so the runner picks the job again. Refuses a bad id (e.g. a live .tmp_ folder)
     and a done job that was never pulled (its run would never be imported) unless force."""
-    import ids
+    from registry import ids
     share = Path(share)
     if not ids.is_id("job", job_id):
         raise SyncError(f"{job_id!r} is not a job id")

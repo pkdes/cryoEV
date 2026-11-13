@@ -16,14 +16,14 @@ import unittest
 from pathlib import Path
 
 REG = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REG))
-import registry  # noqa: E402
+sys.path.insert(0, str(REG.parent))                   # the repo root: `from registry import ...`
+from registry import store as registry  # noqa: E402
 
 WORKER = r"""
 import json, sys, time
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-import registry
+from registry import store as registry
 root, mode, barrier, me, rec_json = Path(sys.argv[2]), sys.argv[3], Path(sys.argv[4]), sys.argv[5], sys.argv[6]
 
 def wait_barrier():
@@ -76,7 +76,7 @@ class TestRace(unittest.TestCase):
         barrier.mkdir()
         procs = []
         for i in range(2):
-            args = [sys.executable, "-B", "-c", WORKER, str(REG), str(self.root), mode, str(barrier), str(i),
+            args = [sys.executable, "-B", "-c", WORKER, str(REG.parent), str(self.root), mode, str(barrier), str(i),
                     json.dumps(rec or {})] + ([str(lists[i])] if lists[i] else [])
             procs.append(subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                           env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}))

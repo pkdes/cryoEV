@@ -77,10 +77,10 @@ class ConfigTests(unittest.TestCase):
         """A copy of data_utils/ and registry/ with no data folders above it: imports work, use raises."""
         for d in ("data_utils", "registry"):
             shutil.copytree(REPO / d, self.tmp / d, ignore=shutil.ignore_patterns("tests", "__pycache__", "samples"))
-        code = ("import sys; sys.path.insert(0, 'registry'); "
-                "import data_utils.config, data_utils.path_guard, history_page, importers, validate, registry; "
+        code = ("import data_utils.config, data_utils.path_guard; "
+                "from registry import history_page, importers, validate, store; "
                 "assert importers.PROCESSING is None\n"
-                "try:\n    registry.default_root()\nexcept data_utils.config.ConfigError as e:\n    print('RAISED', e)")
+                "try:\n    store.default_root()\nexcept data_utils.config.ConfigError as e:\n    print('RAISED', e)")
         r = subprocess.run([sys.executable, "-c", code], cwd=self.tmp, env=clean_env(),
                            capture_output=True, text=True, timeout=120)
         self.assertEqual(r.returncode, 0, r.stderr)

@@ -10,8 +10,8 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 REG = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REG))
-import validate  # noqa: E402
+sys.path.insert(0, str(REG.parent))                   # the repo root: `from registry import ...`
+from registry import validate  # noqa: E402
 
 LIPO = "grid6_1_r0c0_t00_jpg"          # stands in for an excluded-session image; must never be named in output
 PULL = "roboflow_pull_20990101_0000"

@@ -11,9 +11,9 @@ import unittest
 from pathlib import Path
 
 REG = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REG))
-import importers  # noqa: E402
-import registry  # noqa: E402
+sys.path.insert(0, str(REG.parent))                   # the repo root: `from registry import ...`
+from registry import importers  # noqa: E402
+from registry import store as registry  # noqa: E402
 
 OLD = "2026-10-01_120000_y8n_1440_24b_300ep_Run_3"
 NEW = "2026-11-02_120000_y8m_640_8b_50ep_Run_4"

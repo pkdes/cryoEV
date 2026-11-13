@@ -36,8 +36,7 @@ REPO = HERE.parent.parent
 sys.path.insert(0, str(REPO))
 from annotation import multi_review_server as mrs  # noqa: E402
 from annotation import prediction_package as pp  # noqa: E402
-sys.path.insert(0, str(REPO / "registry"))
-from schema_check import check_record, load_schemas  # noqa: E402
+from registry.schema_check import check_record, load_schemas  # noqa: E402
 
 GOLDEN = REPO / "tests" / "fixtures" / "cj_golden"
 PS_ID = "ps_20261105_abc123"

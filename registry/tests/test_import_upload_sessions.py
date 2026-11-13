@@ -20,9 +20,9 @@ from pathlib import Path
 from unittest import mock
 
 REG = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REG))
-import importers  # noqa: E402
-import registry  # noqa: E402
+sys.path.insert(0, str(REG.parent))                   # the repo root: `from registry import ...`
+from registry import importers  # noqa: E402
+from registry import store as registry  # noqa: E402
 
 SID = "20991105"
 CONV = {"id": f"{SID}_a1b2c3", "uploaded_by": "adv", "grids": [1, 2], "sample_labels": {"1": "Up A", "2": "Up B"},

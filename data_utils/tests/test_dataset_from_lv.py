@@ -296,8 +296,7 @@ class TestReporting(Fixture):
         self.assertEqual(rec["counts_trained"], {"train": 3, "valid": 1, "test": 1})
 
     def test_list_text_matches_importer(self):
-        sys.path.insert(0, str(REPO / "registry"))
-        importers = D._load("importers", REPO / "registry" / "importers.py")
+        from registry import importers
         pairs = {("b", "test"), ("a", "train"), ("c", "valid"), ("z", "train")}
         self.assertEqual(D.list_text(pairs), importers.list_text(pairs))
 
@@ -387,7 +386,7 @@ class TestRegistry(Fixture):
         reg_root = self.root / "registry"
         prov, _ = build(self.base_lv, self.export, "lv_ds_fixture", self.root / "out", "ev_nonev")
         line = D.register(prov, self.root / "out" / "lv_ds_fixture", reg_root)
-        reg = D._load("registry", REPO / "registry" / "registry.py")
+        from registry import store as reg
         cur = reg.current("dataset", reg_root)["lv_ds_fixture"]
         self.assertEqual(cur["source"], {"kind": "label_version", "id": "lv_20990101_0000",
                                          "path": str(self.base_lv)})

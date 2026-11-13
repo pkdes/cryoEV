@@ -6,9 +6,9 @@ import unittest
 from pathlib import Path
 
 REG = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REG))
-import ids  # noqa: E402
-from schema_check import UnsupportedKeyword, check_record, errors, load_schemas  # noqa: E402
+sys.path.insert(0, str(REG.parent))                   # the repo root: `from registry import ...`
+from registry import ids  # noqa: E402
+from registry.schema_check import UnsupportedKeyword, check_record, errors, load_schemas  # noqa: E402
 
 ENTITIES = ["image", "session", "grid", "roboflow_image", "pull", "roboflow_export", "label_version",
             "review_package", "inference_check", "dataset", "job_bundle", "run", "model", "job",

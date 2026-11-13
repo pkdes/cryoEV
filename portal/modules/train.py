@@ -181,13 +181,11 @@ def is_admin(user) -> bool:
 
 # ---------------------------------------------------------------- registry (read; the one write is new_job)
 def registry_module():
-    """registry/registry.py, loaded once by path (registry/ is not a package; it puts its own folder on sys.path)."""
+    """registry.store (the one registry module object of the process)."""
     global _reg_mod
     if _reg_mod is None:
-        spec = importlib.util.spec_from_file_location("cj_train_registry", REPO / "registry" / "registry.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _reg_mod = mod
+        from registry import store
+        _reg_mod = store
     return _reg_mod
 
 

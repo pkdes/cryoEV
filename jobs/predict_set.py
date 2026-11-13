@@ -35,8 +35,8 @@ name), its nm/px column nm_per_px.
 Python API (the portal): create(...) -> the set's folder. It reads, md5s and decodes every tile (seconds per 100 tiles; minutes for 1000):
 call it from a worker thread, never on the event loop. find(ps) -> folder; read_status / write_status (atomic,
 read-modify-write under a lock); update_record(ps_id, **fields) appends the registry line after a status change.
-Imported as jobs.predict_set it changes no sys.path and loads registry/registry.py by path (as cj_registry, like
-portal/app.py), so no portal module is shadowed.
+Imported as jobs.predict_set it changes no sys.path and uses the registry package (`from registry import store`,
+the one registry module of the process), so no portal module is shadowed.
 """
 from __future__ import annotations
 
@@ -109,15 +109,9 @@ _THREAD_LOCKS_LOCK = threading.Lock()
 
 
 def registry_module():
-    """registry/registry.py loaded by path as `cj_registry` (once per process, as portal/app.py names it)."""
-    with _REG_LOCK:
-        mod = sys.modules.get("cj_registry")
-        if mod is None:
-            spec = importlib.util.spec_from_file_location("cj_registry", REPO / "registry" / "registry.py")
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            sys.modules["cj_registry"] = mod
-        return mod
+    """registry.store (the one registry module object of the process)."""
+    from registry import store
+    return store
 
 
 @contextlib.contextmanager

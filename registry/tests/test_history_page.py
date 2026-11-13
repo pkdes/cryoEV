@@ -11,8 +11,8 @@ import unittest
 from pathlib import Path
 
 REG = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REG))
-import history_page as hp  # noqa: E402
+sys.path.insert(0, str(REG.parent))                   # the repo root: `from registry import ...`
+from registry import history_page as hp  # noqa: E402
 
 try:
     from playwright.sync_api import sync_playwright

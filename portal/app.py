@@ -368,13 +368,11 @@ def external_href(mod: dict, host: str | None) -> str | None:
 
 def registry_review_package(registry: Path | None, port: int = REVIEW_PORT) -> Path | None:
     """The real review package: the newest open revise job on `port` in the registry -> its review_package path.
-    Read through registry/registry.py's current(); None when anything is missing."""
+    Read through registry.store's current(); None when anything is missing."""
     if registry is None or not Path(registry).is_dir():
         return None
     try:
-        spec = importlib.util.spec_from_file_location("cj_registry", REPO / "registry" / "registry.py")
-        reg = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(reg)
+        from registry import store as reg
         jobs = reg.current("job", Path(registry))
         pkgs = reg.current("review_package", Path(registry))
     except Exception as e:          # an unreadable registry must not stop the portal

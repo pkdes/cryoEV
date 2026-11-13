@@ -1,7 +1,7 @@
 """
 Shim: the attribution helpers moved to data_utils/actor.py (round 10, TODO #61) so they import as a normal package
-everywhere. This file keeps the old ways working: `import actor` with registry/ on sys.path (registry.py, jobs/sync.py),
-`from registry import actor`, and loads by file path. Every name of the real module is re-exported, private ones
+everywhere. This file keeps the old ways working: `from registry import actor` and loads by file path (round 11: nothing
+puts registry/ on sys.path any more, so the bare `import actor` is gone; new code imports data_utils.actor). Every name of the real module is re-exported, private ones
 (e.g. _people) included; registry/tests/test_actor.py checks the two expose the same names.
 """
 import sys as _sys

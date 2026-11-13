@@ -24,7 +24,7 @@ from test_predict_set import FAKE_PRED, GOLDEN, GOLDEN_PRED, MODEL, PredictRoots
 
 import dataset_cache  # noqa: E402
 import monitor as M  # noqa: E402
-import registry  # noqa: E402
+from registry import store as registry  # noqa: E402
 import sync  # noqa: E402
 
 TRAIN = "job_20261102_t1"

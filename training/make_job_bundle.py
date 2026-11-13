@@ -342,8 +342,7 @@ def resolve_dataset(ref, registry_root=None) -> tuple:
         return p.resolve(), p.resolve().name
     rec = {}
     try:
-        sys.path.insert(0, str(REPO / "registry"))
-        import registry
+        from registry import store as registry
         rec = registry.current("dataset", Path(registry_root) if registry_root else config.registry_root()).get(
             str(ref)) or {}
     except Exception as e:                              # no registry here: the CryoAI folder below still works

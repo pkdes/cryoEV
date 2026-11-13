@@ -73,7 +73,8 @@ class BuildError(RuntimeError):
 
 
 def _load(name, path):
-    """A registry/ or jobs/ module by file (those folders aren't packages; their own imports use sys.path)."""
+    """A jobs/ module by file (jobs/ modules import each other by bare name, so their folder goes on sys.path).
+    registry modules are imported as the package (`from registry import ...`), never through this."""
     m = sys.modules.get(name)
     if m is not None and getattr(m, "__file__", None) and Path(m.__file__).resolve() == Path(path).resolve():
         return m
@@ -85,7 +86,7 @@ def _load(name, path):
     return m
 
 
-ids = _load("ids", REG_DIR / "ids.py")
+from registry import ids  # noqa: E402
 
 
 def sha256_bytes(b):
@@ -509,7 +510,8 @@ def registry_lines(record):
 
 
 def _reg():
-    return _load("registry", REG_DIR / "registry.py")
+    from registry import store
+    return store
 
 
 def check_id_free(dataset_id, root=None):

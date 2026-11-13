@@ -13,10 +13,10 @@ from pathlib import Path
 
 REG = Path(__file__).resolve().parents[1]
 REPO = REG.parent
-sys.path.insert(0, str(REG))
+sys.path.insert(0, str(REG.parent))                   # the repo root: `from registry import ...`
 sys.path.insert(0, str(REPO / "data_utils" / "tests"))
-import importers  # noqa: E402
-import registry  # noqa: E402
+from registry import importers  # noqa: E402
+from registry import store as registry  # noqa: E402
 from test_dataset_from_lv import make_pull, write_lv  # noqa: E402
 
 A, B = "lv_20990101_0000", "lv_20990102_0000"

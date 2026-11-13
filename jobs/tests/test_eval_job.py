@@ -23,7 +23,7 @@ import jobtest as T  # noqa: E402
 from jobtest import C, REPO, run_job  # noqa: E402
 
 import sync  # noqa: E402  (puts registry/ on sys.path)
-import registry  # noqa: E402
+from registry import store as registry  # noqa: E402
 from training import make_job_bundle as MB  # noqa: E402
 
 FAKE_VAL = Path(__file__).resolve().parent / "fake_validate.py"

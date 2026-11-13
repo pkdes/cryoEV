@@ -48,7 +48,8 @@ class Refused(CliError):
 
 # ---------------------------------------------------------------- the repo's modules, loaded once
 def load(name: str, rel: str):
-    """A repo file loaded by its path under a fixed module name (registry/ and jobs/ are not packages)."""
+    """A repo file loaded by its path under a fixed module name (jobs/ and tools/ are not packages; registry is:
+    `from registry import ...`)."""
     mod = sys.modules.get(name)
     if mod is None:
         spec = importlib.util.spec_from_file_location(name, REPO / rel)
@@ -63,8 +64,9 @@ def load(name: str, rel: str):
 
 
 def registry():
-    """registry/registry.py as `cj_registry` (the name jobs/predict_set.py and the portal use)."""
-    return load("cj_registry", "registry/registry.py")
+    """registry.store (the one registry module object; jobs/predict_set.py and the portal use the same)."""
+    from registry import store
+    return store
 
 
 def actor():

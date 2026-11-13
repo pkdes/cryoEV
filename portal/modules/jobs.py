@@ -174,13 +174,11 @@ _reg_mod = None
 
 
 def _registry_module():
-    """registry/registry.py, loaded once by path (as portal/app.py does; registry/ is not a package)."""
+    """registry.store (the one registry module object of the process)."""
     global _reg_mod
     if _reg_mod is None:
-        spec = importlib.util.spec_from_file_location("cj_jobs_registry", REPO / "registry" / "registry.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _reg_mod = mod
+        from registry import store
+        _reg_mod = store
     return _reg_mod
 
 
@@ -1215,10 +1213,8 @@ def valid_job_id(job) -> bool:
     """registry/ids.py is_id("job", ...): job_<yyyymmdd>_<name>, so no slash, dot or '..'."""
     global _ids_mod
     if _ids_mod is None:
-        spec = importlib.util.spec_from_file_location("cj_jobs_ids", REPO / "registry" / "ids.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _ids_mod = mod
+        from registry import ids
+        _ids_mod = ids
     return isinstance(job, str) and len(job) <= MAX_JOB_ID and _ids_mod.is_id("job", job)
 
 
