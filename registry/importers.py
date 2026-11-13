@@ -984,11 +984,12 @@ class Importer:
         tmp.replace(c.path)
         return True
 
-    def write(self, dry_run=False):
+    def write(self, dry_run=False, production=True):
         """_write() holding UPLOAD_LOCK (not on a dry run): the portal's upload-session lines are read and carried
-        forward with nothing appended in between."""
+        forward with nothing appended in between. production=False skips the PRODUCTION restatement (round 11:
+        import_label_versions records label versions and nothing else)."""
         if dry_run:
-            return self._write(dry_run)
+            return self._write(dry_run, production)
         registry._guard(self.root)
         self.root.mkdir(parents=True, exist_ok=True)
         lock = registry.acquire_lock(self.root / UPLOAD_LOCK, UPLOAD_LOCK_WAIT)
@@ -996,11 +997,11 @@ class Importer:
             raise registry.RegistryError(f"registry busy: {self.root / UPLOAD_LOCK} held for {UPLOAD_LOCK_WAIT:.0f} s "
                                          "(the portal is registering an upload session)")
         try:
-            return self._write(dry_run)
+            return self._write(dry_run, production)
         finally:
             lock.close()
 
-    def _write(self, dry_run=False):
+    def _write(self, dry_run=False, production=True):
         """Append new / changed records. A record's image list is written with its line under the registry lock
         (nothing for a refused line); a list whose record is unchanged is repaired afterwards if missing or changed."""
         lists_written, repair = 0, set()
@@ -1062,7 +1063,7 @@ class Importer:
             appended["(image list files)"] += lists_written
         prod_id, who = PRODUCTION
         cur = registry.current(root=self.root)
-        if not dry_run and self._restate_production(prod_id, who, cur):
+        if production and not dry_run and self._restate_production(prod_id, who, cur):
             # the user's recorded decision, restated: never via (an agent never promotes; registry._check)
             registry.set_status(prod_id, "production", who, note="user decision 2026-10-30", root=self.root,
                                 via=None)
@@ -1096,6 +1097,20 @@ def run(root, dry_run=False, **kw):
     by = Counter((v["schema"].split("/")[0], v.get("status") or "-") for v in cur.values())
     return {"appended": appended, "refused": imp.refused, "examples": dict(imp.examples),
             "excluded": imp.excluded, "current": by, "dry_run": dry_run}
+
+
+def import_label_versions(root, via=None, laptop=None, only=None):
+    """Round 11 (#67, the portal's Apply button): record label versions and nothing else pending. Importer ->
+    label_versions() -> write(production=False): no tile scan, no other entity, no PRODUCTION restatement. `laptop`:
+    the folder holding labels/ (default: config). `only`: the label-version ids to record (None = every lv_* folder),
+    so other unregistered work stays for the next full import. -> {appended, refused, examples}."""
+    imp = Importer(root, laptop=laptop, processing=None, via=via)
+    imp.label_versions()
+    if only is not None:
+        keep = set(only)
+        imp.out = [(e, r) for e, r in imp.out if r["id"] in keep]
+    appended = imp.write(production=False)
+    return {"appended": appended, "refused": imp.refused, "examples": dict(imp.examples)}
 
 
 def print_result(res):
