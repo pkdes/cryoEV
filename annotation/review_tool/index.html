@@ -1674,6 +1674,7 @@ function openTri() {
   triRender();
 }
 function closeTri() {
+  if (tri.busy) return;  // the card is flying off (#19): its decision lands first; Editor / Esc after that
   $("tri").hidden = true; try { localStorage.setItem("cryoev-review:mode", "editor"); } catch (e) {}
   document.title = PKG_TITLE;
   const c = tri.queue[tri.pos];
@@ -2093,6 +2094,7 @@ function flyOff(dx, dy, then) {
   card.style.transform = `translate(${dx}px, ${dy}px) rotate(${dx / 25}deg)`;
   setTimeout(() => {
     cardReset(false); tri.busy = false;
+    if ($("tri").hidden) return;  // the cards were left meanwhile (e.g. browser Back): no decision off screen
     const now = tri.queue[tri.pos];
     if ((now ? caseId(now) : null) === id) then(); else triRender();
   }, 240);

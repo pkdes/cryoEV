@@ -133,6 +133,25 @@ class Back19Tests(CardBase):
         self.check_double(page, lambda: page.evaluate("() => { const b = document.getElementById('aYes'); b.click(); "
                                                       "setTimeout(() => b.click(), 60); }"))
 
+    def test_editor_exit_during_fly_off(self):
+        """Editor (triExit) during the fly-off is ignored: the card's own decision lands, the cards stay open. And if
+        the cards are hidden meanwhile by another route, the decision never runs off screen."""
+        page = self.open("&who=r19e&mode=cards", setup=PRED, **DESK)
+        self.wait_card(page)
+        first, before = self.here(page), set(self.decided_keys(page))
+        page.evaluate("() => { document.getElementById('aNope').click(); "
+                      "setTimeout(() => document.getElementById('triExit').click(), 60); }")
+        time.sleep(0.8)
+        self.synced(page)
+        self.assertTrue(page.locator("#tri").is_visible())
+        self.assertEqual([k for k in self.decided_keys(page) if k not in before], [first])
+        second, before = self.here(page), set(self.decided_keys(page))
+        page.evaluate("() => { document.getElementById('aNope').click(); "
+                      "setTimeout(() => { document.getElementById('tri').hidden = true; }, 60); }")
+        time.sleep(0.8)
+        self.synced(page)
+        self.assertEqual([k for k in self.decided_keys(page) if k not in before], [], second)
+
     def test_history_holds_case_ids(self):
         page = self.open("&who=r19h&mode=cards", setup=PRED, **DESK)
         self.wait_card(page)
