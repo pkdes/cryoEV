@@ -10,9 +10,9 @@ strip_environ() the same removal applied to os.environ itself (module level, for
 env_patch()     mock.patch.dict(os.environ, clean_env(...), clear=True), restored afterwards (with / enterContext).
 no_actor_env()  context manager that removes the actor variables from os.environ for its body (the gate strips them
                 for children; a test that checks the "no actor" default must not depend on the caller's shell).
-write_registry(root, {entity: [records]}, samples=False)
-                a fixture registry folder: <entity>.jsonl, one JSON line per record (samples=True starts from the
-                repo's registry/samples/*.jsonl).
+write_registry(root, records, samples=..., skip=())
+                a fixture registry folder: records as {entity: [records]} or a list (entity from `schema`);
+                samples=True starts from the repo's registry/samples/*.jsonl (required keyword).
 process_lock()  a cross-process lock on a name (a lock directory in the temp dir; stale-safe), for machine-wide
                 resources such as `subst` drive letters.
 wait_until()    poll a condition instead of sleeping a fixed time.
@@ -30,7 +30,6 @@ from pathlib import Path
 
 ACTOR_VARS = ("CRYOEV_VIA", "CRYOEV_FOR")
 SAMPLES = Path(__file__).resolve().parent.parent / "registry" / "samples"
-NOT_REGISTRY = {"label_change.jsonl"}          # samples/ rows with no id: not a registry entity file
 
 
 def free_port() -> int:
@@ -171,21 +170,36 @@ def process_lock(name: str, timeout: float = 120.0, stale_s: float = 300.0):
             d.rmdir()
 
 
-def write_registry(root, records=None, samples: bool = False) -> Path:
-    """A fixture registry folder (created if missing) -> root.
+def write_registry(root, records=None, *, samples: bool, skip=()) -> Path:
+    """A fixture registry folder at `root` (created if missing) -> root. `samples` is required at every call site.
 
-    records: {entity: [record, ...]}; each becomes root/<entity>.jsonl, one `json.dumps(record)` line per record
-    (written in text mode, as the copies this replaces did). Without samples each entity file is rewritten whole.
-    samples=True first copies the repo's registry/samples/*.jsonl byte for byte (label_change.jsonl left out), and
-    `records` are then appended after the sample lines of the same entity."""
+    records: {entity: [record, ...]}, or a list of records whose entity is taken from `schema` ("model/1" ->
+    model.jsonl); order is kept. samples=True: every registry/samples/<entity>.jsonl (minus the names in `skip`, e.g.
+    "label_change.jsonl", whose rows have no id) with that entity's records appended; an entity with no sample file
+    gets a file of its own. samples=False: each entity in `records` gets root/<entity>.jsonl rewritten whole.
+    Lines are `json.dumps(record, ensure_ascii=False)`, UTF-8, LF line ends (newline="\n" on every OS)."""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
-    if samples:
-        for f in sorted(SAMPLES.glob("*.jsonl")):
-            if f.name not in NOT_REGISTRY:
-                shutil.copyfile(f, root / f.name)
-    for entity, recs in (records or {}).items():
-        mode = "a" if samples and (root / f"{entity}.jsonl").exists() else "w"
-        with open(root / f"{entity}.jsonl", mode, encoding="utf-8") as fh:
-            fh.write("".join(json.dumps(r) + "\n" for r in recs))
+    if isinstance(records, dict):
+        extra = {e: list(r) for e, r in records.items()}
+    else:
+        extra = {}
+        for rec in records or []:
+            extra.setdefault(str(rec["schema"]).split("/", 1)[0], []).append(rec)
+
+    def write(path, lines):
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("".join(x + "\n" for x in lines))
+
+    done = set()
+    for f in sorted(SAMPLES.glob("*.jsonl")) if samples else []:
+        if f.name in skip:
+            continue
+        lines = f.read_text(encoding="utf-8").splitlines()
+        write(root / f.name, lines + [json.dumps(r, ensure_ascii=False) for r in extra.get(f.stem, [])])
+        done.add(f.stem)
+    for ent, recs in extra.items():
+        if ent not in done:
+            write(root / f"{ent}.jsonl", [json.dumps(r, ensure_ascii=False) for r in recs])
+    return root
     return root

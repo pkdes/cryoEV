@@ -41,7 +41,7 @@ class Platform(unittest.TestCase):
         for d in (self.reg, self.lap / "logs", self.lap / "predict", self.lap / "review", self.cai / "training outputs",
                   self.cai / "training images", t / "noproc", self.home, self.share / "q"):
             d.mkdir(parents=True, exist_ok=True)
-        TK.write_registry(self.reg, samples=True)                # the samples, label_change.jsonl left out
+        TK.write_registry(self.reg, samples=True, skip=("label_change.jsonl",))   # its rows have no id
         shutil.copytree(GOLDEN, self.lap / "predict" / PS_ID)
         self.feedback = self.lap / "logs" / "portal_feedback.jsonl"
         self.services = t / "services.json"

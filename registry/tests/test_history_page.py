@@ -264,7 +264,7 @@ class GraphLookup(unittest.TestCase):
                       {"schema": "image/1", "id": "img_b_png", "session": "20990101", "grid": None},
                       {"schema": "image/1", "id": "img_c_png", "session": "20990102", "grid": None}],
         }
-        TK.write_registry(reg, recs)
+        TK.write_registry(reg, recs, samples=False)
         cls.m = hp.build([reg], t / "out" / "history.html")
 
     @classmethod
@@ -499,7 +499,7 @@ class R9LanesAndAttribution(unittest.TestCase):
                      "via": "claude", "package": "pkg_audit", "outputs": [],
                      "inputs": [{"id": R9_EXP, "role": "base"}]}],
         }
-        TK.write_registry(reg, lines)
+        TK.write_registry(reg, lines, samples=False)
         cls.out = Path(cls.tmp.name) / "out" / "history.html"
         cls.m = hp.build([reg], cls.out)
         cls.nodes, cls.edges = graph_index(cls.m)

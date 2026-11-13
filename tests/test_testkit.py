@@ -36,19 +36,32 @@ class Env(unittest.TestCase):
 
 
 class WriteRegistry(unittest.TestCase):
-    def test_records_and_samples(self):
+    def test_dict_records_rewrite_without_samples(self):
         with tempfile.TemporaryDirectory() as t:
-            root = TK.write_registry(Path(t) / "reg", {"job": [{"id": "a"}, {"id": "b"}]})
+            root = TK.write_registry(Path(t) / "reg", {"job": [{"id": "a"}, {"id": "b"}]}, samples=False)
             self.assertEqual([json.loads(x) for x in (root / "job.jsonl").read_text(encoding="utf-8").splitlines()],
                              [{"id": "a"}, {"id": "b"}])
-            TK.write_registry(root, {"job": [{"id": "c"}]})                    # rewritten whole without samples
-            self.assertEqual((root / "job.jsonl").read_text(encoding="utf-8").splitlines(), ['{"id": "c"}'])
-            s = TK.write_registry(Path(t) / "s", {"job": [{"id": "z"}]}, samples=True)
-            names = {p.name for p in s.glob("*.jsonl")}
-            self.assertEqual(names, {p.name for p in TK.SAMPLES.glob("*.jsonl")} - TK.NOT_REGISTRY)
-            sample_job = (TK.SAMPLES / "job.jsonl").read_bytes()
-            self.assertTrue((s / "job.jsonl").read_bytes().startswith(sample_job))
-            self.assertEqual((s / "job.jsonl").read_text(encoding="utf-8").splitlines()[-1], '{"id": "z"}')
+            TK.write_registry(root, {"job": [{"id": "c"}]}, samples=False)        # rewritten whole
+            self.assertEqual((root / "job.jsonl").read_bytes(), b'{"id": "c"}' + bytes([10]))   # LF only
+            TK.write_registry(root, {"job": [{"id": "é"}]}, samples=False)        # ensure_ascii=False
+            self.assertEqual((root / "job.jsonl").read_text(encoding="utf-8"), '{"id": "é"}' + chr(10))
+
+    def test_list_records_with_samples_and_skip(self):
+        with tempfile.TemporaryDirectory() as t:
+            recs = [{"schema": "job/1", "id": "z"}, {"schema": "newent/1", "id": "n"}]
+            s = TK.write_registry(Path(t) / "s", recs, samples=True)
+            self.assertEqual({p.name for p in s.glob("*.jsonl")},
+                             {p.name for p in TK.SAMPLES.glob("*.jsonl")} | {"newent.jsonl"})
+            sample = (TK.SAMPLES / "job.jsonl").read_text(encoding="utf-8").splitlines()
+            got = (s / "job.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(got, sample + ['{"schema": "job/1", "id": "z"}'])
+            self.assertNotIn(bytes([13]), (s / "job.jsonl").read_bytes())
+            k = TK.write_registry(Path(t) / "k", None, samples=True, skip=("label_change.jsonl",))
+            self.assertFalse((k / "label_change.jsonl").exists())
+
+    def test_samples_is_required(self):
+        with tempfile.TemporaryDirectory() as t, self.assertRaises(TypeError):
+            TK.write_registry(Path(t), {"job": []})
 
 
 if __name__ == "__main__":

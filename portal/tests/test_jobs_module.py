@@ -132,7 +132,7 @@ def registry_fixture() -> list:
 
 
 def write_registry(root: Path, recs):
-    T.TK.write_registry(root, {"job": recs})
+    T.TK.write_registry(root, {"job": recs}, samples=False)
     J._reg_cache.clear()                                # the module caches registry reads for 10 s
 
 

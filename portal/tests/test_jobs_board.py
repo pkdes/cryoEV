@@ -73,7 +73,7 @@ def registry(root: Path):
             job("job_20261111_c1_a", "C1 merged", "train", "desktop", "ready", who="tester"),
             job("job_20261111_c1_b", "C1 separate", "train", "desktop", "in_progress", who="tester"),
             job("job_20261111_c1_ok", "C1 recorded", "train", "desktop", "done", who="tester"),
-            job("job_20261111_train_np", "Train not pushed", "train", "desktop", "ready", who="tester")]})
+            job("job_20261111_train_np", "Train not pushed", "train", "desktop", "ready", who="tester")]}, samples=False)
 
 def live_c1():
     """A desktop queue whose three C1 jobs finished (two pulled) while the registry still says ready / running."""

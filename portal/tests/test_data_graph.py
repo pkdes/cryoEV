@@ -29,7 +29,9 @@ from pathlib import Path
 from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests"))
 import cjtest as T  # noqa: E402
+import cryoev_testkit as TK  # noqa: E402  (shared helpers: write_registry)
 from portal import auth as A  # noqa: E402
 from portal.modules import Ctx  # noqa: E402
 from portal.modules import data as D  # noqa: E402
@@ -41,7 +43,6 @@ try:
 except ImportError:  # pragma: no cover
     sync_playwright = None
 
-SAMPLES = T.REPO / "registry" / "samples"
 MODEL = "m_graph_20261106"
 LONELY = "rf_lonely_20261106"                       # visible export whose only child is the hidden set
 HID_PS = "ps_20261106_aaaa11"                       # another person's prediction set
@@ -123,16 +124,10 @@ def fixture_rows(with_hidden_ps=True) -> dict:
     return rows
 
 
-def write_registry(root: Path, with_hidden_ps=True):
-    root.mkdir(parents=True, exist_ok=True)
-    extra = fixture_rows(with_hidden_ps)
-    for f in SAMPLES.glob("*.jsonl"):
-        lines = f.read_text(encoding="utf-8").splitlines()
-        lines += [json.dumps(r) for r in extra.get(f.stem, [])]
-        (root / f.name).write_text("\n".join(lines) + "\n", encoding="utf-8")
-    for ent, recs in extra.items():
-        if not (root / f"{ent}.jsonl").exists():
-            (root / f"{ent}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
+def write_registry(root: Path, with_hidden_ps=True, more=()):
+    """The samples plus fixture_rows() (then `more`, appended after them), and a file only History reads."""
+    TK.write_registry(root, [r for recs in fixture_rows(with_hidden_ps).values() for r in recs] + list(more),
+                      samples=True)
     (root / "zz_extra.jsonl").write_text(json.dumps(       # History reads every *.jsonl; Data only <entity>.jsonl
         {"schema": "roboflow_export/1", "id": HISTORY_ONLY, "logged": "2026-11-06T09:00:00", "status": "imported"})
         + "\n", encoding="utf-8")

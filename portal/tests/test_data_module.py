@@ -25,9 +25,12 @@ from pathlib import Path
 from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests"))
 import cjtest as T  # noqa: E402
+import cryoev_testkit as TK  # noqa: E402  (shared helpers: write_registry)
 from portal import auth as A  # noqa: E402
 from portal.modules import data as D  # noqa: E402
+from portal.modules.data import lineage as DL  # noqa: E402  (the part that defines LINEAGE_MAX_DEPTH)
 
 try:
     from playwright.sync_api import sync_playwright
@@ -35,7 +38,6 @@ except ImportError:  # pragma: no cover
     sync_playwright = None
 
 REPO = Path(__file__).resolve().parent.parent.parent
-SAMPLES = REPO / "registry" / "samples"
 XSS = '<img src=x onerror=alert(1)> label'
 JPEG = b"\xff\xd8\xff"
 
@@ -94,17 +96,10 @@ def fixture_records() -> dict:
 
 
 def write_registry(root: Path, outside: Path):
-    root.mkdir(parents=True, exist_ok=True)
-    extra = fixture_records()
-    for f in SAMPLES.glob("*.jsonl"):
-        lines = f.read_text(encoding="utf-8").splitlines()
-        ent = f.stem
-        for rec in extra.get(ent, []):
-            lines.append(json.dumps(rec).replace("@OUTSIDE@", str(outside / "pkg_outside").replace("\\", "\\\\")))
-        (root / f.name).write_text("\n".join(lines) + "\n", encoding="utf-8")
-    for ent, recs in extra.items():
-        if not (root / f"{ent}.jsonl").exists():
-            (root / f"{ent}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
+    """The samples plus fixture_records(); the package whose path is "@OUTSIDE@" points at <outside>/pkg_outside."""
+    outside_pkg = str(outside / "pkg_outside")
+    TK.write_registry(root, [{**r, "path": outside_pkg} if r.get("path") == "@OUTSIDE@" else r
+                             for recs in fixture_records().values() for r in recs], samples=True)
     D._registry_cache.clear()
     D._files_cache.clear()
     D._package_cache.clear()
@@ -970,12 +965,12 @@ class Lineage(LineageBase):
                     f"/data/lineage/{kind}/{eid.replace(' ', '%20')}/")))
 
     def test_depth_and_size_caps(self):
-        old = D.LINEAGE_MAX_DEPTH
-        D.LINEAGE_MAX_DEPTH = 2
+        old = DL.LINEAGE_MAX_DEPTH
+        DL.LINEAGE_MAX_DEPTH = 2
         try:
             t = self.tree("model", "m_chain")
         finally:
-            D.LINEAGE_MAX_DEPTH = old
+            DL.LINEAGE_MAX_DEPTH = old
         cut = [n for n in walk(t["root"]) if n["status"] == "cut"]
         self.assertTrue(cut)
         self.assertEqual([(n["type"], n["id"], n["parents"]) for n in cut], [("dataset", "ds_chain", [])])
@@ -1154,12 +1149,12 @@ class Lineage(LineageBase):
         self.assertTrue(any(n["status"] == "more" for n in walk(t["root"])))
 
     def test_cut_step_without_a_page_has_no_dead_hint(self):
-        old = D.LINEAGE_MAX_DEPTH
-        D.LINEAGE_MAX_DEPTH = 1
+        old = DL.LINEAGE_MAX_DEPTH
+        DL.LINEAGE_MAX_DEPTH = 1
         try:
             t = self.tree("model", "m_chain")
         finally:
-            D.LINEAGE_MAX_DEPTH = old
+            DL.LINEAGE_MAX_DEPTH = old
         cut = next(n for n in walk(t["root"]) if n["status"] == "cut")
         self.assertEqual((cut["type"], cut["note"]), ("run", "Not shown: limit reached."))
 
