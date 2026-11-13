@@ -54,7 +54,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import html
-import importlib.util
 import json
 import os
 import re
@@ -449,48 +448,19 @@ def served_file(cfg, pkg, ts, rel) -> Path | None:
 
 # ---------------------------------------------------------------- the apply (round 11, #67)
 def registry_modules():
-    """-> namespace(importers, registry, history): registry/importers.py (and the registry.py module it imports) and
-    registry/history_page.py. THE ONE place this module reaches the registry code: registry/ is not a package yet, so
-    they are loaded by path (as jobs/convert_raw.load_importers does), sys.path restored afterwards. When registry/
-    becomes a package (round 11 refactor #1) this becomes `from registry import importers, store, history_page`.
-    It changes sys.path / sys.modules while loading, so routes() calls it ONCE at startup (still single-threaded); in a
-    request it is a cached return, and a failed startup load is raised again, never retried there."""
+    """-> namespace(importers, registry, history): registry.importers, registry.store and registry.history_page. THE ONE
+    place this module reaches the registry code. A plain package import since round 11 refactor #1 (registry/ is a
+    package; before, it was loaded by path). routes() still calls it once at startup, so a broken import shows as the
+    import step's reason ("could not be loaded at startup") and is never retried inside a request."""
     global _reg_mods
     with _reg_lock:
         if _reg_mods is not None:
             return _reg_mods
         if _reg_error is not None:
             raise RuntimeError(f"the registry code could not be loaded at startup ({_reg_error})")
-        reg_dir = REPO / "registry"
-        saved_path, saved_reg = list(sys.path), sys.modules.get("registry")
-        try:
-            sys.path.insert(0, str(reg_dir))
-            if saved_reg is not None and not hasattr(saved_reg, "current"):   # `registry` = the folder (namespace)
-                sys.modules.pop("registry", None)     # importers' `import registry` must get registry/registry.py
-            imp = sys.modules.get("importers")
-            if imp is None or Path(getattr(imp, "__file__", "") or ".").resolve() != reg_dir / "importers.py":
-                imp = _load_path("importers", reg_dir / "importers.py")
-            hp = _load_path("cj_apply_history_page", reg_dir / "history_page.py")
-        finally:                                      # the global name `registry` is left as it was
-            sys.path[:] = saved_path
-            if saved_reg is None:
-                sys.modules.pop("registry", None)
-            else:
-                sys.modules["registry"] = saved_reg
-        _reg_mods = SimpleNamespace(importers=imp, registry=imp.registry, history=hp)
+        from registry import history_page, importers, store
+        _reg_mods = SimpleNamespace(importers=importers, registry=store, history=history_page)
         return _reg_mods
-
-
-def _load_path(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    try:
-        spec.loader.exec_module(mod)
-    except BaseException:
-        sys.modules.pop(name, None)
-        raise
-    return mod
 
 
 def runs_log(cfg) -> Path:

@@ -428,6 +428,14 @@ class Privacy(Base):
                 self.assertIn(theirs, self.get(url, "admin")[2].decode()) if url != "/data/api/overview" else None
         self.assertEqual(self.get(f"/data/api/images/{theirs}", "advanced")[0], 404)
 
+    def test_prediction_set_shows_who_made_it(self):
+        """Round 11 #65: "Made by" (the owner; "<agent> for <owner>" when owner_via is set) on a prediction set the
+        viewer may already see (set_is_visible requires may_see(owner))."""
+        fields = {f[0]: f[1] for f in self.api("/data/api/images/ps_20261105_bbbbbb")["fields"]}
+        self.assertTrue(fields.get("Made by"))
+        from data_utils import actor
+        self.assertEqual(actor.label_of({"owner": "adv", "owner_via": "claude"}, "owner"), "claude for adv")
+
 
     def test_unregistered_prediction_packages_fail_closed(self):
         none_id, json_id, req_id = "pred_ps_20261105_cccccc", "pred_ps_20261105_dddddd", "pred_ps_20261105_eeeeee"

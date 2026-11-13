@@ -326,8 +326,9 @@ class Faults(Base):
     def test_registry_modules_cached_and_not_retried_in_a_request(self):
         mods = M.registry_modules()
         self.assertIs(M.registry_modules(), mods)                           # a cached return
-        with mock.patch.object(M, "_reg_mods", None), mock.patch.object(M, "_reg_error", "ImportError: x"), \
-                mock.patch.object(M, "_load_path", side_effect=AssertionError("loaded in a request")):
+        from registry import store
+        self.assertIs(mods.registry, store)                                  # the package module, one object
+        with mock.patch.object(M, "_reg_mods", None), mock.patch.object(M, "_reg_error", "ImportError: x"):
             with self.assertRaises(RuntimeError):
                 M.registry_modules()
             steps = M.record_steps(self.cfg, NEW, self.w.labels)

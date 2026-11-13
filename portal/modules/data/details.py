@@ -20,7 +20,7 @@ from portal.modules.data.records import (
     label_title, _list, magnification_text, metric_name, _number, package_images_for, plural, ref_hidden,
     review_folder, review_note, session_files, session_images, session_tags, set_images, set_is_visible, set_title,
     short_date, slot_sort_key, split_counts, status_tags, status_word, _text, thumb_version, upload_images,
-    visible_set, _when, who_label)
+    visible_set, _when, who_label, _actor_module)
 
 
 # ---------------------------------------------------------------- detail dicts (one source for page and API)
@@ -297,6 +297,8 @@ def detail_images(records, entity, record, viewer, page) -> dict:
         field("Kind", SET_KIND_NAMES[entity]), field("Images", str(n) if n is not None else None),
         field("Status", status_word(record["status"]) if _text(record.get("status")) else None),
         field("Created", short_date(_when(record))),
+        field("Made by", (who_label(record.get("owner"), _actor_module().via_of(record, "owner")) or None)
+              if entity == "prediction_set" else None),   # set_is_visible already requires viewer.may_see(owner)
         field("Model", model, entity_href("model", model) if model in records["model"] else None),
         field("Detection threshold", format_number(record.get("conf")) if _number(record.get("conf")) is not None
               else None),
