@@ -204,10 +204,16 @@ def audit_path(cfg) -> Path:
     return PA.audit_path(cfg.state_dir)
 
 
-def audit(ctx, actor, action, target, detail=None) -> dict:
-    """portal.audit.audit for a module ctx (or anything with .cfg.state_dir, or a Config). Raises OSError."""
+def audit(ctx, actor, action, target, detail=None, request=None) -> dict | None:
+    """Thin adapter over portal/audit.py (round 11 #3) for a module ctx (or anything with .cfg.state_dir, or a Config):
+    with the request, PA.event (actor as given; a bearer request's agent rides along as detail.via) -> None; without
+    one, PA.audit -> the record written. Either way raises OSError when the line is not written."""
     cfg = getattr(ctx, "cfg", ctx)
-    return PA.audit(cfg.state_dir, actor, action, target, detail)
+    if request is None:
+        return PA.audit(cfg.state_dir, actor, action, target, detail)
+    if not PA.event(cfg.state_dir, request, action, target, detail, actor=actor):
+        raise OSError("the audit line was not written")
+    return None
 
 
 def read_audit(cfg, n=AUDIT_SHOW) -> tuple:

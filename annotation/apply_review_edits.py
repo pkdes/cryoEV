@@ -71,7 +71,9 @@ image w/h, clamped to [0, w] x [0, h], rounded to 0.01 px; several rings stay on
 version id inside labels.coco.json, so the same inputs give the same file hash.
 
 Read-only on the base, package and edits. Refuses --out-root under Box or Cryo-image-processing, and
-never overwrites an existing lv_ folder.
+never overwrites an existing lv_ folder. The files are written into <out-root>/.partial_lv_<stamp>/, which is renamed
+(os.replace) to lv_<stamp> only when complete (round 11), so a crash never leaves a half-written lv_ folder. A failed
+write removes the partial folder; an existing one (another run, or a killed one) is refused.
 
 Who made the version (round 9, registry/actor.py): version.json `created_by` = --who, else $CRYOEV_FOR, else null
 (a people.json id from --people); `created_via` = $CRYOEV_VIA (the agent that ran it, e.g. "claude"), else null.
@@ -96,6 +98,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 from collections import Counter
@@ -132,6 +135,7 @@ CONFLICT_FIELDS = ["severity", "image", "rf_id", "file", "dec_key", "op", "reaso
                    "who_raw", "who", "t", "seed"]
 RF_SUFFIX = re.compile(r"\.rf\.[0-9a-f]+\.\w+$")
 SCOPES = ("reviewed_only", "all_edits")
+PARTIAL = ".partial_"  # <out_root>/.partial_lv_<stamp>/: the folder being written (round 11), never an lv_*
 
 
 # ---------------------------------------------------------------- inputs
@@ -949,12 +953,24 @@ def _make_version(base, package, edits_dir, raw_root, created_by, people_path, c
     if dry_run:
         log(f"[dry-run] nothing written (would write {out})")
         return version
-    out.mkdir(parents=True, exist_ok=False)
-    (out / "labels.coco.json").write_bytes(labels)
-    (out / "changes.jsonl").write_text("".join(json.dumps({k: r[k] for k in ROW_FIELDS}, ensure_ascii=False) + "\n"
-                                               for r in rows), encoding="utf-8")
-    (out / "conflicts.csv").write_text(conflicts_csv(conflicts), encoding="utf-8")
-    (out / "version.json").write_text(json.dumps(version, indent=2) + "\n", encoding="utf-8")
+    part = out_root / f"{PARTIAL}{lv}"             # written whole, then renamed: lv_<stamp> is never half there
+    try:
+        part.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        raise ApplyError(f"[ERROR] {part} exists (another run, or an interrupted one): remove it, then run again") \
+            from None
+    try:
+        (part / "labels.coco.json").write_bytes(labels)
+        (part / "changes.jsonl").write_text("".join(json.dumps({k: r[k] for k in ROW_FIELDS}, ensure_ascii=False)
+                                                    + "\n" for r in rows), encoding="utf-8")
+        (part / "conflicts.csv").write_text(conflicts_csv(conflicts), encoding="utf-8")
+        (part / "version.json").write_text(json.dumps(version, indent=2) + "\n", encoding="utf-8")
+        if out.exists():
+            raise ApplyError(f"[ERROR] {out} exists; label versions are never overwritten")
+        os.replace(part, out)
+    except BaseException:
+        shutil.rmtree(part, ignore_errors=True)    # best effort; a killed process leaves it (the portal cleans those)
+        raise
     log(f"[OK] wrote {out}")
     return version
 
