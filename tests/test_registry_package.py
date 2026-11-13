@@ -47,16 +47,17 @@ ME = Path(__file__).resolve()
 ALLOW = {
     "registry/tests/test_actor.py": "loads the actor shim by path on purpose (the shim's by-path promise)",
     "portal/tests/test_registry_one_module.py": "its control loads store.py by path on purpose (a known second copy)",
-    # TEMPORARY (round 11): R-b moves portal/modules/data.py into the portal/modules/data/ package in parallel and
-    # keeps its 2 registry loader lines unchanged; the PM re-points them to `from registry import ...` after the
-    # merge and REMOVES these two entries.
-    "portal/modules/data.py": "TEMPORARY until the round 11 merge (PM removes)",
-    "portal/modules/data/": "TEMPORARY until the round 11 merge (PM removes)",
 }
-REG_PATH = r"""(["']registry["']\s*/|\bREG_DIR\b|\bREG\b(?!\.parent)|registry[\\/]+\w+\.py)"""
+# a registry path: "registry" / ..., a registry/<file>.py string, or a variable named for the folder (REG, REG_DIR,
+# reg_dir, registry_dir, REGISTRY_DIR; REG.parent is the repo root and fine)
+REG_PATH = (r"""(["']registry["']\s*/|\b(?i:(?:reg|registry)_?dir)\b|\bREG\b(?!\.parent)|registry[\\/]+\w+\.py)""")
+MODS = r"(registry|importers|validate|history_page|ids|schema_check|actor)"
 RULES = {
     "by-path loader": re.compile(r"(spec_from_file_location|SourceFileLoader|run_path)\s*\(.*" + REG_PATH +
-                                 r"|\b(_load|load)\s*\(\s*[\"'][^\"']*[\"']\s*,.*" + REG_PATH),
+                                 r"|\b\w*load\w*\s*\(\s*[\"'][^\"']*[\"']\s*,.*" + REG_PATH),
+    # loading tricks around the shadowing: popping / setting / reading a bare registry name in sys.modules
+    "sys.modules registry name": re.compile(r"sys\.modules(\.(pop|get|setdefault)\s*\(|\s*\[)\s*[\"']" + MODS +
+                                            r"[\"']"),
     "registry/ on sys.path": re.compile(r"sys\.path\.(insert|append)\s*\(.*(" + REG_PATH +
                                         r"""|["'][^"']*registry["'])"""),
     "bare registry import": re.compile(
@@ -141,15 +142,29 @@ class StaticGuard(unittest.TestCase):
             "import history_page as hp": "bare registry import",
             "from validate import ENTITIES": "bare registry import",
             "from registry import registry as REG": "bare registry import",
+            # the r11-apply style (applyreview.registry_modules before the merge): a reg_dir variable, a _load_path
+            # helper, and sys.modules juggling so `import registry` inside importers finds the shim
+            "        reg_dir = REPO / \"registry\"": None,
+            "            sys.path.insert(0, str(reg_dir))": "registry/ on sys.path",
+            '                imp = _load_path("importers", reg_dir / "importers.py")': "by-path loader",
+            '            hp = _load_path("cj_apply_history_page", reg_dir / "history_page.py")': "by-path loader",
+            '                sys.modules.pop("registry", None)': "sys.modules registry name",
+            '                sys.modules["registry"] = saved_reg': "sys.modules registry name",
+            '            imp = sys.modules.get("importers")': "sys.modules registry name",
+            "    sys.path.append(str(REGISTRY_DIR))": "registry/ on sys.path",
         }
         for line, rule in lines.items():
+            if rule is None:                      # context only (a plain assignment is not itself a load)
+                continue
             got = scan_text("x/test_x.py", line)
             self.assertTrue(got and any(f": {rule}:" in g for g in got), (line, got))
         self.assertTrue(scan_text("registry/x.py", "sys.path.insert(0, str(HERE))"))
         for ok in ("from registry import store as registry", "from registry import importers, ids",
                    "sys.path.insert(0, str(REG.parent))", "sys.path.insert(0, str(REPO))",
                    "from data_utils import actor", 'spec_from_file_location("x", REPO / "jobs" / "sync.py")',
-                   "rows = json.loads((REG / 'samples' / 'x.jsonl').read_text())"):
+                   "rows = json.loads((REG / 'samples' / 'x.jsonl').read_text())",
+                   "self.assertNotIn('registry', sys.modules)", "m = json.load(fh)",
+                   'd = yaml.safe_load(REGISTRY.read_text())'):
             self.assertEqual(scan_text("x/test_x.py", ok), [], ok)
         self.assertEqual(scan_text("registry/x.py", "\n".join(PREAMBLE)), [])
 

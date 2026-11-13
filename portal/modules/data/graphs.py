@@ -5,7 +5,6 @@ Part of the Data module (portal/modules/data/__init__.py has the rules); moved f
 """
 from __future__ import annotations
 
-import importlib.util
 import os
 import re
 from pathlib import Path
@@ -35,13 +34,11 @@ _history_module_cache = None
 
 
 def _history_module():
-    """registry/history_page.py, loaded once by path (read only here: its reader and builders are reused)."""
+    """registry.history_page (read only here: its reader and builders are reused)."""
     global _history_module_cache
     if _history_module_cache is None:
-        spec = importlib.util.spec_from_file_location("cj_data_history_page", REPO / "registry" / "history_page.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _history_module_cache = mod
+        from registry import history_page
+        _history_module_cache = history_page
     return _history_module_cache
 
 

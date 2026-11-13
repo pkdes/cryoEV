@@ -1,7 +1,8 @@
 """
-Round 11 #1 control: a portal process holds ONE module object per registry file after the Data, Jobs and Train pages
-have read the registry (before: registry/registry.py was loaded by path 3 times, as cj_data_registry,
-cj_jobs_registry and cj_train_registry, each with its own LOCK_WAIT, caches and patches).
+Round 11 #1 control: a portal process holds ONE module object per registry file after the Data (list and Lab graph),
+Jobs and Train pages have read the registry and Apply, Predict and Admin were opened (before: registry/registry.py was
+loaded by path 3 times, as cj_data_registry, cj_jobs_registry and cj_train_registry, each with its own LOCK_WAIT,
+caches and patches).
 
 Counted from the garbage collector, not sys.modules: a by-path loader keeps its module without registering it.
 Temp world only (cjtest.Env); never the real registry.
@@ -19,9 +20,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cjtest as T  # noqa: E402
 
 REG_DIR = (T.REPO / "registry").resolve()
-# TEMPORARY (round 11): portal/modules/data.py (R-b moves it into a package in parallel) still loads these two by path;
-# the PM re-points them to `from registry import ...` at the merge and empties this set.
-DATA_BY_PATH = {"cj_data_registry", "cj_data_history_page"}
 
 
 def registry_modules() -> dict:
@@ -60,17 +58,20 @@ class OneRegistryModule(unittest.TestCase):
                 os.environ[k] = v
 
     def test_one_module_object_per_registry_file(self):
-        for path in ("/data/", "/jobs/", "/train/"):
+        for path in ("/data/", "/data/lineage/graph", "/jobs/", "/train/"):
             st, _, _ = T.request(self.portal.port, "GET", path, self.cookie)
             self.assertEqual(st, 200, path)
+        for path in ("/apply/", "/predict/", "/admin/"):       # pages whose modules may load the registry too
+            st, _, _ = T.request(self.portal.port, "GET", path, self.cookie)
+            self.assertLess(st, 500, path)
         gc.collect()
         mods = registry_modules()
         self.assertIn("store.py", mods, "control: the pages must have read the registry")
         self.assertEqual(mods["store.py"], ["registry.store"])
         self.assertIn("registry", sys.modules)
         self.assertTrue(hasattr(sys.modules["registry"], "__path__"), "registry must be the package")
-        extra = {f: [n for n in names if n not in DATA_BY_PATH] for f, names in mods.items()}
-        for f, names in extra.items():
+        self.assertIn("history_page.py", mods, "control: the Lab graph must have loaded the history page module")
+        for f, names in mods.items():
             self.assertLessEqual(len(names), 1, f"{f}: {names}")
             for n in names:
                 self.assertEqual(n, "registry" if f == "__init__.py" else f"registry.{Path(f).stem}", json.dumps(mods))

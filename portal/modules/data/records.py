@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import html
-import importlib.util
 import json
 import os
 import re
@@ -153,13 +152,11 @@ _decoders = threading.BoundedSemaphore(THUMB_DECODERS)
 
 
 def _registry_module():
-    """registry/registry.py, loaded once by path (registry/ is not a package)."""
+    """registry.store (the one registry module object of the process)."""
     global _registry_module_cache
     if _registry_module_cache is None:
-        spec = importlib.util.spec_from_file_location("cj_data_registry", REPO / "registry" / "registry.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _registry_module_cache = mod
+        from registry import store
+        _registry_module_cache = store
     return _registry_module_cache
 
 
