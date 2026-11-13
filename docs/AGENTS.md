@@ -113,7 +113,8 @@ Each recipe says what is recorded and where it shows. Details live in the linked
    python -m cryoev predict new --from-dir "<tiles dir>" --manifest "<tiles dir>\MANIFEST.csv" --session YYYYMMDD --model v5_evnonev_y8m_20261029 --owner pujan --sample-label-from manifest:sample_label --nm-from-manifest --nm-confirmed-by pujan
    python -m cryoev predict new ...same args... --do
    ```
-   Recorded: `<CryoAI-laptop>/predict/<ps id>/`, a `prediction_set` registry line (status queued), two action-log
+   Recorded: `<CryoAI-laptop>/predict/<ps id>/`, a `prediction_set` registry line (status queued; with `CRYOEV_VIA`
+   set, `owner_via` on it and in `request.json`, so the Data page says "Made by: claude for <owner>"), two action-log
    lines. Shows: the owner's Predict / Results pages, Data page (image sets), Admin Recent actions.
 
    **Images made in an unusual way** (tiling, resampling, a subset): also give `--note "<text, at most 500

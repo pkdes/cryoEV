@@ -853,6 +853,12 @@ def create_options() -> dict:
 
 def main(argv=None):
     a = build_parser().parse_args(argv)
+    from data_utils import actor
+    try:                                         # an agent session's CRYOEV_VIA (round 11 TODO #70): the CLI path
+        via = actor.via()                        # stamps owner_via like the portal's write tokens do; unset = None
+    except actor.ActorError as e:
+        print(f"[predict_set] {e}", file=sys.stderr)
+        return 2
     try:
         names = None
         if a.only:
@@ -862,7 +868,8 @@ def main(argv=None):
                     sample_label_column=a.sample_label_from, nm_per_px=a.nm_per_px,
                     nm_from_manifest=a.nm_from_manifest, manifest=a.manifest, names=names, conf=a.conf,
                     max_det=a.max_det, imgsz=a.imgsz, session=a.session, registry_root=a.registry, root=a.root,
-                    link=a.link, name=a.name, dry_run=a.dry_run, note=a.note, provenance=a.provenance)
+                    link=a.link, name=a.name, dry_run=a.dry_run, note=a.note, provenance=a.provenance,
+                    via=via)
     except (PredictSetError, config.ConfigError, OSError) as e:
         print(f"[predict_set] {e}", file=sys.stderr)
         return 2

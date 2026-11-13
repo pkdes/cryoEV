@@ -8,6 +8,8 @@ Never touches the real registry or CryoAI-laptop (CRYOEV_LAPTOP_ROOT points at a
 shared by test_predict_local.py and test_predict_desktop.py.
 """
 import csv
+import contextlib
+import io
 import os
 import shutil
 import subprocess
@@ -101,6 +103,49 @@ class PredictRoots(T.TempRoots):
         self.assertFalse(self.root.exists() and any(p.name.startswith("ps_") for p in self.root.iterdir()))
         self.assertFalse((self.root / PS.INCOMING).exists() and any((self.root / PS.INCOMING).iterdir()))
         self.assertFalse((self.reg / "prediction_set.jsonl").exists())
+
+
+class CliVia(PredictRoots, unittest.TestCase):
+    """TODO #70: `predict_set create` from an agent session (CRYOEV_VIA set) stamps owner_via / nm_confirmed_via, as
+    the portal's write tokens do, and it survives a later status line; without the env nothing is stamped."""
+
+    def argv(self):
+        return ["create", "--from-dir", str(self.src), "--manifest", str(self.manifest), "--model", MODEL,
+                "--owner", "pujan", "--sample-label-from", "manifest:sample_label", "--nm-from-manifest",
+                "--nm-confirmed-by", "pujan", "--registry", str(self.reg), "--root", str(self.root)]
+
+    def made(self):
+        return sorted(p for p in self.root.iterdir() if p.name.startswith("ps_"))
+
+    def test_agent_env_stamps_owner_via(self):
+        with mock.patch.dict(os.environ, {"CRYOEV_VIA": "claude"}), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(PS.main(self.argv()), 0)
+        (ps,) = self.made()
+        req = C.read_json(ps / "request.json")
+        self.assertEqual((req["owner_via"], req["nm_confirmed_via"]), ("claude", "claude"))
+        rec = registry.current("prediction_set", self.reg)[ps.name]
+        self.assertEqual((rec["owner_via"], rec.get("via")), ("claude", "claude"))
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CRYOEV_VIA", None)
+            PS.update_record(ps.name, status="running", registry_root=self.reg)
+        rec = registry.current("prediction_set", self.reg)[ps.name]
+        self.assertEqual((rec["status"], rec["owner_via"]), ("running", "claude"))   # carried to the later line
+        from data_utils import actor
+        self.assertEqual(actor.label_of(rec, "owner"), "claude for pujan")
+
+    def test_no_env_no_stamp(self):
+        with mock.patch.dict(os.environ, {}), contextlib.redirect_stdout(io.StringIO()):
+            os.environ.pop("CRYOEV_VIA", None)
+            self.assertEqual(PS.main(self.argv()), 0)
+        (ps,) = self.made()
+        self.assertNotIn("owner_via", C.read_json(ps / "request.json"))
+        self.assertNotIn("owner_via", registry.current("prediction_set", self.reg)[ps.name])
+
+    def test_bad_env_refused_before_writing(self):
+        with mock.patch.dict(os.environ, {"CRYOEV_VIA": "Not An Id"}),                 contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(PS.main(self.argv()), 2)
+        self.assertIn("CRYOEV_VIA", err.getvalue())
+        self.assert_nothing_written()
 
 
 class CreateTests(PredictRoots, unittest.TestCase):

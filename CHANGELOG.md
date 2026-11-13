@@ -11,6 +11,7 @@ near the top of annotation/review_tool/index.html.
 
 - **Prediction sets can say how their images were made:** `predict new` takes `--note` (free text) and `--provenance` (a small JSON file: what the images derive from, the processing steps, tiling, script and git sha). The tile manifest is kept with the set as `source_manifest.csv`.
 - **Data pages** show "Note", "How the images were made" and "Derived from" (linked to the dataset, label set or model) on such sets. Sets without them look exactly as before.
+- **Sets an agent makes from the laptop CLI** (`python -m cryoev predict new` in a Claude session) now show "Made by: claude for <you>", as API-made sets do, on every later status too.
 
 **Components:** CLI, portal, registry
 
