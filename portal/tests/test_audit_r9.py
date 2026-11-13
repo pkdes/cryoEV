@@ -149,10 +149,10 @@ class RefusedAndSafe(Base):
 
     def test_anonymous_refusals_are_counted_not_flooded(self):
         before = len(lines(self.env.state))
-        for _ in range(5):
-            self.send("POST", "/gallery/c1/api/event", who=None)
+        for i in range(5):
+            self.send("POST", f"/gallery/c{i}/api/event", who=None)             # distinct targets: still one
         got = [x for x in self.new_lines(before) if x["actor"] == "-"]
-        self.assertEqual(len(got), 1)
+        self.assertEqual([(x["action"], x["target"]) for x in got], [("gallery mark", None)])
 
     def test_no_secrets_or_paths_in_lines(self):
         before = len(lines(self.env.state))
@@ -264,6 +264,42 @@ class Aggregation(unittest.TestCase):
         self.w.drain()
         self.assertEqual(len([x for x in lines(self.tmp) if x["action"] == "signed in"]), 4)
 
+    def test_flood_is_bounded(self):
+        """50,000 frequent events: anonymous ones over distinct targets are one window; signed-in ones over distinct
+        targets stop at max_windows, the rest fold into one "other" window that still counts."""
+        got = []
+        w = PA.Writer(self.tmp, clock=lambda: self.now[0], write=lambda *a: got.append(a))
+        self.addCleanup(w.close)
+        for i in range(50_000):
+            w.event("-", "gallery mark", f"c{i}", {"status": 401}, frequent=True)
+        w.drain()
+        self.assertEqual((len(w._windows), len(got)), (1, 1))
+        self.assertIsNone(got[0][3])                                         # no target for anonymous
+        for i in range(50_000):
+            w.event("ann", "upload chunk", f"us_{i:012x}", {"status": 200}, frequent=True)
+        w.drain()
+        self.assertLessEqual(len(w._windows), PA.MAX_WINDOWS + 1)
+        self.assertLessEqual(len(got), PA.MAX_WINDOWS + 2)                   # one per real window + "other" + anon
+        w.flush()
+        w.drain()
+        other = [a for a in got if a[2] == PA.OVERFLOW_KEY[1]]
+        self.assertEqual(len(other), 2)                                      # its first line + its counter line
+        self.assertEqual(other[1][4]["n"], 50_000 - (PA.MAX_WINDOWS - 1))    # the anon window holds one slot
+        self.assertEqual([a for a in got if a[1] == "-" and a[2] == "gallery mark"][-1][4]["n"], 50_000)
+
+    def test_locked_log_cannot_hang_shutdown(self):
+        import threading
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        w = PA.Writer(self.tmp, write=lambda *a: gate.wait(30))              # the OS lock never comes free
+        for i in range(20):
+            w.event("ann", "feedback filed", None, {"status": 303})
+        t0 = time.monotonic()
+        with self.assertLogs("cj.audit", "ERROR"):
+            w.close(timeout=0.5)
+        self.assertLess(time.monotonic() - t0, 2.0)
+        self.assertTrue(w.closed)
+
     def test_full_queue_drops_and_logs(self):
         w = PA.Writer(self.tmp, max_pending=0)
         self.addCleanup(w.close)
@@ -328,12 +364,14 @@ class AdminPage(Base):
         t0 = datetime.fromisoformat("2026-11-12T15:20:00+00:00").astimezone()
         t1 = datetime.fromisoformat("2026-11-12T15:30:00+00:00").astimezone()
         self.assertIn(f"{t0:%Y-%m-%d %H:%M}–{t1:%H:%M}", text)
-        self.assertIn('data-who="claude for pujan"', text)
-        self.assertRegex(text, r'<b class="cj-wrap">claude for pujan</b> <span class="cj-admin-ai"[^>]*>AI</span>')
+        self.assertIn('data-who="claude for pujan (unverified)"', text)       # never mixed with portal sign-ins
+        self.assertNotIn('data-who="claude for pujan"', text)
+        self.assertRegex(text, r'<b class="cj-wrap">claude for pujan</b> <span class="cj-admin-ai"[^>]*>AI</span>'
+                               r' <span class="cj-admin-ai cj-admin-unvtag"[^>]*>unverified</span>')
         self.assertIn('cj-admin-unv">laptop CLI (unverified)</span>', text)
         self.assertIn("refused 401", text)
-        self.assertIn('data-who="ann" data-kind="jobs"', text)                 # old Jobs format still read
-        self.assertIn('<option value="claude for pujan">', text)
+        self.assertIn('data-who="ann (unverified)" data-kind="jobs"', text)    # old Jobs format still read
+        self.assertIn('<option value="claude for pujan (unverified)">', text)
         self.assertIn('<option value="feedback">feedback</option>', text)
         self.assertIn('id="cj-admin-audf" hidden', text)                       # shown by admin.js only
         self.assertIn("data-cj-aud-filter", js)

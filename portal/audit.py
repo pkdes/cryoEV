@@ -44,6 +44,8 @@ SHOW = 200
 TAIL_BYTES = 2 * 1024 * 1024
 WINDOW_S = 600                   # frequent routes: one counter line per actor x action x target per 10 min
 MAX_PENDING = 2000               # queued writes beyond this are dropped (logged): a stuck lock never eats memory
+MAX_WINDOWS = 5000               # open counting windows; beyond this, new keys fold into OVERFLOW_KEY (still counted)
+OVERFLOW_KEY = ("-", "other frequent actions (window table full)", None, None)
 CLI_FILE = "agent_actions.jsonl"     # the laptop CLI's own log (self-declared identity), read via CJ_AUDIT_EXTRA
 CLI_DOOR = "laptop CLI (unverified)"
 DOOR_NAMES = {"key": "tailnet key", "access": "access"}   # this portal's door, by its --auth mode
@@ -87,7 +89,7 @@ def audit(state_dir, actor, action, target, detail=None) -> dict:
            "detail": _clip(detail)}
     line = json.dumps(rec, ensure_ascii=False) + "\n"
     path = audit_path(state_dir)
-    with _lock:
+    with _lock:     # held across the OS-lock wait: callers run in worker threads and traffic is low (QC r9, overruled)
         path.parent.mkdir(parents=True, exist_ok=True)
         lk = acquire_lock(path.with_name(path.name + ".lock"), wait=LOCK_WAIT_S)
         if lk is None:
@@ -220,11 +222,13 @@ class Writer:
     counted (self.failed), never raised. sweep() closes due windows (the portal calls it every minute), close()
     flushes every open window and waits for the queue (lifespan shutdown). drain() waits for the queue (tests)."""
 
-    def __init__(self, state_dir, window_s=WINDOW_S, clock=time.time, max_pending=MAX_PENDING, write=None):
+    def __init__(self, state_dir, window_s=WINDOW_S, clock=time.time, max_pending=MAX_PENDING, write=None,
+                 max_windows=MAX_WINDOWS):
         self.state_dir = state_dir
         self.window_s = float(window_s)
         self.clock = clock
         self.max_pending = int(max_pending)
+        self.max_windows = int(max_windows)
         self._write_fn = write or audit
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cj-audit")
         self._mu = threading.Lock()
@@ -271,7 +275,10 @@ class Writer:
     # -- events
     def event(self, actor, action, target=None, detail=None, frequent=False) -> None:
         """One portal action. frequent=True: the first per actor x action x target window is written at once, the
-        rest are counted."""
+        rest are counted. An anonymous actor ("-") never has a target (a flood over many addresses is one window);
+        past max_windows open windows, a new key is folded into OVERFLOW_KEY, which still counts."""
+        if actor == "-":
+            target = None
         if not frequent:
             self.submit(actor, action, target, detail)
             return
@@ -280,6 +287,9 @@ class Writer:
         key = (actor, action, target, status)          # done and refused are counted apart
         closed = None
         with self._mu:
+            if key not in self._windows and len(self._windows) >= self.max_windows:
+                key = OVERFLOW_KEY                      # bounded memory; the fact and the count survive
+                actor, action, target, detail = key[0], key[1], None, None
             w = self._windows.get(key)
             if w is not None and now - w["start"] < self.window_s:
                 w["n"] += 1
@@ -341,12 +351,14 @@ class Writer:
             self._pool.submit(lambda: None).result(timeout)
 
     def close(self, timeout=15.0) -> None:
-        """Shutdown: flush the open windows, write the queue, stop the worker. Never raises."""
+        """Shutdown: flush the open windows, write the queue (up to `timeout` s), stop the worker; lines still queued
+        then are cancelled (logged). Never raises, never waits on a stuck lock beyond `timeout`."""
         try:
             self.flush()
             self.drain(timeout)
-        except Exception as e:                            # noqa: BLE001
-            log.error("audit flush at shutdown incomplete (%s)", type(e).__name__)
+        except Exception as e:                            # noqa: BLE001  e.g. TimeoutError: the log is locked
+            log.error("audit flush at shutdown incomplete (%s): %d line(s) not written", type(e).__name__,
+                      self._pending)
         with self._mu:
             self.closed = True
-        self._pool.shutdown(wait=False)
+        self._pool.shutdown(wait=False, cancel_futures=True)

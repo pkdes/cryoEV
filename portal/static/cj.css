@@ -454,6 +454,7 @@ a.cj-data-graph-node:focus-visible{outline:2px solid var(--acc);outline-offset:1
 .cj-admin-auds>.cj-admin-aud>span.cj-admin-what{flex:1 1 16em;min-width:0;overflow-wrap:anywhere}
 .cj-admin-auds>.cj-admin-aud>span.cj-admin-door{flex:0 0 auto;margin-left:auto}
 .cj-admin-unv{color:var(--warn)}
+.cj-admin-ai.cj-admin-unvtag{background:var(--warnbg);color:var(--warn)}
 .cj-about{max-width:760px;margin:0 auto}
 .cj-about-sec h2{font-size:16px;margin:18px 0 6px}
 .cj-about-sec p{margin:0 0 8px;line-height:1.5;overflow-wrap:anywhere}

@@ -1276,10 +1276,11 @@ def audit_row(e0, own_door="this door") -> dict:
         parts.insert(0, f"{REFUSED.get(status, 'answered')} {status}")
     door = str(e0.get("door") or "this door")
     door = own_door if door == "this door" else door
-    return {"when": when, "who": ACTOR.label(e.get("actor") or "-", via) or "-", "ai": bool(via),
+    name = ACTOR.label(e.get("actor") or "-", via) or "-"
+    unv = door == PA.CLI_DOOR or "unverified" in door          # a self-declared identity (the laptop CLI)
+    return {"when": when, "name": name, "who": f"{name} (unverified)" if unv else name, "ai": bool(via),
             "what": word, "target": "" if e.get("target") is None else str(e.get("target")),
-            "detail": ", ".join(parts), "door": door, "unverified": door == PA.CLI_DOOR or "unverified" in door,
-            "kind": aud_kind(act, status)}
+            "detail": ", ".join(parts), "door": door, "unverified": unv, "kind": aud_kind(act, status)}
 
 
 def _options(name, label, values, all_text) -> str:
@@ -1299,12 +1300,15 @@ def render_audit(entries, problem, own_door="this door") -> str:
     items = []
     for r in rows:
         ai = ' <span class="cj-admin-ai" title="an agent acting for this person">AI</span>' if r["ai"] else ""
+        if r["unverified"]:                         # its own Person-filter value: never mixed with portal sign-ins
+            ai += (' <span class="cj-admin-ai cj-admin-unvtag" title="identity declared by the caller, not '
+                   'checked by the portal">unverified</span>')
         tgt = f' <b class="cj-wrap">{esc(r["target"])}</b>' if r["target"] else ""
         dsp = f' <span class="cj-mut">({esc(r["detail"])})</span>' if r["detail"] else ""
         dcls = "cj-admin-door cj-admin-unv" if r["unverified"] else "cj-admin-door cj-mut"
         items.append(f'<li class="cj-admin-aud" data-who="{esc(r["who"])}" data-kind="{esc(r["kind"])}">'
                      f'<span class="cj-mut cj-num">{esc(r["when"])}</span> '      # spaces: the text reads as a
-                     f'<span class="cj-admin-who"><b class="cj-wrap">{esc(r["who"])}</b>{ai}</span> '   # sentence
+                     f'<span class="cj-admin-who"><b class="cj-wrap">{esc(r["name"])}</b>{ai}</span> '  # sentence
                      f'<span class="cj-admin-what">{esc(r["what"])}{tgt}{dsp}</span> '
                      f'<span class="{dcls}">{esc(r["door"])}</span></li>')
     people = sorted({r["who"] for r in rows}, key=str.lower)
