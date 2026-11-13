@@ -2,7 +2,11 @@
 One writer per review package (round 9, R2): annotation/multi_review_server.py and annotation/review_server.py hold an
 OS lock per package (<root>/.review_locks/<pkg>.lock) for as long as they run, and refuse a package whose lock another
 process holds; the multi server also serves lab_ (compare) packages and never serves an excluded package (--exclude /
-$CJ_REVIEW_EXCLUDE); multi_review_server.main() strips CRYOEV_VIA / CRYOEV_FOR (registry/actor.strip_env), not at import.
+$CJ_REVIEW_EXCLUDE, and fail-closed: the --package of every review_server.py service in the services config; an
+unreadable config serves no lab_ package); lab_ only when asked (--prefix / $CJ_REVIEW_PREFIXES; default pred_ only);
+multi_review_server.main() strips CRYOEV_VIA / CRYOEV_FOR (registry/actor.strip_env), not at import.
+
+Every server here reads a temp services config (CRYOEV_SERVICES_CONFIG), never the real one.
 
 Real processes (servers in subprocesses) on temp packages built by make_fixture: the in-process write lock
 (review_server.py's threading.Lock) can't see another process, so two servers on one package used to both accept
@@ -38,10 +42,33 @@ PKG = "lab_compare_fixture"
 FILE = "fixC_old.png"
 
 
+NO_SERVICES = str(Path(tempfile.gettempdir()) / "cj_no_such_services_config.json")
+BOTH = {mrs.PREFIX_ENV: "pred_,lab_"}
+
+
 def clean_env(**extra):
+    """No CRYOEV_* / CJ_* from this shell; a services config that doesn't exist; lab_ asked for (BOTH) unless given."""
     env = {k: v for k, v in os.environ.items() if not k.startswith(("CRYOEV_", "CJ_"))}
+    env.update({"CRYOEV_SERVICES_CONFIG": NO_SERVICES, **BOTH})
     env.update(extra)
-    return env
+    return {k: v for k, v in env.items() if v is not None}
+
+
+def services_json(path: Path, *packages, extra=()):
+    """A services config with a single-package review_server.py service per package (one disabled)."""
+    svcs = [{"name": f"review{i}", "enabled": i == 0, "port": 9900 + i, "cwd": "{repo}",
+             "argv": ["{python}", "annotation/review_server.py", "--package", str(p), "--port", str(9900 + i)]}
+            for i, p in enumerate(packages)]
+    path.write_text(json.dumps({"services": svcs + list(extra)}), encoding="utf-8")
+    return path
+
+
+def own_env(test):
+    """Unset CRYOEV_* / CJ_* in this process for the test (restored after)."""
+    for k in [k for k in os.environ if k.startswith(("CRYOEV_", "CJ_"))]:
+        test.addCleanup(os.environ.__setitem__, k, os.environ.pop(k))
+    os.environ["CRYOEV_SERVICES_CONFIG"] = NO_SERVICES
+    test.addCleanup(os.environ.pop, "CRYOEV_SERVICES_CONFIG", None)
 
 
 def build_pkg(root: Path, name=PKG, key=KEY):
@@ -99,8 +126,7 @@ class Proc:
 
 class TwoServersOneLock(unittest.TestCase):
     def setUp(self):
-        for k in [k for k in os.environ if k.startswith("CRYOEV_") or k == mrs.EXCLUDE_ENV]:
-            self.addCleanup(os.environ.__setitem__, k, os.environ.pop(k))
+        own_env(self)
         self.tmp = Path(tempfile.mkdtemp(prefix="review_lock_"))
         self.root = self.tmp / "review"
         self.root.mkdir()
@@ -172,13 +198,44 @@ class TwoServersOneLock(unittest.TestCase):
         self.assertEqual(request(m.port, "GET", f"/{PKG}/api/ping")[0], 403)   # as an unknown id
         self.assertFalse((self.root / rs.LOCK_DIR / f"{PKG}.lock").exists())  # never locked, never touched
         self.assertFalse((self.pkg / "edits").exists())
-        self.assertIn(f"Never served (--exclude / ${mrs.EXCLUDE_ENV}): {PKG.lower()}", m.log())
+        self.assertIn(f"Never served (services config, --exclude, ${mrs.EXCLUDE_ENV}): {PKG.lower()}", m.log())
         m2 = self.multi(env=clean_env(**{mrs.EXCLUDE_ENV: f"other_pkg, {PKG}"}))
         self.assertEqual(request(m2.port, "GET", f"/{PKG}/api/ping")[0], 403)
         m3 = self.multi("--prefix", "pred_")                                   # an explicit prefix: lab_ not served
         self.assertEqual(request(m3.port, "GET", f"/{PKG}/api/ping")[0], 403)
         m4 = self.multi()
         self.assertEqual(request(m4.port, "GET", f"/{PKG}/api/ping")[0], 200)
+        m5 = self.multi("--exclude", "no_such_pkg")                            # a name that is no folder: warned
+        self.assertIn("[WARNING] Excluded package 'no_such_pkg' is no folder under", m5.log())
+
+    def test_default_serves_pred_only(self):
+        pred = build_pkg(self.root, "pred_ps_20261112_abcdef")
+        self.assertTrue(pred.is_dir())
+        m = self.multi(env=clean_env(**{mrs.PREFIX_ENV: None}))
+        self.assertEqual(request(m.port, "GET", f"/{PKG}/api/ping")[0], 403)
+        self.assertEqual(request(m.port, "GET", "/pred_ps_20261112_abcdef/api/ping")[0], 200)
+        m2 = self.multi("--prefix", "pred_", "--prefix", "lab_", env=clean_env(**{mrs.PREFIX_ENV: None}))
+        self.assertEqual(request(m2.port, "GET", f"/{PKG}/api/ping")[0], 200)
+
+    def test_services_config_names_the_single_servers_package(self):
+        """No --exclude, no $CJ_REVIEW_EXCLUDE: the services config alone keeps the package off (even a disabled
+        service's), and the lock file is never made."""
+        cfg = services_json(self.tmp / "services.json", Path("~") / "x" / "SANDBOX_other", self.pkg)
+        m = self.multi(env=clean_env(CRYOEV_SERVICES_CONFIG=str(cfg)))
+        self.assertEqual(request(m.port, "GET", f"/{PKG}/api/ping")[0], 403)
+        self.assertFalse((self.root / rs.LOCK_DIR / f"{PKG}.lock").exists())
+        self.assertIn(PKG.lower(), m.log())
+
+    def test_unreadable_services_config_serves_no_lab(self):
+        build_pkg(self.root, "pred_ps_20261112_abcdef")
+        bad = self.tmp / "services.json"
+        for text in ("{not json", json.dumps({"services": [{"name": "review", "argv": ["py", "annotation/review_server.py"]}]})):
+            bad.write_text(text, encoding="utf-8")
+            m = self.multi(env=clean_env(CRYOEV_SERVICES_CONFIG=str(bad)))
+            self.assertEqual(request(m.port, "GET", f"/{PKG}/api/ping")[0], 403, text)
+            self.assertEqual(request(m.port, "GET", "/pred_ps_20261112_abcdef/api/ping")[0], 200)
+            self.assertIn("can't be read: no lab_ package is served", m.log())
+            m.stop()  # it holds the pred_ package's lock
 
     def test_main_strips_agent_env(self):
         m = self.multi(env=clean_env(CRYOEV_VIA="claude", CRYOEV_FOR="pujan"))
@@ -192,8 +249,9 @@ class InProcess(unittest.TestCase):
     module never strips the env (only main() does)."""
 
     def setUp(self):
-        for k in [k for k in os.environ if k.startswith("CRYOEV_") or k == mrs.EXCLUDE_ENV]:
-            self.addCleanup(os.environ.__setitem__, k, os.environ.pop(k))
+        own_env(self)
+        os.environ[mrs.PREFIX_ENV] = "pred_,lab_"
+        self.addCleanup(os.environ.pop, mrs.PREFIX_ENV, None)
         self.tmp = Path(tempfile.mkdtemp(prefix="review_lock_ip_"))
         self.root = self.tmp / "review"
         self.root.mkdir()
@@ -241,10 +299,31 @@ class InProcess(unittest.TestCase):
         self.assertEqual(os.environ.get("CRYOEV_VIA"), "claude")
         os.environ.pop("CRYOEV_VIA")
 
+    def test_services_parsing(self):
+        cfg = self.tmp / "s.json"
+        env = {"CRYOEV_SERVICES_CONFIG": str(cfg)}
+        self.assertEqual(mrs.single_server_packages(env), (frozenset(), True))          # no file: nothing, ok
+        services_json(cfg, "C:\\r\\lab_A\\", "{repo}/x/pred_b", extra=[
+            {"name": "m", "argv": ["py", "-m", "annotation.review_server", "--package=D:/q/lab_C"]},
+            {"name": "multi", "argv": ["py", "-m", "annotation.multi_review_server", "--root", "D:/q"]},
+            {"name": "web", "argv": ["py", "-m", "http.server"]}])
+        self.assertEqual(mrs.single_server_packages(env), (frozenset({"lab_a", "pred_b", "lab_c"}), True))
+        raw = cfg.read_text(encoding="utf-8")
+        cfg.write_bytes(raw.encode("utf-16"))                                            # PowerShell 5.1's `>`
+        self.assertEqual(mrs.single_server_packages(env)[0], frozenset({"lab_a", "pred_b", "lab_c"}))
+        cfg.write_text(json.dumps({"services": [{"name": "r", "argv": ["py", "annotation\\review_server.py"]}]}))
+        self.assertEqual(mrs.single_server_packages(env), (frozenset(), False))           # no --package: unknown
+        self.assertEqual(mrs.serving(("pred_", "lab_"), environ=env)[0], ("pred_",))      # fail-closed
+        cfg.write_text("[1, 2")
+        self.assertFalse(mrs.single_server_packages(env)[1])
+        self.assertEqual(mrs.served_prefixes({}), ("pred_",))
+        self.assertEqual(mrs.served_prefixes({mrs.PREFIX_ENV: " lab_ ,pred_,lab_"}), ("lab_", "pred_"))
+
     def test_excluded_names(self):
-        self.assertEqual(mrs.excluded_names([str(self.pkg) + os.sep, " a "], {mrs.EXCLUDE_ENV: "B, ,c"}),
+        none = {"CRYOEV_SERVICES_CONFIG": NO_SERVICES}
+        self.assertEqual(mrs.excluded_names([str(self.pkg) + os.sep, " a "], {mrs.EXCLUDE_ENV: "B, ,c", **none}),
                          frozenset({PKG, "a", "b", "c"}))
-        self.assertEqual(mrs.excluded_names([], {}), frozenset())
+        self.assertEqual(mrs.excluded_names([], none), frozenset())
 
     def test_one_write_lock_per_package_in_a_process(self):
         h1 = rs.make_handler(self.pkg, KEY, set(), "x")

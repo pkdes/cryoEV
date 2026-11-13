@@ -53,10 +53,14 @@ def put(pkg: Path, file: str, dec: dict):
 
 class PickerTests(unittest.TestCase):
     def setUp(self):
-        for k in [k for k in os.environ if k.startswith("CRYOEV_") or k == MRS.EXCLUDE_ENV]:
+        for k in [k for k in os.environ if k.startswith(("CRYOEV_", "CJ_"))]:
             self.addCleanup(os.environ.__setitem__, k, os.environ.pop(k))
         self.tmp = Path(tempfile.mkdtemp(prefix="cj_picker_"))
         self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.svc = self.tmp / "services.json"   # not there yet: no single-package server known
+        for k, v in (("CRYOEV_SERVICES_CONFIG", str(self.svc)), (MRS.PREFIX_ENV, "pred_,lab_")):
+            os.environ[k] = v
+            self.addCleanup(os.environ.pop, k, None)
         self.root = self.tmp / "review"
         self.root.mkdir()
         self.pred = build(self.root, PRED, {"kind": "prediction", "owner": "bas", "model": "v5_model", "n_images": 4})
@@ -107,6 +111,22 @@ class PickerTests(unittest.TestCase):
 
     def test_excluded_package_never_listed(self):
         os.environ[MRS.EXCLUDE_ENV] = LAB
+        self.assertEqual(set(self.rows(user("bas"))), {PRED})
+
+    def test_services_config_package_never_listed(self):
+        """The single-package server's package (services config) is never listed, with no $CJ_REVIEW_EXCLUDE."""
+        self.svc.write_text(json.dumps({"services": [{"name": "review", "argv": [
+            "py", "annotation/review_server.py", "--package", str(self.lab)]}]}), encoding="utf-8")
+        self.assertEqual(set(self.rows(user("bas"))), {PRED})
+        self.svc.write_text("{nope", encoding="utf-8")                        # unreadable: no lab_ at all
+        self.assertEqual(set(self.rows(user("bas"))), {PRED})
+
+    def test_follows_the_multi_servers_prefixes(self):
+        os.environ.pop(MRS.PREFIX_ENV)                                        # its default: pred_ only
+        self.assertEqual(set(self.rows(user("bas"))), {PRED})
+
+    def test_portals_own_review_package_never_listed(self):
+        self.cfg.review_package = self.lab
         self.assertEqual(set(self.rows(user("bas"))), {PRED})
 
     def test_made_from_has_no_paths(self):

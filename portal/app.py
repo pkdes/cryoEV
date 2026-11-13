@@ -85,7 +85,8 @@ CORE_ROLES = {"/review": ("admin",), "/history": ("admin",)}   # built-in defaul
                                                                 # one with a valid entry (manifest_rules)
 CORE_IDS = {"/review": "review", "/history": "history"}       # the only entry that may set each core prefix
 PRED_PORT = 8767                                              # annotation/multi_review_server.py
-PRED_ID_RE = re.compile(r"^pred_ps_\d{8}_[0-9a-f]{6}\Z")         # prediction review package ids (never "app")
+# review package ids the multi server serves: prediction (pred_ps_*) and lab / compare (lab_*); never "app"
+PRED_ID_RE = re.compile(r"^(?:pred_ps_\d{8}_[0-9a-f]{6}|lab_[A-Za-z0-9][A-Za-z0-9_.-]{0,100})\Z")
 OWNER_PATH_RE = re.compile(r"^/review/(?!app(?:/|$))[^/]+(?:/|$)")   # /review/<pkg id>...: owner-checked routes
 TPL_RE = re.compile(r"\{\{(\w+)\}\}")
 # module icons (24 x 24, stroked; design direction A)
@@ -633,21 +634,21 @@ def review_mount(base: str, proxy: P.ReviewProxy, title: str = "Review") -> list
             Route(app_prefix + "/{path:path}", tool, methods=["GET", "HEAD", "PUT", "POST", "DELETE"])]
 
 
-def pred_package(root: Path | None, pkg_id: str):
-    """(package folder, owner id) for a prediction review package id, else None. The id must match PRED_ID_RE; the
-    folder is found with the multi server's own check (well-formed id, complete package, reached under exactly that
-    name: annotation/multi_review_server.package_dir); the owner comes from its review_package.json."""
+def pred_package(root: Path | None, pkg_id: str, prefixes=MRS.PREFIX):
+    """(package folder, review_package.json) for a review package id, else None. The id must match PRED_ID_RE; the
+    folder is found with the multi server's own check (well-formed id with one of `prefixes`, complete package,
+    reached under exactly that name: annotation/multi_review_server.package_dir); access (owner / reviewers) is read
+    from review_package.json."""
     if root is None or not isinstance(pkg_id, str) or not PRED_ID_RE.match(pkg_id):
         return None
     try:
-        pkg = MRS.package_dir(Path(root), pkg_id)
+        pkg = MRS.package_dir(Path(root), pkg_id, prefixes)
     except OSError:
         return None
     if pkg is None:
         return None
     rec = read_json(pkg / MRS.COMPLETE)
-    owner = rec.get("owner") if isinstance(rec, dict) else None
-    return (pkg, owner) if isinstance(owner, str) and owner else None
+    return (pkg, rec) if isinstance(rec, dict) else None
 
 
 def owner_checked(path: str) -> bool:
@@ -657,19 +658,24 @@ def owner_checked(path: str) -> bool:
     return bool(OWNER_PATH_RE.match(path)) and not any(s in (".", "..") for s in path.split("/"))
 
 
-def pred_mount(proxy: P.ReviewProxy, root: Path | None, title: str = "Review") -> list:
+def pred_mount(proxy: P.ReviewProxy, root: Path | None, title: str = "Review", review_package: Path | None = None) -> list:
     """Prediction review packages in the shell, one URL space per package:
          /review/<pkg_id>/          the shell page (as /review/)
          /review/<pkg_id>/app       -> /review/<pkg_id>/app/
          /review/<pkg_id>/app/...   the multi-package review server at <upstream>/<pkg_id>/..., with that package's
                                     own .review_key as X-Review-Key; every proxy rule applies (portal/proxy.py)
-    Who: ctx.can_see(user, owner) (admins all, others their own). Unknown, malformed or not yours: one 404 page."""
+    Who: portal.modules.reviews.may_open: the owner (ctx.can_see: admins all, others their own) or a listed reviewer.
+    Only what the multi server serves (portal.modules.reviews.serving: its prefixes and excluded packages, plus this
+    portal's real-review package). Unknown, malformed, not yours, not served or excluded: one 404 page."""
 
     def lookup(request: Request):
+        from portal.modules.reviews import may_open, serving
+        prefixes, excluded = serving(review_package=review_package)
         pid = request.path_params.get("pkg_id", "")
-        hit = pred_package(root, pid)
-        if hit is None or not M.Ctx.can_see(request.scope.get("cj_user"), hit[1]) or not MRS.package_key(hit[0]):
-            return None, None                           # unknown, not yours, or no key (not served): one answer
+        hit = pred_package(root, pid, prefixes)
+        if hit is None or not may_open(request.scope.get("cj_user"), hit[1], M.Ctx.can_see) \
+                or not MRS.package_key(hit[0]) or hit[0].name.lower() in excluded:
+            return None, None                           # unknown, not yours, no key or excluded: one answer
         return pid, hit[0]
 
     def missing():
@@ -843,7 +849,7 @@ def create_app(cfg: Config) -> Gate:
         Route("/history/{rest:path}", history_other, methods=["GET"]),
         Route(REVIEW_BASE, redirect(REVIEW_BASE + "/"), methods=["GET"]),
         *review_mount(REVIEW_BASE, proxy),
-        *pred_mount(pred_proxy, cfg.review_root),
+        *pred_mount(pred_proxy, cfg.review_root, review_package=cfg.review_package),
         # anything else under /review/: 404 (the same answer as an unknown or not-yours package)
         Route(REVIEW_BASE + "/{rest:path}", review_free, methods=["GET", "HEAD", "PUT", "POST", "DELETE"]),
     ]

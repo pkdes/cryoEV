@@ -13,9 +13,11 @@ Rules:
   - Access = may_open(): review_package.json `owner` via ctx.can_see (admins all, others their own), or the person's
     id in its `reviewers` list. Checked before a row is built or rendered, so a package that is not yours leaves no
     trace in the page (id, name or owner).
-  - Only what the Open link can open: the portal route's id rule (portal/app.py PRED_ID_RE; lab_ ids appear once the
-    route accepts them), the multi server's own folder check (complete, exact name), a key, and not excluded from the
-    multi server (multi_review_server.excluded_names: $CJ_REVIEW_EXCLUDE, the live single-package server's package).
+  - Only what the Open link can open: the portal route's id rule (portal/app.py PRED_ID_RE), a key, and what the
+    multi server serves: serving() = multi_review_server.serving() (its prefixes: pred_, plus lab_ only with
+    $CJ_REVIEW_PREFIXES, never when the services config can't be read; its excluded names: the services config's
+    single-package review_server.py packages, $CJ_REVIEW_EXCLUDE) plus this portal's own real-review package
+    (cfg.review_package). The same serving() gates /review/<id>/ in portal/app.py.
   - Name = portal.names.display_name(<predict root>/<ps>/request.json) for a prediction package, else the
     review_package.json `title`, else the package id.
   - Cards = card_progress(): the Quick check queue as the tool builds it in its default mode (flagged objects):
@@ -215,6 +217,14 @@ def made_from(meta: dict) -> str:
     return " · ".join(out)
 
 
+def serving(cfg=None, review_package=None) -> tuple:
+    """(prefixes, excluded lower-case names): what the multi server serves (multi_review_server.serving(), the one
+    source), minus the portal's own real-review package (review_package, else cfg.review_package)."""
+    from annotation import multi_review_server as MRS
+    own = review_package or getattr(cfg, "review_package", None)
+    return MRS.serving(exclude=[str(own)] if own else [])
+
+
 def list_packages(cfg, user: dict, can_see, only_mine: bool) -> list:
     root = RES.review_root(cfg)
     if root is None:
@@ -226,12 +236,12 @@ def list_packages(cfg, user: dict, can_see, only_mine: bool) -> list:
         return []
     from annotation import multi_review_server as MRS
     from portal.app import PRED_ID_RE
-    excluded = MRS.excluded_names()
+    prefixes, excluded = serving(cfg)
     me = user.get("id") if isinstance(user, dict) else None
     rows = []
     for d in dirs:
         # only what the Open link can open: the same checks as app.pred_package and the review server
-        if not PRED_ID_RE.match(d.name) or d.name.lower() in excluded or MRS.package_dir(Path(root), d.name) is None \
+        if not PRED_ID_RE.match(d.name) or d.name.lower() in excluded or MRS.package_dir(Path(root), d.name, prefixes) is None \
                 or not MRS.package_key(d):
             continue
         meta = _read_json(d / "review_package.json")

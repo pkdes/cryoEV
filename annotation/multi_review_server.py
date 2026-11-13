@@ -2,23 +2,31 @@
 One process serving many review packages (BUILD_CONTRACTS.md section 3): GET/PUT/POST /<pkg id>/<path> is handled
 by review_server.make_handler for that package, exactly as a single review_server.py would handle /<path>.
 review_server.py is wrapped, not changed; the real review (review_server.py on :8766) is a separate process, kept
-off by --exclude / $CJ_REVIEW_EXCLUDE and by the package lock (below).
+off by the exclude (below, fail-closed) and by the package lock.
 
   python -m annotation.multi_review_server [--root <CryoAI-laptop>/review] [--port 8767] [--host 127.0.0.1]
-                                           [--exclude <pkg id or folder> ...]
+                                           [--prefix pred_ [--prefix lab_]] [--exclude <pkg id or folder> ...]
 
 - Packages: complete folders <root>/<prefix>*/ (data.js + review_package.json), reached under exactly their own
-  name (no case or short-name aliases). Default prefixes pred_ (prediction packages) and lab_ (lab / compare
-  packages, compare_package.py). A package added after start is found on its first request; a rebuilt data.js or a
-  new .review_key is picked up on the next one.
+  name (no case or short-name aliases). Default prefix pred_ (prediction packages). lab_ (lab / compare packages,
+  compare_package.py) only when asked: --prefix (repeatable), else $CJ_REVIEW_PREFIXES (comma-separated); the
+  portal reads the same env var (serving()), so its picker and /review/<id>/ follow what this server serves. A
+  package added after start is found on its first request; a rebuilt data.js or a new .review_key is picked up on
+  the next one.
 - One writer per package (round 9): before anything is made for a package (after its key is checked), this process
-  takes the package's OS lock (review_server.hold_package: <root>/.review_locks/<pkg>.lock) and keeps it while it
-  runs. A package whose lock another process holds (a single review_server.py, another multi server) is refused
-  with 409, on every request, until that process lets go. review_server.py takes the same lock at start.
-- Never served: the packages named by --exclude (repeatable) and $CJ_REVIEW_EXCLUDE (comma-separated), by id or
-  folder path: set it to the package the live single-package server (services.json "review") has open. A server
-  started before the lock existed holds no lock, so the exclude is what keeps this server off its package. An
-  excluded id gets the unknown-id answer (403).
+  takes the package's OS lock (review_server.hold_package: <root>/.review_locks/<pkg>.lock) and keeps it until it
+  exits: a package once opened here stays locked until this server is restarted. A package whose lock another
+  process holds (a single review_server.py, another multi server) is refused with 409, on every request, until that
+  process lets go. review_server.py takes the same lock at start. (Operations: a preview multi server pointed at the
+  real review root would hold real packages' locks; give it a sandbox root.)
+- Never served (serving(); one source for this server, the portal's picker and its /review/<id>/ lookup):
+    * the --package of every annotation/review_server.py service in the services config (tools/services.py's file:
+      $CRYOEV_SERVICES_CONFIG, else $CRYOEV_SERVICES, else ~/.cryoev/services.json; read only), enabled or not;
+    * --exclude (repeatable) and $CJ_REVIEW_EXCLUDE (comma-separated), by id or folder path.
+  Fail-closed: a services config that exists but can't be read (bad JSON, a review_server.py service without
+  --package) means no lab_ package is served at all. A server started before the lock existed holds no lock, so
+  the exclude is what keeps this server off its package. An excluded id gets the unknown-id answer (403); main()
+  warns about an excluded name that is no folder under --root.
 - Auth: each package keeps its own key (<pkg>/.review_key; no key, not served): ?k=<key> once, then a cookie
   review_key_<port>_<pkg id> (one per package, since every package shares this port), or X-Review-Key. The key is
   checked here before anything is made for the package (handler, cache entry, edits/ folder).
@@ -65,8 +73,12 @@ if str(REPO) not in sys.path:
 from annotation import review_server as rs  # noqa: E402
 
 PORT = 8767
-PREFIX = ("pred_", "lab_")        # prediction packages; lab / compare packages (compare_package.py)
+PREFIX = ("pred_",)               # prediction packages; lab_ (compare_package.py) only by --prefix / PREFIX_ENV
+LAB_PREFIX = "lab_"
+PREFIX_ENV = "CJ_REVIEW_PREFIXES"   # comma-separated prefixes to serve (the portal reads it too)
 EXCLUDE_ENV = "CJ_REVIEW_EXCLUDE"   # comma-separated package ids or folders this server never serves
+SERVICES_ENVS = ("CRYOEV_SERVICES_CONFIG", "CRYOEV_SERVICES")       # tools/services.py's config, read only
+SERVICES_DEFAULT = Path.home() / ".cryoev" / "services.json"
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 BAD_PATH = ("..", "\\", ":")
 COMPLETE = "review_package.json"  # prediction_package.build writes it last (and builds in a temp folder anyway)
@@ -98,11 +110,90 @@ def package_dir(root: Path, pkg_id: str, prefix=PREFIX) -> Path | None:
     return p if (p / "data.js").is_file() and (p / COMPLETE).is_file() else None
 
 
+def _name(v: str) -> str:
+    """A package id or folder path -> its lower-case folder name (either slash)."""
+    return re.split(r"[\\/]+", v.strip().rstrip("\\/"))[-1].lower()
+
+
+def served_prefixes(environ=None) -> tuple:
+    """The prefixes served without --prefix: $CJ_REVIEW_PREFIXES, else PREFIX (pred_ only)."""
+    env = os.environ if environ is None else environ
+    got = tuple(dict.fromkeys(v.strip() for v in str(env.get(PREFIX_ENV, "")).split(",") if v.strip()))
+    return got or PREFIX
+
+
+def services_config(environ=None) -> Path:
+    env = os.environ if environ is None else environ
+    for k in SERVICES_ENVS:
+        if env.get(k):
+            return Path(os.path.expanduser(env[k]))
+    return SERVICES_DEFAULT
+
+
+_svc_cache: dict = {}
+
+
+def single_server_packages(environ=None) -> tuple:
+    """(lower-case folder names, ok): the --package of every annotation/review_server.py service in the services
+    config, enabled or not (read only). ok is False when the file exists but can't be read, or such a service has no
+    --package: then nothing is known, and serving() serves no lab_ package (fail-closed). No file: (empty, True)."""
+    path = services_config(environ)
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return frozenset(), True
+    except OSError:
+        return frozenset(), False
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    if _svc_cache.get("key") == key:
+        return _svc_cache["val"]
+    val = _parse_services(path)
+    _svc_cache.update(key=key, val=val)
+    return val
+
+
+def _parse_services(path: Path) -> tuple:
+    try:
+        raw = path.read_bytes()
+        text = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig")
+        data = json.loads(text)
+        services = data.get("services") or []
+        if not isinstance(services, list):
+            return frozenset(), False
+    except (OSError, ValueError, UnicodeError, AttributeError):
+        return frozenset(), False
+    names = set()
+    for svc in services:
+        argv = svc.get("argv") if isinstance(svc, dict) else None
+        if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
+            return frozenset(), False
+        is_single = any(re.split(r"[\\/]+", a)[-1].lower() == "review_server.py" for a in argv) or any(
+            a == "-m" and b == "annotation.review_server" for a, b in zip(argv, argv[1:]))
+        if not is_single:
+            continue
+        pkg = next((b for a, b in zip(argv, argv[1:]) if a == "--package"), None) or next(
+            (a.split("=", 1)[1] for a in argv if a.startswith("--package=")), None)
+        if not pkg or not pkg.strip():
+            return frozenset(), False
+        names.add(_name(os.path.expanduser(os.path.expandvars(pkg.replace("{repo}", str(REPO))))))
+    return frozenset(names), True
+
+
 def excluded_names(values=(), environ=None) -> frozenset:
-    """Lower-case folder names never to serve: `values` (--exclude) plus $CJ_REVIEW_EXCLUDE, each an id or a path."""
+    """Lower-case folder names never to serve: `values` (--exclude), $CJ_REVIEW_EXCLUDE and the single-package
+    review servers' packages from the services config, each an id or a path."""
     env = os.environ if environ is None else environ
     items = list(values or ()) + str(env.get(EXCLUDE_ENV, "")).split(",")
-    return frozenset(Path(v.strip().rstrip("\\/")).name.lower() for v in items if v and v.strip())
+    return frozenset(_name(v) for v in items if v and v.strip()) | single_server_packages(environ)[0]
+
+
+def serving(prefix=None, exclude=(), environ=None) -> tuple:
+    """(prefixes, excluded names) this server serves, as the portal must see them too: prefix (else
+    served_prefixes()), minus lab_ when the services config can't be read (fail-closed); excluded_names(exclude)."""
+    pre = _prefixes(prefix) if prefix else served_prefixes(environ)
+    if not single_server_packages(environ)[1]:
+        pre = tuple(p for p in pre if not p.startswith(LAB_PREFIX))
+    return pre, excluded_names(exclude, environ)
 
 
 def package_key(pkg: Path) -> str:
@@ -153,9 +244,9 @@ class Packages:
     .review_key change. Cached by resolved folder; nothing is cached or created for an unknown id, an excluded one, a
     wrong key, or a package whose lock another process holds."""
 
-    def __init__(self, root: Path, prefix=PREFIX, people=None, exclude=None):
-        self.root, self.prefix = Path(root), _prefixes(prefix)
-        self.exclude = excluded_names() if exclude is None else frozenset(e.lower() for e in exclude)
+    def __init__(self, root: Path, prefix=None, people=None, exclude=()):
+        self.root = Path(root)
+        self.prefix, self.exclude = serving(prefix, exclude)  # the services config's packages always count
         self.people = rs.load_people() if people is None else list(people)
         self._cache, self._lock, self._held = {}, threading.Lock(), set()
 
@@ -347,9 +438,9 @@ class MultiServer(ThreadingHTTPServer):
         self.RequestHandlerClass.packages.close()  # the package locks go with the server
 
 
-def make_server(root: Path, host: str = "127.0.0.1", port: int = PORT, prefix=PREFIX, people=None, exclude=None):
+def make_server(root: Path, host: str = "127.0.0.1", port: int = PORT, prefix=None, people=None, exclude=()):
     """A ThreadingHTTPServer for every <root>/<prefix>* package (port 0 = a free one; see server_address).
-    exclude: folder names never served (default: excluded_names(), i.e. $CJ_REVIEW_EXCLUDE)."""
+    prefix: default served_prefixes(); exclude: more names never served, on top of excluded_names() (serving())."""
     handler = type("MultiDispatch", (Dispatch,), {"packages": Packages(root, prefix, people, exclude)})
     return MultiServer((host, port), handler)
 
@@ -363,7 +454,8 @@ def main(argv=None):
                          "Tailscale IP, no `tailscale serve`, whose requests also arrive from loopback)")
     ap.add_argument("--port", type=int, default=PORT)
     ap.add_argument("--prefix", action="append", default=None,
-                    help=f"Serve only package folders starting with this; repeatable (default {' and '.join(PREFIX)})")
+                    help=f"Serve package folders starting with this; repeatable (default ${PREFIX_ENV}, else "
+                         f"{' and '.join(PREFIX)}). lab_ is never served when the services config can't be read")
     ap.add_argument("--exclude", action="append", default=[],
                     help=f"A package id or folder never to serve; repeatable, added to ${EXCLUDE_ENV} (comma-separated). "
                          "Set it to the package the live single-package review server has open")
@@ -372,18 +464,24 @@ def main(argv=None):
     gone = actor.strip_env()  # main only: a server restarted from an agent session never credits its saves to the agent
     if gone:
         print(f"[OK] Removed {', '.join(gone)} from this server's environment (reviewers' saves are their own)", flush=True)
-    prefix = tuple(a.prefix) if a.prefix else PREFIX
-    exclude = excluded_names(a.exclude)
+    prefix, exclude = serving(a.prefix, a.exclude)
+    if not single_server_packages()[1]:
+        print(f"[WARN] The services config {services_config()} can't be read: no lab_ package is served "
+              "(the single-package review server's package is unknown)", flush=True)
     if a.root is None:
         from data_utils import config
         a.root = config.laptop_root() / "review"
     root = a.root.resolve()
-    srv = make_server(root, a.host, a.port, prefix, exclude=exclude)
+    srv = make_server(root, a.host, a.port, prefix, exclude=a.exclude)
+    for n in sorted(exclude):
+        if not (root / n).is_dir() and not any(d.name.lower() == n for d in root.iterdir() if d.is_dir()):
+            print(f"[WARNING] Excluded package {n!r} is no folder under {root}: check --exclude, ${EXCLUDE_ENV} and "
+                  "the services config", flush=True)
     ids = srv.RequestHandlerClass.packages.ids()
     print(f"[OK] Serving {len(ids)} package(s) {'* / '.join(prefix)}* under {root} on {a.host}:{srv.server_address[1]}; "
           "new packages are found on their first request", flush=True)
-    print(f"[OK] Never served (--exclude / ${EXCLUDE_ENV}): {', '.join(sorted(exclude)) or 'none'}. One writer per "
-          "package: a package another server has open is refused (409)", flush=True)
+    print(f"[OK] Never served (services config, --exclude, ${EXCLUDE_ENV}): {', '.join(sorted(exclude)) or 'none'}. "
+          "One writer per package: a package another server has open is refused (409)", flush=True)
     for i in ids:
         print(f"[OK]   http://{a.host}:{srv.server_address[1]}/{i}/?k=<key in {root / i / '.review_key'}>", flush=True)
     if a.host in ("0.0.0.0", "::"):
