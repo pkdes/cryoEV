@@ -26,11 +26,14 @@ Writes go through data_utils.path_guard (never under Box or Cryo-image-processin
 
 Attribution (round 9, registry/actor.py): `via` (envelope) = the agent that wrote the line, e.g. "claude"; absent
 when a person ran the command. append(record, via=...) always drops a `via` the record arrived with and sets only
-the one passed, so a line copied from an agent's line (set-status, the importer) never carries the agent onto a
-person's write. The CLI commands (import, set-status, job new) take it from $CRYOEV_VIA, and the person from --who,
-else $CRYOEV_FOR (set-status: one of the two is required; job new: else none, as before). An agent never promotes:
-a model line with `via` that would make it production is refused (re-appending an already-production model is not a
-promotion and stays allowed).
+its own, so a line copied from an agent's line (set-status, the importer) never carries the agent onto a person's
+write. append / set_status / new_job (and the importer) take `via` from $CRYOEV_VIA when the argument is not
+passed (via=None explicitly = none): a script an agent runs is stamped; servers strip the variable in main(). The
+CLI commands take the person from --who, else $CRYOEV_FOR (set-status: one of the two is required; job new: else
+none, as before). An agent never sets production: a model line with `via` and status production is refused, even
+when the model already is production (the user's decision is never restamped by an agent).
+Format marker: the first line carrying via / status_via writes <root>/FORMAT.json {"min_reader": 2}; append and the
+importer refuse a registry whose min_reader is above READER_VERSION (an older checkout would mis-read the lines).
 `status_via` = the agent that set the explicit status (next to `status_by`): written by set-status (absent when a
 person sets it), carried with `status_by` wherever that is carried (set-status's own copy, the importers), so an
 agent-set status still reads "claude for pujan" after later lines; a person's new status clears it. append() never
@@ -60,6 +63,8 @@ PEOPLE = REPO / "annotation" / "people.json"
 POINTER = {"inference_check", "label_version"}
 ENVELOPE = {"schema", "id", "logged", "recorded_by", "note", "owner", "status_by", "status_via", "via"}
 PRODUCTION_WHO = "pujan"
+FORMAT, READER_VERSION = "FORMAT.json", 2          # registry format marker; 2 = lines may carry via / status_via
+_ENV = object()                                   # append(via=...) not passed: take it from $CRYOEV_VIA
 LOCK, LOCK_WAIT = ".registry.lock", 30.0          # OS write lock in the registry folder (append holds it per line)
 UPLOAD_LOCK = ".upload_session.lock"              # session read -> merge -> append (= importers / upload_sessions)
 _SCHEMAS = None
@@ -193,8 +198,8 @@ def _check(rec, root, via_set_status=False):
         prev = current("model", root).get(rec["id"], {})
         kept = prev.get("status") == "production" and prev.get("status_by") == PRODUCTION_WHO \
             and rec.get("status_by") == PRODUCTION_WHO
-        if rec.get("via") and not kept:                   # agents never promote (user only)
-            raise RegistryError(f"refused: an agent (via {rec['via']!r}) never sets production; "
+        if rec.get("via"):                                # agents never set (or restamp) production: user only
+            raise RegistryError(f"refused: an agent (via {rec['via']!r}) never writes a production model line; "
                                 f"only `set-status <id> production --who {PRODUCTION_WHO}` run by the user does")
         if not (kept or via_set_status and rec.get("status_by") == PRODUCTION_WHO):
             raise RegistryError(f"refused: only `set-status <id> production --who {PRODUCTION_WHO}` sets production")
@@ -244,19 +249,56 @@ def _write_files(root, files, replace=False):
     return len(todo)
 
 
-def append(record, root=None, _via_set_status=False, new_only=False, files=None, replace_files=False, via=None):
+def check_format(root):
+    """Refuse a registry written for a newer reader (<root>/FORMAT.json min_reader > READER_VERSION). No file = OK."""
+    p = Path(root) / FORMAT
+    if not p.exists():
+        return None
+    try:
+        need = int(json.loads(p.read_text(encoding="utf-8"))["min_reader"])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise RegistryError(f"refused: {p} unreadable ({e}); not writing to a registry of unknown format")
+    if need > READER_VERSION:
+        raise RegistryError(f"refused: {p} needs reader version {need}, this code is {READER_VERSION}: "
+                            "update this checkout (git pull) before writing to the registry")
+    return need
+
+
+def _mark_format(root):
+    """FORMAT.json min_reader >= READER_VERSION (under the lock, before a line with via / status_via)."""
+    if (check_format(root) or 0) < READER_VERSION:
+        p = Path(root) / FORMAT
+        _guard(p)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps({"min_reader": READER_VERSION, "why": "lines may carry via / status_via (round 9)",
+                                   "written": now()}) + "\n", encoding="utf-8")
+        tmp.replace(p)
+
+
+def resolve_via(via=_ENV):
+    """The via argument: not passed -> $CRYOEV_VIA (actor.via()); None -> none; else checked."""
+    if via is _ENV:
+        try:
+            via = actor.via()
+        except actor.ActorError as e:
+            raise RegistryError(f"refused: {e}") from e
+    if via and not actor.VIA_RE.match(str(via)):
+        raise RegistryError(f"refused: via {via!r} is not a short lower-case id")
+    return via or None
+
+
+def append(record, root=None, _via_set_status=False, new_only=False, files=None, replace_files=False, via=_ENV):
     """Validate, then append one line to <root>/<entity>.jsonl. Returns the stored line.
-    via: the agent writing this line (actor.via()), or None for a person. Any `via` in `record` is dropped first:
-    a line copied from an agent's line must not carry the agent onto someone else's write.
+    via: the agent writing this line; not passed = $CRYOEV_VIA (actor.via()), None = a person. Any `via` in `record`
+    is dropped first: a line copied from an agent's line must not carry the agent onto someone else's write.
     new_only: refuse an id already used by any record (creators: new_job, dataset_from_lv), checked under the lock.
     files: {registry-relative path: bytes} written under the lock after the checks, before the line; a file there
     with other content is refused unless replace_files (the importer: a list whose record changes with it)."""
     root = Path(root or default_root())
     rec = dict(record)
     rec.pop("via", None)
+    via = resolve_via(via)
     if via:
-        if not actor.VIA_RE.match(str(via)):
-            raise RegistryError(f"refused: via {via!r} is not a short lower-case id")
         rec["via"] = via
     if rec.get("status_via") is not None and not actor.VIA_RE.match(str(rec["status_via"])):
         raise RegistryError(f"refused: status_via {rec['status_via']!r} is not a short lower-case id")
@@ -267,6 +309,7 @@ def append(record, root=None, _via_set_status=False, new_only=False, files=None,
     if lock is None:
         raise RegistryError(f"registry busy: another process held {root / LOCK} for {LOCK_WAIT:.0f} s")
     try:
+        check_format(root)
         e = _check(rec, root, _via_set_status)
         if new_only:
             used = id_used_by(rec.get("id"), root)
@@ -274,6 +317,8 @@ def append(record, root=None, _via_set_status=False, new_only=False, files=None,
                 raise RegistryError(f"refused: id {rec.get('id')} is already used by {used}/1 (new_only)")
         path = root / f"{e}.jsonl"
         _guard(path)
+        if rec.get("via") or rec.get("status_via"):
+            _mark_format(root)
         _write_files(root, files, replace_files)
         line = compact(e, rec)
         lead = ""
@@ -288,9 +333,11 @@ def append(record, root=None, _via_set_status=False, new_only=False, files=None,
         lock.close()
 
 
-def set_status(id, status, who, note=None, root=None, reason=None, via=None):
+def set_status(id, status, who, note=None, root=None, reason=None, via=_ENV):
     """Explicit status line (wins over derived ones). Jobs: ready / in_progress / done / blocked (needs a
-    reason: `reason` or `note`) / cancelled; leaving `blocked` drops blocked_reason. via: the agent (or None)."""
+    reason: `reason` or `note`) / cancelled; leaving `blocked` drops blocked_reason. via: the agent (not passed =
+    $CRYOEV_VIA, None = a person); it is also the line's status_via."""
+    via = resolve_via(via)
     if who not in roster():
         raise RegistryError(f"refused: --who {who!r} is not in people.json")
     if current("session", root).get(id) is not None:
@@ -359,7 +406,7 @@ def read_image_list(path):
 
 
 def new_job(type, where, name, images=None, session=None, who=None, total=None, root=None, date=None, note=None,
-            via=None):
+            via=_ENV):
     """Append a `job/1` line (status ready) with its image list copied to <root>/lists/<job id>.txt."""
     root = Path(root or default_root())
     if type not in JOB_TYPES or where not in JOB_WHERE:

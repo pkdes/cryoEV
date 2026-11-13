@@ -73,8 +73,14 @@ class Actor(unittest.TestCase):
 
     def test_strip_env_default_is_os_environ(self):
         with mock.patch.dict(os.environ, {"CRYOEV_VIA": "claude"}, clear=False):
+            os.environ.pop("CRYOEV_FOR", None)              # whatever the running session has (restored by the patch)
             self.assertEqual(A.strip_env(), ["CRYOEV_VIA"])
             self.assertNotIn("CRYOEV_VIA", os.environ)
+
+    def test_strip_env_any_case(self):
+        env = {"cryoev_via": "claude", "Cryoev_For": "pujan", "CRYOEV_LAPTOP_ROOT": "x"}
+        self.assertEqual(sorted(A.strip_env(env)), ["Cryoev_For", "cryoev_via"])
+        self.assertEqual(env, {"CRYOEV_LAPTOP_ROOT": "x"})
 
     def test_real_people_json_has_pujan(self):
         self.assertEqual(A.who(None, None, {"CRYOEV_FOR": "pujan"}), "pujan")

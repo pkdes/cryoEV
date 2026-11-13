@@ -41,6 +41,9 @@ class ChildEnv(unittest.TestCase):
         self.assertNotIn("CRYOEV_FOR", env)                  # even when the entry's own env sets it
         self.assertEqual((env["SVC_X"], env["PYTHONUNBUFFERED"], env["CRYOEV_LAPTOP_ROOT"], env["PATH"]),
                          ("1", "1", "lap", "p"))               # control: everything else passes through
+        svc, _ = self.svc({"cryoev_via": "claude", "Cryoev_For": "au1"})          # any case (Windows env names)
+        env = S.child_env(svc, {"PATH": "p"})
+        self.assertFalse([k for k in env if k.upper() in ("CRYOEV_VIA", "CRYOEV_FOR")], env)
 
     def test_spawned_child_has_no_identity_vars(self):
         svc, out = self.svc({"SVC_X": "1"})

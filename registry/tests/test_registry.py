@@ -1,9 +1,11 @@
 """registry.py / importers.py: append/current/history, refusals, guard, production rule, idempotent import."""
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REG = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REG))
@@ -17,6 +19,11 @@ def sample(entity):
 
 class TestRegistry(unittest.TestCase):
     def setUp(self):
+        # writers default `via` to $CRYOEV_VIA (round 9): these tests are a person's writes whatever session runs them
+        env = mock.patch.dict(os.environ, {k: v for k, v in os.environ.items()
+                                           if k not in ("CRYOEV_VIA", "CRYOEV_FOR")}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name) / "registry"
 
