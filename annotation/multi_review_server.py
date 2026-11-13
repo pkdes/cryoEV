@@ -1,7 +1,8 @@
 """
 One process serving many review packages (BUILD_CONTRACTS.md section 3): GET/PUT/POST /<pkg id>/<path> is handled
 by review_server.make_handler for that package, exactly as a single review_server.py would handle /<path>.
-review_server.py is wrapped, not changed; the real review (review_server.py on :8766) is a separate process.
+review_server.py is wrapped, not changed; the real review (review_server.py on :8766) is a separate process, kept
+off by --exclude / $CJ_REVIEW_EXCLUDE and by the package lock (below).
 
   python -m annotation.multi_review_server [--root <CryoAI-laptop>/review] [--port 8767] [--host 127.0.0.1]
                                            [--exclude <pkg id or folder> ...]
