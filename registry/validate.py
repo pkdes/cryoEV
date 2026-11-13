@@ -34,10 +34,16 @@ from data_utils import config  # noqa: E402
 from data_utils.config import find_sibling  # noqa: E402,F401  (re-exported for importers, registry, tests)
 from data_utils.path_guard import protected_problem  # noqa: E402
 from registry import ids  # noqa: E402
-from annotation.review_groups import is_record_file  # noqa: E402  (edits/_groups.json is no image record)
 from registry.schema_check import check_record, load_schemas  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
+GROUPS_FILE = "_groups.json"  # = annotation.review_groups.GROUPS_FILE (registry/ must import without annotation/)
+
+
+def is_record_file(p) -> bool:
+    """A review package's edits/<file>.json image record, not edits/_groups.json (group notes, round 12)."""
+    return Path(p).name.endswith(".json") and Path(p).name != GROUPS_FILE
+
 REPO = HERE.parent
 
 PROTECTED = list(config.protected_roots())  # processing datasets, Box

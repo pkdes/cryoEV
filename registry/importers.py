@@ -68,9 +68,9 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from annotation.review_groups import is_record_file
 from registry import ids
 from registry import store as registry
+from registry.validate import is_record_file  # noqa: E402  (edits/_groups.json is no image record)
 from registry.validate import (EXCLUDED_SESSIONS, REPO, Scan, find_sibling, lv_provenance, read_csv, read_datajs,
                                read_json, read_jsonl, sha256_file)
 from registry.validate import config  # data_utils.config

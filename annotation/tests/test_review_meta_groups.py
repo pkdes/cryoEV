@@ -553,7 +553,7 @@ class GroupsFileIgnoredTests(ServerCase):
         self.assertEqual((st["files"], st["changed"]), (1, []))
         self.assertTrue((self.tmp / "out" / rg.GROUPS_FILE).is_file())       # carried along, byte for byte
         self.assertEqual(cp.edits_sha256(self.pkg / "edits"), cp.edits_sha256(self.tmp / "out"))
-        self.assertTrue(callable(validate.is_record_file))
+        self.assertEqual(validate.GROUPS_FILE, rg.GROUPS_FILE)            # registry/ keeps its own copy of the name
         self.assertFalse(validate.is_record_file(self.pkg / "edits" / rg.GROUPS_FILE))
 
 
