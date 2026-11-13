@@ -157,11 +157,12 @@ def sha256_file(path: Path) -> str | None:
 
 
 def git_sha() -> str:
+    env = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}  # never take index.lock (the live portal runs this in process)
     try:
         sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO, capture_output=True,
-                             text=True, check=True).stdout.strip()
+                             text=True, check=True, env=env).stdout.strip()
         dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=REPO,
-                               capture_output=True, text=True).stdout.strip()
+                               capture_output=True, text=True, env=env).stdout.strip()
         return sha + ("-dirty" if dirty else "")
     except (OSError, subprocess.CalledProcessError):
         return "unknown"

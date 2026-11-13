@@ -146,9 +146,76 @@ class Eligibility(unittest.TestCase):
         self.assertTrue(self.rows()["lab_served"]["eligible"])
         for argv, want in ((["py", "annotation\\review_server.py", "--package=C:\\x\\review\\pk1\\"], {"pk1"}),
                            (["py", "annotation/multi_review_server.py", "--package", "/r/pk2"], set()),
-                           ("py annotation/review_server.py --package /r/pk3", {"pk3"})):
+                           ("py annotation/review_server.py --package /r/pk3", {"pk3"}),
+                           (["py", "-m", "annotation.review_server", "--pack", "/r/pk4"], {"pk4"}),
+                           (["py", "-mreview_server", "--pa=/r/pk5", "--port", "1"], {"pk5"}),
+                           (["py", "-m", "portal.app", "--package", "/r/pk6"], set()),       # not the review server
+                           (["py", "annotation/review_server.py", "--port", "/r/pk7"], set())):  # --port is not --package
             self.w.services.write_text(json.dumps({"services": [{"name": "s", "argv": argv}]}), encoding="utf-8")
             self.assertEqual(M.served_packages()[0], want, argv)
+
+    def test_services_check_failure_fails_closed(self):
+        self.w.services.unlink()
+        self.w.services.mkdir()                                                       # a folder: read_text raises
+        names, problem = M.served_packages()
+        self.assertIsNone(names)
+        self.assertTrue(problem)
+        with mock.patch.object(M, "_is_review_server", side_effect=PermissionError("x")):
+            self.w.services.rmdir()
+            self.w.services.write_text(json.dumps({"services": [{"argv": ["a"]}]}), encoding="utf-8")
+            self.assertEqual(M.served_packages()[0], None)
+            self.assertFalse(any(r["eligible"] for r in self.rows().values()))
+        with mock.patch.object(M, "base_file", side_effect=PermissionError("x")):      # a per-package check fails
+            rows = self.rows()
+        self.assertFalse(rows["lab_ok"]["eligible"])
+        self.assertIn("can't be checked", rows["lab_ok"]["why"][0])
+
+    def test_busy_lock_in_worker(self):
+        row = self.rows()["lab_ok"]
+        self.assertTrue(M._busy.acquire(blocking=False))
+        try:
+            self.assertEqual(M.run_preview(self.w.cfg(), row, "pujan"), (None, None))
+        finally:
+            M._busy.release()
+        self.assertFalse((M.scratch_root(self.w.cfg()) / "lab_ok").exists())
+        ts, info = M.run_preview(self.w.cfg(), row, "pujan")                           # control: free -> runs
+        self.assertTrue(ts and "error" not in info, info.get("error"))
+        self.assertFalse(M._busy.locked())
+
+    def test_new_folder_retries_once(self):
+        root = M.scratch_root(self.w.cfg())
+        real, calls = Path.mkdir, []
+
+        def flaky(path, *a, **kw):
+            calls.append(path)
+            if len(calls) == 1:
+                raise FileNotFoundError("pkg folder pruned meanwhile")
+            return real(path, *a, **kw)
+        now = datetime(2026, 11, 12, tzinfo=timezone.utc)
+        with mock.patch.object(Path, "mkdir", flaky):
+            d = M.new_folder(root, "lab_ok", now)
+        self.assertTrue(d.is_dir())
+        with mock.patch.object(Path, "mkdir", side_effect=PermissionError("no")):
+            with self.assertRaises(OSError):
+                M.new_folder(root, "lab_x", now)
+
+    def test_edits_copy_regular_files_only(self):
+        ed = self.w.review / "lab_ok" / "edits"
+        target = self.w.tmp / "outside.json"
+        target.write_text('{"file": "x"}', encoding="utf-8")
+        import stat as S                                                              # a junction-like reparse point
+        fake = SimpleNamespace(st_mode=S.S_IFREG | 0o644, st_file_attributes=0x400)
+        with mock.patch.object(M.os, "lstat", return_value=fake):
+            self.assertFalse(M.is_regular(ed / "a.png.json"))
+            self.assertFalse(M.is_plain_dir(ed))
+            self.assertEqual(M.edit_files(ed), [])
+        try:
+            os.symlink(target, ed / "zz_link.json")
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks need a privilege on this machine")
+        self.assertFalse(M.is_regular(ed / "zz_link.json"))
+        self.assertTrue(M.is_regular(ed / "a.png.json"))                               # control
+        self.assertNotIn("zz_link.json", [f.name for f in M.edit_files(ed)])
 
     def test_people_and_command(self):
         sys.path.insert(0, str(T.REPO / "annotation"))
@@ -303,6 +370,34 @@ class Portal(unittest.TestCase):
         self.assertEqual((st, T.hget(h, "content-type"), body[:2]), (200, "image/jpeg", b"\xff\xd8"))
         st, _, _ = self.get("pujan", f"/apply/view/lab_ok/{ts}/labels/{info['lv']}/changes.jsonl")
         self.assertEqual(st, 200)
+        self.assertIn("sandbox", T.hget(T.request(self.p.port, "GET", f"/apply/view/lab_ok/{ts}/report/index.html",
+                                                  T.cookie(self.tok["pujan"]))[1], "content-security-policy"))
+        # decisions changed since the preview: a warning and no CLI command
+        self.assertNotIn("Decisions changed", page)                             # control: unchanged
+        rec = self.w.review / "lab_ok" / "edits" / "c.png.json"
+        old = rec.read_bytes()
+        rec.write_bytes(old.replace(b'"reviewed": true', b'"reviewed": false'))
+        try:
+            page2 = self.get("pujan", loc)[2].decode()
+            self.assertIn("Decisions changed since this preview", page2)
+            self.assertNotIn("--who pujan", page2)
+        finally:
+            rec.write_bytes(old)
+        # serve-time re-check: a _work_ folder (or kind compare) appearing later -> 404
+        work = self.w.review / "_work_lab_ok"
+        work.mkdir()
+        try:
+            self.assertEqual(self.get("pujan", loc)[0], 404)
+            self.assertEqual(self.get("pujan", f"/apply/view/lab_ok/{ts}/report/index.html")[0], 404)
+        finally:
+            work.rmdir()
+        meta = self.w.review / "lab_ok" / "review_package.json"
+        meta.write_text(json.dumps({"kind": "compare"}), encoding="utf-8")
+        try:
+            self.assertEqual(self.get("pujan", f"/apply/view/lab_ok/{ts}/report/index.html")[0], 404)
+        finally:
+            meta.unlink()
+        self.assertEqual(self.get("pujan", loc)[0], 200)                         # control: back once removed
         # path traversal and odd names: refused, never another file
         (self.w.env.state / "secret.json").write_text('{"s": "TOPSECRET"}', encoding="utf-8")
         bad = [f"/apply/view/lab_ok/{ts}/../../../secret.json", f"/apply/view/lab_ok/{ts}/report/..%2F..%2F..%2Fsecret.json",
@@ -320,6 +415,46 @@ class Portal(unittest.TestCase):
             self.assertIn(T.raw_status(resp), (400, 404))
             self.assertNotIn(b"TOPSECRET", resp)
         (self.w.env.state / "secret.json").unlink()
+
+
+class AccessDoor(unittest.TestCase):
+    """Cloudflare access mode with CJ_ACCESS_ADMIN on: an admin (verified email) can preview; a non-admin gets 403."""
+
+    @classmethod
+    def setUpClass(cls):
+        import test_access as TA                       # module import: its TestCases are not collected twice
+        from portal.modules import admin as ADM
+        cls.TA = TA
+        cls.w = World()
+        ADM.add_person(cls.w.env.roster, "boss", "advanced", "boss@example.org")
+        A.set_email(cls.w.env.roster, "pujan", "pujan@example.org")
+        cls.envp = mock.patch.dict(os.environ, {"CRYOEV_SERVICES_CONFIG": str(cls.w.services)})
+        cls.envp.start()
+        cls.p = TA.access_portal(cls.w.env, TA.Fetcher(), admin=True, review_root=cls.w.review)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.p.stop()
+        cls.envp.stop()
+        cls.w.cleanup()
+
+    def test_admin_previews_non_admin_refused(self):
+        TA = self.TA
+        st, _, body = TA.get(self.p.port, "/apply/", TA.sign("pujan@example.org"))
+        self.assertEqual(st, 200, body[:300])
+        tok = re.search(rb'name="t" value="([0-9a-f]+)"', body).group(1).decode()
+        st, h, _ = TA.get(self.p.port, "/apply/preview", TA.sign("pujan@example.org"),
+                          {"Origin": TA.ORIGIN, "Content-Type": "application/x-www-form-urlencoded"},
+                          method="POST", body=urlencode({"t": tok, "pkg": "lab_ok"}).encode())
+        self.assertEqual(st, 303)
+        self.assertTrue(T.hget(h, "location").startswith("/apply/run/lab_ok/"))
+        for path in ("/apply/", T.hget(h, "location")):
+            st, _, _ = TA.get(self.p.port, path, TA.sign("boss@example.org"))
+            self.assertEqual(st, 403, path)
+        st, _, _ = TA.get(self.p.port, "/apply/preview", TA.sign("boss@example.org"),
+                          {"Origin": TA.ORIGIN, "Content-Type": "application/x-www-form-urlencoded"},
+                          method="POST", body=urlencode({"t": tok, "pkg": "lab_ok"}).encode())
+        self.assertEqual(st, 403)
 
 
 if __name__ == "__main__":

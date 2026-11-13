@@ -28,6 +28,9 @@ refused before anything is written. Each preview gets its own folder; folders ol
 visit. Nothing is written outside <state>/apply_preview (and the portal audit line): never the label sets
 (CryoAI-laptop/labels), the package or the registry. There is NO apply button: the page shows the CLI command
 (`--out-root` explicit, because the CLI's default <base>/../../labels is wrong for a label-set base).
+Serve time re-checks: /run and /view answer 404 once the package has a _work_ folder or is a compare package; /run
+warns "decisions changed since this preview" when the package's edits no longer match the frozen copy's sha256 (and
+then hides the CLI command). The edits copy takes regular files only (no symlinks / junctions).
 Served files: only under that preview's folder, by a strict name pattern per path part, real path checked, a fixed
 list of types; the report's HTML gets a CSP with no scripts. Every text is escaped.
 """
@@ -41,6 +44,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -69,9 +73,9 @@ PART_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]{0,200}")
 SERVE = {".html": "text/html; charset=utf-8", ".jpg": "image/jpeg", ".json": "application/json",
          ".jsonl": "text/plain; charset=utf-8", ".csv": "text/plain; charset=utf-8"}
 REPORT_CSP = ("default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; "
-              "frame-ancestors 'none'")
+              "frame-ancestors 'none'; sandbox")
 esc = html.escape
-_busy = threading.Lock()   # one preview at a time (an apply + pictures can take a while)
+_busy = threading.Lock()   # one preview at a time (taken by the worker itself: a client hang-up can't start a 2nd)
 
 
 # ---------------------------------------------------------------- inputs (read-only)
@@ -79,44 +83,60 @@ def services_config() -> Path:
     return Path(os.environ.get("CRYOEV_SERVICES_CONFIG") or Path.home() / ".cryoev" / "services.json")
 
 
-def _package_arg(argv) -> list:
-    out = []
+def _is_review_server(argv) -> bool:
+    """annotation/review_server.py (any path), or `-m annotation.review_server` / `-m review_server`."""
+    mods = ("annotation.review_server", "review_server")
     for i, x in enumerate(argv):
         x = str(x)
-        if x == "--package" and i + 1 < len(argv):
-            out.append(str(argv[i + 1]))
-        elif x.startswith("--package="):
-            out.append(x.split("=", 1)[1])
+        if re.split(r"[\\/]", x)[-1] == "review_server.py":
+            return True
+        if x == "-m" and i + 1 < len(argv) and str(argv[i + 1]) in mods:
+            return True
+        if x.startswith("-m") and x[2:] in mods:
+            return True
+    return False
+
+
+def _package_arg(argv) -> list:
+    """Values of --package, --package=..., and the prefixes argparse accepts for it (--pa, --pac, ... ; review_server's
+    only other --p option is --port, so --pa is already unique)."""
+    out = []
+    for i, x in enumerate(argv):
+        opt, eq, val = str(x).partition("=")
+        if len(opt) >= 4 and "--package".startswith(opt):
+            if eq:
+                out.append(val)
+            elif i + 1 < len(argv):
+                out.append(str(argv[i + 1]))
     return out
 
 
 def served_packages(path=None):
-    """-> (names, problem). Package folder names given to annotation/review_server.py --package by any services
-    config entry (enabled or not). No config file: (set(), None). Unreadable or malformed: (None, why): fail closed."""
+    """-> (names, problem). Package folder names given to the review server (annotation/review_server.py or
+    -m annotation.review_server) as --package by any services config entry (enabled or not). No config file:
+    (set(), None). Anything unreadable, malformed or failing while checking: (None, why): fail closed."""
     p = Path(path) if path else services_config()
-    if not p.exists():
-        return set(), None
     try:
+        if not p.exists():
+            return set(), None
         doc = json.loads(p.read_text(encoding="utf-8-sig"))
         svcs = doc.get("services")
         if not isinstance(svcs, list):
             raise ValueError("no services list")
-    except (OSError, ValueError, AttributeError) as e:
+        names = set()
+        for s in svcs:
+            argv = s.get("argv") if isinstance(s, dict) else None
+            if isinstance(argv, str):
+                argv = argv.split()
+            if not isinstance(argv, list) or not _is_review_server(argv):
+                continue
+            for v in _package_arg(argv):
+                name = re.split(r"[\\/]+", v.strip().rstrip("\\/ "))[-1]
+                if name:
+                    names.add(name)
+        return names, None
+    except Exception as e:                               # PermissionError, a folder, bad JSON ...: nothing eligible
         return None, f"the services config can't be read ({type(e).__name__})"
-    names = set()
-    for s in svcs:
-        argv = s.get("argv") if isinstance(s, dict) else None
-        if isinstance(argv, str):
-            argv = argv.split()
-        if not isinstance(argv, list):
-            continue
-        if not any(re.split(r"[\\/]", str(x))[-1] == "review_server.py" for x in argv):
-            continue
-        for v in _package_arg(argv):
-            name = re.split(r"[\\/]+", v.strip().rstrip("\\/ "))[-1]
-            if name:
-                names.add(name)
-    return names, None
 
 
 def load_people(path=None) -> list:
@@ -159,15 +179,20 @@ def packages(cfg, records, served, served_problem=None) -> list:
         pkg = p["id"]
         if p["kind"] == "compare" or pkg.startswith("pred_") or not PKG_RE.fullmatch(pkg):
             continue
-        if (Path(root) / f"_work_{pkg}").exists():       # a blind audit's answer key: exists() only, never read
+        if has_work(root, pkg):                          # a blind audit's answer key: exists() only, never read
             continue
         if not p["base_lv"]:
             continue                                     # a Roboflow export / pull base: not a label set
-        prog = TT.package_progress(Path(root) / pkg) or {}
-        row = {"id": pkg, "title": p["title"], "base_lv": p["base_lv"], "source": prog.get("source"),
+        row = {"id": pkg, "title": p["title"], "base_lv": p["base_lv"], "source": None, "base": None,
                "reviewed": p["reviewed"], "images": p["images"], "waiting": p["waiting"], "applied_by": p["applied_by"],
                "last": p["last"], "dir": Path(root) / pkg}
-        row["base"] = base_file(row)
+        try:
+            row["source"] = (TT.package_progress(Path(root) / pkg) or {}).get("source")
+            row["base"] = base_file(row)
+        except Exception as e:                           # fail closed: listed, not eligible
+            row["why"], row["eligible"] = [f"it can't be checked ({type(e).__name__})"], False
+            out.append(row)
+            continue
         why = []
         if row["base"] is None:
             why.append("its data.js does not name the label set's own file on this computer")
@@ -180,6 +205,27 @@ def packages(cfg, records, served, served_problem=None) -> list:
         row["why"], row["eligible"] = why, not why
         out.append(row)
     return sorted(out, key=lambda r: r["id"])
+
+
+def has_work(root, pkg) -> bool:
+    """<review root>/_work_<pkg> exists (a blind audit's answer key; never listed or read). Any error: True."""
+    try:
+        return root is None or (Path(root) / f"_work_{pkg}").exists()
+    except Exception:
+        return True
+
+
+def excluded(cfg, pkg, records=None) -> bool:
+    """Serve-time re-check: a _work_ folder, or a compare package (its review_package.json or registry record)."""
+    root = RES.review_root(cfg)
+    if has_work(root, pkg):
+        return True
+    try:
+        meta = {**TT._dict(TT._dict(TT._dict(records).get("review_package")).get(pkg)),
+                **TT._dict(TT.read_json(Path(root) / pkg / "review_package.json"))}
+        return meta.get("kind") == "compare"
+    except Exception:
+        return True
 
 
 def cli_command(row, who) -> str:
@@ -247,28 +293,70 @@ def previews(cfg, pkg) -> list:
     return sorted(out, key=lambda x: x["ts"], reverse=True)
 
 
+def is_regular(path) -> bool:
+    """A plain file: not a symlink, junction or other reparse point (lstat, never followed)."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and not getattr(st, "st_file_attributes", 0) & 0x400  # REPARSE_POINT
+
+
+def is_plain_dir(path) -> bool:
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISDIR(st.st_mode) and not getattr(st, "st_file_attributes", 0) & 0x400
+
+
+def edit_files(edits_dir) -> list:
+    """The edit records a preview copies: *.json regular files of a plain (not linked) folder, sorted."""
+    if not is_plain_dir(edits_dir):
+        return []
+    return sorted(f for f in Path(edits_dir).glob("*.json") if is_regular(f))
+
+
 def edits_sha256(edits_dir: Path) -> str:
-    """The rule of annotation/compare_package.edits_sha256: sha256 over the sorted names and their bytes."""
+    """The rule of annotation/compare_package.edits_sha256 (sha256 over the sorted names and their bytes), over
+    edit_files() only."""
     h = hashlib.sha256()
-    for f in sorted(Path(edits_dir).glob("*.json")):
+    for f in edit_files(edits_dir):
         h.update(f.name.encode("utf-8") + b"\x00" + f.read_bytes() + b"\x00")
     return h.hexdigest()
 
 
 def new_folder(root: Path, pkg: str, now) -> Path:
+    """A fresh <root>/<pkg>/<ts>[-n]/. Another visit's prune may remove an empty <pkg> between the parent and the
+    child mkdir: that is retried once; a second failure raises OSError (the caller shows a clean page)."""
     base = now.strftime("%Y%m%dT%H%M%SZ")
     for n in range(0, 1000):
         d = root / pkg / (base if n == 0 else f"{base}-{n}")
-        try:
-            d.mkdir(parents=True, exist_ok=False)
-            return d
-        except FileExistsError:
-            continue
+        for attempt in (0, 1):
+            try:
+                d.mkdir(parents=True, exist_ok=False)
+                return d
+            except FileExistsError:
+                break
+            except OSError:
+                if attempt:
+                    raise
     raise OSError("no free preview folder name")
 
 
 def run_preview(cfg, row, who, now=None) -> tuple:
-    """-> (ts, info). Writes only under <state>/apply_preview/<pkg>/<ts>/."""
+    """-> (ts, info), or (None, None) when another preview is running. The worker takes and releases the lock itself,
+    so a request whose client hung up can't let a second preview start while this one still runs. Writes only under
+    <state>/apply_preview/<pkg>/<ts>/. Raises OSError only when the folder can't be made."""
+    if not _busy.acquire(blocking=False):
+        return None, None
+    try:
+        return _run_preview(cfg, row, who, now)
+    finally:
+        _busy.release()
+
+
+def _run_preview(cfg, row, who, now=None) -> tuple:
     from annotation import apply_review_edits as AR   # lazy: cv2 / numpy only when a preview runs
     from annotation import change_report as CR
     now = now or datetime.now(timezone.utc)
@@ -280,7 +368,9 @@ def run_preview(cfg, row, who, now=None) -> tuple:
     try:
         edits = folder / "edits"                       # frozen copy: the package may get new edits meanwhile
         edits.mkdir()
-        for f in sorted((row["dir"] / "edits").glob("*.json")):
+        if not is_plain_dir(row["dir"] / "edits"):
+            raise ValueError("the package's edits folder is missing or a link")
+        for f in edit_files(row["dir"] / "edits"):    # regular files only: no symlinks / junctions
             (edits / f.name).write_bytes(f.read_bytes())
         info["edits_sha256"] = edits_sha256(edits)
         ver = AR.make_version(row["base"], row["dir"], edits, out_root=folder / "labels", who=who,
@@ -379,11 +469,14 @@ def render_index(rows, who, portal_id, tok, cfg, problem=None) -> str:
     return "".join(out)
 
 
-def render_run(pkg, ts, info, row, who) -> str:
+def render_run(pkg, ts, info, row, who, changed=False) -> str:
     out = [STYLE, '<div class="cj-apply">', f'<p><a href="{PREFIX}/">Back to apply previews</a></p>',
            f'<h1>Preview: {esc(pkg)}</h1>',
            f'<p class="cj-mut">Started {_when(info.get("started"))} by {esc(str(info.get("who")))}; scratch only, '
            f'reviewed images only. Label set <code>{esc(str(info.get("base_lv")))}</code>.</p>']
+    if changed:
+        out.append('<p class="cj-card" role="alert"><b>Decisions changed since this preview</b>: preview again before '
+                   'applying.</p>')
     if info.get("error"):
         out.append(f'<section class="cj-card" role="alert"><h2>Refused</h2><pre>{esc(info["error"])}</pre></section>')
     else:
@@ -405,7 +498,7 @@ def render_run(pkg, ts, info, row, who) -> str:
     out.append(f'<section class="cj-card"><h2>Apply log</h2><pre>{esc(chr(10).join(info.get("log") or []))}</pre>'
                f'<p class="cj-mut">Decisions copy sha256 <code>{esc(str(info.get("edits_sha256") or ""))}</code></p>'
                f'</section>')
-    if row is not None:
+    if row is not None and not changed:
         out.append(f'<section class="cj-card"><h2>Make the label set</h2><p class="cj-mut">After checking the report, '
                    f'run in the cryoEV folder:</p><pre>{esc(cli_command(row, who))}</pre></section>')
     out.append("</div>")
@@ -429,11 +522,17 @@ def routes(ctx) -> list:
             return show(request, "Apply preview", '<p class="cj-card">Admins only.</p>', 403)
         return None
 
-    def state(request):
+    def records():
         from portal.modules import data as DATA
-        records, _err = DATA.read_registry(getattr(ctx.cfg, "registry", None))
+        return DATA.read_registry(getattr(ctx.cfg, "registry", None))[0]
+
+    def state(request):
         served, problem = served_packages()
-        return packages(ctx.cfg, records, served, problem), problem
+        return packages(ctx.cfg, records(), served, problem), problem
+
+    def gone(request):
+        return show(request, "Apply preview", '<p class="cj-card">No such preview (they are kept '
+                    f'{KEEP_DAYS} days).</p><p><a href="{PREFIX}/">Back</a></p>', 404)
 
     def index(request: Request):
         if (deny := admin_only(request)) is not None:
@@ -473,13 +572,14 @@ def routes(ctx) -> list:
         if row is None or not row["eligible"]:
             return show(request, "Apply preview", '<p class="cj-card" role="alert">That package is not ready for a '
                         f'preview (or does not exist).</p><p><a href="{PREFIX}/">Back</a></p>', 404)
-        if not _busy.acquire(blocking=False):
-            return show(request, "Apply preview", '<p class="cj-card">Another preview is running. Try again in a '
-                        f'minute.</p><p><a href="{PREFIX}/">Back</a></p>', 409)
         try:
             ts, info = await run_in_threadpool(run_preview, ctx.cfg, row, who)
-        finally:
-            _busy.release()
+        except OSError:
+            return show(request, "Apply preview", '<p class="cj-card" role="alert">The preview folder could not be '
+                        f'made. Try again.</p><p><a href="{PREFIX}/">Back</a></p>', 503)
+        if ts is None:
+            return show(request, "Apply preview", '<p class="cj-card">Another preview is running. Try again in a '
+                        f'minute.</p><p><a href="{PREFIX}/">Back</a></p>', 409)
         try:
             PA.audit(ctx.cfg.state_dir, pid, "apply preview", row["id"],
                      {"ts": ts, "lv": info.get("lv"), "ok": not info.get("error")})
@@ -492,23 +592,29 @@ def routes(ctx) -> list:
             return deny
         pkg, ts = request.path_params["pkg"], request.path_params["ts"]
         p = served_file(ctx.cfg, pkg, ts, "preview.json")
-        if p is None:
-            return show(request, "Apply preview", '<p class="cj-card">No such preview (they are kept '
-                        f'{KEEP_DAYS} days).</p><p><a href="{PREFIX}/">Back</a></p>', 404)
+        if p is None or excluded(ctx.cfg, pkg, records()):
+            return gone(request)
         try:
             info = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             info = {"error": "this preview's record can't be read"}
         rows, _ = state(request)
         row = next((r for r in rows if r["id"] == pkg and r["eligible"]), None)
+        root = RES.review_root(ctx.cfg)
+        try:
+            now_sha = edits_sha256(Path(root) / pkg / "edits")
+        except Exception:
+            now_sha = None
+        changed = not info.get("error") and info.get("edits_sha256") != now_sha
         pid = ctx.user(request).get("id")
-        return show(request, f"Preview {pkg}", render_run(pkg, ts, info, row, people_id(pid)))
+        return show(request, f"Preview {pkg}", render_run(pkg, ts, info, row, people_id(pid), changed))
 
     def view(request: Request):
         if (deny := admin_only(request)) is not None:
             return deny
-        p = served_file(ctx.cfg, request.path_params["pkg"], request.path_params["ts"], request.path_params["rel"])
-        if p is None:
+        pkg = request.path_params["pkg"]
+        p = served_file(ctx.cfg, pkg, request.path_params["ts"], request.path_params["rel"])
+        if p is None or excluded(ctx.cfg, pkg, records()):
             return ctx.no_store(Response("Not found", status_code=404, media_type="text/plain"))
         r = FileResponse(p, media_type=SERVE[p.suffix.lower()])
         r.headers["Cache-Control"] = "no-store"
