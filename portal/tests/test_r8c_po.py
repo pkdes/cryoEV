@@ -95,7 +95,7 @@ class AdminAuditPortal(unittest.TestCase):
         text = b.decode()
         self.assertEqual(st, 200)
         self.assertIn("zed-other", text)
-        self.assertIn("[door2]", text)
+        self.assertRegex(text, r'class="cj-admin-door[^"]*">door2</span>')          # the Door column (round 9)
         api = json.loads(self.get("admin", "/admin/api/audit")[2])
         self.assertIn(("zed-other", "door2"), [(e["actor"], e["door"]) for e in api["entries"]])
         self.assertNotIn(str(self.env.tmp), json.dumps(api))

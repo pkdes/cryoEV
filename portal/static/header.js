@@ -135,11 +135,16 @@
     }
     return bar;
   }
-  // the running code's version ("Updated <date time> . <commit>"), small, at the foot of every page
+  // the running code's version ("Updated <date time> . <commit>"), small, at the foot of every page, with the
+  // About link (/about: signed-in only, like version.json)
   function stamp(ver, bar) {
     if (!ver || !ver.version || document.getElementById('cj-version')) return;
-    var v = el('div', 'cj-version', ver.version);
+    var v = el('div', 'cj-version', ver.version + ' · ');
     v.id = 'cj-version';
+    var ab = el('a', 'cj-about-link', 'About');
+    ab.href = '/about';
+    if (location.pathname === '/about') ab.setAttribute('aria-current', 'page');
+    v.appendChild(ab);
     if (document.getElementById('cj-review-frame')) { v.className = 'cj-version cj-version-bar'; bar.appendChild(v); }   // the full-height frame page: no room below
     else document.body.appendChild(v);
   }

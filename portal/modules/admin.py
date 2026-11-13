@@ -22,7 +22,7 @@ Admin module (CryoEV portal, admin only): people and their key links, health at 
                                  the scheduled task's last result)
     GET  /admin/audit            Recent actions: the last AUDIT_SHOW audit lines (every module), newest first
     GET  /admin/api/people | /admin/api/predict | /admin/api/health | /admin/api/audit     the same as JSON
-    GET  /admin/admin.js         the key page's Copy button (a file: no inline script)
+    GET  /admin/admin.js         the key page's Copy button and the Recent actions filters (a file: no inline script)
 
 Rules:
   - Every POST: the Gate checks Origin (portal/app.py); here a form token bound to the sign-in (`binding`: the
@@ -39,7 +39,11 @@ Rules:
   - The key link points at the first --origin, else the tailnet address (auth.default_base), else the request's
     Origin reduced to scheme://host[:port] (never in access mode: key links don't work through Cloudflare).
   - Audit: portal/audit.py (shared with Jobs), <state dir>/audit/portal.jsonl. `audit(ctx, actor, action, target,
-    detail)` here is a thin wrapper. The Recent actions page shows the last AUDIT_SHOW lines of every module.
+    detail)` here is a thin wrapper. The Recent actions page shows the last AUDIT_SHOW lines of every door: every
+    portal write (the Gate's catch-all, portal/app.py), the first sign-in per person per day, the modules' own lines,
+    and the laptop CLI's file (named in CJ_AUDIT_EXTRA; door "laptop CLI (unverified)"). Counter lines (detail
+    {from, to, n}) show a time range and "n x action"; agent lines (detail.via) show actor.label + an AI tag.
+    Person / Action filters run in the browser over those lines only (admin.js).
   - Predict sessions: overrides in <state dir>/predict_sources.json (predict_sources.set_override: its own thread +
     OS lock, atomic write); one audit line per change (predict_source_renamed / _hidden / _shown, target = the
     source key). The page rescans the folders (in a worker thread); Predict uses the scan cached for a minute.
@@ -77,6 +81,8 @@ from portal import access_config
 from portal import audit as PA
 from portal import auth as A
 from portal import predict_sources as PSRC
+
+ACTOR = PA.actor_module()                          # registry/actor.py: label() for agent lines
 
 PREFIX = "/admin"
 ROLES = ("admin",)
@@ -1194,41 +1200,125 @@ def read_audit_all(cfg, n=AUDIT_SHOW) -> tuple:
     return PA.read_merged(cfg.state_dir, None, n)
 
 
-def render_audit(entries, problem) -> str:
-    problems = [problem] if isinstance(problem, str) and problem else list(problem or [])
-    multi = any(e.get("door") not in (None, "this door") for e in entries if isinstance(e, dict))
-    warn = "".join(note(p, "warn") for p in problems)
-    if not entries:
-        body = warn + ('<p class="cj-mut">Nothing logged yet.</p>' if not problems else "")
+AUDIT_LOGGED = ("Logged: every change made in the portal (uploads, predictions, conversions, results, review saves, "
+                "gallery marks, feedback, admin and job actions, training), refused attempts, the first sign-in per "
+                "person per day, and actions from the laptop CLI. Frequent saves are counted per 10 minutes.")
+AUD_KINDS = (("feedback", "feedback"), ("review", "review saves"), ("predict", "predictions"),
+             ("convert", "conversions"), ("results", "results"), ("gallery", "gallery marks"),
+             ("sign-in", "sign-ins"), ("admin", "admin"), ("jobs", "jobs and training"), ("refused", "refused"),
+             ("other", "other"))
+_ADMIN_ACTS = {"person_added", "role_changed", "person_revoked", "email_changed", "key_made", "person added",
+               "role changed", "person revoked", "sign-in email changed", "key link made"}
+_JOB_ACTS = {"cancel", "release", "job cancel", "job release", "train_queue", "training queued", "training checked"}
+REFUSED = {401: "refused", 403: "refused", 409: "refused"}
+
+
+def aud_kind(action, status=None) -> str:
+    """The Action filter's group for one line (AUD_KINDS)."""
+    a = str(action or "").lower()
+    if isinstance(status, int) and status in REFUSED:
+        return "refused"
+    if a == "signed in":
+        return "sign-in"
+    if a.startswith("feedback"):
+        return "feedback"
+    if a in _ADMIN_ACTS or a.startswith("predict_source") or a.startswith("predict session"):
+        return "admin"
+    if a in _JOB_ACTS or a.startswith("train"):
+        return "jobs"
+    if a.startswith("conversion"):
+        return "convert"
+    if a.startswith("results"):
+        return "results"
+    if a.startswith("gallery"):
+        return "gallery"
+    if a.startswith(("prediction", "predict", "upload")) or a == "review package made":
+        return "predict"
+    if a.startswith("review"):
+        return "review"
+    return "other"
+
+
+def _clock(t, with_s=True) -> str:
+    return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S" if with_s else "%Y-%m-%d %H:%M") if t else "?"
+
+
+def audit_row(e0, own_door="this door") -> dict:
+    """One normalised line -> what the Recent actions table shows: {when, who, ai, what, door, unverified, kind}.
+    A counter line (detail {from, to, n}) shows the time range and "n x action"; an agent's line (detail.via) shows
+    actor.label(who, via) with the AI tag."""
+    e0 = _d(e0)
+    e = PA.normalise(e0)
+    act = str(e.get("action") or "?")
+    detail = e.get("detail")
+    d = detail if isinstance(detail, dict) else {}
+    word = ACTION_WORD.get(act, act.replace("_", " "))
+    via = d.get("via") if isinstance(d.get("via"), str) else None
+    status = d.get("status") if isinstance(d.get("status"), int) else None
+    counted = isinstance(d.get("n"), int) and d.get("from") and d.get("to")
+    if counted:
+        t0, t1 = parse_time(_s(d.get("from"))), parse_time(_s(d.get("to")))
+        end = datetime.fromtimestamp(t1).strftime("%H:%M") if t1 else "?"
+        when = f"{_clock(t0, False)}–{end}"
+        word = f"{d['n']} × {word}"
     else:
-        items = []
-        for e0 in entries:
-            e0 = _d(e0)
-            e = PA.normalise(e0)
-            t = parse_time(_s(e.get("t")))
-            act = str(e.get("action") or "?")
-            detail = e.get("detail")
-            word = ACTION_WORD.get(act, act.replace("_", " "))
-            if isinstance(detail, dict):
-                if detail.get("phase") == "requested":       # write-ahead line of a Jobs action
-                    word = f"asked to {word}"
-                elif detail.get("phase") == "result":
-                    word = f"{word} result for"
-                dtext = ", ".join(f"{k}: {v}" for k, v in detail.items() if v is not None and k != "phase")
-            else:
-                dtext = "" if detail is None else str(detail)
-            dspan = f' <span class="cj-mut">({esc(dtext)})</span>' if dtext else ""
-            door = (f'<span class="cj-mut cj-admin-door">[{esc(str(e0.get("door") or "this door"))}]</span> '
-                    if multi else "")
-            items.append(f'<li class="cj-admin-aud"><span class="cj-mut cj-num">'
-                         f'{esc(datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S") if t else "?")}</span>'
-                         f'<span>{door}<b class="cj-wrap">{esc(str(e.get("actor") or "-"))}</b> '
-                         f'{esc(word)} '
-                         f'<b class="cj-wrap">{esc(str(e.get("target") or ""))}</b>'
-                         f'{dspan}</span></li>')
-        body = warn + f'<ol class="cj-card cj-admin-auds">{"".join(items)}</ol>'
-    return (f'<h1>Recent actions</h1><p class="cj-mut">The last {AUDIT_SHOW} actions in the portal (people, job '
-            f'cancels and releases; both doors when CJ_AUDIT_EXTRA is set), newest first. Times are this computer\'s.</p>{body}')
+        when = _clock(parse_time(_s(e.get("t"))))
+    if d.get("phase") == "requested":                   # write-ahead line of a Jobs / Train action
+        word = f"asked to {word}"
+    elif d.get("phase") == "result":
+        word = f"{word} result for"
+    skip = {"phase", "via", "status"} | ({"from", "to", "n"} if counted else set()) | ({"door"} if act == "signed in" else set())
+    if isinstance(detail, dict):
+        parts = [f"{k}: {v}" for k, v in detail.items() if v is not None and k not in skip]
+    else:
+        parts = [] if detail is None else [str(detail)]
+    if status is not None and status >= 400:
+        parts.insert(0, f"{REFUSED.get(status, 'answered')} {status}")
+    door = str(e0.get("door") or "this door")
+    door = own_door if door == "this door" else door
+    name = ACTOR.label(e.get("actor") or "-", via) or "-"
+    unv = door == PA.CLI_DOOR or "unverified" in door          # a self-declared identity (the laptop CLI)
+    return {"when": when, "name": name, "who": f"{name} (unverified)" if unv else name, "ai": bool(via),
+            "what": word, "target": "" if e.get("target") is None else str(e.get("target")),
+            "detail": ", ".join(parts), "door": door, "unverified": unv, "kind": aud_kind(act, status)}
+
+
+def _options(name, label, values, all_text) -> str:
+    opts = "".join(f'<option value="{esc(v)}">{esc(t)}</option>' for v, t in values)
+    return (f'<label class="cj-admin-lbl">{esc(label)} <select class="cj-admin-in" data-cj-aud-filter="{name}">'
+            f'<option value="">{esc(all_text)}</option>{opts}</select></label>')
+
+
+def render_audit(entries, problem, own_door="this door") -> str:
+    problems = [problem] if isinstance(problem, str) and problem else list(problem or [])
+    warn = "".join(note(p, "warn") for p in problems)
+    head = (f'<h1>Recent actions</h1><p class="cj-mut">{esc(AUDIT_LOGGED)} The last {AUDIT_SHOW} lines, newest '
+            f'first; times are this computer\'s.</p>')
+    if not entries:
+        return head + warn + ('<p class="cj-mut">Nothing logged yet.</p>' if not problems else "")
+    rows = [audit_row(e, own_door) for e in entries]
+    items = []
+    for r in rows:
+        ai = ' <span class="cj-admin-ai" title="an agent acting for this person">AI</span>' if r["ai"] else ""
+        if r["unverified"]:                         # its own Person-filter value: never mixed with portal sign-ins
+            ai += (' <span class="cj-admin-ai cj-admin-unvtag" title="identity declared by the caller, not '
+                   'checked by the portal">unverified</span>')
+        tgt = f' <b class="cj-wrap">{esc(r["target"])}</b>' if r["target"] else ""
+        dsp = f' <span class="cj-mut">({esc(r["detail"])})</span>' if r["detail"] else ""
+        dcls = "cj-admin-door cj-admin-unv" if r["unverified"] else "cj-admin-door cj-mut"
+        items.append(f'<li class="cj-admin-aud" data-who="{esc(r["who"])}" data-kind="{esc(r["kind"])}">'
+                     f'<span class="cj-mut cj-num">{esc(r["when"])}</span> '      # spaces: the text reads as a
+                     f'<span class="cj-admin-who"><b class="cj-wrap">{esc(r["name"])}</b>{ai}</span> '  # sentence
+                     f'<span class="cj-admin-what">{esc(r["what"])}{tgt}{dsp}</span> '
+                     f'<span class="{dcls}">{esc(r["door"])}</span></li>')
+    people = sorted({r["who"] for r in rows}, key=str.lower)
+    present = {r["kind"] for r in rows}
+    filters = (f'<div class="cj-admin-audf" id="cj-admin-audf" hidden>'
+               f'{_options("who", "Person", [(p, p) for p in people], "everyone")}'
+               f'{_options("kind", "Action", [(k, t) for k, t in AUD_KINDS if k in present], "all")}'
+               f'<span class="cj-mut">Filters search the last {AUDIT_SHOW} lines.</span>'
+               f'<span class="cj-mut" id="cj-aud-n" aria-live="polite"></span></div>')
+    return head + warn + filters + f'<ol class="cj-card cj-admin-auds">{"".join(items)}</ol>'
 
 
 _PH = re.compile(r"\{\{(sub|content)\}\}")
@@ -1258,6 +1348,30 @@ JS = r"""// Admin key page (portal/modules/admin.py): the Copy button. Shown onl
       if (out) out.textContent = 'Select the link and copy it.';
     });
   });
+})();
+// Recent actions: the Person / Action filters, in the browser, over the lines on the page only. Shown only with
+// script (the filter row is hidden in the HTML).
+(function () {
+  'use strict';
+  var box = document.getElementById('cj-admin-audf');
+  if (!box) return;
+  var sels = box.querySelectorAll('[data-cj-aud-filter]');
+  var rows = document.querySelectorAll('.cj-admin-aud[data-who]');
+  var out = document.getElementById('cj-aud-n');
+  function apply() {
+    var f = {};
+    Array.prototype.forEach.call(sels, function (s) { f[s.getAttribute('data-cj-aud-filter')] = s.value; });
+    var n = 0;
+    Array.prototype.forEach.call(rows, function (r) {
+      var ok = (!f.who || r.getAttribute('data-who') === f.who) && (!f.kind || r.getAttribute('data-kind') === f.kind);
+      r.hidden = !ok;
+      if (ok) n++;
+    });
+    if (out) out.textContent = (f.who || f.kind) ? n + ' of ' + rows.length + ' shown' : '';
+  }
+  Array.prototype.forEach.call(sels, function (s) { s.addEventListener('change', apply); });
+  box.hidden = false;
+  apply();
 })();
 """
 
@@ -1466,7 +1580,8 @@ def routes(ctx) -> list:
 
     def audit_page(request: Request):
         entries, prob = read_audit_all(ctx.cfg)
-        return show(request, "Recent actions", "audit", render_audit(entries, prob))
+        own = PA.DOOR_NAMES.get(getattr(ctx.cfg, "auth", "key"), "this door")
+        return show(request, "Recent actions", "audit", render_audit(entries, prob, own))
 
     def api_audit(request: Request):
         entries, prob = read_audit_all(ctx.cfg)
