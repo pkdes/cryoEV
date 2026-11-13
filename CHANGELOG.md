@@ -7,6 +7,13 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-13 09:30 · Round 11b: notes and provenance on prediction sets
+
+- **Prediction sets can say how their images were made:** `predict new` takes `--note` (free text) and `--provenance` (a small JSON file: what the images derive from, the processing steps, tiling, script and git sha). The tile manifest is kept with the set as `source_manifest.csv`.
+- **Data pages** show "Note", "How the images were made" and "Derived from" (linked to the dataset, label set or model) on such sets. Sets without them look exactly as before.
+
+**Components:** CLI, portal, registry
+
 ## 2026-11-13 08:45 · Round 11: agent API writes, the Apply button, faster and tidier code
 
 - **Agent API, read + write:** when you make a token on **My account**, choose **Read only** or **Read + write** (write tokens last at most 30 days). A write token lets your agent upload images, start predictions, compute results and send feedback, and nothing else: no admin, review, Apply or training. Limits: 60 writes an hour and one open agent upload per person, and agent-started prediction sets count against the active-set cap whatever your role. Everything it makes is stamped "<agent> for <you>" [AI], including on the prediction set ("Made by" on Data). An agent's upload no longer cancels your own browser upload.

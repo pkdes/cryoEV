@@ -15,7 +15,7 @@ portal, job queue), **gpu-desktop** (the shared GPU PC that trains; may be off),
 folder, `\\<gpu-desktop>\cj`), **lab-login** (the lab's login node). Data paths are written `<CryoAI-laptop>`,
 `<CryoAI>`; `data_utils/config.py` finds them.
 
-> **Remote agents** (not on the laptop) use the portal's read-only HTTP API with a personal token: see [API.md](API.md).
+> **Remote agents** (not on the laptop) use the portal's HTTP API with a personal token (read only, or read + write: upload, predict, compute results, feedback): see [API.md](API.md).
 
 ## Identity: who did it, and through which agent
 
