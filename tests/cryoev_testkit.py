@@ -16,6 +16,8 @@ write_registry(root, records, samples=..., skip=())
 process_lock()  a cross-process lock on a name (a lock directory in the temp dir; stale-safe), for machine-wide
                 resources such as `subst` drive letters.
 wait_until()    poll a condition instead of sleeping a fixed time.
+browser         decorator for a test class or method that drives a real browser: skipped when the gate sets
+                CJ_GATE_SKIP_BROWSER=1 (--affected with only non-UI files changed; tools/test_gate.py).
 """
 from __future__ import annotations
 
@@ -29,7 +31,16 @@ import time
 from pathlib import Path
 
 ACTOR_VARS = ("CRYOEV_VIA", "CRYOEV_FOR")
+SKIP_BROWSER_ENV = "CJ_GATE_SKIP_BROWSER"      # = tools/test_gate.py SKIP_BROWSER_ENV
 SAMPLES = Path(__file__).resolve().parent.parent / "registry" / "samples"
+
+
+def browser(obj):
+    """@browser on a TestCase class (or one test method) that drives a real browser (Playwright). The test gate sets
+    CJ_GATE_SKIP_BROWSER=1 in --affected runs whose changed files are all non-UI; such classes are then skipped, while
+    the file's other (unit) classes still run. Decorate the class when its setUpClass / setUp starts the browser."""
+    import unittest
+    return unittest.skipIf(os.environ.get(SKIP_BROWSER_ENV) == "1", "browser test: no UI file changed (gate)")(obj)
 
 
 def free_port() -> int:

@@ -44,6 +44,10 @@ TOKEN_RE = re.compile(r'name="t" value="([0-9a-f]{40})"')
 LINK_RE = re.compile(r"/login\?k=([A-Za-z0-9_-]+)")
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 class Capture(logging.Handler):
     def __init__(self):
         super().__init__(logging.DEBUG)
@@ -888,6 +892,7 @@ def launch(p):
     return None
 
 
+@browser
 class Browser(Base):
     @classmethod
     def setUpClass(cls):

@@ -33,6 +33,10 @@ _MODS = __import__("json").loads((__import__("pathlib").Path(__file__).resolve()
                                  .read_text(encoding="utf-8"))["modules"]
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def _on(role):
     return [m["name"] for m in _MODS if m.get("nav") and m["status"] == "on" and role in m["roles"]]
 
@@ -56,6 +60,7 @@ def launch(p):
     return None
 
 
+@browser
 class Shell(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -44,6 +44,10 @@ SHOTS = os.environ.get("JOBS_TEST_SHOTS")
 PULL = "roboflow_pull_20990101_0000"
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def lines_by_file(root):
     return {p.name: p.read_bytes().count(b"\n") for p in Path(root).glob("*.jsonl")}
 
@@ -403,6 +407,7 @@ class RealRegistryCopy(unittest.TestCase):
         for stem in hidden:                                   # excluded-session image names are not embedded
             self.assertNotIn(stem, html)
 
+    @browser
     def test_browser(self):
         if sync_playwright is None:
             self.skipTest("playwright not installed")

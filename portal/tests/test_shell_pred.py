@@ -33,6 +33,10 @@ PKG_NOKEY = "pred_ps_20261105_0000aa"        # owner u-basic, no .review_key
 UNKNOWN = "pred_ps_20261105_ffffff"          # well-formed, no such package
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def build_root(tmp: Path) -> Path:
     """<tmp>/review with three packages built from copies of the golden prediction set."""
     root = tmp / "review"
@@ -287,6 +291,7 @@ class PredRealServer(unittest.TestCase):
         self.assertTrue(saved["edit"]["reviewed"])
         self.assertFalse((self.root / PKG_B / "edits" / f"{f}.json").exists())
 
+    @browser
     def test_in_a_browser(self):
         """The owner (basic) opens the package's shell: the tool loads in the frame from /review/<pkg>/app/, only
         same-origin requests, no page or console errors."""

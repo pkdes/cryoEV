@@ -18,9 +18,10 @@ The pre-push scan (tools/prepush_scan.py --range <base>..HEAD) runs at the end u
 
 Browser skip (round 11 #6, --affected only): when EVERY changed file is on the non-UI allowlist (NON_UI: registry/
 except history_page.py, jobs/, training/, inference/, data_utils/, docs/, tools/ except this gate and its test,
-cryoev/), the pure-browser files are skipped and the gate prints "N browser files skipped (no UI change)". The mixed
-files (MIXED: mostly unit tests that also drive a browser) and a changed test file always run; --full and --suites
-never skip. --plan prints the selection and an estimate from past timings without running anything.
+cryoev/) and none is unknown, the children run with CJ_GATE_SKIP_BROWSER=1: the test classes (or methods) marked
+@browser (tests/cryoev_testkit.py) skip, and every other class in the same file still runs. No file is skipped. A
+changed test file runs in full. The gate prints "N browser classes skipped (no UI change)"; --full and --suites never
+skip. --plan prints the selection and an estimate from past timings without running anything.
 
 One gate runs at a time per machine (round 10): a lock directory in ~/.cryoev/gate/ is shared by every worktree. A
 second gate waits up to --lock-wait minutes (default 45) and then fails "gate busy"; a lock whose owner process is gone,
@@ -81,11 +82,11 @@ NOT_DOC = re.compile(r"(^|/)(CHANGELOG\.md|requirements[^/]*\.txt)$", re.I)
 ALWAYS = {"tests"}                           # repo-wide checks, ~1 min
 BROWSER_HELPERS = {"test_review_tool_browser"}   # test modules wrapping Playwright; importing one = a browser file
 ENV_STRIP = ("CRYOEV_VIA", "CRYOEV_FOR")
-# --affected only: the pure-browser files are skipped when EVERY changed file is on this non-UI allowlist (round 11 #6)
+# --affected only: the @browser classes skip (CJ_GATE_SKIP_BROWSER=1) when EVERY changed file is on this non-UI
+# allowlist (round 11 #6)
 NON_UI = ("registry/", "jobs/", "training/", "inference/", "data_utils/", "docs/", "tools/", "cryoev/")
 NON_UI_EXCEPT = {"registry/history_page.py", "tools/test_gate.py", "tools/tests/test_test_gate.py"}
-# browser files that are mostly unit tests (they drive a browser for a few checks only): never skipped
-MIXED = {"portal/test_predict_convert.py", "portal/test_data_module.py", "portal/test_admin_module.py"}
+SKIP_BROWSER_ENV = "CJ_GATE_SKIP_BROWSER"     # = tests/cryoev_testkit.py SKIP_BROWSER_ENV (@browser)
 AGENT_ENV = {"CRYOEV_VIA": "claude", "CRYOEV_FOR": "pujan"}
 LOCK_DIR = Path.home() / ".cryoev" / "gate" / "lock"
 LOCK_WAIT_MIN = 45.0
@@ -108,7 +109,7 @@ def changed_files(base: str) -> list[str]:
 def affected_suites(files: list[str]) -> tuple[set[str], list[str]]:
     """-> (suites, files that matched no rule). An unknown code file means: run everything."""
     out, unknown = set(ALWAYS), []
-    for f in files:
+    for f in (x.replace("\\", "/") for x in files):
         if f.startswith(".claude/"):
             continue
         hits = [s for p, s in AFFECTS if f.startswith(p)]
@@ -128,15 +129,22 @@ def ui_untouched(files: list[str]) -> bool:
     return bool(files) and all(f.startswith(NON_UI) and f not in NON_UI_EXCEPT for f in files)
 
 
-def drop_browser(units: list, files: list[str]) -> tuple[list, list]:
-    """-> (units to run, pure-browser units skipped). MIXED files and a changed test file always run."""
-    changed = {f.replace("\\", "/") for f in files}
-    keep, skipped = [], []
-    for u in units:
-        s, n, b = u
-        pure = b and f"{s}/{n}" not in MIXED and f"{SUITES[s]}/{n}" not in changed
-        (skipped if pure else keep).append(u)
-    return keep, skipped
+def browser_marks(path: Path) -> tuple[int, int]:
+    """-> (classes, test methods) decorated @browser in a test file (static: the decorator by name)."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+    except (OSError, SyntaxError):
+        return 0, 0
+    n_cls = n_fn = 0
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+                (isinstance(d, ast.Name) and d.id == "browser") or (isinstance(d, ast.Attribute) and d.attr == "browser")
+                for d in node.decorator_list):
+            if isinstance(node, ast.ClassDef):
+                n_cls += 1
+            else:
+                n_fn += 1
+    return n_cls, n_fn
 
 
 def is_browser_file(path: Path) -> bool:
@@ -169,13 +177,16 @@ def is_browser_file(path: Path) -> bool:
     return False
 
 
-def child_env(agent_env: bool = False, base: dict | None = None) -> dict:
-    """Environment for every child: CRYOEV_VIA / CRYOEV_FOR removed (or set to the agent values on purpose)."""
+def child_env(agent_env: bool = False, base: dict | None = None, skip_browser: bool = False) -> dict:
+    """Environment for every child: CRYOEV_VIA / CRYOEV_FOR removed (or set to the agent values on purpose);
+    CJ_GATE_SKIP_BROWSER=1 only when skip_browser (never inherited from the caller's shell)."""
     env = dict(os.environ if base is None else base)
-    for k in ENV_STRIP:
+    for k in ENV_STRIP + (SKIP_BROWSER_ENV,):
         env.pop(k, None)
     if agent_env:
         env.update(AGENT_ENV)
+    if skip_browser:
+        env[SKIP_BROWSER_ENV] = "1"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
 
@@ -317,21 +328,25 @@ class GateLock:
             pass
 
 
-def past_times(path: Path = None, keep: int = 9) -> dict[str, float]:
-    """Median seconds per unit over its last `keep` passing runs (one slow loaded run must not reorder the queue)."""
-    seen: dict[str, list[float]] = {}
+def past_times(path: Path = None, keep: int = 9, skip_browser: bool = False) -> dict[str, float]:
+    """Median seconds per unit over its last `keep` passing runs (one slow loaded run must not reorder the queue).
+    skip_browser: medians from runs with the @browser classes skipped where a unit has any, else from full runs."""
+    seen: dict[bool, dict[str, list[float]]] = {False: {}, True: {}}
     try:
         for line in Path(path or TIMINGS).read_text(encoding="utf-8").splitlines():
             try:
                 r = json.loads(line)
                 if r.get("ok", True) is False:
                     continue
-                seen.setdefault(r["unit"], []).append(float(r["seconds"]))
+                seen[bool(r.get("skip_browser"))].setdefault(r["unit"], []).append(float(r["seconds"]))
             except (ValueError, KeyError, TypeError, AttributeError):
                 continue
     except OSError:
         pass
-    return {u: statistics.median(v[-keep:]) for u, v in seen.items()}
+    out = {u: statistics.median(v[-keep:]) for u, v in seen[False].items()}
+    if skip_browser:
+        out.update({u: statistics.median(v[-keep:]) for u, v in seen[True].items()})
+    return out
 
 
 def units_for(suites: set[str]) -> list[tuple[str, str, bool]]:
@@ -344,12 +359,12 @@ def units_for(suites: set[str]) -> list[tuple[str, str, bool]]:
     return out
 
 
-def run_unit(suite: str, name: str, timeout: int, agent_env: bool = False) -> dict:
+def run_unit(suite: str, name: str, timeout: int, agent_env: bool = False, skip_browser: bool = False) -> dict:
     t0 = time.time()
     cmd = [sys.executable, "-m", "unittest", "discover", "-s", SUITES[suite], "-p", name]
     try:
         p = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, timeout=timeout,
-                           env=child_env(agent_env))
+                           env=child_env(agent_env, skip_browser=skip_browser))
         text, rc = p.stdout + p.stderr, p.returncode
     except subprocess.TimeoutExpired as e:
         text, rc = f"TIMEOUT after {timeout}s\n" + ((e.stdout or "") if isinstance(e.stdout, str) else ""), 124
@@ -357,7 +372,7 @@ def run_unit(suite: str, name: str, timeout: int, agent_env: bool = False) -> di
     ran = re.search(r"Ran (\d+) test", text)
     return {"unit": f"{suite}/{name}", "suite": suite, "file": name, "rc": rc, "ok": rc == 0,
             "seconds": round(time.time() - t0, 1), "tests": int(ran.group(1)) if ran else 0,
-            "summary": " | ".join(m[-2:]) if m else "", "output": text, "retries": 0}
+            "summary": " | ".join(m[-2:]) if m else "", "output": text, "retries": 0, "skip_browser": skip_browser}
 
 
 def record(results: list[dict], mode: str, agent_env: bool = False, path: Path = None) -> None:
@@ -373,6 +388,7 @@ def record(results: list[dict], mode: str, agent_env: bool = False, path: Path =
                                     "seconds": r["seconds"], "tests": r["tests"], "ok": r["ok"],
                                     "flaky": r.get("flaky", False), "retries": r.get("retries", 0),
                                     "retry_seconds": r.get("retry_seconds"), "agent_env": agent_env,
+                                    "skip_browser": bool(r.get("skip_browser")),
                                     "fail_tail": tail}) + "\n")
     except (OSError, subprocess.CalledProcessError) as e:
         print(f"(timings not recorded: {e})", file=sys.stderr)
@@ -409,23 +425,42 @@ def estimate_wall(units: list, times: dict, jobs: int, browser_jobs: int) -> flo
     return t
 
 
-def select(suites: set[str], mode: str, files: list | None) -> tuple[list, list, dict]:
-    """-> (units in run order, browser units skipped, past medians). Skipping only in --affected (see NON_UI)."""
-    units, skipped = units_for(suites), []
-    if mode == "affected" and files is not None and ui_untouched(files):
-        units, skipped = drop_browser(units, files)
-    order = past_times()
+def skip_mode(mode: str, files: list | None) -> bool:
+    """CJ_GATE_SKIP_BROWSER for this run: --affected only, every changed file non-UI, none unknown."""
+    return mode == "affected" and files is not None and ui_untouched(files) and not affected_suites(files)[1]
+
+
+def select(suites: set[str], mode: str, files: list | None, timings: Path = None) -> tuple[list, set, dict]:
+    """-> (units in run order, the units run with CJ_GATE_SKIP_BROWSER=1, past medians). Every unit runs; in skip mode
+    a unit's browser flag is cleared (its browser classes skip, so it needs no browser lane), except a changed test
+    file, which runs in full."""
+    units, skip = units_for(suites), set()
+    if skip_mode(mode, files):
+        changed = {f.replace("\\", "/") for f in files}
+        skip = {f"{s}/{n}" for s, n, _ in units if f"{SUITES[s]}/{n}" not in changed}
+        units = [(s, n, b and f"{s}/{n}" not in skip) for s, n, b in units]
+    order = past_times(timings, skip_browser=bool(skip))
+    if skip:
+        full = past_times(timings)
+        order = {u: (order.get(u, 60.0) if u in skip else full.get(u, 60.0)) for u in set(order) | set(full)}
     units.sort(key=lambda u: -order.get(f"{u[0]}/{u[1]}", 60.0))
-    return units, skipped, order
+    return units, skip, order
 
 
-def skip_note(skipped: list) -> str:
-    return f"{len(skipped)} browser files skipped (no UI change)" if skipped else ""
+def skip_note(units: list, skip: set) -> str:
+    if not skip:
+        return ""
+    n_cls = n_fn = 0
+    for s, n, _ in units:
+        if f"{s}/{n}" in skip:
+            c, f = browser_marks(REPO / SUITES[s] / n)
+            n_cls, n_fn = n_cls + c, n_fn + f
+    return f"{n_cls} browser classes skipped (no UI change)" + (f", plus {n_fn} browser test methods" if n_fn else "")
 
 
 def plan(a, suites: set[str], mode: str, files: list | None) -> int:
     """--plan: the selection and an estimate from past timings; nothing runs and no lock is taken."""
-    units, skipped, order = select(suites, mode, files)
+    units, skip, order = select(suites, mode, files, a.timings)
     serial = sum(order.get(f"{s}/{n}", 60.0) for s, n, _ in units)
     nb = sum(1 for u in units if u[2])
     print(f"plan ({mode}): suites {', '.join(sorted(suites))}")
@@ -433,8 +468,8 @@ def plan(a, suites: set[str], mode: str, files: list | None) -> int:
         print(f"changed files ({len(files)}): {', '.join(files[:8])}" + (" ..." if len(files) > 8 else ""))
     print(f"{len(units)} test files ({nb} browser); estimated {estimate_wall(units, order, a.jobs, a.browser_jobs) / 60:.1f} "
           f"min wall at {a.jobs} jobs / {a.browser_jobs} browser ({serial / 60:.1f} min serial), from past medians")
-    if skipped:
-        print(skip_note(skipped) + f": {sum(order.get(f'{s}/{n}', 60.0) for s, n, _ in skipped):.0f} s serial")
+    if skip:
+        print(skip_note(units, skip))
     for s, n, b in units:
         print(f"  {order.get(f'{s}/{n}', 60.0):7.1f}s  {s}/{n}" + ("  [browser]" if b else ""))
     return 0
@@ -462,6 +497,7 @@ def main(argv=None) -> int:
     ap.add_argument("--base", default="origin/main")
     ap.add_argument("--plan", action="store_true", help="print the selection and estimated wall time; run nothing")
     ap.add_argument("--files", help="comma-separated changed files to use instead of git diff (with --affected)")
+    ap.add_argument("--timings", type=Path, default=None, help="--plan: read past timings from this file instead")
     ap.add_argument("--jobs", type=int, default=max(2, (os.cpu_count() or 4) // 2))
     ap.add_argument("--browser-jobs", type=int, default=2)
     ap.add_argument("--retry", type=int, default=1)
@@ -503,9 +539,9 @@ def main(argv=None) -> int:
 
 
 def run_gate(a, suites: set[str], mode: str, files: list | None = None) -> int:
-    units, skipped, order = select(suites, mode, files)
-    if skipped:
-        print(skip_note(skipped))
+    units, skip, order = select(suites, mode, files)
+    if skip:
+        print(skip_note(units, skip))
     print(f"gate ({mode}): suites {', '.join(sorted(suites))}; {len(units)} test files; "
           f"{a.jobs} at once ({a.browser_jobs} browser); child env: "
           + ("CRYOEV_VIA=claude CRYOEV_FOR=pujan (--agent-env)" if a.agent_env else "CRYOEV_VIA/CRYOEV_FOR removed"))
@@ -516,10 +552,11 @@ def run_gate(a, suites: set[str], mode: str, files: list | None = None) -> int:
 
     def job(u):
         suite, name, browser = u
+        sk = f"{suite}/{name}" in skip
         if browser:
             with browser_lane:
-                return run_unit(suite, name, a.timeout, a.agent_env)
-        return run_unit(suite, name, a.timeout, a.agent_env)
+                return run_unit(suite, name, a.timeout, a.agent_env, sk)
+        return run_unit(suite, name, a.timeout, a.agent_env, sk)
 
     results = []
     with ThreadPoolExecutor(max_workers=a.jobs) as ex:
@@ -538,7 +575,7 @@ def run_gate(a, suites: set[str], mode: str, files: list | None = None) -> int:
         print(f"retrying {len(failed)} failed file(s) one at a time")
         still = []
         for r in failed:
-            r2 = run_unit(r["suite"], r["file"], a.timeout, a.agent_env)
+            r2 = run_unit(r["suite"], r["file"], a.timeout, a.agent_env, r.get("skip_browser", False))
             r["retries"] = r.get("retries", 0) + 1
             r.setdefault("first_fail_tail", r["output"][-600:])
             if r2["ok"]:

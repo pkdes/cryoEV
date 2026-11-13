@@ -35,6 +35,10 @@ T0 = 1_761_000_000_000  # ms: when the older records below were "saved"
 
 
 # ---- frozen copy of merge_edits / _migrate before server_t (commit 8e9f9f6): the byte-identity reference ----
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def HEAD_migrate(e):
     e = dict(e or {})
     e["dec"] = {k: (v if isinstance(v, dict) else {"v": v, "t": e.get("t", 0), "who": ""})
@@ -341,6 +345,7 @@ from test_review_tool_browser import Base  # noqa: E402  (after the Python tests
 FUTURE_CLOCK = "{ const now = Date.now.bind(Date); Date.now = () => now() + %d; }" % DAY
 
 
+@browser
 class SkewBrowserTests(Base):
     """Two Editors on one server; A's device clock runs a day ahead."""
 
@@ -388,6 +393,7 @@ class SkewBrowserTests(Base):
             self.assertEqual(js[k], json.loads(json.dumps(rs.merge_edits(copy.deepcopy(a), copy.deepcopy(b)))), k)
 
 
+@browser
 class StorageScopeTests(Base):
     """The SANDBOX_ copy has the real package's id. Both pages here share one origin (the sandbox flag is added to
     data.js by a route, as the sandbox server would), the case a portal on one host creates."""

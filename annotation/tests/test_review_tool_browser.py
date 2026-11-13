@@ -35,6 +35,10 @@ CLASS_ORDER = ["EV", "Low conf EV", "MV", "inner", "Incomplete", "Overlapping", 
 SHOTS = os.environ.get("REVIEW_TEST_SHOTS")  # a folder: keep phone screenshots for a look by eye
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def launch(p):
     for kw in ({"channel": "msedge"}, {"channel": "chrome"}, {}):
         try:
@@ -55,6 +59,7 @@ def norm(labels):
                   for g in labels)
 
 
+@browser
 class Base(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

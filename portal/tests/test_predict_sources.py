@@ -52,6 +52,10 @@ ENV_KEYS = ("CJ_PREDICT_SOURCES", "CJ_PREDICT_SCAN_ROOTS", "CJ_PREDICT_ROOT", "C
 SHAPE = {"key", "label", "dir", "manifest", "session", "sample_column", "problem"}
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def png(bits=8, size=16) -> bytes:
     from PIL import Image
     im = Image.new("L", (size, size), 120) if bits == 8 else Image.new("I;16", (size, size), 1000)
@@ -860,6 +864,7 @@ def launch(p):
     return None
 
 
+@browser
 class Browser(PortalCase):
     @classmethod
     def setUpClass(cls):

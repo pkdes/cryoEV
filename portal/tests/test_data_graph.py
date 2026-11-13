@@ -65,6 +65,10 @@ HIDDEN_STRINGS = (HID_PS, HID_PKG, HID_RF, HID_JOB, OUT_JOB, "aaaa11", LAB_PART,
 SAMPLE_PS = "ps_20261105_abc123"                    # the samples' prediction set (another owner, so hidden too)
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def fixture_rows(with_hidden_ps=True) -> dict:
     ds = "roboflow_20261028_cryoai_v5_S1_evnonev"
     rows = {
@@ -470,6 +474,7 @@ def launch(p):
     return None
 
 
+@browser
 class Browser(Base):
     @classmethod
     def setUpClass(cls):

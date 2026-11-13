@@ -44,6 +44,10 @@ MODEL = "v5_evnonev_y8m_20261029"
 FORM = {"Content-Type": "application/x-www-form-urlencoded"}
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def flag_tiles(d: Path, who="alyssia"):
     c = G.Conv(d, json.loads((d / "convert.json").read_text()), {})
     for n in KEEP:
@@ -350,6 +354,7 @@ def launch(p):
     return None
 
 
+@browser
 class Browser(Base):
     @classmethod
     def setUpClass(cls):

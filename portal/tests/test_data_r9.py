@@ -54,6 +54,10 @@ ENV_KEYS = ("CRYOEV_VIA", "CRYOEV_FOR", "CRYOEV_REGISTRY", "CRYOEV_CRYOAI_ROOT",
             "CRYOEV_PROCESSING_ROOT")
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def rec(entity, rid, **kw):
     return {"schema": entity + "/1", "id": rid, "logged": "2026-11-11T10:00:00", **kw}
 
@@ -351,6 +355,7 @@ class Served(CleanEnv, TG.Base):
         self.assertIn("Session unknown", {n["title"] for n in g["nodes"]})
 
 
+@browser
 @unittest.skipIf(sync_playwright is None, "playwright not installed")
 class Browser(Served):
     @classmethod

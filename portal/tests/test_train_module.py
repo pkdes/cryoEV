@@ -58,6 +58,10 @@ PRED_JOB = "job_20261105_pred_other"
 UNKNOWN_JOB = "job_20261105_not_in_registry"
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def build_registry(root: Path):
     """A small registry: two datasets (one with an image list), three models (production first), runs, train jobs."""
     lst = "".join(f"img_{i:04d}_png\t{s}\n" for i, s in enumerate(["train"] * 6 + ["valid"] * 2 + ["test"] * 2))
@@ -854,6 +858,7 @@ def launch(p):
     return None
 
 
+@browser
 class Browser(Base):
     @classmethod
     def setUpClass(cls):

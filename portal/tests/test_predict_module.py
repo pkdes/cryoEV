@@ -56,6 +56,10 @@ ENV_KEYS = ("CJ_PREDICT_SOURCES", "CJ_PREDICT_ROOT", "CJ_REVIEW_ROOT", "CRYOEV_L
             "FAKE_PRED_FROM", "FAKE_PRED_DELAY")
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def golden_rows():
     with open(GOLDEN / "images.csv", newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
@@ -1056,6 +1060,7 @@ def launch(p):
     return None
 
 
+@browser
 class Browser(Base):
     @classmethod
     def setUpClass(cls):

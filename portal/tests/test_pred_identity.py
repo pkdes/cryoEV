@@ -41,6 +41,10 @@ T0 = 1_762_400_000_000
 PHONE = {"viewport": {"width": 390, "height": 800}, "is_mobile": True, "has_touch": True}
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def send(port, method, path, headers, body=None) -> int:
     """A request with headers as a list of pairs (one name may repeat, in any case) -> status."""
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
@@ -198,6 +202,7 @@ class ThroughThePortal(unittest.TestCase):
         self.assertEqual(st, 200, body)
         self.assertEqual(self.saved(file)["dec"][g1]["who"], "pujan")
 
+    @browser
     def test_in_a_browser_at_390(self):
         """The owner opens the package through the portal at 390 px: no name prompt, the badge shows their id, a card
         pick is saved under it, and drafts sit under a per-user key. Then the admin on the SAME browser: their own id
@@ -299,6 +304,7 @@ class OldPackageCopy(unittest.TestCase):
         st, _, body = T.request(self.port, "GET", f"/{PKG_A}/?k={self.e.key[PKG_A]}")
         self.assertEqual((st, body), (200, self.old))                     # direct link: the package's own copy
 
+    @browser
     def test_cards_do_not_skip_own_card(self):
         sync_playwright = sync_playwright_or_skip(self)
         origin, card = self.e.p.origin, "0001.png|p0"                    # the golden set's one candidate card

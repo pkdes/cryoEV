@@ -41,6 +41,10 @@ PHONE = {"viewport": {"width": 390, "height": 844}, "is_mobile": True, "has_touc
 CAP_CONTROLS = ("#imgSec", "#helpL", "#aLow", "#triImgBtn", "#lowBtn", "#accLowBtn")
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def shot(page, name):
     if SHOTS:
         Path(SHOTS).mkdir(parents=True, exist_ok=True)
@@ -53,6 +57,7 @@ def as_prediction_package(context, page):
                          "set(d) { Object.assign(d, {kind: 'prediction', cand_conf: 0.3, label_conf: 0.5}); this.__rd = d; }});")
 
 
+@browser
 class Base(trb.Base):
     def tri_go(self, page, file, key):
         q = self.state(page)["tri"]["queue"]

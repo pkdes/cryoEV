@@ -39,6 +39,10 @@ MISSING = "20261110_eeeeee"
 NAMES = [f"g1_Grid_1__m1_r{r}c{c}_t{r * 3 + c:02d}__denoised.png" for r in range(3) for c in range(3)]
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def tile_png(i: int) -> bytes:
     from PIL import Image
     im = Image.new("L", (120, 90), 40 + 20 * i)
@@ -810,6 +814,7 @@ def launch(p):
     return None
 
 
+@browser
 class Browser(Base):
     @classmethod
     def setUpClass(cls):

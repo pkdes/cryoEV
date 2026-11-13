@@ -26,6 +26,10 @@ EVIL = "pkg_<script>alert(1)</script>&x"
 SHOTS = os.environ.get("HISTORY_TEST_SHOTS")
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def synthetic_lines():
     P, OLD, NEW = "roboflow_pull_20990101_0000", "lv_20990101_0900", "lv_20990102_0900"
     DS, RUN, MOD = "ds_test_S1", "2099-01-03_000000_y8m_1440_8b_300ep_Run_99", "v9_Test_Y8M_20990103"
@@ -390,6 +394,7 @@ class ReviewScopeChips(unittest.TestCase):
         self.assertNotIn("innerHTML", self.html)
         self.assertIsNone(re.search(r"(?i)https?://", self.html))
 
+    @browser
     @unittest.skipIf(sync_playwright is None, "playwright not installed")
     def test_browser(self):
         with sync_playwright() as pw:
@@ -563,6 +568,7 @@ class R9LanesAndAttribution(unittest.TestCase):
         self.assertIsNone(hp.line_via({"status_via": "claude"}))                  # not for a non-status field
         self.assertEqual(hp.line_via({"status_via": "claude"}, status=True), "claude")
 
+    @browser
     @unittest.skipIf(sync_playwright is None, "playwright not installed")
     def test_browser_ai_tag_lanes_and_arrows(self):
         with sync_playwright() as pw:
@@ -682,6 +688,7 @@ def launch(p):
     return None
 
 
+@browser
 class Browser(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -806,6 +813,7 @@ class Browser(unittest.TestCase):
             ctx.close()
 
 
+@browser
 class LiveServed(unittest.TestCase):
     """The Live tab served over a localhost http.server, with live/live.json written by jobs/monitor.py --once from
     temp queues built in code (jobs/tests/jobtest.py): queue A has a job at epoch 4 of 300 with batch 8 of 16

@@ -29,6 +29,10 @@ CONTROLS = """() => ({slider: document.getElementById('conf').value, sliderMin: 
     options: [...document.getElementById('triConf').options].map(o => o.value)})"""
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def with_cand_conf(v):
     """An init script that sets REVIEW_DATA.cand_conf as data.js assigns it (data.js on disk unchanged)."""
     def setup(context, page):
@@ -37,6 +41,7 @@ def with_cand_conf(v):
     return setup
 
 
+@browser
 class RealPackageDefaultsTests(trb.Base):
     """The fixture is a real-package data.js (no cand_conf): the controls are exactly as before."""
 
@@ -72,6 +77,7 @@ def with_fields(**kw):
     return setup
 
 
+@browser
 class LabelingPackageWordsTests(trb.Base):
     """Control: the lab's labeling package (no kind, no cand_conf) keeps the old words and the brand button."""
 
@@ -100,6 +106,7 @@ class LabelingPackageWordsTests(trb.Base):
         self.assertEqual(self.errors, [])
 
 
+@browser
 class PredictionWordsTests(trb.Base):
     """Prediction package: Counted / Unsure wording, Quick check button, key legend in the cards."""
 
@@ -152,6 +159,7 @@ class PredictionWordsTests(trb.Base):
         self.assertEqual(self.errors, [])
 
 
+@browser
 class PredictionPackageTests(trb.Base):
     """A package built by prediction_package.build from the golden set: the 0.30 candidate (D on 0001) shows."""
     card, file_of, wait_card = trb.PhoneReviewTests.card, trb.PhoneReviewTests.file_of, trb.PhoneReviewTests.wait_card
@@ -174,6 +182,7 @@ class PredictionPackageTests(trb.Base):
         self.assertEqual(self.errors, [])
 
 
+@browser
 class EscapingTests(trb.Base):
     """Markup in a package's file name, split, category and run is shown as text, never parsed."""
     FILE, SPLIT, CAT, RUN = ("<img src=x onerror=window.__xss=1>.png", "<b id=xsplit>S</b>", "<i id=xcat>c</i>",

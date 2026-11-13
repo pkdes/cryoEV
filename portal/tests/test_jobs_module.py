@@ -40,6 +40,10 @@ TECH_WORDS = ("watcher", "heartbeat", "registry", "jobs/sync", "jobs/monitor", "
               "\\\\", "home-laptop", "train.log", "ready_at", "&lt;script", "run failed")
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def local(hours_ago: float) -> str:
     return (datetime.now() - timedelta(hours=hours_ago)).isoformat(timespec="seconds")
 
@@ -600,6 +604,7 @@ def launch(p):
     return None
 
 
+@browser
 class Browser(Base):
     @classmethod
     def setUpClass(cls):
@@ -1103,6 +1108,7 @@ class Buttons(ActionBase):
         self.assertFalse(any(x["can_release"] for x in s["queue"]))
 
 
+@browser
 @unittest.skipIf(sync_playwright is None, "playwright not installed")
 class CancelFlowBrowser(ActionBase):
     @classmethod

@@ -42,6 +42,10 @@ XSS = '<img src=x onerror=alert(1)> label'
 JPEG = b"\xff\xd8\xff"
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def write_img(path: Path, size=(640, 480), color=(90, 120, 160), fmt=None):
     from PIL import Image, ImageDraw
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -635,6 +639,7 @@ class Cache(unittest.TestCase):
         D._registry_cache.clear()
 
 
+@browser
 class Browser(Base):
     @classmethod
     def setUpClass(cls):
