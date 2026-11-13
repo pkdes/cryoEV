@@ -81,6 +81,10 @@ writer of that line.
   python annotation/apply_review_edits.py --base <pull>/current.coco.json --package <review package> [--dry-run]
       [--all-edits] [--edits <dir>] [--out-root <CryoAI-laptop>/labels] [--people annotation/people.json]
       [--stamp YYYYMMDD_HHMM] [--who <people.json id>]
+
+In process (round 10, the portal's apply preview): make_version(base, package, edits_dir, out_root=..., who=...,
+scope=..., via=..., log=...) is what main() runs, with every input explicit (no CLI defaults, no environment) and
+refusals raised as ApplyError instead of SystemExit; the CLI's outputs are byte-identical (annotation/tests/test_apply_entry.py).
 """
 from __future__ import annotations
 
@@ -103,12 +107,16 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
-sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(REPO))
-from review_server import (LOW_CONF_EV, _migrate, _num, effective_labels, image_flags, is_low_conf,  # noqa: E402
-                           load_people, object_key, tag_of)
+if __package__:   # imported as annotation.apply_review_edits (the portal's apply preview): no sys.path changes
+    from .review_server import (LOW_CONF_EV, _migrate, _num, effective_labels, image_flags, is_low_conf,  # noqa: E402
+                                load_people, object_key, tag_of)
+else:             # the CLI, and the tests' `import apply_review_edits` with annotation/ on sys.path
+    sys.path.insert(0, str(HERE))
+    sys.path.insert(0, str(REPO))
+    from review_server import (LOW_CONF_EV, _migrate, _num, effective_labels, image_flags, is_low_conf,  # noqa: E402
+                               load_people, object_key, tag_of)
 from data_utils.path_guard import PROTECTED_ROOTS, normalize, protected_problem  # noqa: E402
-from registry import actor  # noqa: E402
+from data_utils import actor  # noqa: E402
 
 SCHEMA = "label_change/1"
 DUP_IOU = 0.9
@@ -841,58 +849,60 @@ def conflicts_csv(conflicts: list) -> str:
     return buf.getvalue()
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--base", required=True, type=Path, help="The package's base pull: <pull>/current.coco.json")
-    ap.add_argument("--package", required=True, type=Path, help="Review package folder (data.js)")
-    ap.add_argument("--edits", type=Path, default=None, help="Edit records folder (default: <package>/edits)")
-    ap.add_argument("--out-root", type=Path, default=None,
-                    help="Where lv_<stamp>/ is created (default: <base pull folder>/../labels)")
-    ap.add_argument("--people", type=Path, default=PEOPLE, help="Reviewer roster (default: annotation/people.json)")
-    ap.add_argument("--class-groups", type=Path, default=CLASS_GROUPS, help="Recorded by hash in version.json")
-    ap.add_argument("--dup-iou", type=float, default=DUP_IOU, help="Mask IoU at or above which two outlines are duplicates")
-    ap.add_argument("--stamp", default=None, help="Version stamp YYYYMMDD_HHMM (default: now)")
-    ap.add_argument("--all-edits", action="store_true",
-                    help="Apply every record with changes, reviewed or not (default: only images marked reviewed)")
-    ap.add_argument("--dry-run", action="store_true", help="Report only; write nothing")
-    ap.add_argument("--who", default=None, help="people.json id recorded as version.json created_by "
-                    "(default: $CRYOEV_FOR, else none)")
-    a = ap.parse_args(argv)
-    scope = "all_edits" if a.all_edits else "reviewed_only"
-    try:                                       # version.json created_by / created_via (registry/actor.py)
-        created_by = actor.who(a.who, default=None, people_path=a.people)
-        created_via = actor.via()
-    except actor.ActorError as e:
-        raise SystemExit(f"[ERROR] {e}")
+class ApplyError(Exception):
+    """A refusal by make_version(), text "[ERROR] ..." (main() exits with it; the portal shows it)."""
 
-    base, package = a.base.resolve(), a.package.resolve()
-    edits_dir = (a.edits or package / "edits").resolve()
-    raw_root = a.out_root or base.parent.parent / "labels"
+
+def _log_flush(text):
+    print(text, flush=True)
+
+
+def make_version(base, package, edits_dir=None, *, out_root, who, people_path=PEOPLE, class_groups=CLASS_GROUPS,
+                 dup_iou=DUP_IOU, stamp=None, scope="reviewed_only", via=None, dry_run=False, log=_log_flush) -> dict:
+    """The callable entry (main() runs it; the portal's apply preview calls it in process): apply the package's
+    edits to `base` and write <out_root>/lv_<stamp>/ (nothing with dry_run) -> version.json as a dict.
+
+    Every input is explicit: `out_root` (no default: the CLI's default is main()'s), `who` (a people.json id, or None;
+    never read from the environment here), `via` (the agent, or None). Refusals raise ApplyError, never SystemExit,
+    and happen before anything is written. Same checks, order and outputs as the CLI (test_apply_entry.py)."""
+    try:
+        return _make_version(Path(base), Path(package), edits_dir, Path(out_root), who, Path(people_path),
+                             class_groups, dup_iou, stamp, scope, via, dry_run, log)
+    except SystemExit as e:                   # apply(), load_records(), check_source() refuse with SystemExit
+        raise ApplyError(str(e.code)) from None
+
+
+def _make_version(base, package, edits_dir, raw_root, created_by, people_path, class_groups, dup_iou, stamp, scope,
+                  created_via, dry_run, log):
+    if scope not in SCOPES:
+        raise ApplyError(f"[ERROR] scope {scope!r}: expected one of {SCOPES}")
+    base, package = base.resolve(), package.resolve()
+    edits_dir = (Path(edits_dir) if edits_dir else package / "edits").resolve()
     problem = out_root_problem(raw_root)  # as typed (UNC, \\?\, trailing spaces), then resolved
     out_root = raw_root.resolve() if not problem else raw_root
     problem = problem or out_root_problem(out_root)
     if problem:
-        raise SystemExit(f"[ERROR] {problem}")
-    stamp = a.stamp or datetime.now().strftime("%Y%m%d_%H%M")
+        raise ApplyError(f"[ERROR] {problem}")
+    stamp = stamp or datetime.now().strftime("%Y%m%d_%H%M")
     if not re.fullmatch(r"\d{8}_\d{4}", stamp):
-        raise SystemExit(f"[ERROR] --stamp {stamp!r}: expected YYYYMMDD_HHMM")
+        raise ApplyError(f"[ERROR] --stamp {stamp!r}: expected YYYYMMDD_HHMM")
     lv = f"lv_{stamp}"
     out = out_root / lv
     if out.exists():
-        raise SystemExit(f"[ERROR] {out} exists; label versions are never overwritten")
+        raise ApplyError(f"[ERROR] {out} exists; label versions are never overwritten")
     for p, what in ((base, "--base"), (package / "data.js", "--package data.js"), (edits_dir, "--edits")):
         if not p.exists():
-            raise SystemExit(f"[ERROR] {what} not found: {p}")
-    people = load_people(a.people)
+            raise ApplyError(f"[ERROR] {what} not found: {p}")
+    people = load_people(people_path)
     if created_by is not None and created_by not in {p.get("id") for p in people}:
-        raise SystemExit(f"[ERROR] --who {created_by!r} is not a people.json id ({a.people})")
-    print(f"[steps] scope {scope} ({'only images marked reviewed; unreviewed edits held back' if scope == 'reviewed_only' else 'every record with changes, reviewed or not'}); "
-          "effective_labels() per record -> per-object diff vs package labels; "
-          f"duplicates at mask IoU >= {a.dup_iou}; pixels = normalized x w/h, clamped, 0.01 px; "
-          "bbox/area recomputed; conflicts not written", flush=True)
-    print(f"[in] base {base}\n[in] package {package}\n[in] edits {edits_dir}\n[in] people {a.people} ({len(people)})", flush=True)
+        raise ApplyError(f"[ERROR] --who {created_by!r} is not a people.json id ({people_path})")
+    log(f"[steps] scope {scope} ({'only images marked reviewed; unreviewed edits held back' if scope == 'reviewed_only' else 'every record with changes, reviewed or not'}); "
+        "effective_labels() per record -> per-object diff vs package labels; "
+        f"duplicates at mask IoU >= {dup_iou}; pixels = normalized x w/h, clamped, 0.01 px; "
+        "bbox/area recomputed; conflicts not written")
+    log(f"[in] base {base}\n[in] package {package}\n[in] edits {edits_dir}\n[in] people {people_path} ({len(people)})")
 
-    coco, rows, conflicts, info = apply(base, package, edits_dir, people, a.dup_iou, scope)
+    coco, rows, conflicts, info = apply(base, package, edits_dir, people, dup_iou, scope)
     for r in rows:
         r["label_version"] = lv
     labels = coco_bytes(coco)
@@ -911,32 +921,32 @@ def main(argv=None):
                "source_check": info["source_check"], "base_duplicates": info["base_duplicates"],
                "new_categories": info["new_categories"], "new_categories_flag": bool(info["new_categories"]),
                "n_annotations_base": info["n_annotations_base"], "n_annotations_out": info["n_annotations_out"],
-               "labels_sha256": hashlib.sha256(labels).hexdigest(), "dup_iou": a.dup_iou,
-               "class_groups_sha256": sha256_file(a.class_groups), "people_sha256": sha256_file(a.people),
+               "labels_sha256": hashlib.sha256(labels).hexdigest(), "dup_iou": dup_iou,
+               "class_groups_sha256": sha256_file(class_groups), "people_sha256": sha256_file(people_path),
                "rejected_images": info["rejected_images"], "n_rejected": len(info["rejected_images"]),
                "low_conf": info["low_conf"], "n_low_conf": len(info["low_conf"]), "object_notes": info["object_notes"],
                "tool": f"apply_review_edits.py {git_sha()}", "created": datetime.now().isoformat(timespec="seconds"),
                "created_by": created_by, "created_via": created_via}
     if scope == "reviewed_only":
-        print(f"[OK] reviewed only: {info['n_reviewed']} of {info['n_package_images']} images; "
-              f"{info['n_held_back']} edited images held back (not reviewed)")
+        log(f"[OK] reviewed only: {info['n_reviewed']} of {info['n_package_images']} images; "
+            f"{info['n_held_back']} edited images held back (not reviewed)")
     else:
         n_unrev = sum(1 for im in {r['image'] for r in rows} if im not in set(info["reviewed_images"]))
-        print(f"[OK] all edits: {info['n_images_applied']} edited images applied, {n_unrev} of them not reviewed; "
-              f"{info['n_reviewed']} of {info['n_package_images']} images reviewed")
-    print(f"[OK] {info['n_records']} records, {info['n_images_applied']} images applied; "
-          f"annotations {info['n_annotations_base']} -> {info['n_annotations_out']}; "
-          f"supersedes {supersedes or 'none'}; labels sha256 {version['labels_sha256']}")
-    print("[OK] applied by op: " + ", ".join(f"{k} {v}" for k, v in info["counts_by_op"].items()))
-    print(f"[OK] conflicts: {info['n_conflicts']} {info['counts_conflict_by_op']}; duplicate-dropped {info['n_dropped']} "
-          f"{info['counts_dropped_by_op']}; warnings {info['n_warnings']}; skipped {info['skipped']}")
-    print(f"[OK] data.js source: {info['source_check']}; base duplicates (not flagged): {len(info['base_duplicates'])}")
+        log(f"[OK] all edits: {info['n_images_applied']} edited images applied, {n_unrev} of them not reviewed; "
+            f"{info['n_reviewed']} of {info['n_package_images']} images reviewed")
+    log(f"[OK] {info['n_records']} records, {info['n_images_applied']} images applied; "
+        f"annotations {info['n_annotations_base']} -> {info['n_annotations_out']}; "
+        f"supersedes {supersedes or 'none'}; labels sha256 {version['labels_sha256']}")
+    log("[OK] applied by op: " + ", ".join(f"{k} {v}" for k, v in info["counts_by_op"].items()))
+    log(f"[OK] conflicts: {info['n_conflicts']} {info['counts_conflict_by_op']}; duplicate-dropped {info['n_dropped']} "
+        f"{info['counts_dropped_by_op']}; warnings {info['n_warnings']}; skipped {info['skipped']}")
+    log(f"[OK] data.js source: {info['source_check']}; base duplicates (not flagged): {len(info['base_duplicates'])}")
     for c in conflicts:
-        print(f"  [{c['severity']}] {c['image']} {c['dec_key']} {c['op']}: {c['reason']}")
+        log(f"  [{c['severity']}] {c['image']} {c['dec_key']} {c['op']}: {c['reason']}")
     if info["new_categories"]:
-        print(f"[WARN] classes not in the base, added as categories: {[c['name'] for c in info['new_categories']]}")
-    if a.dry_run:
-        print(f"[dry-run] nothing written (would write {out})")
+        log(f"[WARN] classes not in the base, added as categories: {[c['name'] for c in info['new_categories']]}")
+    if dry_run:
+        log(f"[dry-run] nothing written (would write {out})")
         return version
     out.mkdir(parents=True, exist_ok=False)
     (out / "labels.coco.json").write_bytes(labels)
@@ -944,8 +954,40 @@ def main(argv=None):
                                                for r in rows), encoding="utf-8")
     (out / "conflicts.csv").write_text(conflicts_csv(conflicts), encoding="utf-8")
     (out / "version.json").write_text(json.dumps(version, indent=2) + "\n", encoding="utf-8")
-    print(f"[OK] wrote {out}")
+    log(f"[OK] wrote {out}")
     return version
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--base", required=True, type=Path, help="The package's base pull: <pull>/current.coco.json")
+    ap.add_argument("--package", required=True, type=Path, help="Review package folder (data.js)")
+    ap.add_argument("--edits", type=Path, default=None, help="Edit records folder (default: <package>/edits)")
+    ap.add_argument("--out-root", type=Path, default=None,
+                    help="Where lv_<stamp>/ is created (default: <base pull folder>/../labels)")
+    ap.add_argument("--people", type=Path, default=PEOPLE, help="Reviewer roster (default: annotation/people.json)")
+    ap.add_argument("--class-groups", type=Path, default=CLASS_GROUPS, help="Recorded by hash in version.json")
+    ap.add_argument("--dup-iou", type=float, default=DUP_IOU, help="Mask IoU at or above which two outlines are duplicates")
+    ap.add_argument("--stamp", default=None, help="Version stamp YYYYMMDD_HHMM (default: now)")
+    ap.add_argument("--all-edits", action="store_true",
+                    help="Apply every record with changes, reviewed or not (default: only images marked reviewed)")
+    ap.add_argument("--dry-run", action="store_true", help="Report only; write nothing")
+    ap.add_argument("--who", default=None, help="people.json id recorded as version.json created_by "
+                    "(default: $CRYOEV_FOR, else none)")
+    a = ap.parse_args(argv)
+    scope = "all_edits" if a.all_edits else "reviewed_only"
+    try:                                       # version.json created_by / created_via (data_utils/actor.py)
+        created_by = actor.who(a.who, default=None, people_path=a.people)
+        created_via = actor.via()
+    except actor.ActorError as e:
+        raise SystemExit(f"[ERROR] {e}")
+    base = a.base.resolve()
+    try:
+        return make_version(base, a.package, a.edits, out_root=a.out_root or base.parent.parent / "labels",
+                            who=created_by, people_path=a.people, class_groups=a.class_groups, dup_iou=a.dup_iou,
+                            stamp=a.stamp, scope=scope, via=created_via, dry_run=a.dry_run)
+    except ApplyError as e:
+        raise SystemExit(str(e)) from None
 
 
 if __name__ == "__main__":

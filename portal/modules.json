@@ -12,6 +12,7 @@
   {"id": "train", "name": "Train", "route": "/train/", "icon": "train", "roles": ["admin", "advanced"], "health": null, "status": "on", "nav": true, "desc": "Queue a training run on the GPU, watch it, compare runs"},
   {"id": "admin", "name": "Admin", "route": "/admin/", "icon": "admin", "roles": ["admin"], "health": null, "status": "on", "nav": true, "desc": "People, access and system health"},
   {"id": "sandbox", "name": "Sandbox", "route": null, "external": {"public_port": 8443, "local_port": 8765, "path": "/"}, "icon": "sandbox", "roles": ["admin"], "health": "sandbox", "status": "on", "nav": true, "desc": "Practice copy of the label review. Edits never ship."},
+  {"id": "applyreview", "name": "Apply preview", "route": "/apply/", "icon": "data", "roles": ["admin"], "health": null, "status": "on", "nav": false, "desc": "Preview what applying a review package's decisions would change in its label set (scratch only)"},
   {"id": "history", "name": "History", "route": "/history/", "icon": "history", "roles": ["admin"], "health": null, "status": "on", "nav": false, "classic": true, "desc": "Registry history, queue and live training (classic page)"}
  ]
 }
