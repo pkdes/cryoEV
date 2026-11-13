@@ -197,6 +197,46 @@ class StatusVia(Base):
             registry.append(dict(sample("run"), status_by="pujan", status_via="Claude!"), root=self.root)
 
 
+class EnvDefaultAndFormat(Base):
+    def test_via_not_passed_comes_from_env_none_means_none(self):
+        run = sample("run")
+        with mock.patch.dict(os.environ, AGENT):
+            self.assertEqual(registry.append(run, root=self.root)["via"], "claude")       # library writer, agent env
+            self.assertNotIn("via", registry.append(run, root=self.root, via=None))     # explicit none
+            line = registry.set_status(run["id"], "failed", "pujan", root=self.root)
+            self.assertEqual((line["via"], line["status_via"]), ("claude", "claude"))
+        self.assertNotIn("via", registry.append(run, root=self.root))                   # no env: a person
+        with mock.patch.dict(os.environ, {"CRYOEV_VIA": "Bad Id"}):
+            with self.assertRaises(registry.RegistryError):
+                registry.append(run, root=self.root)
+
+    def test_format_marker_written_with_the_first_via_line(self):
+        fmt = self.root / registry.FORMAT
+        registry.append(sample("run"), root=self.root)
+        self.assertFalse(fmt.exists())                                        # a person's line: no marker
+        registry.append(sample("run"), root=self.root, via="claude")
+        self.assertEqual(json.loads(fmt.read_text(encoding="utf-8"))["min_reader"], registry.READER_VERSION)
+        registry.append(sample("pull"), root=self.root)                       # marker present (= ours): fine
+
+    def test_newer_format_refused_absent_ok(self):
+        registry.append(sample("run"), root=self.root)                        # control: no FORMAT.json -> OK
+        n = len(lines(self.root, "run"))
+        (self.root / registry.FORMAT).write_text(json.dumps({"min_reader": 3}), encoding="utf-8")
+        with self.assertRaisesRegex(registry.RegistryError, "reader version 3"):
+            registry.append(sample("run"), root=self.root)
+        with self.assertRaisesRegex(registry.RegistryError, "reader version 3"):
+            registry.set_status(sample("run")["id"], "failed", "pujan", root=self.root)
+        with self.assertRaisesRegex(registry.RegistryError, "reader version 3"):
+            importers.run(self.root, laptop=self.root, cache=self.root, processing=None)
+        rc, out = cli(["--root", str(self.root), "import"])
+        self.assertEqual(rc, 2, out)
+        self.assertIn("reader version 3", out)
+        self.assertEqual(len(lines(self.root, "run")), n)                    # nothing written
+        (self.root / registry.FORMAT).write_text("{not json", encoding="utf-8")
+        with self.assertRaisesRegex(registry.RegistryError, "unreadable"):
+            registry.append(sample("run"), root=self.root)
+
+
 class Production(Base):
     def setUp(self):
         super().setUp()
@@ -210,16 +250,27 @@ class Production(Base):
         with mock.patch.dict(os.environ, AGENT):                               # the CLI under an agent session
             rc, out = cli(["--root", str(self.root), "set-status", mid, "production", "--who", "pujan"])
         self.assertEqual(rc, 2, out)
-        self.assertIn("never sets production", out)
+        self.assertIn("never writes a production model line", out)
         self.assertEqual(registry.current(root=self.root)[mid]["status"], "registered")
         rc, out = cli(["--root", str(self.root), "set-status", mid, "production", "--who", "pujan"])   # control
         self.assertEqual(rc, 0, out)
         cur = registry.current(root=self.root)[mid]
         self.assertEqual((cur["status"], cur["status_by"]), ("production", "pujan"))
         self.assertNotIn("via", cur)
-        # re-appending an already-production model (e.g. an agent's import) is not a promotion: allowed
-        line = registry.append(dict(cur, note="alias added"), root=self.root, via="claude")
-        self.assertEqual((line["status"], line["via"]), ("production", "claude"))
+        # the kept path (already production by pujan): an agent still never writes a production line
+        n = len(lines(self.root, "model"))
+        with self.assertRaisesRegex(registry.RegistryError, "agent"):
+            registry.append(dict(cur, note="alias added"), root=self.root, via="claude")
+        with self.assertRaisesRegex(registry.RegistryError, "agent"):
+            registry.set_status(mid, "production", "pujan", root=self.root, via="claude")
+        with mock.patch.dict(os.environ, AGENT):
+            rc, out = cli(["--root", str(self.root), "set-status", mid, "production", "--who", "pujan"])
+            self.assertEqual(rc, 2, out)
+            with self.assertRaisesRegex(registry.RegistryError, "agent"):     # via not passed: from the env
+                registry.append(dict(cur, note="alias added"), root=self.root)
+        self.assertEqual(len(lines(self.root, "model")), n)
+        line = registry.append(dict(cur, note="alias added"), root=self.root)   # control: a person, kept path
+        self.assertEqual(line["status"], "production")
 
     def test_agent_append_of_production_refused(self):
         with self.assertRaisesRegex(registry.RegistryError, "agent"):

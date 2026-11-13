@@ -86,14 +86,24 @@ class PullStampsOnce(T.TempRoots, unittest.TestCase):
         C.write_json(d / C.DONE, {"job": JOB, "status": "cancelled", "reason": "test"})   # no runs, no import
 
     def test_agent_pull_set_status_line(self):
-        with mock.patch.dict(os.environ, {"CRYOEV_FOR": "pujan", "CRYOEV_VIA": "claude"}):
+        with mock.patch.dict(os.environ, {"CRYOEV_FOR": "au1", "CRYOEV_VIA": "claude"}):   # not the default person
             out = sync.pull(self.share, copier="shutil")
         self.assertEqual(out[0]["status"], "cancelled")
         raw = (self.reg / "job.jsonl").read_text(encoding="utf-8").splitlines()
         last = json.loads(raw[-1])
-        self.assertEqual((last["status"], last["status_by"], last["via"]), ("cancelled", "pujan", "claude"))
+        self.assertEqual((last["status"], last["status_by"], last["via"], last["status_via"]),
+                         ("cancelled", "au1", "claude", "claude"))
         self.assertEqual(raw[-1].count('"via"'), 1)
         self.assertNotIn("via", json.loads(raw[0]))                                # job new: a person (no env)
+
+    def test_bad_via_fails_before_copying(self):
+        ledger = self.lap / sync.LEDGER
+        with mock.patch.dict(os.environ, {"CRYOEV_VIA": "Not An Id"}):
+            with self.assertRaises(sync.actor.ActorError):
+                sync.pull(self.share, copier="shutil")
+            self.assertEqual(sync.main(["pull", "--share", str(self.share), "--copier", "shutil"]), 2)
+        self.assertFalse(ledger.exists())                                        # nothing pulled or recorded
+        self.assertEqual(len((self.reg / "job.jsonl").read_text(encoding="utf-8").splitlines()), 1)
 
     def test_person_pull_has_no_via(self):
         out = sync.pull(self.share, who="au1", copier="shutil")
@@ -101,6 +111,40 @@ class PullStampsOnce(T.TempRoots, unittest.TestCase):
         last = json.loads((self.reg / "job.jsonl").read_text(encoding="utf-8").splitlines()[-1])
         self.assertEqual(last["status_by"], "au1")
         self.assertNotIn("via", last)
+
+
+from test_predict_set import PredictRoots  # noqa: E402
+
+
+class PushPredictJob(PredictRoots, unittest.TestCase):
+    """push-predict's registry job (made by sync itself) carries who + via from the env; none without it."""
+
+    def setUp(self):
+        super().setUp()
+        for k in IDENTITY:
+            os.environ.pop(k, None)
+        origin = mock.patch.object(sync, "commit_on_origin", lambda commit: None)
+        origin.start()
+        self.addCleanup(origin.stop)
+        os.environ[C.PREDICT_ENV] = "1"
+
+    def job_line(self, q):
+        return [json.loads(x) for x in (self.reg / "job.jsonl").read_text(encoding="utf-8").splitlines()
+                if json.loads(x)["id"] == q.name][-1]
+
+    def test_new_job_carries_via(self):
+        ps = self.make()
+        with mock.patch.dict(os.environ, {"CRYOEV_FOR": "au1", "CRYOEV_VIA": "claude"}):
+            q = sync.push_predict(ps.name, self.share, copier="shutil", check_origin=False)
+        line = self.job_line(q)
+        self.assertEqual((line["type"], line["who"], line["via"]), ("predict", "au1", "claude"))
+
+    def test_new_job_by_a_person_has_no_via(self):
+        ps = self.make()
+        q = sync.push_predict(ps.name, self.share, copier="shutil", check_origin=False)
+        line = self.job_line(q)
+        self.assertEqual(line["who"], None)
+        self.assertNotIn("via", line)
 
 
 if __name__ == "__main__":

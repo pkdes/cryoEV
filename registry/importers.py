@@ -426,11 +426,12 @@ def grid_fields(rows):
 
 
 class Importer:
-    def __init__(self, root, laptop=None, cache=None, processing=PROCESSING, parser=None, via=None):
+    def __init__(self, root, laptop=None, cache=None, processing=PROCESSING, parser=None, via=registry._ENV):
         """`parser`: parse_metadata-compatible callable; default = the canonical one (load_metadata_parser).
-        `via`: the agent running the import (actor.via()), stamped on appended lines; None for a person."""
+        `via`: the agent running the import, stamped on appended lines; not passed = $CRYOEV_VIA, None = a person."""
         self.root = Path(root)
-        self.via = via
+        registry.check_format(self.root)          # a registry written for a newer reader: refuse before scanning
+        self.via = registry.resolve_via(via)
         self.laptop = Path(laptop) if laptop else config.laptop_root(required=False)
         self.cache = Path(cache) if cache else config.cryoai_root(required=False)
         self.proc = Path(processing) if processing else None
@@ -1063,7 +1064,8 @@ class Importer:
         cur = registry.current(root=self.root)
         if not dry_run and prod_id in cur and cur[prod_id].get("status") != "production":
             # the user's recorded decision, restated: never via (an agent never promotes; registry._check)
-            registry.set_status(prod_id, "production", who, note="user decision 2026-10-30", root=self.root)
+            registry.set_status(prod_id, "production", who, note="user decision 2026-10-30", root=self.root,
+                                via=None)
             appended["model (set-status production)"] += 1
         return appended
 

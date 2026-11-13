@@ -101,7 +101,7 @@ def strip_env(environ=None) -> list:
     """Remove CRYOEV_VIA / CRYOEV_FOR from `environ` (default os.environ); -> the names removed. For server main()s and
     for child environments built by services.py."""
     env = os.environ if environ is None else environ
-    gone = [k for k in (ENV_VIA, ENV_FOR) if k in env]
+    gone = [k for k in list(env) if str(k).upper() in (ENV_VIA, ENV_FOR)]      # any case: a plain dict is case-exact
     for k in gone:
         env.pop(k, None)
     return gone

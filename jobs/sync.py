@@ -573,7 +573,7 @@ def pull(share, who=None, copier="auto", all_weights=False):
     """-> list of {job, status, copied, skipped, not_pulled}. Raises SyncError after logging what succeeded.
     weights/epoch*.pt stay on the share unless all_weights; not_pulled = {files, bytes, paths} (also in the ledger).
     who: the set-status person, actor.who() (flag > $CRYOEV_FOR > pujan)."""
-    who = actor.who(who, default=DEFAULT_WHO)
+    who = actor.current(who, default=DEFAULT_WHO)["who"]   # also checks $CRYOEV_VIA before anything is copied
     share = Path(share)
     dd = share / C.D
     led_path = ledger_path()
@@ -744,7 +744,7 @@ def local(job_id, bundle, queue=LOCAL_QUEUE, allow_big=False, who=None, runner_a
     the runner refused to start). The same code paths as the desktop; only the folder is local."""
     from run_job import is_network_path
     queue = Path(queue)
-    who = actor.who(who, default=DEFAULT_WHO)            # resolved before anything runs: a bad $CRYOEV_FOR fails here
+    who = actor.current(who, default=DEFAULT_WHO)["who"]  # before anything runs: a bad CRYOEV_FOR / _VIA fails here
     if not max_hours:
         raise SyncError("local needs --max-hours (the runner stops the trainer then; the partial run is kept)")
     if is_network_path(queue):
