@@ -9,10 +9,15 @@ import test_gate as G  # noqa: E402
 
 class Affected(unittest.TestCase):
     def test_known_answers(self):
-        self.assertEqual(G.affected_suites(["portal/modules/gallery.py"])[0], {"tests", "portal"})
+        self.assertEqual(G.affected_suites(["portal/modules/gallery.py"])[0], {"tests", "portal", "cryoev"})
         self.assertEqual(G.affected_suites(["docs/TOOLS.md", "README.md"])[0], {"tests"})
         self.assertEqual(G.affected_suites(["results/compute.py"])[0], {"tests", "results", "portal"})
-        self.assertEqual(G.affected_suites(["jobs/convert_raw.py"])[0], {"tests", "jobs", "portal", "tools"})
+        self.assertEqual(G.affected_suites(["jobs/convert_raw.py"])[0], {"tests", "jobs", "portal", "tools", "cryoev"})
+        # registry/ also runs data_utils (dataset_from_lv appends through the registry; QC r9 #13) and the CLI
+        self.assertEqual(G.affected_suites(["registry/registry.py"])[0],
+                         {"tests", "registry", "portal", "jobs", "data_utils", "cryoev"})
+        self.assertEqual(G.affected_suites(["cryoev/common.py"])[0], {"tests", "cryoev"})
+        self.assertEqual(G.affected_suites(["models/models.yaml"])[0], {"tests", "jobs", "portal", "registry", "cryoev"})
 
     def test_shared_code_and_unknown_files_run_everything(self):
         self.assertEqual(G.affected_suites(["data_utils/oslock.py"])[0], set(G.SUITES))
