@@ -246,7 +246,7 @@ New image and object state are **decisions on keys of their own** (`i:reject`, `
 extra fields on a class decision. So they merge per key (the newest received wins), carry `who` and `server_t`, and
 pass through older pages, exports and imports untouched. A class change on another device leaves an object's `t:` as it is.
 
-- **Capability gate.** `GET /api/ping` answers `{"ok": true, "caps": ["i", "t"]}`. The page shows the reject, note and
+- **Capability gate.** `GET /api/ping` answers `{"ok": true, "caps": ["i", "t", ...]}` (round 12 added `m`, `g`). The page shows the reject, note and
   Low conf controls only when the caps are there. A server started on older code answers `{"ok": true}` and would
   refuse the new keys with a 400, so the page never offers them; the same for a page opened from a file. The multi
   server reads `index.html` from disk on every request but validates with the code it started with: restart the
@@ -288,6 +288,58 @@ pass through older pages, exports and imports untouched. A class change on anoth
   `object_notes`, the other objects with a tag note. Their rows: image, key (the object's decision key), ann (its id
   in the output, null if not written), cls (its category there), tagged (`t:` is `lowconf`), note. A record with only
   `i:` keys is a record without changes; a `t:` tag counts as a change.
+
+## Image info and sample groups (round 12)
+Two caps more in `/api/ping` (`["i", "t", "m", "g"]`): **m** = `GET /api/meta`, **g** = `GET /api/groups`,
+`POST /api/group` and the `grp` field on `i:reject`. A server on older code lacks them, so the page hides these
+controls (the same gate as round 7). Both routes are in `review_server.make_handler`, so the single server and the
+multi server (and the portal's `/review/<id>/` proxy) serve them with the same key check as every other route.
+
+**Image info** (`annotation/review_meta.py`). Read at request time from folders that already exist, cached by each
+file's mtime, never written: the package's `prediction_package.json`, the set's `images.csv` / `request.json`, the
+tiles' `MANIFEST.csv`, and for a portal conversion its `convert.json` (recipe, `params_effective`: clip %, bandpass,
+denoise; variant, GPU), `acquisition.json` (per montage: defocus, magnification, pixel size, dose, exposure, time) and
+`montages/layout.json` (row / col). A set cut from bigger images (`source_manifest.csv`) gives the parent image and
+x / y; a set made from the processing repo's own tile folder gets the session's acquisition summary from the
+registry. Montage and row / col fall back to the tile name (`export_detector_tiles.training_name`:
+`g<grid>_<label>__<montage>_r<row>c<col>_t<nn>__...`). Anything not found is left out and the page says **not
+recorded**; a broken file never fails the request. Only names are sent, never local paths. Lab / compare packages
+get the split only (plus what file names give).
+- Editor side panel **Image info** (collapsible): sample, montage, tile, defocus, magnification, pixel size, dose,
+  exposure, acquired, session, conversion, processing (recipe and its parameters), the session's defocus range, the
+  file name; a set's note and provenance steps.
+- Quick check: one line under the card position, e.g. `grid10_1 · row 0, col 1 (piece 5) · defocus -4.48 µm`.
+
+**Sample switcher** (prediction packages). The list's first filter reads **All samples**, each sample with its image
+count (and "rejected" when the sample is). Picking one shows only that sample and moves the Editor into it when the
+open image is elsewhere; N / P then step through it. The side panel's **◀ Sample / Sample ▶** go to the previous / next
+sample. Sort **Sample · montage · tile** orders by sample, montage (natural order), row, column, with a header per
+sample and per montage (size, ✎ note, Rejected). With **All samples** and the other sorts, nothing changed.
+
+**Groups** (`annotation/review_groups.py`; side panel **Sample**, prediction packages): **Comment on sample /
+montage...**, **Reject sample / montage...** (a reason is required, an optional detail; the dialog says how many images it
+rejects and how many already rejected stay as they are), **Undo sample / montage reject**.
+- A group reject is the image reject on every image of the group: each gets `i:reject` `reject:<reason>` with `who`,
+  `server_t` and `grp` = the group id (`["sample","<split>"]` or `["montage","<split>","<montage>"]`), merged like a PUT
+  from that reviewer. Results, apply and the spot check treat them as any rejected image. Images already rejected are
+  left alone (one rejected by hand keeps its own reason). Rejecting again with another reason updates the group's images.
+- **Undo** touches only images whose `i:reject` still carries that group's id: they go back to not rejected, or to the
+  other group reject that still covers them (the sample around a montage, or the montage inside a sample). Images
+  rejected by hand, or changed by hand since, keep their state.
+- A group comment is one note per group (text, who, time); empty removes it. Every action is logged.
+- **Concurrency:** the action runs under the package write lock that every image save takes (one writer process per
+  package), so it never interleaves with another reviewer's group action or save. Images open on another reviewer's
+  screen are changed too; the answer lists them and the page says they see it on their next sync (<= 20 s). A later
+  decision of theirs on such an image wins as usual (per-key merge).
+- **Storage:** group notes and reject states in `edits/_groups.json` (`review_groups/1`). It is **not an image record**:
+  every reader of `edits/*.json` skips it (`review_groups.record_files` / `is_record_file`: `/api/edits`,
+  `apply_review_edits`, `resolve_review_edits`, the registry importers and validator, `strip_decoys`' count) or reads
+  records by name / by their `file` key (the portal's progress and card counters, `reviewed.json`, the build's seed
+  and part copies), so no count moves. It is backed up with the edits and is part of the apply snapshot's sha256.
+- **Downstream:** `image_flags` / `reviewed.json` add `reject_scope` (`sample` | `montage`) to a group-rejected image;
+  `reviewed.json` has `sample_groups` (notes and rejects by real sample label) when there are any, and
+  `results.compute` copies it to that sample's `group` in `results.json` (not the CSVs). The portal pages don't show
+  it yet.
 
 ## Shipping a partial review
 1. Review images in the tool and press **R** on each one you have checked (also when you changed nothing).
@@ -391,4 +443,10 @@ python -m unittest discover -s annotation/tests -v
   sends no new key; reject + note, badge, filter, counts, Quick check skipping; XSS strings inert; Accept as low conf
   and its one-step undo (Editor and cards); the toggle and note, the Low conf EV alias; export -> import round trip;
   screenshots at 1280 / 390 / 360 px, light and dark.
+- `test_review_meta_groups.py` (round 12): tile names, `package_meta` (full conversion, missing / broken files,
+  upload set, registry session, lab package, no paths), the routes and their key check, group reject / undo /
+  comment (hand rejections survive undo, nested sample / montage, reason change, claims, portal identity, bad
+  bodies), the lock under concurrent reviewers, `_groups.json` ignored by every edits reader, results.
+- `test_review_meta_groups_browser.py` (Playwright): the info panel's defocus and "not recorded", the sample switcher
+  and sort, reject / undo of a sample with a hand-rejected image, the Quick check line, phone width, an old server.
 - `REVIEW_TEST_SHOTS=<dir>` keeps phone screenshots.

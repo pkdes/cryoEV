@@ -7,6 +7,15 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-13 15:00 · Review page 2026-11-13.1: image info, sample switcher, sample / montage reject
+
+- **Image info** in the Editor's side panel: sample, montage, tile, defocus, magnification, pixel size, dose, when it was taken, and how it was processed (recipe, contrast clip, bandpass, denoise). Anything the lab's folders don't have says "not recorded". Quick check shows montage, tile and defocus under the card.
+- **Sample switcher:** "All samples" or one sample, each with its image count; ◀ / ▶ Sample in the side panel. New sort "Sample · montage · tile" with a header per sample and montage.
+- **Comment on or reject a whole sample or montage** (side panel "Sample"): a reason is required and the dialog says how many images it rejects. Images rejected one by one keep their own reason; "Undo sample reject" brings back only the images the group reject took out.
+- Results leave out group-rejected images like any rejected image; the group's note and reason are kept with the sample in the results file.
+
+**Components:** review page, review servers (restart to enable), results
+
 ## 2026-11-13 09:30 · Round 11b: notes and provenance on prediction sets
 
 - **Prediction sets can say how their images were made:** `predict new` takes `--note` (free text) and `--provenance` (a small JSON file: what the images derive from, the processing steps, tiling, script and git sha). The tile manifest is kept with the set as `source_manifest.csv`.
