@@ -20,8 +20,8 @@ Automated detection and characterization of extracellular vesicles and particles
 - **Git remote naming:** on the lab desktop the remote is named `CarneyMLdesktop`; a fresh clone calls it `origin`. Check with `git remote -v` before pushing.
 
 ## Agents (Claude sessions and other automations)
-**Read [`docs/AGENTS.md`](docs/AGENTS.md) first:** the `python -m cryoev` CLI (status, find / show / lineage, pull, review progress, feedback, register, predict new), identity (`CRYOEV_FOR` / `CRYOEV_VIA`; after go-live, credited as "claude for pujan"), and recipes for putting data in, analysing, pulling down, the review loop and the training loop. Hard rules:
-- **Keep `CRYOEV_VIA` UNSET until the new registry code (with the `FORMAT.json` `min_reader` guard) is deployed on every machine that runs registry code.** Until then identify the person only (`--who` / `CRYOEV_FOR`).
+**Read [`docs/AGENTS.md`](docs/AGENTS.md) first:** the `python -m cryoev` CLI (status, find / show / lineage, pull, review progress, feedback, register, predict new), identity (`CRYOEV_FOR` / `CRYOEV_VIA`, credited as "claude for pujan"), and recipes for putting data in, analysing, pulling down, the review loop and the training loop. Hard rules:
+- **Run registry code only from an up-to-date `main` checkout (or `python -m cryoev`), never from an old worktree:** code older than round 9 doesn't know `via` and would re-append stamped lines.
 - **Use the tools' own commands; never write records by hand or edit `*.jsonl`.** The registry is append-only; the importers are the safety net (`python -m cryoev register`).
 - **Dry run first.** `cryoev` writes nothing without `--do`; every `--do` is logged to `<CryoAI-laptop>/logs/agent_actions.jsonl` (Admin, Recent actions: "laptop CLI (unverified)").
 - **Never automated:** Roboflow uploads / relabels (the user's OK each time), setting production / promoting a model (user only), `git push`, sending work to the desktop, anything under Box.

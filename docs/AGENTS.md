@@ -6,8 +6,8 @@ down and reviews, without leaving a mess. The short version:
 - **Use `python -m cryoev`** (run from the repo root) for what it covers, and the tools' own commands for the rest.
   Never write a record, a JSONL line or a data file by hand.
 - **Every write is a dry run first.** `cryoev` writes nothing without `--do`; the wrapped scripts have `--dry-run`.
-- **After go-live, everything an agent does is credited as "claude for pujan"**: the person it acts for, plus the
-  agent. Until then, see the caveat under Identity: `CRYOEV_VIA` stays unset.
+- **Everything an agent does is credited as "claude for pujan"**: the person it acts for, plus the agent (see
+  Identity).
 - **Some things are never automated** (below). The CLI refuses them and points here.
 
 Machines are named by codename only (this repo is public): **home-laptop** (home base: registry, review servers,
@@ -17,10 +17,10 @@ folder, `\\<gpu-desktop>\cj`), **lab-login** (the lab's login node). Data paths 
 
 ## Identity: who did it, and through which agent
 
-> **Caveat: keep `CRYOEV_VIA` UNSET until the new registry code (with the `FORMAT.json` `min_reader` guard) is
-> deployed on EVERY machine that runs registry code** (home-laptop, gpu-desktop, lab-login). Older registry code
-> does not know the `via` field. Until then, identify the person only: `--who <id>` or `CRYOEV_FOR`. Everything below
-> about "claude for pujan" describes the state after that go-live.
+> **Live since 2026-11-12:** `CRYOEV_VIA` / `CRYOEV_FOR` are set for agent sessions on home-laptop. Only run
+> registry code from an up-to-date checkout of `main` (or via `python -m cryoev`): older registry code doesn't know the
+> `via` field and would re-append stamped lines. The registry's `FORMAT.json` (`min_reader`) makes newer code refuse
+> to run on a registry it can't read; code from before this guard has no such check, so never use an old worktree.
 
 | Variable | Meaning | Set by |
 |---|---|---|
