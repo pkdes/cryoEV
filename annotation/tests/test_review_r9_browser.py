@@ -29,6 +29,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import test_review_tool_browser as trb  # noqa: E402,F401  (module: its TestCases must not be collected twice)
+sys.path.append(str(HERE.parent.parent / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
 from test_review_audit_fixes_browser import CardBase as _AuditCardBase, with_fields  # noqa: E402
 from test_review_server import LiveServer  # noqa: E402
 
@@ -78,6 +80,7 @@ def pinch(page, sel, mx, my, d0, d1, steps=6):
     ptr(page, sel, "pointerup", 2, mx + d1 / 2, my)
 
 
+@browser
 class CardBase(_AuditCardBase):
     @classmethod
     def setUpClass(cls):
@@ -103,6 +106,7 @@ class CardBase(_AuditCardBase):
         page.wait_for_function(f"(() => {{ const t = __review.state().tri; return !t.busy && ({cond}); }})()")
 
 
+@browser
 class Back19Tests(CardBase):
     """#19 reproduction. With the page before the fix (REVIEW_TOOL_INDEX=<main's index.html>) both tests fail: the
     second key decides the next card unseen, and Back lands on that card instead of the one just decided."""
@@ -165,6 +169,7 @@ class Back19Tests(CardBase):
         self.assertEqual(self.state(page)["tri"]["histIds"], ["|".join(first)])
 
 
+@browser
 class FunModeTests(CardBase):
     def test_default_on_switch_and_plain_texts(self):
         page = self.open("&who=fun1&mode=cards", setup=PRED, **DESK)
@@ -267,6 +272,7 @@ class FunModeTests(CardBase):
         step(lambda: page.keyboard.press("Enter"))
 
 
+@browser
 class SideListTests(CardBase):
     def items(self, page):
         return page.evaluate("[...document.querySelectorAll('#triItems button')].map(b => "
@@ -328,6 +334,7 @@ class SideListTests(CardBase):
         self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 400)
 
 
+@browser
 class PinchTests(CardBase):
     def test_card_pinch_zooms_about_the_fingers(self):
         page = self.open("&who=pin1&mode=cards", setup=setups(PRED, init(NO_CAPTURE)), **PHONE)
@@ -360,6 +367,7 @@ class PinchTests(CardBase):
         self.assertAlmostEqual((200 - v["oy"]) / v["s"], (200 - v0["oy"]) / v0["s"], places=3)
 
 
+@browser
 class EraserTests(CardBase):
     def scr(self, page, k):
         st, box = self.state(page)["tri"], page.locator("#tcv").bounding_box()
@@ -434,6 +442,7 @@ class EraserTests(CardBase):
 
 
 
+@browser
 class EditorEraserTests(CardBase):
     F = "fixA_new.png"  # label 103 (MV): 20 points, in the upper half of the image (the class chips cover the bottom)
 
