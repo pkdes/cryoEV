@@ -118,7 +118,8 @@ To add a model, put `best.pt` in `models/<model_id>/` and add an entry to `model
 | `training/monitor_run.py`, `notify.py` | Live training monitor (aggregate + per-class table from each run's `per_class_epoch.csv`), completion notifications |
 | `tools/` | Repo tools: a pre-push secret scan (enable with `git config core.hooksPath .githooks`) and the daily state backup; see [`docs/TOOLS.md`](docs/TOOLS.md) |
 | `embedding/` | DINO embedding + clustering workflow; see `embedding/README.md`. Planned to move to its own fork |
-| `portal/` | The CryoEV portal: the lab's multi-user web platform (Home, Data + Lineage, Jobs, Review, Predict incl. raw → tiles, Results, Train, Admin; roles admin / advanced / basic). Two sign-in doors, one roster: key links on the tailnet, and Cloudflare Access (email PIN) for lab members on the internet; see [`portal/README.md`](portal/README.md) |
+| `cryoev/` | The agent CLI, `python -m cryoev` (status, find/show/lineage, pull, review progress, feedback, register, predict new): one safe entry point for AI agents and scripts; writes are dry-run unless `--do` and every action is logged with who + via ("claude for pujan"); see [`docs/AGENTS.md`](docs/AGENTS.md) |
+| `portal/` | The CryoEV portal: the lab's multi-user web platform (Home, Data + Lineage, Jobs, Review, Predict incl. raw → tiles, Results, Train, Admin; roles admin / advanced / basic). Two sign-in doors, one roster: key links on the tailnet, and Cloudflare Access (Google or email PIN) for lab members on the internet; see [`portal/README.md`](portal/README.md) |
 
 **How it fits together:** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) has a dependency diagram. **Cleanup history and remaining candidates:** [`CLEANUP_CANDIDATES.md`](CLEANUP_CANDIDATES.md).
 
