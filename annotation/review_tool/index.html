@@ -1273,6 +1273,10 @@ function recipeText(r) {
   return out.join(" · ");
 }
 const rangeText = (v, u) => v && typeof v === "object" && !Array.isArray(v) && typeof v.min === "number" ? `${fmtN(v.min, 2)} to ${fmtN(v.max, 2)}${u} (median ${fmtN(v.median, 2)})` : Array.isArray(v) ? v.join(", ") + u : null;
+function thMetaLine(im) {  // Quick check: montage, tile and defocus of the card's image, under the card position
+  const mm = im ? imMeta(im) : null, bits = mm ? [mm.montage || mm.parent_image, tileText(mm.tile), mm.defocus_um != null ? "defocus " + withUnit(mm.defocus_um, 2, " µm") : ""].filter(Boolean) : [];
+  $("thMeta").hidden = !bits.length; $("thMeta").textContent = bits.join(" · "); $("thMeta").title = bits.length ? "Image info (the Editor's side panel has the rest)" : "";
+}
 function renderInfo() {  // Editor side panel: what is known about the open image; missing values say "not recorded"
   const sec = $("infoSec"), box = $("infoBox"), im = curImg(), mm = imMeta(im) || {}, P = (meta && meta.package) || {};
   sec.hidden = !capOn("m") || !meta; if (sec.hidden) return;
@@ -1429,7 +1433,9 @@ $("grpCancel").onclick = closeGroup; $("grpOk").onclick = sendGroup; $("grpDlg")
 async function loadMeta() {  // once per connect: ~0.3 KB per image
   if (!capOn("m")) return;
   try { const r = await tfetch("api/meta", {cache: "no-store"}); if (r.ok) { const j = await r.json(); if (j && typeof j.images === "object") meta = j; } } catch (e) {}
-  if (!$("tri").hidden) triRender(); else { renderList(); renderSide(); }
+  // only what shows metadata: a full re-render here could land mid-swipe or mid-edit (cards, the selection panel)
+  if (!$("tri").hidden) { const c = tri.queue[tri.pos]; thMetaLine(c ? D.images[c.i] : null); return; }
+  renderInfo(); renderGroupBox(); if ($("fSort").value === "sample") renderList();
 }
 async function loadGroups() {
   if (!capOn("g")) return;
@@ -2163,8 +2169,7 @@ function triHeader(c) {
   $("thObj").textContent = `object ${same.indexOf(c) + 1} of ${same.length}`; $("thObj").title = `decision key ${c.key}`;
   const sd = seedOf(im.file, c.key); $("thSept").hidden = !sd; $("thSept").title = sd ? "Carried from the September review: " + sd : "";
   $("thPos").textContent = `card ${tri.pos + 1} of ${tri.queue.length} · order: most flags first`;
-  const mm = imMeta(im), bits = mm ? [mm.montage || mm.parent_image, tileText(mm.tile), mm.defocus_um != null ? "defocus " + withUnit(mm.defocus_um, 2, " µm") : ""].filter(Boolean) : [];
-  $("thMeta").hidden = !bits.length; $("thMeta").textContent = bits.join(" · "); $("thMeta").title = bits.length ? "Image info (the Editor's side panel has the rest)" : "";
+  thMetaLine(im);
   open.hidden = false; open.href = deepLink(im.file, c.key);
 }
 // After a pick on this card (auto-next off), a swipe or ♥ / ✕ / Enter only moves on: it never overwrites the pick.
@@ -2730,7 +2735,7 @@ async function pull() {  // bring in other reviewers' decisions (and who is look
     if (!(file in remote) && (l.modified || l.reviewed || Object.keys(l.dec || {}).length)) dirty.add(file);
   persist();
   if (!$("tri").hidden && !g0 && !tri.busy) { if (!leaveTaken() && triSig() !== tri.sig) triRender(); }  // re-render only on a change
-  else if ($("tri").hidden) { renderList(); renderImgBox(); draw(); }
+  else if ($("tri").hidden) { renderList(); renderImgBox(); renderGroupBox(); draw(); }
 }
 // /api/ping caps: the decision kinds beyond g/p/n the server accepts (review_server.CAPS). A server started on older
 // code answers {"ok": true}: the reject, note and Low conf controls stay hidden, so this page never sends a key it
