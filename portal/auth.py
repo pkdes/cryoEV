@@ -27,7 +27,8 @@ CryoEV portal sign-in, tailnet mode (P1): key links -> session cookie. Deny by d
   takes tokens_lock (thread lock + OS lock on <store>.lock) and re-reads the file; the portal's TokenStore re-reads
   on (mtime, size) like Roster, looks tokens up by sha256, keeps last_used in memory and merges it into the file at
   most every LAST_USED_FLUSH_S (the merge sets last_used only: it never clears a revoke). A token is valid when it is
-  not revoked or expired, its scope is "read" ("write" is reserved for the next round and refused), and its person
+  not revoked or expired, its scope is "read" or "write" (round 11 #65: write also opens portal/app.py's
+  BEARER_WRITE_ROUTES and lasts at most WRITE_MAX_DAYS, checked on every request too), and its person
   is on the roster, not revoked, with a known role (no key needed: email-only people count). Revoking a person
   (this CLI, Admin) revokes their tokens too.
 The Cloudflare `access` mode (portal/access.py) runs on its own port; it is never mixed with key links.
@@ -387,8 +388,10 @@ CLI_ACTOR = "cli"                                       # = portal.audit.CLI_ACT
 TOKEN_MAX_DAYS = 90
 TOKEN_DEFAULT_DAYS = 30
 TOKENS_PER_PERSON = 10                                  # live (not revoked, not expired) tokens per person
-TOKEN_SCOPES = ("read",)                                # what a token may carry now
-RESERVED_SCOPES = ("write",)                            # next round (a flag in the store); refused tonight
+TOKEN_SCOPES = ("read", "write")                        # write implies read (round 11 #65; portal/app.py)
+RESERVED_SCOPES = ()                                    # none reserved now (round 10 refused "write" here)
+WRITE_MAX_DAYS = 30                                     # a write token's lifetime cap, at creation AND in check()
+WRITE_LIMIT = 60                                        # agent writes per person per hour (portal/app.py WriteLimiter)
 LAST_USED_FLUSH_S = 300.0
 TOKENS_LOCK_WAIT_S = 10.0
 _tokens_rlock = threading.RLock()
@@ -491,11 +494,16 @@ def person_ok(p) -> bool:
     return isinstance(p, dict) and not p.get("revoked") and p.get("role") in ROLES
 
 
+def max_days(scope) -> int:
+    """The longest lifetime a token of this scope may have: WRITE_MAX_DAYS for write, else TOKEN_MAX_DAYS."""
+    return WRITE_MAX_DAYS if scope == "write" else TOKEN_MAX_DAYS
+
+
 def create_token(path: Path, person: str, agent: str, days: int = TOKEN_DEFAULT_DAYS, scope: str = "read",
                  roster: Path | None = None, now: float | None = None) -> tuple:
     """-> (token, public record). The token is returned once and stored only as sha256. Raises TokenError: bad
-    agent name / days / scope, a person who isn't active on `roster` (when given), TOKENS_PER_PERSON live tokens
-    already; OSError when the store is locked or can't be written."""
+    agent name / days / scope (read, or write: at most WRITE_MAX_DAYS), a person who isn't active on `roster` (when
+    given), TOKENS_PER_PERSON live tokens already; OSError when the store is locked or can't be written."""
     now = time.time() if now is None else now
     if not id_ok(person):
         raise TokenError("bad person id")
@@ -503,15 +511,17 @@ def create_token(path: Path, person: str, agent: str, days: int = TOKEN_DEFAULT_
         raise TokenError("The agent name is 1 to 32 lower-case letters, digits, '_' or '-', starting with a letter "
                          "(e.g. claude).")
     if scope in RESERVED_SCOPES:
-        raise TokenError(f"The {scope!r} scope is not available yet: tokens are read-only for now.")
+        raise TokenError(f"The {scope!r} scope is not available yet.")
     if scope not in TOKEN_SCOPES:
         raise TokenError(f"Unknown scope {scope!r}.")
+    top = max_days(scope)
+    what = "A read + write token lasts" if scope == "write" else "Expiry is"
     try:
         days = int(days)
     except (TypeError, ValueError):
-        raise TokenError(f"Expiry is 1 to {TOKEN_MAX_DAYS} days.") from None
-    if not 1 <= days <= TOKEN_MAX_DAYS:
-        raise TokenError(f"Expiry is 1 to {TOKEN_MAX_DAYS} days.")
+        raise TokenError(f"{what} 1 to {top} days.") from None
+    if not 1 <= days <= top:
+        raise TokenError(f"{what} 1 to {top} days.")
     if roster is not None and not person_ok(Roster(roster).people().get(person)):
         raise TokenError(f"{person} is not on the list, or revoked.")
     with tokens_lock(path):
@@ -612,7 +622,9 @@ class TokenStore:
 
     def check(self, token, roster: Roster, now: float | None = None) -> tuple:
         """-> (person entry, token record) for a valid token, else (None, reason). reason: "malformed", "unknown",
-        "revoked", "expired", "scope" (anything but read) or "person" (not on the roster, revoked, no valid role)."""
+        "revoked", "expired" (also: a lifetime over max_days(scope), e.g. a hand-edited write token of 90 days),
+        "scope" (anything but read / write) or "person" (not on the roster, revoked, no valid role). The record's
+        "scope" says what it opens (portal/app.py: write routes need "write")."""
         now = self.clock() if now is None else now
         if not isinstance(token, str) or not TOKEN_RE.fullmatch(token):
             return None, "malformed"
@@ -623,7 +635,7 @@ class TokenStore:
         if state != "active":
             return None, state
         made = _ts(rec.get("created"))
-        if made is None or _ts(rec["expires"]) - made > TOKEN_MAX_DAYS * 86400 + 60:   # a hand-edited lifetime
+        if made is None or _ts(rec["expires"]) - made > max_days(rec.get("scope")) * 86400 + 60:   # hand-edited
             return None, "expired"
         if rec.get("scope") not in TOKEN_SCOPES or not isinstance(rec.get("agent"), str) \
                 or not ACTOR.VIA_RE.match(rec["agent"]):
@@ -689,10 +701,8 @@ def token_audit(state_dir, action, rec) -> None:
         v = None
     if v:
         detail["via"] = v
-    try:
-        PA.audit(state_dir or default_state_dir(), CLI_ACTOR, action, rec.get("id"), detail)
-    except OSError as e:
-        print(f"[WARN] audit line not written ({type(e).__name__})", file=sys.stderr)
+    if not PA.event(state_dir or default_state_dir(), None, action, rec.get("id"), detail, actor=CLI_ACTOR):
+        print("[WARN] audit line not written (see the log)", file=sys.stderr)
 
 
 def cli_tokens(args) -> Path | None:
@@ -713,7 +723,8 @@ def token_cli(args) -> int:
             token, rec = create_token(path, args.id, args.agent, args.days, args.scope,
                                       roster=args.roster or default_roster())
             token_audit(args.state_dir, "agent token made", rec)
-            print(f"[OK] token {rec['id']} for {args.agent} acting for {args.id} (read-only, expires "
+            what = "read + write" if rec["scope"] == "write" else "read-only"
+            print(f"[OK] token {rec['id']} for {args.agent} acting for {args.id} ({what}, expires "
                   f"{rec['expires']}). Shown once, keep it private:")
             print(token)
             return 0
@@ -748,12 +759,14 @@ def main(argv=None):
     e.add_argument("--id", required=True)
     e.add_argument("--email", required=True)
     sub.add_parser("list", help="ids, roles, emails and state (never keys)")
-    m = sub.add_parser("mint-token", help="a read-only agent token for a person (printed once); docs/API.md")
+    m = sub.add_parser("mint-token", help="an agent token for a person (printed once); docs/API.md")
     m.add_argument("--id", required=True, help="the person the agent acts for")
     m.add_argument("--agent", required=True, help="the agent's name, e.g. claude (shown as '<agent> for <id>')")
-    m.add_argument("--days", type=int, default=TOKEN_DEFAULT_DAYS, help=f"1 to {TOKEN_MAX_DAYS} (default "
+    m.add_argument("--days", type=int, default=TOKEN_DEFAULT_DAYS, help=f"1 to {TOKEN_MAX_DAYS} for read, 1 to "
+                                                                        f"{WRITE_MAX_DAYS} for write (default "
                                                                         f"{TOKEN_DEFAULT_DAYS})")
-    m.add_argument("--scope", default="read", help="read (write is not available yet)")
+    m.add_argument("--scope", default="read", help="read, or write (also upload, predict, compute, feedback; "
+                                                   "docs/API.md)")
     lt = sub.add_parser("list-tokens", help="agent tokens: id, person, agent, dates, state (never the token)")
     lt.add_argument("--id", default=None, help="only this person's")
     rt = sub.add_parser("revoke-token", help="revoke one agent token (it stops working on its next request)")

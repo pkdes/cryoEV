@@ -1,11 +1,13 @@
 """
-My account (CryoEV portal, every role, both doors): who you are, and read-only tokens for your own AI agent
-(round 10 #60; docs/API.md).
+My account (CryoEV portal, every role, both doors): who you are, and tokens for your own AI agent (round 10 #60;
+write scope round 11 #65; docs/API.md).
 
-    GET  /account/                  your id and role; your agent tokens (agent, created, expires, last used, state)
-                                    with Revoke; the form for a new one (agent name, expiry 1-90 days)
-    POST /account/tokens/new        agent + days -> a new read-only token, shown ONCE on the answer page (no-store);
-                                    never logged, stored as sha256 only (portal/auth.py create_token)
+    GET  /account/                  your id and role; your agent tokens (agent, access, created, expires, last used,
+                                    state) with Revoke; the form for a new one (agent name, expiry, Read only or
+                                    Read + write)
+    POST /account/tokens/new        agent + days + scope -> a new token, shown ONCE on the answer page (no-store);
+                                    never logged, stored as sha256 only (portal/auth.py create_token). Read: 1-90
+                                    days; read + write: 1-30 days (auth.WRITE_MAX_DAYS)
     POST /account/tokens/revoke     id -> your own token revoked (it stops working on its next request)
 
 Rules:
@@ -13,10 +15,11 @@ Rules:
     change is one read-modify-write under auth.tokens_lock.
   - Every POST: the Gate checks Origin; here a form token bound to the sign-in (admin.binding) as Admin does. A bearer
     token never reaches these routes (the Gate's allowlist), so an agent can't make or revoke tokens.
-  - Tokens are read-only and work on the tailnet address only for now; the agent sees what you see, capped at Advanced
-    (an admin's agent is not an admin).
-  - Audit: "agent token made" / "agent token revoked" (target = the token id; detail = for, agent, scope, expires).
-    Never the token or its hash.
+  - Tokens work on the tailnet address only for now; the agent sees what you see, capped at Advanced (an admin's
+    agent is not an admin). A read + write token can also upload images, start predictions, compute results and send
+    feedback (portal/app.py BEARER_WRITE_ROUTES; 60 writes an hour per person).
+  - Audit: "agent token made" / "agent token revoked" (target = the token id; detail = for, agent, scope, expires),
+    through portal.audit.event. Never the token or its hash.
 """
 from __future__ import annotations
 
@@ -41,6 +44,8 @@ PREFIX = "/account"
 ROLES = tuple(A.ROLES)
 MAX_FORM = 4 * 1024
 DAY_CHOICES = (7, 30, 90)
+SCOPE_WORD = {"read": "read only", "write": "read+write"}
+WRITE_LIMIT_TEXT = f"{A.WRITE_LIMIT} writes an hour"
 esc = html.escape
 log = logging.getLogger("cj.account")
 CSS = """<style>
@@ -62,6 +67,9 @@ select.cj-acct-in{width:auto;min-width:9em}
 .cj-acct-tok form{margin:0}
 .cj-acct-secret{font-family:var(--cj-mono);font-size:.85rem;word-break:break-all;resize:vertical}
 .cj-acct-note{border-left:3px solid var(--acc);padding:6px 10px;margin:10px 0}
+.cj-acct-scope{border:0;margin:4px 0;padding:0;display:flex;flex-direction:column;gap:6px;min-width:0}
+.cj-acct-scope label{display:flex;gap:8px;align-items:flex-start;min-height:44px;cursor:pointer}
+.cj-acct-scope input{margin-top:3px;width:18px;height:18px;flex:none}
 .cj-acct-warn{border-left-color:var(--warn)}
 .cj-acct pre{white-space:pre-wrap;word-break:break-all;font-size:.82rem}
 .cj-acct section{margin-bottom:16px}
@@ -92,8 +100,10 @@ def render_tokens(rows, tok) -> str:
                    f'<button class="cj-acct-btn cj-acct-danger" type="submit">Revoke</button></form>')
         else:
             act = f'<span class="cj-mut">{esc(state)}</span>'
-        items.append(f'<li class="cj-acct-tok" data-token-id="{esc(r["id"])}" data-state="{esc(state)}"><span>'
-                     f'<b>{esc(r["agent"])}</b> <span class="cj-mut">{esc(r["id"])} · {esc(r["scope"])} · '
+        scope = SCOPE_WORD.get(r["scope"], str(r["scope"]))
+        items.append(f'<li class="cj-acct-tok" data-token-id="{esc(r["id"])}" data-state="{esc(state)}" '
+                     f'data-scope="{esc(str(r["scope"]))}"><span>'
+                     f'<b>{esc(r["agent"])}</b> <span class="cj-mut">{esc(r["id"])} · {esc(scope)} · '
                      f'{meta}</span></span>{act}</li>')
     return f'<ul class="cj-acct-list">{"".join(items)}</ul>'
 
@@ -109,8 +119,14 @@ def render_page(user, rows, tok, msg_html="", door_note="") -> str:
             f'claude; shown as "claude for {esc(user["id"])}")</span></label>'
             f'<input class="cj-acct-in" id="cj-acct-agent" name="agent" value="claude" required maxlength="32" '
             f'pattern="[a-z][a-z0-9_\\-]{{0,31}}" autocomplete="off" autocapitalize="none" spellcheck="false">'
-            f'<label class="cj-acct-lbl" for="cj-acct-days">Expires after</label>'
+            f'<label class="cj-acct-lbl" for="cj-acct-days">Expires after <span class="cj-mut">(read: at most '
+            f'{A.TOKEN_MAX_DAYS} days · read + write: at most {A.WRITE_MAX_DAYS})</span></label>'
             f'<select class="cj-acct-in" id="cj-acct-days" name="days">{days}</select>'
+            f'<fieldset class="cj-acct-scope"><legend class="cj-acct-lbl">Access</legend>'
+            f'<label><input type="radio" name="scope" value="read" checked> <span><b>Read only</b></span></label>'
+            f'<label><input type="radio" name="scope" value="write"> <span><b>Read + write</b> '
+            f'<span class="cj-mut">upload images, start predictions, compute results, send feedback '
+            f'({WRITE_LIMIT_TEXT})</span></span></label></fieldset>'
             f'<button class="cj-acct-btn cj-acct-primary" type="submit"{" disabled" if full else ""}>'
             f'Make a token</button></form>'
             + (note(f"You have {A.TOKENS_PER_PERSON} live tokens. Revoke one to make another.", True) if full else ""))
@@ -119,8 +135,10 @@ def render_page(user, rows, tok, msg_html="", door_note="") -> str:
             f'<p>Signed in as <b>{esc(user["id"])}</b> ({esc(role)}).</p>{msg_html}'
             f'<section class="cj-card"><h2>Agent tokens</h2>'
             f'<p>A token lets your own AI agent (e.g. Claude Code) <b>read</b> the portal for you: data, lineage, '
-            f'your predictions and results, the jobs summary. It can\'t change anything. It sees what you see, '
-            f'but never more than an Advanced user. Shown as "agent for you" in the audit log.</p>'
+            f'your predictions and results, the jobs summary. A <b>read + write</b> token can also upload images, '
+            f'start predictions, compute results and send feedback; nothing else (no admin, review, Apply or '
+            f'training). It sees what you see, but never more than an Advanced user. What it does is shown as '
+            f'"agent for you" in the audit log and on what it makes.</p>'
             f'<p class="cj-mut">Works on the Tailscale address only for now. Keep a token private, like a key '
             f'link. Client: <a href="/cj/cryoev_client.py">cryoev_client.py</a> (one file, Python standard '
             f'library); docs: docs/API.md in the repo.</p>{door_note}'
@@ -134,7 +152,8 @@ def render_new(user, rec, token, base) -> str:
                f'CRYOEV_URL = {base or "https://<the portal Tailscale address>"}\n'
                f'CRYOEV_TOKEN = <the token above>\n'
                f'python cryoev_client.py me')
-    made = f"Token {rec['id']} made: read-only, expires {_when(rec['expires'])}."
+    what = "read + write" if rec.get("scope") == "write" else "read-only"
+    made = f"Token {rec['id']} made: {what}, expires {_when(rec['expires'])}."
     return (f'{CSS}<div class="cj-acct"><h1>Token for {esc(rec["agent"])}</h1>{note(made)}'
             f'<section class="cj-card"><h2>Copy it now: it is shown only once</h2>'
             f'<label class="cj-acct-lbl" for="cj-acct-secret">Token</label>'
@@ -142,7 +161,10 @@ def render_new(user, rec, token, base) -> str:
             f'spellcheck="false">{esc(token)}</textarea>'
             f'<ul><li><b>Shown only now.</b> It is stored only as a fingerprint; if you lose it, revoke it and make '
             f'another.</li><li>Anyone who has it can read the portal as {esc(rec["agent"])} for '
-            f'{esc(user["id"])} until it expires or is revoked.</li></ul>'
+            f'{esc(user["id"])}'
+            + (" and upload, start predictions, compute results and send feedback" if rec.get("scope") == "write"
+               else "") +
+            f' until it expires or is revoked.</li></ul>'
             f'<pre>{esc(snippet)}</pre></section>'
             f'<p><a href="{PREFIX}/">Back to My account</a></p></div>')
 
@@ -196,15 +218,13 @@ def routes(ctx) -> list:
             return None, await run_in_threadpool(page, request, note("This form has expired. Try again.", True), 403)
         return f, None
 
-    def audit_line(actor, action, rec) -> str:
-        try:
-            PA.audit(ctx.cfg.state_dir, actor, action, rec.get("id"),
-                     {"for": rec.get("person"), "agent": rec.get("agent"), "scope": rec.get("scope"),
-                      "expires": rec.get("expires")})
+    def audit_line(request, action, rec) -> str:
+        """The self-logged line (portal.audit.event; SELF_LOGGED in app.py). -> "" or a warning note."""
+        if PA.event(ctx.cfg.state_dir, request, action, rec.get("id"),
+                    {"for": rec.get("person"), "agent": rec.get("agent"), "scope": rec.get("scope"),
+                     "expires": rec.get("expires")}, log_to=log):
             return ""
-        except OSError as e:
-            log.error("account: audit line not written (%s)", type(e).__name__)
-            return note(f"Done, but the audit log could not be written ({type(e).__name__}).", True)
+        return note("Done, but the audit log could not be written.", True)
 
     def index(request: Request):                         # sync: a file read
         text = ADM.flash_take(ADM.binding(request), request.query_params.get("f"))
@@ -215,16 +235,20 @@ def routes(ctx) -> list:
         if err:
             return err
         user = me(request)
+        scope = f.get("scope") or "read"
+        if scope not in A.TOKEN_SCOPES:
+            return await run_in_threadpool(page, request, note("No token was made: pick Read only or Read + write.",
+                                                               True), 400)
         try:
             token, rec = await run_in_threadpool(A.create_token, store(), user["id"], f.get("agent", ""),
-                                                 f.get("days", ""), "read", ctx.cfg.roster)
+                                                 f.get("days", ""), scope, ctx.cfg.roster)
         except A.TokenError as e:
             return await run_in_threadpool(page, request, note(f"No token was made: {e}", True), 400)
         except OSError as e:
             log.error("account: token store not written (%s)", type(e).__name__)
             return await run_in_threadpool(page, request, note("No token was made: the token store is busy or "
                                                                "can't be written. Try again.", True), 503)
-        warn = await run_in_threadpool(audit_line, user["id"], "agent token made", rec)
+        warn = await run_in_threadpool(audit_line, request, "agent token made", rec)
         base = ADM.link_base(ctx.cfg, request.headers.get("origin")) if getattr(ctx.cfg, "auth", "key") != "access" \
             else ""
         r = show(request, warn + render_new(user, rec, token, base))
@@ -246,7 +270,7 @@ def routes(ctx) -> list:
             log.error("account: token store not written (%s)", type(e).__name__)
             return await run_in_threadpool(page, request, note("Nothing was revoked: the token store is busy or "
                                                                "can't be written. Try again.", True), 503)
-        warn = await run_in_threadpool(audit_line, user["id"], "agent token revoked", rec)
+        warn = await run_in_threadpool(audit_line, request, "agent token revoked", rec)
         if warn:
             return await run_in_threadpool(page, request, warn)
         tok = ADM.flash_put(ADM.binding(request), f"Token {rec['id']} ({rec['agent']}) is revoked.")

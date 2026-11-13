@@ -4,7 +4,9 @@ Feedback module (round 7, F): bug reports, feature ideas and questions.
     PREFIX = "/feedback"    ROLES = every role
 
     GET  /feedback/?page=/gallery/x      the form (page prefilled, path only) + "My reports" with status and the reply
-    POST /feedback/                      create (urlencoded: kind, text, steps, page) -> 303 back with a thank-you
+    POST /feedback/                      create (urlencoded: kind, text, steps, page) -> 303 back with a thank-you;
+                                         an agent (a write token, round 11 #65): via recorded, 303 to /feedback/?id=<n>
+                                         (no flash: every bearer request has the same empty sign-in binding)
     GET  /feedback/all?kind=&status=     admin: every report, filtered
     POST /feedback/<id>/status           admin: set the status  (form token)
     POST /feedback/<id>/reply            admin: set the reply the reporter sees  (form token)
@@ -31,6 +33,7 @@ from starlette.requests import Request
 from starlette.responses import RedirectResponse
 from starlette.routing import Route
 
+from portal import audit as PA
 from portal import auth as A
 from portal import feedback_store as FS
 from portal.modules import admin as AD
@@ -252,9 +255,10 @@ def routes(ctx) -> list:
         if err:
             return err
         kind, text, steps, page = f.get("kind", ""), f.get("text", ""), f.get("steps", ""), f.get("page", "")
+        via = PA.request_via(request)                     # the agent acting for this person (bearer), else None
         try:
             rec = await run_in_threadpool(FS.create, path(), me(request), kind, text, steps if kind == "bug" else "",
-                                          page)
+                                          page, via)
         except FS.RateLimited as e:
             return await redo(f, note(str(e), "warn"), 429)
         except FS.Invalid as e:
@@ -262,6 +266,8 @@ def routes(ctx) -> list:
         except OSError:
             return await redo(f, note("That could not be saved just now. Try again in a minute.", "warn"), 503)
         notify_new(rec["id"], rec["kind"])
+        if via:                                           # an agent reads the id from Location; no flash for it
+            return RedirectResponse(f"{PREFIX}/?id={int(rec['id'])}", status_code=303)
         return back(request, f"Thank you. Your report #{rec['id']} was sent.")
 
     async def all_reports(request: Request):

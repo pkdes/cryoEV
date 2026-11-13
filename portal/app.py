@@ -45,9 +45,17 @@ Agent API (round 10 #60, docs/API.md): `Authorization: Bearer cev_...` (portal/a
 opens ONLY the exact (GET, route template) pairs in BEARER_ROUTES, existing JSON read routes; everything else answers
 401 with no cookie fallback, and cookies (and the Authorization header) are dropped from the request before the app
 sees it. The person's role is capped at advanced (BEARER_ROLE_CAP), then the normal module rules and the handlers'
-owner checks apply as for a browser. No Origin check (GET only). scope cj_auth = "bearer", cj_via = the token's
-agent. CJ_API=off refuses every bearer request (the kill switch). The Cloudflare (access) door refuses bearer:
-the API is tailnet-only for now (a Cloudflare service token comes next round); access_user is unchanged.
+owner checks apply as for a browser. No Origin check (a browser never sends a bearer token by itself). scope
+cj_auth = "bearer", cj_via = the token's agent, cj_scope = its scope. CJ_API=off refuses every bearer request (the
+kill switch). The Cloudflare (access) door refuses bearer: the API is tailnet-only for now (a Cloudflare service
+token comes next round); access_user is unchanged.
+Write scope (round 11 #65): a "write" token also opens the exact pairs in BEARER_WRITE_ROUTES (upload, start a
+prediction from a session, compute results, send feedback; never admin, review, Apply, Box, Roboflow or training).
+A read token there gets 403 saying so; CJ_API_WRITE=off refuses them all (403; reads go on). Limits per PERSON across
+all their tokens (WriteLimiter, in memory): WRITE_LIMIT POSTs per rolling hour (an upload's chunks count once), 429 +
+Retry-After over it; one open agent upload and the active-set cap for every agent are the Predict module's
+(portal/predict_parts: uploads.upload_start, create.check_active). No bearer route checks a form token: binding() is
+"" for every bearer request, so one would be one shared token (portal/tests/test_agent_api.py guards it).
 
 Defaults: --registry = data_utils.config.registry_root(); --review-package = the newest open revise job on port
 8766 in that registry (its review_package path); roster and state dir under %USERPROFILE%\\.cryoev (portal/auth.py).
@@ -74,6 +82,8 @@ import os
 import re
 import socket
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -109,8 +119,23 @@ BEARER_ROUTES = frozenset({
     ("GET", "/results/{ps}/api/status"),
     ("GET", "/jobs/api/summary"),
 })
+# ---- write scope (round 11 #65): the ONLY extra pairs a "write" token opens. Exact templates again; the GETs are the
+# upload's state, the create's progress (polled) and the session form (?json=1: its sig and samples, which a POST of
+# it needs); they are never counted as writes.
+BEARER_WRITE_ROUTES = frozenset({
+    ("POST", "/predict/api/upload"), ("POST", "/predict/api/upload/{uid}/file"),
+    ("POST", "/predict/api/upload/{uid}/create"), ("POST", "/predict/api/upload/{uid}/cancel"),
+    ("GET", "/predict/api/upload/{uid}"), ("GET", "/predict/api/preparing/{tid}"),
+    ("GET", "/predict/new/session/{key}/"), ("POST", "/predict/new/session/{key}/"),
+    ("POST", "/results/{ps}/compute"),
+    ("POST", "/feedback/"),
+})
+BEARER_ONCE_PER = {"/predict/api/upload/{uid}/file": "uid"}   # counted once per this path parameter (an upload)
 BEARER_ROLE_CAP = {"admin": "advanced"}       # an agent never acts as an admin
 API_ENV = "CJ_API"                            # "off": every bearer request refused (the kill switch)
+API_WRITE_ENV = "CJ_API_WRITE"                # "off": every write-scope route refused (reads go on)
+WRITE_LIMIT = A.WRITE_LIMIT                   # bearer writes per person per rolling WRITE_WINDOW_S, across tokens
+WRITE_WINDOW_S = 3600.0
 API_DOCS = "See docs/API.md."
 API_TAILNET_ONLY = ("API is tailnet-only for now: use the portal's Tailscale address. Agent tokens are not accepted "
                     "through the Cloudflare sign-in yet.")
@@ -298,6 +323,37 @@ def api_error(status: int, text: str) -> Response:
 
 def api_enabled(env=None) -> bool:
     return str((os.environ if env is None else env).get(API_ENV) or "").strip().lower() != "off"
+
+
+def api_writes_enabled(env=None) -> bool:
+    return str((os.environ if env is None else env).get(API_WRITE_ENV) or "").strip().lower() != "off"
+
+
+class WriteLimiter:
+    """Agent writes per PERSON (all their tokens together) in a rolling window: at most `limit` counted events per
+    `window` s. An event with a `once` key (an upload's id, for its chunks) is counted the first time only, and a
+    request whose key is already counted in the window always passes (the rest of that upload). In memory, per
+    process: one portal process per door, and the access door refuses bearer."""
+
+    def __init__(self, limit: int = WRITE_LIMIT, window: float = WRITE_WINDOW_S, clock=time.monotonic):
+        self.limit, self.window, self.clock = int(limit), float(window), clock
+        self._ev: dict = {}                       # person -> [(t, once key or None)], oldest first
+        self._lock = threading.Lock()
+
+    def take(self, person: str, once=None) -> float:
+        """Count one write for `person`. -> 0.0 when allowed (counted), else the seconds until one is free again."""
+        now = self.clock()
+        with self._lock:
+            ev = [e for e in self._ev.get(person, ()) if now - e[0] < self.window]
+            self._ev[person] = ev
+            if once is not None and any(k == once for _, k in ev):
+                return 0.0
+            if len(ev) >= self.limit:
+                return max(1.0, self.window - (now - ev[0][0]))
+            ev.append((now, once))
+            for p in [p for p, v in self._ev.items() if not v or now - v[-1][0] >= self.window]:
+                self._ev.pop(p, None)                      # people with nothing left in the window
+            return 0.0
 
 
 def read_json(path: Path):
@@ -522,10 +578,11 @@ class Gate:
     Origin check on unsafe methods, and the access log with `k` redacted (never cookies or keys)."""
 
     def __init__(self, app: Starlette, auth: A.Auth, origins=(), rules=(), mode: str = "key", verifier=None,
-                 access_admin: bool = False, writer=None, review_target=None, tokens=None):
+                 access_admin: bool = False, writer=None, review_target=None, tokens=None, limiter=None):
         if mode not in AUTH_MODES or (mode == "access") != (verifier is not None):
             raise ValueError(f"auth mode {mode!r} needs {'a' if mode == 'access' else 'no'} JWT verifier")
         self.tokens = tokens if tokens is not None else A.TokenStore(A.default_tokens())   # agent tokens (bearer)
+        self.limiter = limiter if limiter is not None else WriteLimiter()                # agent writes per person
         self.app = app
         self.auth = auth
         self.origins = tuple(origins)
@@ -621,10 +678,11 @@ class Gate:
 
     def bearer_user(self, scope, token) -> tuple:
         """The bearer branch: -> (user, deny, credited). user = the token's person with the role capped
-        (BEARER_ROLE_CAP) when the token is valid AND the request is an allowlisted (GET, template); deny = the JSON
-        refusal otherwise; credited = who the audit line names (a valid token on a route it doesn't open is still
-        that person's agent). Sets scope cj_auth = "bearer" and cj_via for every valid token. Refusals are logged
-        with a reason, never the token."""
+        (BEARER_ROLE_CAP) when the token is valid AND the request is an allowlisted (method, template): BEARER_ROUTES
+        for every token, BEARER_WRITE_ROUTES for a write token only (and not with CJ_API_WRITE=off); deny = the JSON
+        refusal otherwise (a read token on a write route: 403 saying so); credited = who the audit line names (a
+        valid token on a route it doesn't open is still that person's agent). Sets scope cj_auth = "bearer",
+        cj_via and cj_scope for every valid token. Refusals are logged with a reason, never the token."""
         if self.mode == "access":                       # tailnet-only for now; access_user is never asked
             log.warning("bearer refused: the access door does not take agent tokens yet")
             return None, api_error(403, API_TAILNET_ONLY), None
@@ -638,11 +696,43 @@ class Gate:
         self.tokens.used(rec["id"])
         user = dict(person)
         user["role"] = BEARER_ROLE_CAP.get(user.get("role"), user.get("role"))
-        scope["cj_auth"], scope["cj_via"] = "bearer", rec["agent"]
+        scope["cj_auth"], scope["cj_via"], scope["cj_scope"] = "bearer", rec["agent"], rec.get("scope")
         tpl, _ = self.route_of(scope)
-        if (scope.get("method"), tpl) not in BEARER_ROUTES:
-            return None, api_error(401, f"Agent tokens open only the API's read routes. {API_DOCS}"), user
+        pair = (scope.get("method"), tpl)
+        if pair in BEARER_ROUTES:
+            return user, None, user
+        if pair not in BEARER_WRITE_ROUTES:
+            return None, api_error(401, f"Agent tokens open only the API's read routes and, with a read + write "
+                                        f"token, its write routes. {API_DOCS}"), user
+        if rec.get("scope") != "write":
+            log.warning("bearer refused: a read-only token on a write route")
+            return None, api_error(403, f"This token is read-only. Make a read + write token on My account to "
+                                        f"upload, start predictions, compute results or send feedback. "
+                                        f"{API_DOCS}"), user
+        if not api_writes_enabled():
+            log.warning("bearer refused: %s=off", API_WRITE_ENV)
+            return None, api_error(403, f"Agent writes are switched off on this portal (reads still work). "
+                                        f"{API_DOCS}"), user
         return user, None, user
+
+    def write_limited(self, scope, user):
+        """A bearer write (a POST on BEARER_WRITE_ROUTES) that passed every other check: counted per person. -> None,
+        or the 429 JSON answer with Retry-After when the person's agents used WRITE_LIMIT in the window."""
+        if scope.get("method") not in UNSAFE:
+            return None
+        tpl, params = self.route_of(scope)
+        if (scope.get("method"), tpl) not in BEARER_WRITE_ROUTES:
+            return None
+        key = BEARER_ONCE_PER.get(tpl)
+        once = (tpl, str(params.get(key))) if key else None
+        wait = self.limiter.take(str(user.get("id")), once)
+        if not wait:
+            return None
+        log.warning("bearer refused: %s's agents made %d writes in the last hour", user.get("id"), self.limiter.limit)
+        r = api_error(429, f"Too many agent writes: at most {self.limiter.limit} an hour for each person, across all "
+                           f"their tokens (an upload's pieces count once). Try again later. {API_DOCS}")
+        r.headers["Retry-After"] = str(int(wait + 0.999))
+        return r
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -688,9 +778,12 @@ class Gate:
                     and not M.allowed(self.rules, path, user.get("role"))):
                 deny = (api_error(403, "Your role can't open this part of the portal.") if token is not None else
                         page(403, "Not allowed", "Your role can't open this part of the portal."))
-            # bearer requests are GET only (BEARER_ROUTES): the Origin check is for browsers' writes
+            # the Origin check is for browsers' writes: a bearer write carries its own credential (a browser never
+            # adds one), and the bearer routes never check a form token (binding() is "" for them)
             if deny is None and token is None and method in UNSAFE and not self.origin_allowed(scope):
                 deny = page(403, "Refused", "Cross-origin request refused.")
+            if deny is None and token is not None:      # the last check: only writes that would run are counted
+                deny = self.write_limited(scope, user)
             if deny is not None:
                 return await deny(scope, receive, send_secure)
             scope["cj_user"] = user
@@ -1137,6 +1230,7 @@ def create_app(cfg: Config) -> Gate:
         if request.scope.get("cj_auth") == "bearer":                  # an agent: its name, and that it's capped
             out["via"] = request.scope.get("cj_via")
             out["auth"] = "bearer"
+            out["scope"] = request.scope.get("cj_scope")              # read | write (round 11 #65)
         if access:
             out["signout"] = "/cdn-cgi/access/logout"                 # Cloudflare's own sign-out (header.js)
         return no_store(JSONResponse(out))

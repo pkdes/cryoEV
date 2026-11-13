@@ -290,6 +290,25 @@ def default_name_for(source: dict, label=None) -> str:
     return NM.default_name({"source": source, "created": now_iso()}, label)[:PS.NAME_MAX]
 
 
+SCHEMA_SESSION_FORM = "cj_predict_session_form/1"
+
+
+def session_form_view(cfg, user, src: dict, t: dict) -> dict:
+    """The session form's data as JSON (GET /predict/new/session/<key>/?json=1; round 11 #65): what an agent needs to
+    POST the form (sig, the sample ids, their nm/px, the models it may pick), the same values the page shows. A
+    mixed sample can't be picked (as on the page)."""
+    default, choices = allowed_models(cfg, user)
+    groups = []
+    for i, g in enumerate(t["groups"]):
+        groups.append({"gid": g.get("gid", f"g{i}"), "label": g["label"], "n": len(g["names"]), "nm": g["nm"],
+                       "nm_min": g["nm_min"], "nm_max": g["nm_max"], "nm_range": bool(g["nm_range"]),
+                       "nm_missing": g["nm_missing"], "mixed": bool(g["mixed"])})
+    return {"schema": SCHEMA_SESSION_FORM, "key": src["key"], "label": src["label"], "session": src["session"],
+            "sig": t["sig"], "n": t["n"], "max_files": COMMON.MAX_FILES, "needs_label": t["column"] is None,
+            "kept": t.get("kept"), "groups": groups, "models": [c["id"] for c in choices],
+            "default_model": default if default in {c["id"] for c in choices} else None}
+
+
 def page_session_form(cfg, user, src: dict, t: dict, form=None, error=None) -> str:
     admin = user.get("role") == "admin"
     form = form or {}
