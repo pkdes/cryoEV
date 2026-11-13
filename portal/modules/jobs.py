@@ -184,18 +184,12 @@ def _registry_module():
     return _reg_mod
 
 
-_actor_mod = None
 
 
 def _actor():
-    """registry/actor.py (label()), loaded once by path like registry.py."""
-    global _actor_mod
-    if _actor_mod is None:
-        spec = importlib.util.spec_from_file_location("cj_jobs_actor", REPO / "registry" / "actor.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _actor_mod = mod
-    return _actor_mod
+    """data_utils/actor.py (label())."""
+    from data_utils import actor
+    return actor
 
 
 def who_label(who, via=None) -> str:

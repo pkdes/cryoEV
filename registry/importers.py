@@ -1062,13 +1062,26 @@ class Importer:
             appended["(image list files)"] += lists_written
         prod_id, who = PRODUCTION
         cur = registry.current(root=self.root)
-        if not dry_run and prod_id in cur and cur[prod_id].get("status") != "production":
+        if not dry_run and self._restate_production(prod_id, who, cur):
             # the user's recorded decision, restated: never via (an agent never promotes; registry._check)
             registry.set_status(prod_id, "production", who, note="user decision 2026-10-30", root=self.root,
                                 via=None)
             appended["model (set-status production)"] += 1
         return appended
 
+
+    def _restate_production(self, prod_id, who, cur) -> bool:
+        """PRODUCTION is a seed for an empty or rebuilt registry, never an override (round 10, TODO #62): restate it
+        only when the model exists, isn't production now, NO line in its history is a decision by PRODUCTION_WHO in
+        person (status_by == who, no status_via: e.g. a later demotion), and no other model is production."""
+        rec = cur.get(prod_id)
+        if rec is None or rec.get("status") == "production":
+            return False
+        if any(r.get("status_by") == who and not r.get("status_via")
+               for r in registry.history(prod_id, root=self.root)):
+            return False                       # the user decided something about this model: follow that
+        return not any(m.get("status") == "production" for k, m in cur.items()
+                       if k != prod_id and registry.entity_of(m) == "model")
 
 REQUIRED_NULL = {"image": ("session", "grid"), "model": ("run",),
                  "dataset": ("images_sha256", "image_list", "counts_trained", "counts_listed"),

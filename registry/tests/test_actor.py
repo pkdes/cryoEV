@@ -88,3 +88,19 @@ class Actor(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Shim(unittest.TestCase):
+    """registry/actor.py is a shim over data_utils/actor.py (round 10): every name, private ones included."""
+
+    def test_same_names_and_objects(self):
+        from data_utils import actor as real
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("shim_actor_by_path", REPO / "registry" / "actor.py")
+        shim = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(shim)
+        names = {k for k in vars(real) if not (k.startswith("__") and k.endswith("__"))}
+        for n in names:
+            self.assertIs(getattr(shim, n), getattr(real, n), n)
+        self.assertIn("_people", names)                      # the CLI calls the private _people()
+        self.assertIs(A.label, real.label)                    # `from registry import actor` = the same functions

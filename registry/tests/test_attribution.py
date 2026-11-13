@@ -358,3 +358,44 @@ class ImportTwice(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProductionSeed(ImportTwice):
+    """TODO #62 (round 10): importers.PRODUCTION is a seed for an empty or rebuilt registry, never an override. Once the
+    user has decided anything about that model in person (status_by == PRODUCTION_WHO, no status_via), or another model
+    is production, an import leaves it alone."""
+
+    def prod_lines(self):
+        return [r for r in lines(self.root, "model") if r["id"] == importers.PRODUCTION[0]
+                and r.get("recorded_by") == "registry.py set-status"]
+
+    def test_fresh_registry_seeds_production_once(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for k in AGENT:
+                os.environ.pop(k, None)
+            self.assertEqual(self.run_cli()[0], 0)
+            self.assertEqual([r["status"] for r in self.prod_lines()], ["production"])
+            self.assertEqual(self.run_cli()[0], 0)                       # control: no second restatement
+            self.assertEqual(len(self.prod_lines()), 1)
+
+    def test_user_demotion_is_kept(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for k in AGENT:
+                os.environ.pop(k, None)
+            self.assertEqual(self.run_cli()[0], 0)
+            registry.set_status(importers.PRODUCTION[0], "retired", "pujan", root=self.root, via=None)
+            self.assertEqual(self.run_cli()[0], 0)
+            cur = registry.current(root=self.root)[importers.PRODUCTION[0]]
+            self.assertEqual(cur["status"], "retired")                   # before round 10 this flipped back
+            self.assertEqual([r["status"] for r in self.prod_lines()], ["production", "retired"])
+
+    def test_another_production_model_blocks_the_seed(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for k in AGENT:
+                os.environ.pop(k, None)
+            other = {"schema": "model/1", "id": "v9_other_y8m_20261201", "logged": registry.now(), "run": None,
+                     "weights": "x.pt", "imgsz": 1440, "status": "registered"}
+            registry.append(other, root=self.root, via=None)
+            registry.set_status(other["id"], "production", "pujan", root=self.root, via=None)
+            self.assertEqual(self.run_cli()[0], 0)
+            self.assertEqual(self.prod_lines(), [])

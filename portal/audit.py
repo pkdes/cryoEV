@@ -54,15 +54,10 @@ log = logging.getLogger("cj.audit")
 
 
 def actor_module():
-    """registry/actor.py (who / via, label, strip_env), loaded by its file path: the name `registry` may already be
-    registry/registry.py in a process that put registry/ on sys.path."""
-    m = sys.modules.get("cj_registry_actor")
-    if m is None:
-        spec = importlib.util.spec_from_file_location("cj_registry_actor", REPO / "registry" / "actor.py")
-        m = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(m)
-        sys.modules["cj_registry_actor"] = m
-    return m
+    """The attribution helpers (data_utils/actor.py: who / via, label, strip_env). A normal package import since
+    round 10; before, registry/actor.py was loaded by file path because `registry` could be registry/registry.py."""
+    from data_utils import actor
+    return actor
 
 
 def audit_path(state_dir) -> Path:

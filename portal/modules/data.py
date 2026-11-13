@@ -229,7 +229,6 @@ _files_cache: dict = {}
 _package_cache: dict = {}
 _owner_cache: dict = {}
 _registry_module_cache = None
-_actor_module_cache = None
 _decoders = threading.BoundedSemaphore(THUMB_DECODERS)
 
 
@@ -245,14 +244,9 @@ def _registry_module():
 
 
 def _actor_module():
-    """registry/actor.py, loaded once by path: label() is the one "claude for pujan" display form."""
-    global _actor_module_cache
-    if _actor_module_cache is None:
-        spec = importlib.util.spec_from_file_location("cj_data_actor", REPO / "registry" / "actor.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _actor_module_cache = mod
-    return _actor_module_cache
+    """data_utils/actor.py: label() is the one "claude for pujan" display form."""
+    from data_utils import actor
+    return actor
 
 
 def who_label(who, via=None) -> str:
@@ -1179,6 +1173,11 @@ def waiting_on(records, label_id, viewer) -> list:
     return sorted(out, key=lambda x: x["id"])
 
 
+def replaced_by(records, label_id):
+    """The newer label version(s) whose `supersedes` is this one (T4: the registry stores only the backward link)."""
+    return sorted(i for i, r in records.get("label_version", {}).items() if _text(r.get("supersedes")) == label_id)
+
+
 def detail_labels(records, record, viewer, page) -> dict:
     label_id = record["id"]
     package = _text(record.get("pkg"))
@@ -1201,6 +1200,7 @@ def detail_labels(records, record, viewer, page) -> dict:
         field("Review package", shown_package,
               entity_href("images", shown_package) if shown_package in records["review_package"] else None),
         field("Replaces", replaces, entity_href("labels", replaces) if replaces in records["label_version"] else None),
+        *[field("Replaced by", newer, entity_href("labels", newer)) for newer in replaced_by(records, label_id)],
         field("Created", short_date(_when(record))), field("Note", _text(record.get("note"))))
     detail = make_detail("labels", label_id, label_title(records, label_id, viewer), [(note, tone)] + status_tags(record),
                          fields, datasets=[{"id": i, "url": entity_href("dataset", i)} for i in built],
@@ -1794,6 +1794,7 @@ class Lineage:
             field("Checking", note),
             field("Images changed", str(rec["n_images_applied"]) if rec.get("n_images_applied") is not None else None),
             field("Replaces", replaces, self.link("label", replaces)),
+            *[field("Replaced by", newer, self.link("label", newer)) for newer in replaced_by(self.records, _text(rec.get("id")))],
             field("Created", short_date(_when(rec))))
         maker = "Labels: revised" if _text(rec.get("pkg")) or any(
             _dict(i).get("role") == "edits" for i in _list(rec.get("inputs"))) else "Labels: human"

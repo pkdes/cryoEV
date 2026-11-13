@@ -68,8 +68,9 @@ def registry():
 
 
 def actor():
-    """registry/actor.py as `cj_registry_actor` (= portal/audit.actor_module())."""
-    return load("cj_registry_actor", "registry/actor.py")
+    """data_utils/actor.py (the attribution helpers; = portal/audit.actor_module())."""
+    from data_utils import actor as _actor
+    return _actor
 
 
 def services():
