@@ -88,7 +88,7 @@ body.sandbox #list,body.sandbox #side{top:var(--sbh,0px)}
 #triEye.off{background:#fff;color:#000}
 #triAdj{position:absolute;left:56px;top:10px;border-radius:50%;width:38px;height:38px;padding:0;font-size:17px;background:rgba(0,0,0,.55);border:1px solid rgba(255,255,255,.3);color:#fff}
 #triAdj.off{background:#fff;border-color:#fff}
-#triAdjBar{display:flex;justify-content:center;gap:10px;padding:6px 10px 14px}
+#triAdjBar{display:flex;flex-wrap:wrap;justify-content:center;gap:10px;padding:6px 10px 14px}
 #triAdjBar[hidden]{display:none}
 #triAdjBar button{min-height:50px;border-radius:25px;padding:0 18px;font-size:15px;font-weight:600}
 #adjSave{background:#16a34a;border-color:#16a34a;color:#fff}
@@ -186,6 +186,36 @@ button.lowTog.on{background:#f59e0b;border-color:#f59e0b;color:#1c1300;font-weig
 #triActions.pcard #aLow{width:auto;min-width:92px;height:60px;border-radius:30px;padding:0 12px;font-size:15px;font-weight:700;flex-direction:column;line-height:1.1;background:#f59e0b;border-color:#f59e0b;color:#1c1300}
 #aLow small{font-size:11px;font-weight:500}
 #triBio p.lowc{color:#fbbf24;font-weight:700}
+/* R1 Fun mode (settings ⚙, per viewer, default on): .fun = the dating-app parts (names, pop-up, quips, ♥); .nofun = their
+   plain stand-ins. body.plain = Fun mode off. Display only: decisions never depend on it. */
+body.plain .fun,body:not(.plain) .nofun{display:none!important}
+#tri .logo.nofun b{background:none;color:var(--ink);font-size:24px;letter-spacing:0}
+body.plain #triActions #aNope{order:1}body.plain #triActions #aLow{order:2}body.plain #triActions #aYes{order:3}
+body.plain #triActions #aSkip{order:4}body.plain #triActions #aNext{order:5}
+#setPop{position:fixed;z-index:45;right:10px;top:52px;width:min(300px,calc(100vw - 20px));background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:12px;padding:12px;box-shadow:0 8px 30px rgba(0,0,0,.35)}
+#setPop[hidden]{display:none}
+#setPop h2{margin:0 0 8px;font-size:15px;display:flex;justify-content:space-between;align-items:center}
+#setPop label{font-size:15px;min-height:36px}
+#setPop input{width:18px;height:18px}
+#setPop p{margin:6px 0 0;color:var(--mute);font-size:12px}
+#triSet{width:40px;height:40px;font-size:18px}
+body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;font-size:15px}
+/* #18 the side list of cards: a left column on desktop, a drawer (☰) on a phone */
+#triList{display:none;flex-direction:column;position:absolute;left:0;top:0;bottom:0;width:260px;background:var(--panel);border-right:1px solid var(--line);z-index:6;padding-top:env(safe-area-inset-top,0px)}
+#triList .tlh{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:8px 10px;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--mute);border-bottom:1px solid var(--line)}
+#triItems{position:relative;flex:1;min-height:0;overflow:auto;padding:6px;display:flex;flex-direction:column;gap:4px}
+#triItems button{display:flex;flex-direction:column;align-items:flex-start;gap:1px;text-align:left;padding:6px 9px;border-radius:8px;min-height:40px;flex:none}
+#triItems .nm{font-size:12.5px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#triItems .st{font-size:11.5px;color:var(--mute)}
+#triItems .acc .st{color:#16a34a}#triItems .rej .st{color:#dc2626}#triItems .low .st{color:#d97706}
+#triItems .cur{border-color:var(--acc);background:color-mix(in srgb,var(--acc) 16%,var(--panel))}#triItems .cur .st{color:var(--acc);font-weight:600}
+#triListBtn{width:40px;height:40px;font-size:18px}
+#triListX{padding:2px 8px}
+@media (min-width:901px){#tri{padding-left:260px}#triList{display:flex}#triListBtn,#triListX{display:none}}
+@media (max-width:900px){#triList.show{display:flex;width:min(300px,85vw);z-index:30;box-shadow:0 0 24px rgba(0,0,0,.45)}}
+/* #10 vertex eraser (card adjust): selected points, the box being dragged */
+#adjDel{background:#dc2626;border-color:#dc2626;color:#fff}
+#adjDel[hidden],#adjUndo[hidden]{display:none}
 @media (max-width:900px){
   #whereBar{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   #app{grid-template-columns:minmax(0,1fr)}
@@ -274,11 +304,15 @@ button.lowTog.on{background:#f59e0b;border-color:#f59e0b;color:#1c1300;font-weig
 </aside>
 </div>
 <section id="tri" hidden>
+  <nav id="triList" aria-label="Cards"><div class="tlh"><span>Cards: click one to go back</span><button id="triListX" title="Close the list">✕</button></div><div id="triItems"></div></nav>
   <div class="tbar">
+    <button id="triListBtn" class="round" title="All cards: go back to any">☰</button>
     <button id="triExit" title="Open this object in the full editor">Editor</button>
-    <div class="logo" id="logo" title="Tap to switch app"><b id="logoName">eVHarmony</b><small id="logoTag">Find your perfect membrane match</small></div>
+    <div class="logo fun" id="logo" title="Tap to switch app"><b id="logoName">eVHarmony</b><small id="logoTag">Find your perfect membrane match</small></div>
+    <div class="logo nofun" id="logoPlain"><b>Quick check</b></div>
     <button id="triBack" class="round" title="Back to the previous card, its decision stays editable (B or Backspace)" disabled>←</button>
     <button id="triUndo" class="round" title="Rewind (Z)">↺</button>
+    <button id="triSet" class="round" title="Settings">⚙</button>
   </div>
   <div class="tfil">
     <span id="triProg"></span>
@@ -307,18 +341,20 @@ button.lowTog.on{background:#f59e0b;border-color:#f59e0b;color:#1c1300;font-weig
       <div id="triStamp"></div>
       <div id="triBio"></div>
     </div>
-    <div id="triMatch" hidden></div>
+    <div id="triMatch" class="fun" hidden></div>
   </div>
   <div id="triChips"></div>
   <div id="triCls" hidden></div>
   <div id="triAdjBar" hidden>
     <button id="adjCancel" title="Stop editing, keep the original shape (Esc)">Cancel</button>
+    <button id="adjUndo" title="Undo the last point change (Z)" hidden>↺ Undo</button>
+    <button id="adjDel" title="Delete the selected points (Delete). Select: drag a box, or shift-click / tap points" hidden>Delete points</button>
     <button id="adjRedraw" title="Trace a new outline with one stroke (R)">✏️ Redraw outline</button>
     <button id="adjSave" title="Save this shape (Enter)">✓ Save shape</button>
   </div>
   <div id="triActions">
     <button id="aNope" class="round" title="Nope">✕</button>
-    <button id="aSkip" class="round" title="Maybe later">↑</button>
+    <button id="aSkip" class="round" title="Maybe later"><span class="fun">↑</span><span class="nofun">Later</span></button>
     <button id="aYes" class="round" title="Match">♥</button>
     <button id="aLow" class="round" title="Low conf (L)" hidden>◐</button>
     <button id="aNext" title="Next card (N, or swipe)" hidden>Next →</button>
@@ -337,6 +373,11 @@ button.lowTog.on{background:#f59e0b;border-color:#f59e0b;color:#1c1300;font-weig
     <div id="imgNoteN"></div>
     <div class="row"><button id="imgCancel" type="button">Cancel</button><button id="imgSave" type="button" class="on">Save</button></div>
   </div>
+</div>
+<div id="setPop" role="dialog" aria-labelledby="setTitle" hidden>
+  <h2 id="setTitle">Settings <button id="setClose" type="button" title="Close (Esc)">✕</button></h2>
+  <label class="tg"><input type="checkbox" id="funMode"> Fun mode</label>
+  <p>Off: a plain Quick check (no app names, pop-ups or jokes; Reject ✕ · Low conf · Accept ✓). Saved in this browser only. Your decisions are the same either way.</p>
 </div>
 <div id="whoDlg" role="dialog" aria-modal="true" aria-labelledby="whoTitle" hidden>
   <div class="box">
@@ -430,6 +471,13 @@ const WHO_OK = v => /^[\p{L}\p{N}_ .\-]{1,40}$/u.test(v);
 // in this page. The reviewer is then that signed-in user: never asked, not changeable here, not stored (the server
 // stamps every save with it anyway). Without it (the real review, the sandbox, a file), everything is as before.
 const LOCKED_WHO = (r => r && r.locked === true && typeof r.who === "string" && WHO_OK(r.who) ? r.who : "")(window.REVIEW_IDENTITY);
+// R1 Fun mode: per viewer (localStorage, default on, so nothing changes for anyone who never touches it). Off =
+// body.plain: CSS hides every .fun element (the app names, the match pop-up, the bio quips, ♥) and shows its .nofun
+// stand-in. Display only: no decision, key or request depends on it.
+const FUN_KEY = "cryoev-review:fun";
+let funMem = true; try { funMem = localStorage.getItem(FUN_KEY) !== "0"; } catch (e) {}
+const funOn = () => funMem;
+document.body.classList.toggle("plain", !funMem);
 const cv = $("cv"), ctx = cv.getContext("2d"), stage = $("stage");
 // Drafts in localStorage, per package. A SANDBOX_ copy has the real package's id, so the sandbox (the server's
 // REVIEW_SERVER.sandbox flag) gets its own key: on one origin, the real review would otherwise take sandbox drafts
@@ -714,6 +762,16 @@ function segDist(px, py, ax, ay, bx, by) {
   const dx = bx - ax, dy = by - ay, L = dx*dx + dy*dy;
   let t = L ? ((px - ax) * dx + (py - ay) * dy) / L : 0; t = Math.max(0, Math.min(1, t));
   return Math.hypot(px - ax - t*dx, py - ay - t*dy);
+}
+
+// Two-pointer pinch (the Editor's math, shared with the Quick check card, #7). v = {s, ox, oy}: screen = image * s + o.
+// pinchStart keeps where the fingers started; pinchView gives the view that keeps the image point under their
+// first midpoint under their current one, scaled by the change in their distance, s clamped to [lo, hi].
+function pinchStart(a, b, v) { return {d: Math.hypot(a[0]-b[0], a[1]-b[1]), mx: (a[0]+b[0])/2, my: (a[1]+b[1])/2, s: v.s, ox: v.ox, oy: v.oy}; }
+function pinchView(p, a, b, lo, hi) {
+  const d = Math.hypot(a[0]-b[0], a[1]-b[1]), mx = (a[0]+b[0])/2, my = (a[1]+b[1])/2;
+  const s = Math.max(lo, Math.min(hi, p.s * d / p.d));
+  return {s, ox: mx - (p.mx - p.ox) * s / p.s, oy: my - (p.my - p.oy) * s / p.s};
 }
 
 // ---------- rendering ----------
@@ -1212,7 +1270,7 @@ cv.addEventListener("pointerdown", ev => {
   if (ptrs.size === 2) {  // pinch: abandon any one-finger action
     if (drag && drag.type === "free") draft = null;
     if (drag && drag.type === "vertex") endVertexDrag(drag);
-    const [a, b] = [...ptrs.values()]; pinch = {d: Math.hypot(a[0]-b[0], a[1]-b[1]), mx: (a[0]+b[0])/2, my: (a[1]+b[1])/2, s: view.s, ox: view.ox, oy: view.oy}; drag = null; return;
+    const [a, b] = [...ptrs.values()]; pinch = pinchStart(a, b, view); drag = null; return;
   }
   if (ptrs.size > 2) return;
   if (ev.pointerType === "mouse" && ev.button === 2 && mode === "select" && sel && selRings()) {
@@ -1232,9 +1290,7 @@ cv.addEventListener("pointermove", ev => {
   const [x, y] = pos(ev);
   if (ptrs.has(ev.pointerId)) ptrs.set(ev.pointerId, [x, y]);
   if (pinch && ptrs.size === 2) {
-    const [a, b] = [...ptrs.values()], d = Math.hypot(a[0]-b[0], a[1]-b[1]), mx = (a[0]+b[0])/2, my = (a[1]+b[1])/2;
-    const s = Math.max(0.05, Math.min(40, pinch.s * d / pinch.d));
-    view.s = s; view.ox = mx - (pinch.mx - pinch.ox) * s / pinch.s; view.oy = my - (pinch.my - pinch.oy) * s / pinch.s; draw(); return;
+    const [a, b] = [...ptrs.values()]; Object.assign(view, pinchView(pinch, a, b, 0.05, 40)); draw(); return;
   }
   if (mode === "tap") { hover = [x, y]; if (!drag) { draw(); return; } }
   if (!drag) return;
@@ -1303,6 +1359,7 @@ cv.addEventListener("contextmenu", ev => ev.preventDefault());
 document.addEventListener("keydown", ev => {
   if (!$("whoDlg").hidden) { if (ev.key === "Escape") $("whoCancel").click(); return; }  // typing a name: no hotkeys
   if (!$("imgDlg").hidden) { if (ev.key === "Escape") closeImg(); return; }  // the image's reject / note: no hotkeys
+  if (!$("setPop").hidden) { if (ev.key === "Escape") $("setPop").hidden = true; return; }  // settings open: no hotkeys
   if (!$("tri").hidden) return triKey(ev);
   if (ev.target.tagName === "SELECT" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "INPUT" && ev.target.type !== "checkbox" && ev.target.type !== "range") return;
   const k = ev.key;
@@ -1467,10 +1524,13 @@ function applyBrand() {
   const b = brand(); $("logoName").textContent = b.name; $("logoTag").textContent = b.tag;
   const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   $("tri").style.setProperty("--hot", dark ? b.hotD : b.hot); $("tri").style.setProperty("--hot2", dark ? b.hotD2 : b.hot2);
-  if (isPredPkg || D.kind === "compare") { const t = $("toTri"); t.textContent = "Quick check"; const sm = document.createElement("small"); sm.textContent = b.name; t.append(sm); } else $("toTri").textContent = b.name;
-  document.title = $("tri").hidden ? PKG_TITLE : b.name;
+  const t = $("toTri"), el = (tag, cls, txt) => { const x = document.createElement(tag); x.className = cls; x.textContent = txt; return x; };
+  t.textContent = "";  // Fun mode off (.nofun): "Quick check" on every package
+  if (isPredPkg || D.kind === "compare") t.append("Quick check", el("small", "fun", b.name));
+  else t.append(el("span", "fun", b.name), el("span", "nofun", "Quick check"));
+  document.title = $("tri").hidden ? PKG_TITLE : funOn() ? b.name : "Quick check";
 }
-$("logo").onclick = () => { brandI = (brandI + 1) % BRANDS.length; try { localStorage.setItem("cryoev-review:brand", brandI); } catch (e) {} applyBrand(); triRender(); };
+$("logo").onclick = () => { if (!funOn()) return; brandI = (brandI + 1) % BRANDS.length; try { localStorage.setItem("cryoev-review:brand", brandI); } catch (e) {} applyBrand(); triRender(); };
 function resolved(c) {  // decided, unless the decision is September's (seed): a reviewer still has to confirm it
   const im = D.images[c.i], d = edits[im.file] && edits[im.file].dec && edits[im.file].dec[c.key];
   if (rejectOf(im.file)) return true;  // a rejected image: its cards are skipped (back if it is un-rejected)
@@ -1510,7 +1570,14 @@ function buildQueue() {
     im.gt.forEach(g => { if (g.u && g.id != null) own.push({i, kind: "g", id: g.id, key: "g" + g.id}); });
     q.push(...own, ...seededCases(i, new Set(own.map(c => c.key))));
   });
-  tri.queue = q;
+  tri.queue = q; tri.idx = new Map(q.map((c, n) => [caseId(c), n]));
+}
+// Back's history and the undo steps hold case ids, resolved to a queue position only when used (#19)
+const posOf = id => tri.idx && tri.idx.has(id) ? tri.idx.get(id) : -1;
+function histPush(id) {
+  const h = tri.hist = tri.hist || [];
+  if (h[h.length - 1] !== id) h.push(id);
+  if (h.length > 200) h.shift();  // Back remembers the last 200 cards
 }
 // Claims: the server reserves the card on each reviewer's screen for 90 s; other queues skip it.
 // The Editor claims "<file>|editor", so cards from an image someone is editing are skipped too.
@@ -1526,7 +1593,7 @@ async function postClaim(id) {
   } catch (e) {}
 }
 function leaveTaken() {  // the card on screen is another reviewer's, or was decided elsewhere: move on (not off my own pick)
-  if ($("tri").hidden || g0 || tri.adj || !$("whoDlg").hidden) return false;
+  if ($("tri").hidden || g0 || tri.adj || tri.busy || !$("whoDlg").hidden) return false;
   const c = tri.queue[tri.pos];
   if (c && tri.picked !== caseId(c) && (takenByOther(c) || (resolved(c) && tri.back !== caseId(c)))) { advance(true); return true; }
   return false;
@@ -1552,7 +1619,7 @@ async function pullClaims() {
 }
 function nextOpen(from) { for (let n = from; n < tri.queue.length; n++) if (!resolved(tri.queue[n]) && !takenByOther(tri.queue[n])) return n; return -1; }
 function advance(noHist) {
-  const cur = tri.queue[tri.pos]; if (cur && noHist !== true) { (tri.hist = tri.hist || []).push(tri.pos); if (tri.hist.length > 200) tri.hist.shift(); }  // Back remembers the last 200 cards
+  const cur = tri.queue[tri.pos]; if (cur && noHist !== true) histPush(caseId(cur));
   tri.picked = null; tri.back = null;
   if (tri.adj) { tri.adj = null; updAdjBar(); }
   let n = nextOpen(tri.pos + 1); if (n < 0) n = nextOpen(0);
@@ -1605,22 +1672,27 @@ function closeTri() {
   focusObj(c.i, c.key);
 }
 function triRender() {
-  const left = tri.queue.filter(c => !resolved(c)).length, c = tri.queue[tri.pos];
+  const left = tri.queue.filter(c => !resolved(c)).length, c = tri.queue[tri.pos], fun = funOn();
   const others = new Set(Object.values(claims).filter(w => w !== meName())).size;
-  $("triProg").textContent = `${left} of ${tri.queue.length} ${clsMode() ? "labels to check" : "singles left"}` + (others ? ` · ${others} other swiper${others > 1 ? "s" : ""} online` : "");
-  $("triUndo").disabled = !tri.undo.length; $("triBack").disabled = !(tri.hist && tri.hist.length);
+  $("triProg").textContent = `${left} of ${tri.queue.length} ${clsMode() ? "labels to check" : fun ? "singles left" : "cards left"}` + (others ? ` · ${others} other ${fun ? "swiper" : "reviewer"}${others > 1 ? "s" : ""} online` : "");
+  const curId = c ? caseId(c) : null;
+  $("triUndo").disabled = !tri.undo.length; $("triBack").disabled = !(tri.hist || []).some(id => id !== curId && posOf(id) >= 0);
   const bio = $("triBio"), chips = $("triChips"); chips.innerHTML = ""; $("triCls").innerHTML = "";
   ["aNope", "aSkip", "aYes", "aNext"].forEach(id => $(id).disabled = !c);
   $("aNext").hidden = autoNext(); $("aNext").classList.toggle("on", !!c && decided(D.images[c.i], c.key));
   triHeader(c);
   // a prediction-only card (not September's, not picked on yet): Accept / Reject are labelled pills, the primary actions
   const big = !clsMode() && !!c && c.kind === "p" && !seedOf(D.images[c.i].file, c.key) && !pickedHere(c);
-  $("triActions").classList.toggle("pcard", big);
-  $("aYes").innerHTML = big ? `✓ Accept<small>as ${esc(cardPredCls(c))}</small>` : clsMode() ? "✓" : "♥";
-  $("aNope").innerHTML = big ? "✕ Reject" : "✕";
-  const lowNow = renderLowBtn(c, big);
+  // Fun mode off: every card's buttons are the labelled pills, "Reject ✕ · Low conf · Accept ✓" (.nofun)
+  const pill = big || (!fun && !clsMode() && !!c);
+  $("triActions").classList.toggle("pcard", pill);
+  $("aYes").innerHTML = clsMode() ? "✓" : (pill ? '<span class="fun">✓ Accept</span>' : '<span class="fun">♥</span>') + '<span class="nofun">Accept ✓</span>'
+    + (big ? `<small>as ${esc(cardPredCls(c))}</small>` : "");
+  $("aNope").innerHTML = (pill ? '<span class="fun">✕ Reject</span>' : '<span class="fun">✕</span>') + '<span class="nofun">Reject ✕</span>';
+  const lowNow = renderLowBtn(c, big, pill);
+  renderTriList();
   if (!c) {
-    bio.innerHTML = `<h2>${brand().empty}</h2>` + (clsMode() ? "<p>No labels left to check here. Pick “all labels”, or open the Editor.</p>"
+    bio.innerHTML = `<h2><span class="fun">${brand().empty}</span><span class="nofun">No cards left</span></h2>` + (clsMode() ? "<p>No labels left to check here. Pick “all labels”, or open the Editor.</p>"
       : "<p>Lower the confidence filter to meet more vesicles, or open the Editor.</p>");
     tri.imgI = -1; triDraw(); return;
   }
@@ -1652,14 +1724,14 @@ function triRender() {
     });
   } else if (c.kind === "p") {
     const p = im.pr[c.k], conf = p.s.toFixed(2), pc = cardPredCls(c);
-    bio.innerHTML = `<h2>Vesicle?, <span>${conf}</span></h2>${pickedLine(im, c)}<p>${makeBio(im, c, {conf, cls: "EV", sample: esc(sample), diam, frac, nested: nestedCount(im, c, caseRing(c), parseFloat($("triConf").value))})}</p>` +
+    bio.innerHTML = `<h2>Vesicle?, <span>${conf}</span></h2>${pickedLine(im, c)}<p class="fun quip">${makeBio(im, c, {conf, cls: "EV", sample: esc(sample), diam, frac, nested: nestedCount(im, c, caseRing(c), parseFloat($("triConf").value))})}</p>` +
       `<small>⌀ ~${diam} px · ${esc(sample)} · ${esc(im.split)} set${p.c ? ` · model: ${esc(p.c)}` : ""}</small>`;
     $("aYes").title = sept ? "Swipe right: confirm the September decision" : `Accept: add as ${pc} (A, Enter, →, swipe right)`;
     $("aNope").title = "Reject: not a vesicle (X, ←, swipe left)";
     CATS.filter(cl => cl !== pc).forEach(cl => chip(cl, decV(edits[im.file], c.key) === "add:" + cl ? "on" : "", () => tri.adj ? saveAdjust(cl) : pick("add", cl, `added as ${cl}`)));
   } else {
     const g = cardObj(c), act = c.kind === "n" ? "new" : "keep";
-    bio.innerHTML = `<h2>${esc(g.c)}, <span>labeled</span></h2>${pickedLine(im, c)}<p>${makeBio(im, c, {conf: "", cls: esc(g.c), sample: esc(sample), diam, frac, nested: nestedCount(im, c, caseRing(c), 0)})}</p>` +
+    bio.innerHTML = `<h2>${esc(g.c)}, <span>labeled</span></h2>${pickedLine(im, c)}<p class="fun quip">${makeBio(im, c, {conf: "", cls: esc(g.c), sample: esc(sample), diam, frac, nested: nestedCount(im, c, caseRing(c), 0)})}</p>` +
       `<small>⌀ ~${diam} px · ${esc(sample)} · ${esc(im.split)} set</small>`;
     $("aYes").title = sept ? "Swipe right: confirm the September decision" : `Swipe right: keep as ${g.c}`; $("aNope").title = "Swipe left: delete label";
     CATS.filter(cl => cl !== g.c).forEach(cl => chip(`→ ${cl}`, "", () => tri.adj ? saveAdjust(cl) : pick(act, cl, `now ${cl}`)));
@@ -1673,14 +1745,14 @@ function triRender() {
 }
 // The ◐ button on a card (L): an unaccepted candidate -> "Accept as low conf"; a counted object -> the tag on / off.
 // Returns whether the card's object is low conf now. Hidden without the t cap, and on an object that is gone.
-function renderLowBtn(c, big) {
+function renderLowBtn(c, big, pill) {
   const b = $("aLow"), im = c && D.images[c.i], now = c && findKey(gtOf(im), c.key);
   b.hidden = !capOn("t") || !c || (!now && c.kind !== "p");
-  b.classList.remove("on"); b.textContent = "◐";
+  b.classList.remove("on"); b.innerHTML = `<span class="fun">${big ? "◐ Low conf" : "◐"}</span><span class="nofun">Low conf</span>`;
   if (b.hidden) return false;
   if (!now) {
     b.title = "Accept as low conf: counted, reported as low conf (L)";
-    if (big) { b.textContent = "◐ Low conf"; const s = document.createElement("small"); s.textContent = "accept as low conf"; b.append(s); }
+    if (big || pill) { const s = document.createElement("small"); s.textContent = "accept as low conf"; b.append(s); }
     return false;
   }
   const on = isLowObj(im.file, now);
@@ -1688,13 +1760,13 @@ function renderLowBtn(c, big) {
   return on;
 }
 function lowCard() {
-  const c = tri.queue[tri.pos]; if (!c || !capOn("t") || tri.adj) return;
+  const c = tri.queue[tri.pos]; if (!c || !capOn("t") || tri.adj || tri.busy) return;
   const im = D.images[c.i], now = findKey(gtOf(im), c.key);
   if (!now && c.kind !== "p") return;
   if (!now) return react("yes", decideLow, `added as ${cardPredCls(c)}, low conf`);
   if (!needWho(lowCard)) return;
   const e = ensureEdit(im), note = tagOf(im.file, c.key).note;
-  tri.undo.push({i: c.i, snap: snapOf(e), pos: tri.pos});
+  tri.undo.push({i: c.i, snap: snapOf(e), pos: tri.pos, id: caseId(c)});
   if (!isLowObj(im.file, now)) setDec(e, "t:" + c.key, "lowconf", undefined, note);
   else { setDec(e, "t:" + c.key, note ? "plain" : null, undefined, note); if (now.c === "Low conf EV") reclassKey(e, im, c.key, "EV"); }
   // An undecided card (no decision, or only September's): the tag also decides it, as it stands (keep / add / new
@@ -1706,7 +1778,7 @@ function lowCard() {
 function decideLow() {  // after the fly-off: the candidate accepted as its predicted class + the tag, one undo step
   const c = tri.queue[tri.pos]; if (!c || !needWho()) return;
   const im = D.images[c.i], e = ensureEdit(im), prev = e.dec[c.key];
-  tri.undo.push({i: c.i, snap: snapOf(e), pos: tri.pos});
+  tri.undo.push({i: c.i, snap: snapOf(e), pos: tri.pos, id: caseId(c)});
   const poly = (prev && prev.v && prev.v.startsWith("add:") && prev.p) || undefined;  // keeps a reshape
   setDec(e, c.key, "add:" + cardPredCls(c), poly); setDec(e, "t:" + c.key, "lowconf", undefined, tagOf(im.file, c.key).note);
   e.modified = true; touch(im.file); renderList(); advance();
@@ -1714,7 +1786,7 @@ function decideLow() {  // after the fly-off: the candidate accepted as its pred
 function decide(act, cls, poly, stay) {
   const c = tri.queue[tri.pos]; if (!c || !needWho()) return;
   const im = D.images[c.i], e = ensureEdit(im);
-  tri.undo.push({i: c.i, snap: snapOf(e), pos: tri.pos});
+  tri.undo.push({i: c.i, snap: snapOf(e), pos: tri.pos, id: caseId(c)});
   const prev = e.dec[c.key];
   if (c.kind === "p") {
     poly = poly || (act === "add" && prev && prev.v && prev.v.startsWith("add:") && prev.p) || undefined;  // keeps a reshape
@@ -1736,6 +1808,7 @@ function decide(act, cls, poly, stay) {
 // Next / swipe moves on. On: the card flies off, as before. Swipes and the round buttons always move on.
 const autoNext = () => { try { return localStorage.getItem("cryoev-review:autoNext") === "1"; } catch (e) { return false; } };
 function pick(act, cls, sub) {
+  if (tri.busy) return;  // the card on screen is flying off: this tap was meant for it, not the next one (#19)
   if (autoNext()) return react("yes", () => decide(act, cls), sub);
   if (!needWho(() => pick(act, cls, sub))) return;
   decide(act, cls, undefined, true);
@@ -1782,28 +1855,87 @@ function swipeNo() { const c = tri.queue[tri.pos]; if (!c) return; if (clsMode()
 function confirmSept(c) {  // ✓ on a September card: the same decision again, fresh (no seed), credited to this reviewer
   if (!needWho()) return;
   const im = D.images[c.i], e = ensureEdit(im), d = e.dec[c.key], o = im.gt.find(g => g.id === c.id);
-  tri.undo.push({i: c.i, snap: snapOf(e), pos: tri.pos});
+  tri.undo.push({i: c.i, snap: snapOf(e), pos: tri.pos, id: caseId(c)});
   setDec(e, c.key, d.v, d.p ? clone(d.p) : undefined);
   if (d.v === "del" || /^(add|new):/.test(d.v) || d.p || (d.v.startsWith("keep:") && o && d.v.slice(5) !== o.c)) e.modified = true;
   touch(im.file); renderList(); advance();
 }
 function triBack() {  // the previous card, its decision untouched and editable (pick again, Adjust); other decisions stay
-  let p; while (tri.hist && tri.hist.length && ((p = tri.hist.pop()) === tri.pos || !tri.queue[p]));
-  if (p === undefined || p === tri.pos || !tri.queue[p]) return;
+  if (tri.busy) return;
+  const at = tri.queue[tri.pos], curId = at ? caseId(at) : null; let p = -1;
+  while (tri.hist && tri.hist.length) {  // case ids (#19): a card no longer queued is passed over
+    const id = tri.hist.pop(); if (id === curId) continue;
+    p = posOf(id); if (p >= 0) break;
+  }
+  if (p < 0) { triRender(); return; }
+  showCard(p);
+}
+function showCard(p) {  // Back and the side list: card p on screen, its decision kept and editable
   if (tri.adj) { tri.adj = null; updAdjBar(); }
   tri.pos = p; tri.zoom = 0; tri.picked = null; tri.back = caseId(tri.queue[p]); triRender();
 }
+function triJump(n) {  // #18: a click in the side list goes to that card, as Back does; Back then returns here
+  if (tri.busy || !tri.queue[n]) return;
+  $("triList").classList.remove("show");
+  if (n === tri.pos) return;
+  const at = tri.queue[tri.pos]; if (at) histPush(caseId(at));
+  showCard(n);
+}
 function triUndo() {
+  if (tri.busy) return;
   const u = tri.undo.pop(); if (!u) return;
   restoreSnap(D.images[u.i], u.snap); touch(D.images[u.i].file); renderList();
-  tri.pos = u.pos; tri.zoom = 0; triRender();
+  const n = u.id ? posOf(u.id) : -1; tri.pos = n >= 0 ? n : u.pos; tri.zoom = 0; triRender();
+}
+// #18 the side list: every card in queue order, its name and state; built once per queue, states updated per render.
+// Skipped while it is not shown (the phone drawer closed), and rendered when it opens.
+function cardState(c, n) {
+  if (n === tri.pos) return ["cur", "on screen"];
+  const im = D.images[c.i], d = decOf(im.file, c.key);
+  if (rejectOf(im.file)) return ["rej", "image rejected"];
+  if (d && d.v && !d.seed) {
+    if (d.v === "no" || d.v === "del") return ["rej", "rejected"];
+    const cls = d.v.replace(/^(?:keep|add|new):/, "");
+    if (cls === "Low conf EV" || tagOf(im.file, c.key).v === "lowconf") return ["low", "low conf"];
+    return ["acc", clsMode() ? "class: " + cls : "accepted"];
+  }
+  if (takenByOther(c)) return ["", "on another reviewer's screen"];
+  if (d && d.v && d.seed) return ["", "open · Sept"];
+  return resolved(c) ? ["acc", "done"] : ["", "open"];
+}
+function renderTriList() {
+  const box = $("triItems");
+  if ($("tri").hidden || getComputedStyle($("triList")).display === "none") return;
+  if (tri.listQ !== tri.queue) {
+    tri.listQ = tri.queue; tri.listPos = -1; box.textContent = "";
+    const per = new Map(), frag = document.createDocumentFragment();
+    tri.queue.forEach((c, n) => {
+      const k = (per.get(c.i) || 0) + 1, b = document.createElement("button"), nm = document.createElement("span"), st = document.createElement("span");
+      per.set(c.i, k); b.type = "button"; b.dataset.n = n; nm.className = "nm"; st.className = "st";
+      nm.textContent = `${shortName(D.images[c.i].file)} · obj ${k}`; nm.title = D.images[c.i].file;
+      b.append(nm, st); frag.appendChild(b);
+    });
+    box.appendChild(frag);
+  }
+  const els = box.children;
+  for (let n = 0; n < els.length; n++) {
+    const [cls, txt] = cardState(tri.queue[n], n), b = els[n];
+    if (b.className !== cls) b.className = cls;
+    if (b.lastChild.textContent !== txt) b.lastChild.textContent = txt;
+  }
+  const cur = els[tri.pos];
+  if (cur && tri.listPos !== tri.pos) {  // keep the card on screen in view (the list only: #tri never scrolls)
+    tri.listPos = tri.pos;
+    if (cur.offsetTop < box.scrollTop) box.scrollTop = cur.offsetTop - 6;
+    else if (cur.offsetTop + cur.offsetHeight > box.scrollTop + box.clientHeight) box.scrollTop = cur.offsetTop + cur.offsetHeight - box.clientHeight + 6;
+  }
 }
 function triDraw() {
   const box = card.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
   tcv.width = Math.max(1, box.width * dpr); tcv.height = Math.max(1, box.height * dpr);
   tctx.setTransform(dpr, 0, 0, dpr, 0, 0); tctx.fillStyle = "#000"; tctx.fillRect(0, 0, box.width, box.height);
   const c = tri.queue[tri.pos];
-  $("triZoom").textContent = !c ? "" : tri.adj ? (tri.adj.redraw ? "trace around the object in one stroke" : "drag the dots · tap here to zoom") : ["close-up", "wider", "whole image", "closest"][tri.zoom] + " · tap to zoom";
+  $("triZoom").textContent = !c ? "" : tri.adj ? (tri.adj.msg || (tri.adj.redraw ? "trace around the object in one stroke" : "drag the dots · box or shift-click to select · tap here to zoom")) : ["close-up", "wider", "whole image", "closest"][tri.zoom] + " · tap to zoom";
   $("triEye").classList.toggle("off", tri.hideOutline);
   if (!c || !tri.ready) return;
   const im = D.images[c.i], Wi = tri.img.naturalWidth, Hi = tri.img.naturalHeight, r = caseRing(c);
@@ -1814,7 +1946,8 @@ function triDraw() {
   if (z) { s = Math.min(box.width, vh) / Math.max(size * z, z === 3 ? 240 : z < 3 ? 120 : 520); cx = (x0 + x1) / 2 * Wi; cy = (y0 + y1) / 2 * Hi; }
   else { s = Math.min(box.width / Wi, box.height / Hi); cx = Wi / 2; cy = Hi / 2; }
   let ox = box.width / 2 - cx * s, oy = (z ? vh / 2 + 8 : box.height / 2) - cy * s;
-  const wkey = caseId(c) + ":" + tri.zoom; if (tri.wtKey !== wkey) { tri.wt = null; tri.wtKey = wkey; }  // wheel zoom resets with the card / zoom step
+  tri.xfBase = {s, ox, oy};  // before the wheel / pinch zoom: what tri.wt scales
+  const wkey = caseId(c) + ":" + tri.zoom; if (tri.wtKey !== wkey) { tri.wt = null; tri.wtKey = wkey; }  // wheel / pinch zoom resets with the card / zoom step
   if (tri.wt) { s *= tri.wt.k; ox = ox * tri.wt.k + tri.wt.tx; oy = oy * tri.wt.k + tri.wt.ty; }
   tctx.imageSmoothingEnabled = s < 2;
   tctx.drawImage(tri.img, ox, oy, Wi * s, Hi * s);
@@ -1847,37 +1980,66 @@ function drawAdjust() {
   if (a.path.length) { tctx.strokeStyle = "#60a5fa"; tctx.lineWidth = 3; poly(a.path, false); tctx.stroke(); return; }
   tctx.fillStyle = "rgba(96,165,250,.15)"; tctx.strokeStyle = "#60a5fa"; tctx.lineWidth = 2.2; poly(a.ring, true); tctx.fill(); tctx.stroke();
   if (a.redraw) return;
-  for (let k = 0; k < a.ring.length; k += 2) {
-    tctx.beginPath(); tctx.arc(X(a.ring[k]), Y(a.ring[k+1]), k === a.drag ? 8 : 5.5, 0, 7);
-    tctx.fillStyle = k === a.drag ? "#facc15" : "#fff"; tctx.fill(); tctx.strokeStyle = "#1e3a8a"; tctx.lineWidth = 1.5; tctx.stroke();
+  for (let k = 0; k < a.ring.length; k += 2) {  // selected points (#10 eraser): red, larger
+    const on = a.sel.has(k);
+    tctx.beginPath(); tctx.arc(X(a.ring[k]), Y(a.ring[k+1]), k === a.drag ? 8 : on ? 7 : 5.5, 0, 7);
+    tctx.fillStyle = k === a.drag ? "#facc15" : on ? "#ef4444" : "#fff"; tctx.fill(); tctx.strokeStyle = on ? "#fff" : "#1e3a8a"; tctx.lineWidth = on ? 2 : 1.5; tctx.stroke();
+  }
+  if (a.box) {
+    const {x0, y0, x1, y1} = a.box; tctx.setLineDash([5, 4]); tctx.strokeStyle = "#fff"; tctx.lineWidth = 1.5;
+    tctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0)); tctx.setLineDash([]);
   }
 }
 function adjPtr(ev, phase) {
   const a = tri.adj, xf = tri.xf; if (!a || !xf) return;
   const b = tcv.getBoundingClientRect(), x = ev.clientX - b.left, y = ev.clientY - b.top;
   const nx = clamp01((x - xf.ox) / xf.s / xf.Wi), ny = clamp01((y - xf.oy) / xf.s / xf.Hi);
+  // #10 eraser: shift-click a point toggles it; a press on empty space drags a selection box (shift: adds to the
+  // selection); a tap on a point selects just that one. Delete removes the selected points (>= 3 stay); Z undoes.
+  const sx = k => a.ring[k] * xf.Wi * xf.s + xf.ox, sy = k => a.ring[k+1] * xf.Hi * xf.s + xf.oy;
   if (phase === 0) {
+    a.msg = "";
     if (a.redraw) { a.path = [nx, ny]; a.drawing = true; return; }
     let best = -1, bd = 26;
-    for (let k = 0; k < a.ring.length; k += 2) { const d = Math.hypot(a.ring[k] * xf.Wi * xf.s + xf.ox - x, a.ring[k+1] * xf.Hi * xf.s + xf.oy - y); if (d < bd) { bd = d; best = k; } }
-    a.drag = best; triDraw();
+    for (let k = 0; k < a.ring.length; k += 2) { const d = Math.hypot(sx(k) - x, sy(k) - y); if (d < bd) { bd = d; best = k; } }
+    if (best >= 0 && ev.shiftKey) { if (a.sel.has(best)) a.sel.delete(best); else a.sel.add(best); a.drag = -1; updAdjBar(); triDraw(); return; }
+    if (best < 0) { a.box = {x0: x, y0: y, x1: x, y1: y, add: ev.shiftKey}; a.drag = -1; triDraw(); return; }
+    a.drag = best; a.snap = a.ring.slice(); a.moved = false; triDraw();
   } else if (phase === 1) {
     if (a.drawing) {
       const L = a.path.length, lx = a.path[L-2] * xf.Wi * xf.s + xf.ox, ly = a.path[L-1] * xf.Hi * xf.s + xf.oy;
       if (Math.hypot(x - lx, y - ly) >= 3) { a.path.push(nx, ny); triDraw(); }
-    } else if (a.drag >= 0) { a.ring[a.drag] = nx; a.ring[a.drag + 1] = ny; triDraw(); }
+    } else if (a.box) { a.box.x1 = x; a.box.y1 = y; triDraw(); }
+    else if (a.drag >= 0) { a.ring[a.drag] = nx; a.ring[a.drag + 1] = ny; a.moved = true; triDraw(); }
   } else {
     if (a.drawing) {
       a.drawing = false;
-      if (a.path.length >= 16) { a.ring = resample(a.path, 60); a.redraw = false; updAdjBar(); }
+      if (a.path.length >= 16) { a.undo.push(a.ring.slice()); a.ring = resample(a.path, 60); a.redraw = false; a.sel.clear(); }
       a.path = [];
+    } else if (a.box) {
+      const {x0, y0, x1, y1, add} = a.box, l = Math.min(x0, x1), r = Math.max(x0, x1), t = Math.min(y0, y1), btm = Math.max(y0, y1);
+      a.box = null; if (!add) a.sel.clear();
+      if (r - l > 4 || btm - t > 4) for (let k = 0; k < a.ring.length; k += 2) if (sx(k) >= l && sx(k) <= r && sy(k) >= t && sy(k) <= btm) a.sel.add(k);
+    } else if (a.drag >= 0) {
+      if (a.moved) a.undo.push(a.snap); else { a.sel.clear(); a.sel.add(a.drag); }
     }
-    a.drag = -1; triDraw();
+    a.drag = -1; a.snap = null; updAdjBar(); triDraw();
   }
 }
+function eraseSel() {  // #10: delete the selected points; the outline keeps at least 3, so it stays a valid polygon
+  const a = tri.adj; if (!a || a.redraw || !a.sel.size) return;
+  const left = a.ring.length / 2 - a.sel.size;
+  if (left < 3) { a.msg = `An outline needs at least 3 points: deleting ${a.sel.size} would leave ${left}`; triDraw(); return; }
+  a.undo.push(a.ring.slice()); a.ring = a.ring.filter((_, i) => !a.sel.has(i - i % 2)); a.sel.clear(); a.msg = "";
+  updAdjBar(); triDraw();
+}
+function adjUndo() {  // the last point change in this adjust (delete, drag, redraw); Cancel drops them all
+  const a = tri.adj; if (!a || !a.undo.length) return;
+  a.ring = a.undo.pop(); a.sel.clear(); a.msg = ""; updAdjBar(); triDraw();
+}
 function startAdjust() {
-  const c = tri.queue[tri.pos]; if (!c || clsMode()) return;  // class review never edits outlines
-  tri.adj = {ring: resample(caseRing(c), 40), redraw: false, path: [], drag: -1, drawing: false};
+  const c = tri.queue[tri.pos]; if (!c || clsMode() || tri.busy) return;  // class review never edits outlines
+  tri.adj = {ring: resample(caseRing(c), 40), redraw: false, path: [], drag: -1, drawing: false, sel: new Set(), box: null, undo: [], msg: ""};
   if (ZOOMS[tri.zoom] === 0) tri.zoom = 0;
   updAdjBar(); triDraw();
 }
@@ -1894,23 +2056,37 @@ function updAdjBar() {
   $("triActions").hidden = on; $("triAdjBar").hidden = !on; $("triAdj").classList.toggle("off", on);
   $("adjRedraw").classList.toggle("on", on && tri.adj.redraw);
   $("adjRedraw").textContent = on && tri.adj.redraw ? "Trace it now…" : "✏️ Redraw outline";
+  const n = on ? tri.adj.sel.size : 0;
+  $("adjDel").hidden = !n || tri.adj.redraw; $("adjDel").textContent = `Delete ${n} point${n === 1 ? "" : "s"}`;
+  $("adjUndo").hidden = !on || !tri.adj.undo.length;
 }
 $("triAdj").onclick = () => tri.adj ? endAdjust() : startAdjust();
 $("adjCancel").onclick = endAdjust;
 $("adjSave").onclick = () => saveAdjust();
-$("adjRedraw").onclick = () => { if (!tri.adj) return; tri.adj.redraw = !tri.adj.redraw; updAdjBar(); triDraw(); };
+$("adjRedraw").onclick = () => { if (!tri.adj) return; tri.adj.redraw = !tri.adj.redraw; tri.adj.sel.clear(); updAdjBar(); triDraw(); };
+$("adjDel").onclick = eraseSel; $("adjUndo").onclick = adjUndo;
 $("triZoom").onclick = () => { tri.zoom = (tri.zoom + 1) % ZOOMS.length; triDraw(); };
 // ---- swipe animation + feedback ----
 const stamp = $("triStamp");
 function setStamp(kind, c) {
-  const txt = {yes: c && c.kind === "g" ? "KEEP" : "MATCH", nope: c && c.kind === "g" ? "DELETE" : "NOPE", skip: "LATER"}[kind];
+  const g = c && c.kind === "g", fun = funOn();
+  const txt = {yes: g ? "KEEP" : fun ? "MATCH" : "ACCEPT", nope: g ? "DELETE" : fun ? "NOPE" : "REJECT", skip: "LATER"}[kind];
   stamp.textContent = txt; stamp.className = kind;
 }
 function cardReset(animate) { card.style.transition = animate ? "transform .2s" : ""; card.style.transform = ""; stamp.style.opacity = 0; }
+// #19: the decision runs after the 240 ms fly-off. Until then the card is busy: every tap, key, swipe, Back or list
+// click is ignored (a second one used to decide the NEXT card, never shown, and put it in Back's history), and the
+// decision runs only if the card on screen is still the one that flew off.
 function flyOff(dx, dy, then) {
+  const c = tri.queue[tri.pos], id = c ? caseId(c) : null;
+  tri.busy = true;
   card.style.transition = "transform .24s ease-in";
   card.style.transform = `translate(${dx}px, ${dy}px) rotate(${dx / 25}deg)`;
-  setTimeout(() => { cardReset(false); then(); }, 240);
+  setTimeout(() => {
+    cardReset(false); tri.busy = false;
+    const now = tri.queue[tri.pos];
+    if ((now ? caseId(now) : null) === id) then(); else triRender();
+  }, 240);
 }
 let toastT = null;
 function toast(title, sub) {
@@ -1920,7 +2096,7 @@ function toast(title, sub) {
   clearTimeout(toastT); toastT = setTimeout(() => { m.hidden = true; }, 900);
 }
 function react(kind, act, sub) {
-  const c = tri.queue[tri.pos]; if (!c) return;
+  const c = tri.queue[tri.pos]; if (!c || tri.busy) return;
   if (kind !== "skip" && act !== advance && !(kind === "nope" && clsMode()) && !needWho(() => react(kind, act, sub))) return;
   setStamp(kind, c); stamp.style.opacity = 1;
   const w = card.getBoundingClientRect().width;
@@ -1934,12 +2110,31 @@ $("aSkip").onclick = () => react("skip", advance);
 $("aLow").onclick = lowCard;
 // Gestures on the card: swipe right/left/up; tap = next zoom level; press and hold = peek without outlines.
 let g0 = null, pressT = null;
+const tptr = new Map();  // pointers down on the card (card px): two = pinch zoom (#7), with the Editor's pinch math
+const cardXY = ev => { const b = tcv.getBoundingClientRect(); return [ev.clientX - b.left, ev.clientY - b.top]; };
+function cardPinchStart() {  // a second finger: drop the swipe / peek / point drag, zoom about the fingers instead
+  clearTimeout(pressT); g0 = null; cardReset(false);
+  if (tri.held) { tri.held = false; tri.hideOutline = tri.peekPrev; }
+  const a = tri.adj; if (a) { if (a.snap && a.moved) a.ring = a.snap; a.drag = -1; a.snap = null; a.box = null; a.drawing = false; a.path = []; }
+  const [p, q] = [...tptr.values()];
+  tri.pinch = tri.xf && tri.xfBase ? pinchStart(p, q, tri.xf) : null; triDraw();
+}
+function cardPinchMove() {  // tri.wt (the wheel zoom's transform) from the pinched view; k in [0.5, 8] as the wheel
+  const [p, q] = [...tptr.values()], base = tri.xfBase, v = pinchView(tri.pinch, p, q, base.s * 0.5, base.s * 8), k = v.s / base.s;
+  tri.wt = {k, tx: v.ox - base.ox * k, ty: v.oy - base.oy * k}; triDraw();
+}
 tcv.addEventListener("pointerdown", ev => {
+  if (tri.busy) return;  // the card is flying off (#19)
   try { tcv.setPointerCapture(ev.pointerId); } catch (e) {}
+  tptr.set(ev.pointerId, cardXY(ev));
+  if (tptr.size === 2) return cardPinchStart();
+  if (tptr.size > 2 || tri.pinch) return;
   if (tri.adj) return adjPtr(ev, 0); g0 = {x: ev.clientX, y: ev.clientY, drag: false}; tri.held = false;
   pressT = setTimeout(() => { if (g0 && !g0.drag) { tri.held = true; tri.peekPrev = tri.hideOutline; tri.hideOutline = true; triDraw(); } }, 350);
 });
 tcv.addEventListener("pointermove", ev => {
+  if (tptr.has(ev.pointerId)) tptr.set(ev.pointerId, cardXY(ev));
+  if (tri.pinch) { if (tptr.size === 2) cardPinchMove(); return; }
   if (tri.adj) return adjPtr(ev, 1);
   if (!g0) return;
   const dx = ev.clientX - g0.x, dy = ev.clientY - g0.y;
@@ -1951,6 +2146,8 @@ tcv.addEventListener("pointermove", ev => {
   stamp.style.opacity = Math.min(1, Math.max(Math.abs(dx), -dy) / 100);
 });
 tcv.addEventListener("pointerup", ev => {
+  tptr.delete(ev.pointerId);
+  if (tri.pinch) { if (tptr.size < 2) tri.pinch = null; g0 = null; return; }
   if (tri.adj) return adjPtr(ev, 2);
   clearTimeout(pressT); if (!g0) return;
   const dx = ev.clientX - g0.x, dy = ev.clientY - g0.y, wasDrag = g0.drag; g0 = null;
@@ -1962,8 +2159,8 @@ tcv.addEventListener("pointerup", ev => {
   else if (dx < -90) flyOff(-card.getBoundingClientRect().width * 1.5, dy, swipeNo);  // class review: next
   else cardReset(true);
 });
-tcv.addEventListener("pointercancel", () => { clearTimeout(pressT); g0 = null; if (tri.held) { tri.held = false; tri.hideOutline = tri.peekPrev; triDraw(); } cardReset(true); });
-tcv.addEventListener("wheel", ev => {  // desktop: wheel zooms about the cursor (pinch is not handled)
+tcv.addEventListener("pointercancel", ev => { tptr.delete(ev.pointerId); if (tptr.size < 2) tri.pinch = null; clearTimeout(pressT); g0 = null; if (tri.held) { tri.held = false; tri.hideOutline = tri.peekPrev; triDraw(); } cardReset(true); });
+tcv.addEventListener("wheel", ev => {  // desktop: wheel zooms about the cursor (touch: pinch, above)
   if (!tri.xf || !tri.queue[tri.pos]) return;
   ev.preventDefault();
   const b = tcv.getBoundingClientRect(), px = ev.clientX - b.left, py = ev.clientY - b.top, w = tri.wt || {k: 1, tx: 0, ty: 0};
@@ -1975,8 +2172,11 @@ function toggleOutlines() { tri.hideOutline = !tri.hideOutline; triDraw(); }
 $("triEye").onclick = toggleOutlines;
 function triKey(ev) {
   if (ev.target.tagName === "SELECT" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "INPUT" && ev.target.type === "text") return;  // typing: no card keys
+  if (tri.busy) { if (ev.key === "Backspace" || ev.key === " ") ev.preventDefault(); return; }  // the card is flying off (#19)
   if (tri.adj) {
     if (ev.key === "Enter") saveAdjust(); else if (ev.key === "Escape") endAdjust();
+    else if (ev.key === "Delete" || ev.key === "Backspace") { ev.preventDefault(); eraseSel(); }
+    else if (ev.key === "z" || ev.key === "Z") adjUndo();
     else if (ev.key === "r" || ev.key === "R") $("adjRedraw").onclick();
     else if (ev.key === "e" || ev.key === "E") endAdjust();
     return;
@@ -2010,8 +2210,19 @@ $("triOpen").onclick = ev => {  // same tab: open in place (the link itself stay
   closeTri();
 };
 $("triConf").onchange = openTri; $("triSplit").onchange = openTri; $("clsScope").onchange = openTri;
+$("triItems").onclick = ev => { const b = ev.target.closest("button[data-n]"); if (b) triJump(+b.dataset.n); };
+$("triListBtn").onclick = () => { $("triList").classList.toggle("show"); renderTriList(); };
+$("triListX").onclick = () => $("triList").classList.remove("show");
+// Settings (⚙ on the cards; the Editor header keeps its layout): Fun mode, per viewer
+function applyFun() {
+  document.body.classList.toggle("plain", !funOn()); $("funMode").checked = funOn();
+  applyBrand(); if (!$("tri").hidden) triRender();
+}
+$("triSet").onclick = () => { $("funMode").checked = funOn(); $("setPop").hidden = !$("setPop").hidden; };
+$("setClose").onclick = () => { $("setPop").hidden = true; };
+$("funMode").onchange = () => { funMem = $("funMode").checked; try { localStorage.setItem(FUN_KEY, funMem ? "1" : "0"); } catch (e) {} applyFun(); };
 $("triMode").onchange = () => setTriMode($("triMode").value);
-window.addEventListener("resize", () => { if (!$("tri").hidden) triDraw(); });
+window.addEventListener("resize", () => { if (!$("tri").hidden) { triDraw(); renderTriList(); } });
 
 // ---------- reviewer name picker (U5): roster from /api/people, "Other" = free text; required before an edit ----------
 let whoPending = null, peopleP = null, peopleDone = false;
@@ -2182,7 +2393,7 @@ async function pull() {  // bring in other reviewers' decisions (and who is look
   for (const [file, l] of Object.entries(edits))
     if (!(file in remote) && (l.modified || l.reviewed || Object.keys(l.dec || {}).length)) dirty.add(file);
   persist();
-  if (!$("tri").hidden && !g0) { if (!leaveTaken() && triSig() !== tri.sig) triRender(); }  // re-render only on a change
+  if (!$("tri").hidden && !g0 && !tri.busy) { if (!leaveTaken() && triSig() !== tri.sig) triRender(); }  // re-render only on a change
   else if ($("tri").hidden) { renderList(); renderImgBox(); draw(); }
 }
 // /api/ping caps: the decision kinds beyond g/p/n the server accepts (review_server.CAPS). A server started on older
@@ -2229,7 +2440,9 @@ let startMode = null; try { startMode = localStorage.getItem("cryoev-review:mode
 if (deep) startMode = "editor";  // a deep link always opens the Editor on its object
 if (startMode === "tri" || (!startMode && window.matchMedia("(max-width: 700px)").matches)) openTri();
 window.__review = {D, CATS, effGt, gtOf, mergeEdit, pull, materialize, edits: () => edits, caps: () => [...caps], openImg, statusOf, triGo: n => { tri.pos = n; tri.zoom = 0; tri.picked = null; triRender(); }, render: () => { renderList(); renderSide(); draw(); if (!$("tri").hidden) triRender(); }, state: () => ({mode, sel, curCls, redrawKey, cur, order, view: {...view}, W, H, imgReady, server, dirty: dirty.size,
-  who: me(), tri: {mode: tri.mode, pos: tri.pos, queue: tri.queue, ready: tri.ready, picked: tri.picked || null, zoom: tri.zoom, wk: tri.wt ? tri.wt.k : 1, xfs: tri.xf ? tri.xf.s : 0, hist: (tri.hist || []).length}})};  // for annotation/tests
+  who: me(), tri: {mode: tri.mode, pos: tri.pos, queue: tri.queue, ready: tri.ready, picked: tri.picked || null, zoom: tri.zoom, wk: tri.wt ? tri.wt.k : 1, xfs: tri.xf ? tri.xf.s : 0, hist: (tri.hist || []).length,
+  histIds: (tri.hist || []).slice(), busy: !!tri.busy, xf: tri.xf ? {...tri.xf} : null,
+  adj: tri.adj ? {ring: tri.adj.ring.slice(), sel: [...tri.adj.sel].map(k => k / 2).sort((a, b) => a - b), undo: tri.adj.undo.length, msg: tri.adj.msg} : null}, fun: funOn()})};  // for annotation/tests
 })();
 </script>
 </body>
