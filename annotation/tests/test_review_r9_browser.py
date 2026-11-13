@@ -10,6 +10,8 @@ annotation/review_tool/index.html (held branch r9-review):
 - #18 the side list of the Quick check cards: names, states, click = jump (as Back);
 - #7  pinch zoom on the Quick check card (the editor's two-pointer math, shared);
 - #10 the multi-point vertex eraser in the card's adjust mode (box / shift-click, Delete, >= 3 points, undo).
+- #10 the same eraser in the full Editor (Shift-drag box / shift-click / click, Delete or the button, >= 3 points,
+      Z), saved exactly like a right-click vertex delete.
 
 Control: REVIEW_TOOL_INDEX=<an index.html> serves that page instead of the current one (the #19 repro fails with the
 page from main 00dab61: git show 00dab61:annotation/review_tool/index.html).
@@ -430,6 +432,137 @@ class EraserTests(CardBase):
         self.synced(page)
         self.assertFalse(self.saved_dec(card[0])[card[1]].get("v"))
 
+
+
+class EditorEraserTests(CardBase):
+    F = "fixA_new.png"  # label 103 (MV): 20 points, in the upper half of the image (the class chips cover the bottom)
+
+    def pts(self, page, ring):
+        return [self.scr(page, ring[2 * k], ring[2 * k + 1]) for k in range(len(ring) // 2)]
+
+    def vsel(self, page):
+        return sorted(int(k.split(":")[1]) // 2 for k in self.state(page)["vsel"])
+
+    def shift_box(self, page, x0, y0, x1, y1):
+        page.keyboard.down("Shift")
+        page.mouse.move(x0, y0)
+        page.mouse.down()
+        page.mouse.move(x1, y1, steps=6)
+        page.mouse.up()
+        page.keyboard.up("Shift")
+
+    def shift_click(self, page, xy):
+        page.keyboard.down("Shift")
+        page.mouse.click(*xy)
+        page.keyboard.up("Shift")
+
+    def select103(self, page):
+        ring = self.image(self.F)["gt"][2]["p"][0]
+        self.click_obj(page, ring)
+        self.assertEqual(self.state(page)["sel"]["kind"], "gt")
+        return ring
+
+    @staticmethod
+    def bare(d):
+        return {k: v for k, v in d.items() if k not in ("t", "server_t", "pending")}
+
+    def test_box_shift_delete_floor_undo(self):
+        page = self.open("&who=erase3&mode=editor", **DESK)
+        self.go(page, self.F)
+        ring = self.select103(page)
+        n = len(ring) // 2
+        pts = self.pts(page, ring)
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+        x0, y0, x1, y1 = max(xs) + 30, min(ys) - 30, cx + 1, cy  # Shift-drag a box over the upper-right quarter
+        self.shift_box(page, x0, y0, x1, y1)
+        want = sorted(k for k, (x, y) in enumerate(pts) if x1 <= x <= x0 and y0 <= y <= y1)
+        self.assertTrue(0 < len(want) < n - 3, want)
+        self.assertEqual(self.vsel(page), want)
+        self.assertEqual(self.state(page)["sel"]["kind"], "gt")  # the label stays selected
+        self.assertEqual(page.inner_text("#vDel"), f"Delete {len(want)} points")
+        extra = next(k for k in range(n) if k not in want and pts[k][1] < cy)
+        self.shift_click(page, pts[extra])  # shift-click adds one, and toggles it off again
+        self.assertEqual(self.vsel(page), sorted(want + [extra]))
+        self.shift_click(page, pts[extra])
+        self.assertEqual(self.vsel(page), want)
+        self.shift_click(page, pts[extra])
+        sel = sorted(want + [extra])
+        self.assertIsNone(self.saved_dec(self.F).get("g103"))  # selecting points is not an edit
+        page.keyboard.press("Delete")
+        self.synced(page)
+        d = self.saved_dec(self.F)["g103"]
+        keep = [v for k in range(n) if k not in sel for v in ring[2 * k:2 * k + 2]]
+        self.assertEqual((d["v"], d["p"]), ("keep:MV", [keep]))
+        self.assertEqual(self.state(page)["vsel"], [])
+        self.assertTrue(page.locator("#vDel").is_hidden())
+        self.assertIsNotNone(self.obj(page, self.F, oid=103))  # Delete took the points, not the label
+        self.check_js_equals_python(page)
+        page.keyboard.press("z")  # undo restores the outline
+        self.synced(page)
+        self.assertEqual(self.obj(page, self.F, oid=103)["p"], [ring])
+        self.assertIsNone(self.saved_dec(self.F)["g103"]["v"])
+        # every point: refused with a message, nothing changes
+        ring = self.select103(page)
+        self.shift_box(page, min(xs) - 30, min(ys) - 30, max(xs) + 30, max(ys) + 30)
+        self.assertEqual(len(self.vsel(page)), n)
+        page.click("#vDel")
+        self.assertIn("at least 3 points", page.inner_text("#hint"))
+        self.assertEqual(self.obj(page, self.F, oid=103)["p"], [ring])
+        page.keyboard.press("Escape")  # Esc clears the points first, the label stays selected
+        self.assertEqual((self.state(page)["vsel"], self.state(page)["sel"]["kind"]), ([], "gt"))
+        top = sorted(range(n), key=lambda k: pts[k][1])  # upper points first (clear of the class chips)
+        page.mouse.click(*pts[top[0]])  # a click on a point selects just that one
+        self.assertEqual(self.vsel(page), [top[0]])
+        for k in top[1:n - 3]:  # n - 3 selected: 3 points stay
+            self.shift_click(page, pts[k])
+        page.click("#vDel")
+        self.synced(page)
+        stay = sorted(top[n - 3:])
+        self.assertEqual(self.saved_dec(self.F)["g103"]["p"], [[v for k in stay for v in ring[2 * k:2 * k + 2]]])
+        self.check_js_equals_python(page)
+        page.keyboard.press("Delete")  # no points selected: Delete deletes the label, as before
+        self.synced(page)
+        self.assertEqual(self.saved_dec(self.F)["g103"]["v"], "del")
+
+    def test_record_equals_right_click_delete_and_drag_shape(self):
+        f = "fixC_old.png"  # its own image: the class's server is shared with the test above
+        page = self.open("&who=erase4&mode=editor", **DESK)
+        self.go(page, f)
+        ring = self.image(f)["gt"][0]["p"][0]  # 301
+        self.click_obj(page, ring)
+        pts = self.pts(page, ring)
+        top = sorted(range(len(pts)), key=lambda k: pts[k][1])[:3]
+        page.mouse.click(*pts[top[0]])
+        for k in top[1:]:
+            self.shift_click(page, pts[k])
+        page.keyboard.press("Backspace")
+        self.synced(page)
+        erased = self.saved_dec(f)["g301"]
+        page.keyboard.press("z")
+        self.synced(page)
+        self.assertEqual(self.obj(page, f, oid=301)["p"], [ring])
+        self.click_obj(page, ring)
+        for k in sorted(top, reverse=True):  # the same points, one right-click each (highest index first)
+            page.mouse.click(*pts[k], button="right")
+            time.sleep(0.6)
+        self.synced(page)
+        clicked = self.saved_dec(f)["g301"]
+        self.assertEqual(self.bare(erased), self.bare(clicked))
+        self.assertEqual(sorted(erased), sorted(clicked))
+        self.assertEqual(len(erased["p"][0]), len(ring) - 6)
+        # a vertex drag on another label saves a record of the same shape
+        r302 = self.image(f)["gt"][1]["p"][0]
+        self.click_obj(page, r302)
+        top = min(range(len(r302) // 2), key=lambda k: r302[2 * k + 1])
+        x, y = self.scr(page, r302[2 * top], r302[2 * top + 1])
+        page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x, y - 20, steps=5); page.mouse.up()
+        self.synced(page)
+        dragged = self.saved_dec(f)["g302"]
+        self.assertEqual(sorted(dragged), sorted(erased))
+        self.assertEqual(dragged["v"].split(":")[0], erased["v"].split(":")[0])
+        self.assertNotEqual(dragged["p"], [r302])
+        self.check_js_equals_python(page)
 
 if __name__ == "__main__":
     unittest.main()

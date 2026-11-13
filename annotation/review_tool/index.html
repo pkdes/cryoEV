@@ -214,8 +214,9 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 @media (min-width:901px){#tri{padding-left:260px}#triList{display:flex}#triListBtn,#triListX{display:none}}
 @media (max-width:900px){#triList.show{display:flex;width:min(300px,85vw);z-index:30;box-shadow:0 0 24px rgba(0,0,0,.45)}}
 /* #10 vertex eraser (card adjust): selected points, the box being dragged */
-#adjDel{background:#dc2626;border-color:#dc2626;color:#fff}
-#adjDel[hidden],#adjUndo[hidden]{display:none}
+#adjDel,#vDel{background:#dc2626;border-color:#dc2626;color:#fff}
+#adjDel[hidden],#adjUndo[hidden],#vDel[hidden]{display:none}
+#vDel{position:absolute;right:8px;top:8px;z-index:5;font-weight:600}  /* Editor: over the image, so the toolbar never reflows */
 /* a phone's card bar holds ☰ Editor logo ← ↺ ⚙: smaller round buttons, the logo on one line */
 #tri .logo.nofun b{white-space:nowrap}
 @media (max-width:480px){
@@ -281,7 +282,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
   </div>
   <div id="items"></div>
 </nav>
-<main id="stage"><canvas id="cv"></canvas><div id="banner"></div><div id="hint"></div><div id="redrawBan" role="status" hidden></div><div id="edToast" role="status" hidden><span id="edToastMsg">Accepted (edited) —</span><button id="edToastUndo" title="Restore the previous decision (Z)">Undo</button></div><div id="chipBar" title="Class: a tap or 1–8 reclasses the selection and is used for new shapes"></div></main>
+<main id="stage"><canvas id="cv"></canvas><div id="banner"></div><div id="hint"></div><div id="redrawBan" role="status" hidden></div><button id="vDel" title="Delete the selected points (Delete). Select: Shift-drag a box, shift-click or click points" hidden>Delete points</button><div id="edToast" role="status" hidden><span id="edToastMsg">Accepted (edited) —</span><button id="edToastUndo" title="Restore the previous decision (Z)">Undo</button></div><div id="chipBar" title="Class: a tap or 1–8 reclasses the selection and is used for new shapes"></div></main>
 <aside id="side">
   <div id="progress"></div>
   <div id="imgSec" hidden>
@@ -299,6 +300,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
     <li>Click a polygon to select (innermost wins)</li>
     <li>Drag a white handle to move a vertex</li>
     <li>Click the outline to add a point; right-click a point (phone: double-tap) to delete it</li>
+    <li>Several points: click one, shift-click more, or <kbd>Shift</kbd>-drag a box; <kbd>Del</kbd> deletes them (at least 3 stay), <kbd>Esc</kbd> clears</li>
     <li>Selected <span class="hSel">prediction</span>: <kbd>A</kbd> accept (as its predicted class) · <kbd>X</kbd> reject (not an object). Moving, adding or deleting one of its vertices accepts it too (Undo in the message, or <kbd>Z</kbd>)</li>
     <li><kbd>Del</kbd> delete <span class="hDel">label</span></li>
     <li><kbd>D</kbd> freehand: drag around the object · <kbd>V</kbd> vertex: tap points, tap the first point or <kbd>Enter</kbd> to close · <kbd>Esc</kbd> cancel. In both, right/middle-drag or two fingers pan</li>
@@ -630,6 +632,7 @@ function effGt(im) {  // labels as they stand: base list + everyone's decisions 
     return o;
   });
 }
+let vsel = new Set(), vselId = "";  // #10 eraser: the Editor's selected points (vSel)
 let dragLive = null;  // {file, key, p}: the outline under a vertex drag, drawn live until the drag is recorded
 function gtOf(im) {
   const out = effGt(im);
@@ -803,9 +806,13 @@ try { $("showFill").checked = localStorage.getItem("cryoev-review:fill") === "1"
 $("showFill").onchange = () => { try { localStorage.setItem("cryoev-review:fill", $("showFill").checked ? "1" : "0"); } catch (e) {} draw(); };
 let showOrig = false;  // Editor: draw the selected object's original outline dashed under the current one
 const origRing = (im, g) => g.src && g.src[0] === "p" ? (im.pr[+g.src.slice(1)] || {}).p : g.id != null ? (im.gt.find(o => o.id === g.id) || {}).p : null;
-function handles(rings) {  // the white vertex handles of the selection
-  ctx.fillStyle = "#fff"; ctx.strokeStyle = "#000"; ctx.lineWidth = 1;
-  rings.forEach(rg => { for (let i = 0; i < rg.length; i += 2) { const [x, y] = toScr(rg[i], rg[i+1]); ctx.beginPath(); ctx.arc(x, y, 3.5, 0, 7); ctx.fill(); ctx.stroke(); } });
+function handles(rings) {  // the white vertex handles of the selection; selected points (#10 eraser): red, larger
+  const vs = vSel();
+  rings.forEach((rg, r) => { for (let i = 0; i < rg.length; i += 2) {
+    const [x, y] = toScr(rg[i], rg[i+1]), on = vs.has(r + ":" + i);
+    ctx.fillStyle = on ? "#ef4444" : "#fff"; ctx.strokeStyle = on ? "#fff" : "#000"; ctx.lineWidth = on ? 1.5 : 1;
+    ctx.beginPath(); ctx.arc(x, y, on ? 5.5 : 3.5, 0, 7); ctx.fill(); ctx.stroke();
+  } });
 }
 function draw() {
   const r = stage.getBoundingClientRect();
@@ -878,6 +885,9 @@ function draw() {
       for (let i = 0; i < draft.length; i += 2) { const [x, y] = toScr(draft[i], draft[i+1]); ctx.beginPath(); ctx.arc(x, y, i ? 3 : 6, 0, 7); ctx.fill(); }
     }
   }
+  if (drag && drag.type === "box") drawSelBox(ctx, drag);
+  const nv = mode === "select" ? vSel().size : 0;
+  $("vDel").hidden = !nv; $("vDel").textContent = `Delete ${nv} point${nv === 1 ? "" : "s"}`;
 }
 let hover = null;
 
@@ -1288,6 +1298,8 @@ cv.addEventListener("pointerdown", ev => {
   const panBtn = ev.pointerType === "mouse" && (ev.button === 1 || ev.button === 2 || ev.altKey);
   if (mode === "draw" && !panBtn) { const [ix, iy] = toImg(x, y); draft = [clamp01(ix), clamp01(iy)]; drag = {type: "free", lx: x, ly: y}; return; }
   const v = mode === "select" && !panBtn ? nearVertex(x, y) : null;
+  if (v && ev.shiftKey) { vToggle(v); draw(); return; }  // #10: shift-click a point toggles it (no edit)
+  if (!v && !panBtn && mode === "select" && ev.shiftKey && selRings()) { drag = {type: "box", x0: x, y0: y, x1: x, y1: y}; return; }
   if (v) {
     if (!needWho()) return;
     if (sel.kind === "pr") { drag = {type: "vertex", v, moved: false, pr: sel.i, x0: x, y0: y}; return; }  // accepted on the first move
@@ -1314,6 +1326,7 @@ cv.addEventListener("pointermove", ev => {
     if (!rg || drag.v.i >= rg.length) { drag = null; return; }  // the object went away under the drag (a pull)
     rg[drag.v.i] = clamp01(ix); rg[drag.v.i+1] = clamp01(iy); drag.moved = true;
     dragLive = {file: curImg().file, key: sel.key, p: g.p}; draw();
+  } else if (drag.type === "box") { drag.x1 = x; drag.y1 = y; draw();
   } else if (drag.type === "pan") {
     if (Math.hypot(x - drag.x0, y - drag.y0) > 4) drag.moved = true;
     if (drag.moved) { view.ox = drag.ox + x - drag.x0; view.oy = drag.oy + y - drag.y0; draw(); }
@@ -1325,7 +1338,8 @@ function endPtr(ev) {
   if (!drag) return;
   const [x, y] = pos(ev), d = drag; drag = null;
   if (d.type === "free") { if (draft && draft.length >= 6) finishShape(simplify(draft)); else { draft = null; draw(); } return; }
-  if (d.type === "vertex") return endVertexDrag(d);
+  if (d.type === "vertex") { endVertexDrag(d); if (!d.moved) { vOnly(d.v); draw(); } return; }  // #10: a tap selects that point
+  if (d.type === "box") { if (boxMoved(d)) { vBox(d); draw(); return; } draw(); }  // Shift-drag: adds the points inside; a shift-tap stays a tap
   if (d.moved || mode === "draw") return;
   if (mode === "tap") {
     const [ix, iy] = toImg(x, y);
@@ -1354,8 +1368,30 @@ function removeVertex(v) {
 function insertVertex(x, y, ed) {
   const [ix, iy] = toImg(x, y); editRings(g => g.p[ed.r].splice(ed.i, 0, clamp01(ix), clamp01(iy)));
 }
+// #10 eraser in the Editor: the selected points of the selected outline, as "ring:flat index". They belong to that
+// image + selection + outline as it stands; any change to one of them (a drag, an undo, a sync) drops them.
+function vSel() {
+  const rg = sel && selRings(), id = rg ? cur + "|" + JSON.stringify(sel) + "|" + JSON.stringify(rg) : "";
+  if (id !== vselId) { vsel.clear(); vselId = id; }
+  return vsel;
+}
+function vToggle(v) { const s = vSel(), k = v.r + ":" + v.i; if (s.has(k)) s.delete(k); else s.add(k); }
+function vOnly(v) { const s = vSel(); s.clear(); s.add(v.r + ":" + v.i); }
+function vBox(b) {
+  const s = vSel(), rg = selRings(); if (!rg) return;
+  rg.forEach((ring, r) => { for (let i = 0; i < ring.length; i += 2) { const [x, y] = toScr(ring[i], ring[i+1]); if (inBox(b, x, y)) s.add(r + ":" + i); } });
+}
+function flashMsg(t) { const h = $("hint"); h.textContent = t; h.style.display = "block"; clearTimeout(hintT); hintT = setTimeout(hint, 2500); }
+function eraseVerts() {  // delete the selected points; each ring keeps >= 3. Saved like a point's right-click delete
+  const s = vSel(), rg = selRings(); if (!s.size || !rg) return;
+  const by = new Map(); for (const k of s) { const [r, i] = k.split(":").map(Number); if (!by.has(r)) by.set(r, new Set()); by.get(r).add(i); }
+  const out = new Map();
+  for (const [r, ks] of by) { const o = eraseRing(rg[r], ks); if (o.msg) return flashMsg(o.msg); out.set(r, o.ring); }
+  editRings(g => { for (const [r, ring] of out) g.p[r] = ring; });
+  vsel.clear(); draw();
+}
 cv.addEventListener("dblclick", ev => {  // touch has no right-click: double-tap a point removes it
-  if (mode !== "select" || !sel || !selRings()) return;
+  if (mode !== "select" || !sel || !selRings() || ev.shiftKey) return;  // shift: two toggles of a point (#10 eraser)
   const [x, y] = pos(ev); removeVertex(nearVertex(x, y));
 });
 cv.addEventListener("wheel", ev => {
@@ -1372,10 +1408,10 @@ document.addEventListener("keydown", ev => {
   if (!$("tri").hidden) return triKey(ev);
   if (ev.target.tagName === "SELECT" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "INPUT" && ev.target.type !== "checkbox" && ev.target.type !== "range") return;
   const k = ev.key;
-  if (k === "Escape") { draft = null; if (mode !== "select") setMode("select"); else { sel = null; renderSide(); draw(); } }
+  if (k === "Escape") { draft = null; if (mode !== "select") setMode("select"); else if (vSel().size) { vsel.clear(); draw(); } else { sel = null; renderSide(); draw(); } }
   else if (k === "Enter" && mode === "tap") finishDraft();
   else if (k === "Enter" && mode === "draw") flashHint();
-  else if ((k === "Delete" || k === "Backspace") && mode === "select") { ev.preventDefault(); deleteSel(); }
+  else if ((k === "Delete" || k === "Backspace") && mode === "select") { ev.preventDefault(); if (vSel().size) eraseVerts(); else deleteSel(); }
   else if (k === "n" || k === "N" || k === "ArrowRight") step(1);
   else if (k === "p" || k === "P" || k === "ArrowLeft") step(-1);
   else if (k === "d" || k === "D") setMode(mode === "draw" ? "select" : "draw");
@@ -1395,7 +1431,7 @@ document.addEventListener("keydown", ev => {
 $("prev").onclick = () => step(-1); $("next").onclick = () => step(1);
 $("mSel").onclick = () => setMode("select"); $("mDraw").onclick = () => setMode("draw"); $("mTap").onclick = () => setMode("tap");
 $("bClose").onclick = finishDraft;
-$("undo").onclick = undo; $("reviewed").onclick = markReviewed;
+$("undo").onclick = undo; $("reviewed").onclick = markReviewed; $("vDel").onclick = eraseVerts;
 ["showGt", "showPr", "showFlags", "showSept"].forEach(id => $(id).onchange = draw);
 $("conf").oninput = () => { $("confOut").textContent = conf().toFixed(2); if (sel && sel.kind === "pr") sel = null; renderSide(); draw(); };
 ["fSplit", "fSort", "fStat"].forEach(id => $(id).onchange = renderList);
@@ -1984,6 +2020,19 @@ function resample(r, maxN) {  // thin a flat ring to at most maxN vertices, even
   const n = r.length / 2; if (n <= maxN) return r.slice();
   const out = []; for (let k = 0; k < maxN; k++) { const i = Math.floor(k * n / maxN) * 2; out.push(r[i], r[i + 1]); } return out;
 }
+// #10 eraser pieces shared by the card's adjust and the Editor: the dashed selection box (screen px), which points
+// it holds, and the delete that keeps an outline at >= 3 points.
+function drawSelBox(c, b) {
+  c.setLineDash([5, 4]); c.strokeStyle = "#fff"; c.lineWidth = 1.5;
+  c.strokeRect(Math.min(b.x0, b.x1), Math.min(b.y0, b.y1), Math.abs(b.x1 - b.x0), Math.abs(b.y1 - b.y0)); c.setLineDash([]);
+}
+const boxMoved = b => Math.abs(b.x1 - b.x0) > 4 || Math.abs(b.y1 - b.y0) > 4;
+const inBox = (b, x, y) => x >= Math.min(b.x0, b.x1) && x <= Math.max(b.x0, b.x1) && y >= Math.min(b.y0, b.y1) && y <= Math.max(b.y0, b.y1);
+function eraseRing(ring, ks) {  // ks: the flat indices (even) of the points to delete -> {ring} or {msg} (refused)
+  const left = ring.length / 2 - ks.size;
+  if (left < 3) return {msg: `An outline needs at least 3 points: deleting ${ks.size} would leave ${left}`};
+  return {ring: ring.filter((_, i) => !ks.has(i - i % 2))};
+}
 function drawAdjust() {
   const a = tri.adj, {s, ox, oy, Wi, Hi} = tri.xf, X = v => v * Wi * s + ox, Y = v => v * Hi * s + oy;
   const poly = (r, close) => { tctx.beginPath(); for (let k = 0; k < r.length; k += 2) k ? tctx.lineTo(X(r[k]), Y(r[k+1])) : tctx.moveTo(X(r[k]), Y(r[k+1])); if (close) tctx.closePath(); };
@@ -1995,10 +2044,7 @@ function drawAdjust() {
     tctx.beginPath(); tctx.arc(X(a.ring[k]), Y(a.ring[k+1]), k === a.drag ? 8 : on ? 7 : 5.5, 0, 7);
     tctx.fillStyle = k === a.drag ? "#facc15" : on ? "#ef4444" : "#fff"; tctx.fill(); tctx.strokeStyle = on ? "#fff" : "#1e3a8a"; tctx.lineWidth = on ? 2 : 1.5; tctx.stroke();
   }
-  if (a.box) {
-    const {x0, y0, x1, y1} = a.box; tctx.setLineDash([5, 4]); tctx.strokeStyle = "#fff"; tctx.lineWidth = 1.5;
-    tctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0)); tctx.setLineDash([]);
-  }
+  if (a.box) drawSelBox(tctx, a.box);
 }
 function adjPtr(ev, phase) {
   const a = tri.adj, xf = tri.xf; if (!a || !xf) return;
@@ -2027,9 +2073,8 @@ function adjPtr(ev, phase) {
       if (a.path.length >= 16) { a.undo.push(a.ring.slice()); a.ring = resample(a.path, 60); a.redraw = false; a.sel.clear(); }
       a.path = [];
     } else if (a.box) {
-      const {x0, y0, x1, y1, add} = a.box, l = Math.min(x0, x1), r = Math.max(x0, x1), t = Math.min(y0, y1), btm = Math.max(y0, y1);
-      a.box = null; if (!add) a.sel.clear();
-      if (r - l > 4 || btm - t > 4) for (let k = 0; k < a.ring.length; k += 2) if (sx(k) >= l && sx(k) <= r && sy(k) >= t && sy(k) <= btm) a.sel.add(k);
+      const b = a.box; a.box = null; if (!b.add) a.sel.clear();
+      if (boxMoved(b)) for (let k = 0; k < a.ring.length; k += 2) if (inBox(b, sx(k), sy(k))) a.sel.add(k);
     } else if (a.drag >= 0) {
       if (a.moved) a.undo.push(a.snap); else { a.sel.clear(); a.sel.add(a.drag); }
     }
@@ -2038,9 +2083,9 @@ function adjPtr(ev, phase) {
 }
 function eraseSel() {  // #10: delete the selected points; the outline keeps at least 3, so it stays a valid polygon
   const a = tri.adj; if (!a || a.redraw || !a.sel.size) return;
-  const left = a.ring.length / 2 - a.sel.size;
-  if (left < 3) { a.msg = `An outline needs at least 3 points: deleting ${a.sel.size} would leave ${left}`; triDraw(); return; }
-  a.undo.push(a.ring.slice()); a.ring = a.ring.filter((_, i) => !a.sel.has(i - i % 2)); a.sel.clear(); a.msg = "";
+  const out = eraseRing(a.ring, a.sel);
+  if (out.msg) { a.msg = out.msg; triDraw(); return; }
+  a.undo.push(a.ring.slice()); a.ring = out.ring; a.sel.clear(); a.msg = "";
   updAdjBar(); triDraw();
 }
 function adjUndo() {  // the last point change in this adjust (delete, drag, redraw); Cancel drops them all
@@ -2451,7 +2496,7 @@ let startMode = null; try { startMode = localStorage.getItem("cryoev-review:mode
   if (m === "classes" || m === "cls" || m === "cards") startMode = "tri"; else if (m === "editor") startMode = "editor"; }
 if (deep) startMode = "editor";  // a deep link always opens the Editor on its object
 if (startMode === "tri" || (!startMode && window.matchMedia("(max-width: 700px)").matches)) openTri();
-window.__review = {D, CATS, effGt, gtOf, mergeEdit, pull, materialize, edits: () => edits, caps: () => [...caps], openImg, statusOf, triGo: n => { tri.pos = n; tri.zoom = 0; tri.picked = null; triRender(); }, render: () => { renderList(); renderSide(); draw(); if (!$("tri").hidden) triRender(); }, state: () => ({mode, sel, curCls, redrawKey, cur, order, view: {...view}, W, H, imgReady, server, dirty: dirty.size,
+window.__review = {D, CATS, effGt, gtOf, mergeEdit, pull, materialize, edits: () => edits, caps: () => [...caps], openImg, statusOf, triGo: n => { tri.pos = n; tri.zoom = 0; tri.picked = null; triRender(); }, render: () => { renderList(); renderSide(); draw(); if (!$("tri").hidden) triRender(); }, state: () => ({mode, sel, curCls, redrawKey, cur, vsel: [...vSel()], order, view: {...view}, W, H, imgReady, server, dirty: dirty.size,
   who: me(), tri: {mode: tri.mode, pos: tri.pos, queue: tri.queue, ready: tri.ready, picked: tri.picked || null, zoom: tri.zoom, wk: tri.wt ? tri.wt.k : 1, xfs: tri.xf ? tri.xf.s : 0, hist: (tri.hist || []).length,
   histIds: (tri.hist || []).slice(), busy: !!tri.busy, xf: tri.xf ? {...tri.xf} : null,
   adj: tri.adj ? {ring: tri.adj.ring.slice(), sel: [...tri.adj.sel].map(k => k / 2).sort((a, b) => a - b), undo: tri.adj.undo.length, msg: tri.adj.msg} : null}, fun: funOn()})};  // for annotation/tests
