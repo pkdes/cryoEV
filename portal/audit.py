@@ -104,6 +104,46 @@ def audit(state_dir, actor, action, target, detail=None) -> dict:
     return rec
 
 
+def scope_of(request_or_scope) -> dict:
+    """A Starlette Request, an ASGI scope dict, or None -> the scope dict ({} for None)."""
+    if request_or_scope is None:
+        return {}
+    if isinstance(request_or_scope, dict):
+        return request_or_scope
+    return getattr(request_or_scope, "scope", None) or {}
+
+
+def request_via(request_or_scope) -> str | None:
+    """The agent acting for the signed-in person: the bearer token's agent the Gate verified (scope cj_via), only
+    on a bearer request. None for a browser (and for anything without a scope)."""
+    scope = scope_of(request_or_scope)
+    return scope.get("cj_via") if scope.get("cj_auth") == "bearer" else None
+
+
+def event(state_dir, request_or_scope, action, target, detail=None, *, actor=None, log_to=None) -> bool:
+    """The one audit helper for modules (round 11 #3): the actor is the signed-in person (scope cj_user) unless
+    `actor` is given; a bearer request's agent rides along as detail.via (so Admin shows "<agent> for <person>").
+    Never raises: a missing state folder or an unwritable log is logged (to `log_to`, a logging.Logger, else this
+    module's) and returns False; the caller's action is never undone. -> True when the line was written.
+    A route whose handler logs itself through this must be in portal/app.py SELF_LOGGED, or each write is logged
+    twice (the Gate's catch-all writes one too)."""
+    lg = log_to or log
+    try:
+        scope = scope_of(request_or_scope)
+        who = actor if actor is not None else ((scope.get("cj_user") or {}).get("id") or "-")
+        via = request_via(scope)
+        if via:
+            detail = {**(detail if isinstance(detail, dict) else
+                         ({} if detail is None else {"detail": detail})), "via": via}
+        if not state_dir:
+            raise OSError("the portal has no state folder configured")
+        audit(state_dir, who, action, target, detail)
+        return True
+    except OSError as e:
+        lg.error("audit: %s on %s not written (%s: %s)", action, target, type(e).__name__, e)
+        return False
+
+
 def normalise(rec: dict) -> dict:
     """Any line -> {t, actor, action, target, detail} (the old Jobs format included). A top-level "via" (an agent
     acting for the actor) is kept as detail["via"], where the CLI writes it."""
