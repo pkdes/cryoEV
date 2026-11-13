@@ -26,6 +26,12 @@ Routes:
   POST /api/claim?c=<case>&who=<n>   reserve the card (or "<file>|editor") on a reviewer's screen for CLAIM_SECONDS
   GET  /api/claims                   active claims {case: reviewer}, so other reviewers skip them
 
+One writer per package (round 9): the server holds an OS lock on <review root>/.review_locks/<package>.lock
+(data_utils/oslock; next to the package, never inside it, so a rebuild can still rename the folder) for as long as
+it runs, and refuses to start when another process holds it. annotation/multi_review_server.py takes the same lock
+per package, so the two never write one package's edits at once (their write locks are per process: two processes
+on one package would lose saves).
+
 Edits are written to <package>/edits/<file>.json (one file per image, atomic
 replace). The record format (decision keys and values) is in docs/REVIEW_TOOL.md;
 effective_labels() applies one record to its image without the browser, for the
@@ -44,6 +50,7 @@ import os
 import re
 import secrets
 import subprocess
+import sys
 import threading
 import time
 from http.cookies import SimpleCookie
@@ -93,11 +100,76 @@ def sandbox_js(on: bool) -> bytes:
     return b"\nwindow.REVIEW_SERVER = {\"sandbox\": true};\n" if on else b""
 
 
+# ---- one writer per package: an OS lock between processes, one write lock per package within this process ----
+LOCK_DIR = ".review_locks"
+_HELD: dict = {}      # lock file -> [open handle, holders in this process]
+_WRITE: dict = {}     # edits folder -> threading.Lock, shared by every handler this process makes for it
+_REG = threading.Lock()
+
+
+def _norm(p: Path) -> str:
+    s = str(Path(p).resolve())
+    return s.lower() if os.name == "nt" else s  # one package, whatever case it was reached under
+
+
+def lock_path(pkg: Path) -> Path:
+    """<review root>/.review_locks/<package>.lock: beside the package folder, so a rebuild can rename the folder."""
+    pkg = Path(pkg).resolve()
+    return pkg.parent / LOCK_DIR / f"{pkg.name}.lock"
+
+
+def hold_package(pkg: Path) -> bool:
+    """Make this process the package's writer: take its OS lock (data_utils/oslock, dies with the process), or count
+    one more holder when this process has it already. False when another process holds it."""
+    f = lock_path(pkg)
+    k = _norm(f)
+    with _REG:
+        if k in _HELD:
+            _HELD[k][1] += 1
+            return True
+        repo = str(Path(__file__).resolve().parent.parent)
+        if repo not in sys.path:
+            sys.path.insert(0, repo)
+        from data_utils.oslock import acquire_lock
+        try:
+            f.parent.mkdir(exist_ok=True)
+            h = acquire_lock(f)
+        except OSError:
+            h = None
+        if h is None:
+            return False
+        _HELD[k] = [h, 1]
+        return True
+
+
+def release_package(pkg: Path):
+    """One holder fewer; the last one closes the lock file (the OS lock goes with it)."""
+    k = _norm(lock_path(pkg))
+    with _REG:
+        hit = _HELD.get(k)
+        if not hit:
+            return
+        hit[1] -= 1
+        if hit[1] <= 0:
+            del _HELD[k]
+            try:
+                hit[0].close()
+            except OSError:
+                pass
+
+
+def _write_lock(edits_dir: Path) -> threading.Lock:
+    """The package's write lock in this process: shared by every handler made for it (the multi server remakes a
+    handler when data.js changes while a kept-alive connection may still use the old one)."""
+    with _REG:
+        return _WRITE.setdefault(_norm(edits_dir), threading.Lock())
+
+
 def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people: list = (), sandbox: bool = False):
     people = list(people)
     edits_dir = pkg / "edits"
     edits_dir.mkdir(exist_ok=True)
-    lock = threading.Lock()
+    lock = _write_lock(edits_dir)
 
     def active_claims(now):
         for k in [k for k, (_, exp) in claims.items() if exp < now]:
@@ -606,6 +678,10 @@ def main():
     args = ap.parse_args()
 
     pkg = args.package.resolve()
+    if not hold_package(pkg):  # held until this process ends
+        print(f"[ERROR] {pkg.name} is open in another review server (lock: {lock_path(pkg)}). Two servers on one "
+              "package lose saves: stop the other one first.", flush=True)
+        raise SystemExit(2)
     data = json.loads((pkg / "data.js").read_text(encoding="utf-8").split("=", 1)[1].strip().rstrip(";"))
     valid = {im["file"] for im in data["images"]}
     key_file = pkg / ".review_key"

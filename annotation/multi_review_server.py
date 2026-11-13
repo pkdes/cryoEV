@@ -4,11 +4,20 @@ by review_server.make_handler for that package, exactly as a single review_serve
 review_server.py is wrapped, not changed; the real review (review_server.py on :8766) is a separate process.
 
   python -m annotation.multi_review_server [--root <CryoAI-laptop>/review] [--port 8767] [--host 127.0.0.1]
+                                           [--exclude <pkg id or folder> ...]
 
 - Packages: complete folders <root>/<prefix>*/ (data.js + review_package.json), reached under exactly their own
-  name (no case or short-name aliases). Default prefix pred_: prediction packages only, so this server never writes
-  the edits of a package another server has open. A package added after start is found on its first request; a
-  rebuilt data.js or a new .review_key is picked up on the next one.
+  name (no case or short-name aliases). Default prefixes pred_ (prediction packages) and lab_ (lab / compare
+  packages, compare_package.py). A package added after start is found on its first request; a rebuilt data.js or a
+  new .review_key is picked up on the next one.
+- One writer per package (round 9): before anything is made for a package (after its key is checked), this process
+  takes the package's OS lock (review_server.hold_package: <root>/.review_locks/<pkg>.lock) and keeps it while it
+  runs. A package whose lock another process holds (a single review_server.py, another multi server) is refused
+  with 409, on every request, until that process lets go. review_server.py takes the same lock at start.
+- Never served: the packages named by --exclude (repeatable) and $CJ_REVIEW_EXCLUDE (comma-separated), by id or
+  folder path: set it to the package the live single-package server (services.json "review") has open. A server
+  started before the lock existed holds no lock, so the exclude is what keeps this server off its package. An
+  excluded id gets the unknown-id answer (403).
 - Auth: each package keeps its own key (<pkg>/.review_key; no key, not served): ?k=<key> once, then a cookie
   review_key_<port>_<pkg id> (one per package, since every package shares this port), or X-Review-Key. The key is
   checked here before anything is made for the package (handler, cache entry, edits/ folder).
@@ -39,6 +48,7 @@ review_server.py is wrapped, not changed; the real review (review_server.py on :
 import argparse
 import io
 import json
+import os
 import re
 import secrets
 import sys
@@ -54,7 +64,8 @@ if str(REPO) not in sys.path:
 from annotation import review_server as rs  # noqa: E402
 
 PORT = 8767
-PREFIX = "pred_"
+PREFIX = ("pred_", "lab_")        # prediction packages; lab / compare packages (compare_package.py)
+EXCLUDE_ENV = "CJ_REVIEW_EXCLUDE"   # comma-separated package ids or folders this server never serves
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 BAD_PATH = ("..", "\\", ":")
 COMPLETE = "review_package.json"  # prediction_package.build writes it last (and builds in a temp folder anyway)
@@ -68,17 +79,29 @@ def cookie_name(port: int, pkg_id: str) -> str:
     return f"{rs.cookie_name(port)}_{pkg_id}"
 
 
-def package_dir(root: Path, pkg_id: str, prefix: str = PREFIX) -> Path | None:
-    """The resolved <root>/<pkg_id> when pkg_id is a well-formed id with the prefix, the folder is complete
-    (data.js and review_package.json, which the builder writes last) and it is reached under exactly that name: on a
-    case-insensitive disk /PRED_x/ or an 8.3 short name would otherwise be a second package with its own lock."""
-    if not (ID_RE.match(pkg_id or "") and ".." not in pkg_id and pkg_id.startswith(prefix)):
+def _prefixes(prefix) -> tuple:
+    return (prefix,) if isinstance(prefix, str) else tuple(prefix)
+
+
+def package_dir(root: Path, pkg_id: str, prefix=PREFIX) -> Path | None:
+    """The resolved <root>/<pkg_id> when pkg_id is a well-formed id with a prefix (one, or a tuple of them), the
+    folder is complete (data.js and review_package.json, which the builder writes last) and it is reached under
+    exactly that name: on a case-insensitive disk /PRED_x/ or an 8.3 short name would otherwise be a second package
+    with its own lock."""
+    if not (ID_RE.match(pkg_id or "") and ".." not in pkg_id and pkg_id.startswith(_prefixes(prefix))):
         return None
     root = Path(root).resolve()
     p = (root / pkg_id).resolve()
     if p.parent != root or p.name != pkg_id:
         return None
     return p if (p / "data.js").is_file() and (p / COMPLETE).is_file() else None
+
+
+def excluded_names(values=(), environ=None) -> frozenset:
+    """Lower-case folder names never to serve: `values` (--exclude) plus $CJ_REVIEW_EXCLUDE, each an id or a path."""
+    env = os.environ if environ is None else environ
+    items = list(values or ()) + str(env.get(EXCLUDE_ENV, "")).split(",")
+    return frozenset(Path(v.strip().rstrip("\\/")).name.lower() for v in items if v and v.strip())
 
 
 def package_key(pkg: Path) -> str:
@@ -121,24 +144,36 @@ def stamp_identity(edit, who: str):
     return edit
 
 
+LOCKED = object()  # Packages.handler: the key is right, but another process holds the package's lock
+
+
 class Packages:
     """pkg id -> handler class for that package, made on the first request with its key and remade when data.js or
-    .review_key change. Cached by resolved folder; nothing is cached or created for an unknown id or a wrong key."""
+    .review_key change. Cached by resolved folder; nothing is cached or created for an unknown id, an excluded one, a
+    wrong key, or a package whose lock another process holds."""
 
-    def __init__(self, root: Path, prefix: str = PREFIX, people=None):
-        self.root, self.prefix = Path(root), prefix
+    def __init__(self, root: Path, prefix=PREFIX, people=None, exclude=None):
+        self.root, self.prefix = Path(root), _prefixes(prefix)
+        self.exclude = excluded_names() if exclude is None else frozenset(e.lower() for e in exclude)
         self.people = rs.load_people() if people is None else list(people)
-        self._cache, self._lock = {}, threading.Lock()
+        self._cache, self._lock, self._held = {}, threading.Lock(), set()
 
     def handler(self, pkg_id: str, given):
-        """The package's handler class when `given` is its key, else None (unknown id and wrong key alike)."""
+        """The package's handler class when `given` is its key; LOCKED when it is, but another process writes the
+        package; else None (unknown or excluded id and wrong key alike)."""
         pkg = package_dir(self.root, pkg_id, self.prefix)
+        if pkg is not None and pkg.name.lower() in self.exclude:
+            pkg = None
         key = package_key(pkg) if pkg else ""
         # bytes: compare_digest refuses non-ASCII str, and a ?k= can hold anything
         ok = secrets.compare_digest(str(given or "").encode(), (key or "\0no package\0").encode()) and bool(key)
         if not ok:
             return None
         with self._lock:
+            if pkg not in self._held:  # the package's one writer: this process, or nobody here
+                if not rs.hold_package(pkg):
+                    return LOCKED
+                self._held.add(pkg)
             try:
                 sig = ((pkg / "data.js").stat().st_mtime_ns, (pkg / ".review_key").stat().st_mtime_ns)
             except OSError:
@@ -159,7 +194,16 @@ class Packages:
             return cls
 
     def ids(self):
-        return sorted(p.name for p in self.root.glob(f"{self.prefix}*") if package_dir(self.root, p.name, self.prefix))
+        return sorted({p.name for pre in self.prefix for p in self.root.glob(f"{pre}*")
+                       if package_dir(self.root, p.name, self.prefix) and p.name.lower() not in self.exclude})
+
+    def close(self):
+        """Let go of every package lock this instance holds (the server is closing)."""
+        with self._lock:
+            for pkg in self._held:
+                rs.release_package(pkg)
+            self._held.clear()
+            self._cache.clear()
 
 
 class Dispatch(BaseHTTPRequestHandler):
@@ -209,6 +253,13 @@ class Dispatch(BaseHTTPRequestHandler):
             self._plain(400, "bad path")
             return False
         cls = self.packages.handler(pkg_id, self._given_key(url.query, pkg_id))
+        if cls is LOCKED:  # the key was right: say why, so nobody retries into a second writer
+            msg = "This package is open in another review server: only one may save to it at a time."
+            if self.command in ("GET", "HEAD"):
+                self._plain(409, msg)
+            else:
+                self._plain(409, json.dumps({"error": msg}), ctype="application/json")
+            return False
         if cls is None:  # unknown id or wrong key: one answer, as review_server gives it, so ids can't be listed
             if self.command in ("GET", "HEAD"):
                 self._plain(403, "Access key required: open the full link that includes ?k=...")
@@ -289,10 +340,17 @@ class Dispatch(BaseHTTPRequestHandler):
         print(f"{self.address_string()} {msg}", flush=True)
 
 
-def make_server(root: Path, host: str = "127.0.0.1", port: int = PORT, prefix: str = PREFIX, people=None):
-    """A ThreadingHTTPServer for every <root>/<prefix>* package (port 0 = a free one; see server_address)."""
-    handler = type("MultiDispatch", (Dispatch,), {"packages": Packages(root, prefix, people)})
-    return ThreadingHTTPServer((host, port), handler)
+class MultiServer(ThreadingHTTPServer):
+    def server_close(self):
+        super().server_close()
+        self.RequestHandlerClass.packages.close()  # the package locks go with the server
+
+
+def make_server(root: Path, host: str = "127.0.0.1", port: int = PORT, prefix=PREFIX, people=None, exclude=None):
+    """A ThreadingHTTPServer for every <root>/<prefix>* package (port 0 = a free one; see server_address).
+    exclude: folder names never served (default: excluded_names(), i.e. $CJ_REVIEW_EXCLUDE)."""
+    handler = type("MultiDispatch", (Dispatch,), {"packages": Packages(root, prefix, people, exclude)})
+    return MultiServer((host, port), handler)
 
 
 def main(argv=None):
@@ -303,16 +361,28 @@ def main(argv=None):
                          "and a portal identity is trusted only from loopback, so don't expose this port (no "
                          "Tailscale IP, no `tailscale serve`, whose requests also arrive from loopback)")
     ap.add_argument("--port", type=int, default=PORT)
-    ap.add_argument("--prefix", default=PREFIX, help=f"Serve only package folders starting with this (default {PREFIX})")
+    ap.add_argument("--prefix", action="append", default=None,
+                    help=f"Serve only package folders starting with this; repeatable (default {' and '.join(PREFIX)})")
+    ap.add_argument("--exclude", action="append", default=[],
+                    help=f"A package id or folder never to serve; repeatable, added to ${EXCLUDE_ENV} (comma-separated). "
+                         "Set it to the package the live single-package review server has open")
     a = ap.parse_args(argv)
+    from registry import actor
+    gone = actor.strip_env()  # main only: a server restarted from an agent session never credits its saves to the agent
+    if gone:
+        print(f"[OK] Removed {', '.join(gone)} from this server's environment (reviewers' saves are their own)", flush=True)
+    prefix = tuple(a.prefix) if a.prefix else PREFIX
+    exclude = excluded_names(a.exclude)
     if a.root is None:
         from data_utils import config
         a.root = config.laptop_root() / "review"
     root = a.root.resolve()
-    srv = make_server(root, a.host, a.port, a.prefix)
+    srv = make_server(root, a.host, a.port, prefix, exclude=exclude)
     ids = srv.RequestHandlerClass.packages.ids()
-    print(f"[OK] Serving {len(ids)} package(s) {a.prefix}* under {root} on {a.host}:{srv.server_address[1]}; "
+    print(f"[OK] Serving {len(ids)} package(s) {'* / '.join(prefix)}* under {root} on {a.host}:{srv.server_address[1]}; "
           "new packages are found on their first request", flush=True)
+    print(f"[OK] Never served (--exclude / ${EXCLUDE_ENV}): {', '.join(sorted(exclude)) or 'none'}. One writer per "
+          "package: a package another server has open is refused (409)", flush=True)
     for i in ids:
         print(f"[OK]   http://{a.host}:{srv.server_address[1]}/{i}/?k=<key in {root / i / '.review_key'}>", flush=True)
     if a.host in ("0.0.0.0", "::"):
