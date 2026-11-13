@@ -300,10 +300,12 @@ class JobsTests(Base):
         self.assertEqual((c["decided"], c["cards"], c["reviewed"], c["images"], c["who"], c["status"]),
                          (2, 4, 1, 2, "bob", "in_progress"))
         self.assertEqual(by["lab_pkg_applied"]["applied_by"], LV)
-        html = J.render(adm)["finished"]
-        self.assertIn("Review packages", html)
-        self.assertIn("2 of 4 cards decided", html)
-        self.assertIn("1 of 2 images reviewed", html)
+        rendered = J.render(adm)
+        html = rendered["finished"] + rendered["review"]                # in review moved up; applied stays below
+        self.assertIn("Applied review packages", rendered["finished"])
+        self.assertNotIn("lab_pkg_applied", rendered["review"])
+        self.assertIn("2 of 4 cards decided", rendered["review"])
+        self.assertIn("1 of 2 images reviewed", rendered["review"])
         self.assertIn("last edit", html)
         self.assertIn(f"/data/labels/{LV}", html)
         self.assertNotIn("SECRET", html)
