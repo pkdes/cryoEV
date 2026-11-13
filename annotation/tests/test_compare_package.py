@@ -57,12 +57,12 @@ class CompareKnownAnswer(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def build(self, decoys, name, source_title=None):
+    def build(self, decoys, name, source_title=None, reviewer=None):
         a = argparse.Namespace(labels=self.labels, images_root=[self.t / "imgs"], select_csv=None, where=None,
                                split_csv=None, b_model=None, b_preds=self.t / "preds", b_coco=None, b_label="B",
                                imgsz=1440, nms=0.7, max_det=1000, device="cpu", pred_classes="EV,non-EV",
                                class_groups=CP.B.CLASS_GROUPS, flag_conf=0.55, decoys=decoys, seed=0, owner="tester",
-                               reviewer=None, reuse_key=None, index_html=None, width=1440, quality=72, force=False,
+                               reviewer=reviewer, reuse_key=None, index_html=None, width=1440, quality=72, force=False,
                                out=self.t / "review" / name, source_title=source_title)
         out, work = CP.build(a)
         data = json.loads((out / "data.js").read_text(encoding="utf-8").split("=", 1)[1].rstrip().rstrip(";"))
@@ -156,6 +156,18 @@ class CompareKnownAnswer(unittest.TestCase):
             with mock.patch.object(CP, "build") as b, mock.patch.object(sys, "argv", argv + extra):
                 CP.main()
             self.assertEqual(b.call_args[0][0].source_title, want)
+
+    def test_reviewers_are_portal_ids(self):
+        """--reviewer must be a portal id (^[a-z][a-z0-9_-]{0,31}$): checked before any work; good ones are saved."""
+        out, _, _ = self.build(0, "lab_cmp_rev", reviewer=["au1", "x-y_2"])
+        meta = json.loads((out / "review_package.json").read_text(encoding="utf-8"))
+        self.assertEqual(meta["reviewers"], ["au1", "x-y_2"])
+        for bad in ("Au1", "a b", "1abc", "", "a" * 33, "<b>", "a.b", "-a"):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit) as cm:
+                self.build(0, "lab_cmp_bad", reviewer=["au1", bad])
+            self.assertIn("is not a portal id", str(cm.exception))
+        self.assertFalse((self.t / "review" / "_work_lab_cmp_bad").exists())   # stopped before any work
+        self.assertEqual(CP.check_reviewers(None), [])
 
 
 class ImageKey(unittest.TestCase):

@@ -32,6 +32,7 @@ import csv
 import json
 import math
 import random
+import re
 import secrets
 import shutil
 import sys
@@ -48,6 +49,18 @@ import build_review_package as B  # noqa: E402
 TOOL = "annotation/compare_package.py"
 EV_GROUP = "ev_type"
 DECOY_MARGIN = 1.5  # reject decoys keep this many radii away from every A and B object
+REVIEWER_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")  # a portal id: the portal opens the package for these (reviewers)
+
+
+def check_reviewers(reviewers) -> list:
+    """--reviewer values, each a portal id (REVIEWER_RE); anything else stops the build before any work, since the
+    portal would never match it and the person could not open the package."""
+    out = list(reviewers or [])
+    for r in out:
+        if not isinstance(r, str) or not REVIEWER_RE.match(r):
+            raise SystemExit(f"--reviewer {r!r} is not a portal id: a lower-case letter, then up to 31 of a-z 0-9 _ - "
+                             "(the id the person signs in to the portal with, e.g. --reviewer au1)")
+    return out
 
 
 def parse_where(items):
@@ -289,6 +302,7 @@ def add_model_cards(rec, pr_other, name, conf, ref_conf, w, h, groups, dedup_iou
 
 
 def build(args):
+    args.reviewer = check_reviewers(args.reviewer)
     if any((args.out / "edits").glob("*.json")) and not args.force:
         raise SystemExit(f"{args.out} already has review edits: a rebuild would point them at different objects. "
                          "Build into a new folder, or pass --force.")
