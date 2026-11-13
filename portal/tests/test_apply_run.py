@@ -8,7 +8,11 @@ Never the real data or ~/.cryoev.
     full import WOULD append); nothing is written outside the temp roots;
   - every refusal writes nothing: typed name, no / failed preview, unmapped who, not eligible, decisions changed after
     the preview, the frozen copy changed, already applied, another label set on (or replacing) the same base;
-  - fault injection mid-apply: no lv_ folder, no partial; a killed run's leftover partial is cleaned on the next run;
+  - fault injection mid-apply: no lv_ folder, no partial; a killed run's leftover partial blocks while young (it may
+    be a CLI run) and is cleaned on the next run once older than PARTIAL_MIN_AGE_S;
+  - a crash after the rename but before the apply_runs line: refused as "made here but not recorded", Retry records
+    it; a run folder the log names is never removed; a decisions-copy I/O error is a clean failure; a package
+    rebuilt since the preview (data.js sha256) is refused; registry_modules is a cached return in a request;
   - an import failure (and a history failure) -> Retry records it, once; a second Retry has nothing to do;
   - a concurrent press (the OS lock held by another process; the in-process lock) is refused; control: free -> runs;
   - HTTP: non-admin 403, bearer refused, stale form token 403, no Origin 403; the typed-name confirm, the result page
@@ -236,11 +240,98 @@ class Faults(Base):
         with mock.patch.object(AR, "conflicts_csv", boom), \
                 mock.patch.object(AR, "shutil", mock.Mock(rmtree=lambda *a, **k: None)):
             self.assertEqual(self.apply(ts)[0], "failed")
-        self.assertIn(".partial_" + NEW, self.w.lvs())
+        part = self.w.labels / (".partial_" + NEW)
+        self.assertIn(part.name, self.w.lvs())
         self.assertNotIn(NEW, self.w.lvs())
+        # a YOUNG partial may be a CLI apply still writing (the CLI takes no lock): it blocks and is left alone
+        status, d = self.apply(ts)
+        self.assertEqual(status, "refused")
+        self.assertIn(f"another apply seems to be running (partial {part.name}, 0 min old)", d["why"])
+        self.assertTrue(part.is_dir())
+        self.assertFalse((Path(self.cfg.state_dir) / M.APPLY_DIR / NEW).exists())
+        old = part.stat().st_mtime - M.PARTIAL_MIN_AGE_S - 60                # older than the limit: a dead run's
+        os.utime(part, (old, old))
         status, rec = self.apply(ts)
         self.assertEqual(status, "done", rec)
         self.assertEqual(self.w.lvs(), sorted([*lv0, NEW]))                 # partial cleaned, lv made
+
+    def test_crash_after_rename_then_retry(self):
+        """A crash between the rename and the apply_runs line: the next press says so and offers Retry, which
+        records it (import + history + its "apply" line); then the (pkg, sha) rule applies as usual."""
+        ts = self.preview()
+
+        class Crash(BaseException):
+            pass
+        with mock.patch.object(M, "record_steps", side_effect=Crash()), self.assertRaises(Crash):
+            self.apply(ts)
+        self.assertIn(NEW, self.w.lvs())
+        self.assertFalse(M.runs_log(self.cfg).exists())
+        self.assertFalse((self.w.reg / "label_version.jsonl").exists())
+        status, d = self.apply(ts, now=datetime(2026, 11, 13, 11, 0))
+        self.assertEqual((status, d.get("unrecorded")), ("refused", NEW))
+        self.assertIn(f"{NEW} was made here but not recorded", d["why"])
+        page = M.render_confirm("lab_ok", ts, {}, None, "pujan", "tok", d["why"], d["unrecorded"])
+        self.assertIn(f'name="op" value="retry"><input type="hidden" name="lv" value="{NEW}"', page)
+        self.assertEqual(self.w.lvs().count("lv_20261113_1100"), 0)
+        status, rec = M.run_retry(self.cfg, NEW)
+        self.assertEqual((status, rec["op"], rec.get("recovered"), rec["steps"]["import"], rec["steps"]["history"]),
+                         ("done", "apply", True, "ok", "ok"))
+        self.assertEqual([x["id"] for x in jsonl(self.w.reg / "label_version.jsonl")], [NEW])
+        self.assertEqual([(r["op"], r["lv"], r["pkg"]) for r in jsonl(M.runs_log(self.cfg))],
+                         [("apply", NEW, "lab_ok")])
+        status, d = self.apply(ts, now=datetime(2026, 11, 13, 11, 0))
+        self.assertIn("already applied as " + NEW, d["why"])
+        # control: an lv on the same base that this page did NOT make is the plain refusal, with no Retry
+        self.assertEqual(M.run_retry(self.cfg, OTHER)[0], "refused")
+        self.assertFalse(M.made_here(self.cfg, OTHER))
+
+    def test_run_dir_named_by_the_log_is_never_removed(self):
+        ts = self.preview()
+        run_dir = Path(self.cfg.state_dir) / M.APPLY_DIR / NEW
+        (run_dir / "edits").mkdir(parents=True)
+        (run_dir / "keep.txt").write_text("named", encoding="utf-8")
+        M.append_run(self.cfg, {"op": "retry", "pkg": "lab_other", "lv": NEW, "steps": {}})
+        status, d = self.apply(ts)
+        self.assertEqual(status, "refused")
+        self.assertIn("is named by the apply log", d["why"])
+        self.assertEqual((run_dir / "keep.txt").read_text(encoding="utf-8"), "named")
+        self.assertNotIn(NEW, self.w.lvs())
+
+    def test_decisions_copy_io_failure_is_a_clean_failure(self):
+        ts = self.preview()
+        lv0, reg0 = self.w.lvs(), tree(self.w.reg)
+        (Path(self.cfg.state_dir) / M.APPLY_DIR).write_text("a file where the folder goes", encoding="utf-8")
+        status, d = self.apply(ts)
+        self.assertEqual(status, "failed")
+        self.assertIn("the decisions copy could not be made", d["why"])
+        self.assertEqual((self.w.lvs(), tree(self.w.reg)), (lv0, reg0))
+        (Path(self.cfg.state_dir) / M.APPLY_DIR).unlink()
+        self.assertEqual(self.apply(ts)[0], "done")                         # control: the folder can be made
+
+    def test_package_rebuilt_since_preview(self):
+        ts = self.preview()
+        info = json.loads((M.scratch_root(self.cfg) / "lab_ok" / ts / "preview.json").read_text(encoding="utf-8"))
+        data_js = self.w.review / "lab_ok" / "data.js"
+        self.assertEqual(info["data_js_sha256"], hashlib.sha256(data_js.read_bytes()).hexdigest())
+        lv0, reg0 = self.w.lvs(), tree(self.w.reg)
+        old = data_js.read_bytes()
+        data_js.write_bytes(old + b"\n")                                    # rebuilt: same decisions, other data.js
+        status, d = self.apply(ts)
+        self.assertEqual(status, "refused")
+        self.assertIn("the package was rebuilt since the preview", d["why"])
+        self.assert_nothing_written(lv0, reg0)
+        data_js.write_bytes(old)
+        self.assertEqual(self.apply(ts)[0], "done")                         # control: unchanged -> it runs
+
+    def test_registry_modules_cached_and_not_retried_in_a_request(self):
+        mods = M.registry_modules()
+        self.assertIs(M.registry_modules(), mods)                           # a cached return
+        with mock.patch.object(M, "_reg_mods", None), mock.patch.object(M, "_reg_error", "ImportError: x"), \
+                mock.patch.object(M, "_load_path", side_effect=AssertionError("loaded in a request")):
+            with self.assertRaises(RuntimeError):
+                M.registry_modules()
+            steps = M.record_steps(self.cfg, NEW, self.w.labels)
+        self.assertIn("could not be loaded at startup", steps["import"])
 
     def test_cli_entry_refuses_an_existing_partial(self):
         """make_version without the portal's lock: an existing partial (another run, or a killed one) is refused."""

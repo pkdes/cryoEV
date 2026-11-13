@@ -63,6 +63,7 @@ import shutil
 import stat
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -104,7 +105,9 @@ esc = html.escape
 _busy = threading.Lock()   # one preview at a time (taken by the worker itself: a client hang-up can't start a 2nd)
 _applying = threading.Lock()   # one apply / retry per process (and APPLY_LOCK across processes)
 _reg_mods = None
+_reg_error = None              # why routes()' startup load failed (then never retried inside a request)
 _reg_lock = threading.Lock()
+PARTIAL_MIN_AGE_S = 3600       # a younger .partial_lv_* may be a CLI apply still writing: it blocks, never removed
 
 
 # ---------------------------------------------------------------- inputs (read-only)
@@ -402,6 +405,7 @@ def _run_preview(cfg, row, who, now=None) -> tuple:
         for f in edit_files(row["dir"] / "edits"):    # regular files only: no symlinks / junctions
             (edits / f.name).write_bytes(f.read_bytes())
         info["edits_sha256"] = edits_sha256(edits)
+        info["data_js_sha256"] = file_sha256(row["dir"] / "data.js")    # the package as built (re-checked on apply)
         ver = AR.make_version(row["base"], row["dir"], edits, out_root=folder / "labels", who=who,
                               stamp=now.strftime("%Y%m%d_%H%M"), scope="reviewed_only", via=None,
                               log=lambda s: info["log"].append(str(s)))
@@ -448,11 +452,15 @@ def registry_modules():
     """-> namespace(importers, registry, history): registry/importers.py (and the registry.py module it imports) and
     registry/history_page.py. THE ONE place this module reaches the registry code: registry/ is not a package yet, so
     they are loaded by path (as jobs/convert_raw.load_importers does), sys.path restored afterwards. When registry/
-    becomes a package (round 11 refactor #1) this becomes `from registry import importers, store, history_page`."""
+    becomes a package (round 11 refactor #1) this becomes `from registry import importers, store, history_page`.
+    It changes sys.path / sys.modules while loading, so routes() calls it ONCE at startup (still single-threaded); in a
+    request it is a cached return, and a failed startup load is raised again, never retried there."""
     global _reg_mods
     with _reg_lock:
         if _reg_mods is not None:
             return _reg_mods
+        if _reg_error is not None:
+            raise RuntimeError(f"the registry code could not be loaded at startup ({_reg_error})")
         reg_dir = REPO / "registry"
         saved_path, saved_reg = list(sys.path), sys.modules.get("registry")
         try:
@@ -538,17 +546,46 @@ def lvs_on_base(labels: Path, base_lv: str) -> list:
     return hits
 
 
-def clean_partials(labels: Path) -> list:
-    """Remove <labels>/.partial_lv_<stamp>/ folders (a make_version that never finished). Only under APPLY_LOCK."""
+def clean_partials(labels: Path, now=None) -> tuple:
+    """<labels>/.partial_lv_<stamp>/ folders (a make_version that never finished), only under APPLY_LOCK: those older
+    than PARTIAL_MIN_AGE_S (by mtime) are removed; a younger one may be a CLI apply still writing (the CLI takes no
+    lock), so it is left alone and blocks. -> (removed names, the blocking refusal text or None)."""
+    now = time.time() if now is None else now
     gone = []
     try:
-        kids = [d for d in Path(labels).iterdir() if PARTIAL_RE.fullmatch(d.name) and is_plain_dir(d)]
+        kids = sorted(d for d in Path(labels).iterdir() if PARTIAL_RE.fullmatch(d.name) and is_plain_dir(d))
     except OSError:
-        return gone
+        return gone, None
     for d in kids:
+        try:
+            age = now - d.stat().st_mtime
+        except OSError:
+            continue
+        if age < PARTIAL_MIN_AGE_S:
+            return gone, (f"another apply seems to be running (partial {d.name}, {max(0, int(age // 60))} min old); "
+                          f"try again later")
         shutil.rmtree(d, ignore_errors=True)
         gone.append(d.name)
-    return gone
+    return gone, None
+
+
+def file_sha256(path) -> str | None:
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def made_here(cfg, lv) -> bool:
+    """<state>/apply_runs/<lv>/run.json names a label set whose version.json takes its decisions from this run's
+    frozen copy: this page's apply made it (the rename happened), whether or not apply_runs.jsonl got its line."""
+    run_dir = Path(cfg.state_dir) / APPLY_DIR / lv
+    try:
+        run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        ver = json.loads((Path(run["labels"]) / lv / "version.json").read_text(encoding="utf-8"))
+        return Path(ver["edits_dir"]).resolve() == (run_dir / "edits").resolve()
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def apply_refusal(cfg, row, pkg, ts, typed, who, records=None) -> tuple:
@@ -580,6 +617,8 @@ def apply_refusal(cfg, row, pkg, ts, typed, who, records=None) -> tuple:
         return "the preview's frozen decisions copy is missing or changed: preview again", {}
     if not is_plain_dir(row["dir"] / "edits") or edits_sha256(row["dir"] / "edits") != sha:
         return "the decisions changed since this preview: preview again, check the report, then apply", {}
+    if not info.get("data_js_sha256") or file_sha256(row["dir"] / "data.js") != info["data_js_sha256"]:
+        return "the package was rebuilt since the preview (its data.js changed): preview again", {}
     try:
         runs = read_runs(cfg)
     except OSError as e:
@@ -592,6 +631,9 @@ def apply_refusal(cfg, row, pkg, ts, typed, who, records=None) -> tuple:
     if labels.name != "labels":
         return f"the label set is not in a labels folder ({labels})", {}
     hits = lvs_on_base(labels, row["base_lv"])
+    lost = next((h for h in hits if made_here(cfg, h) and not any(r.get("lv") == h for r in runs)), None)
+    if lost:                                             # a crash between the rename and the apply_runs line
+        return f"{lost} was made here but not recorded (the apply stopped before its log line)", {"unrecorded": lost}
     if hits:
         return (f"{', '.join(hits)} already builds on (or replaces) {row['base_lv']}: a second label set from the same "
                 f"base would fork it"), {}
@@ -671,21 +713,38 @@ def _run_apply(cfg, row, pkg, ts, typed, who, records, now):
     row = row() if callable(row) else row
     why, got = apply_refusal(cfg, row, pkg, ts, typed, who, records)
     if why:
-        return "refused", {"why": why}
+        return "refused", {"why": why, **({"unrecorded": got["unrecorded"]} if got.get("unrecorded") else {})}
     labels, sha = got["labels"], got["sha"]
-    clean_partials(labels)
+    _gone, busy = clean_partials(labels)
+    if busy:
+        return "refused", {"why": busy}
     stamp = (now or datetime.now()).strftime("%Y%m%d_%H%M")   # local time, as the CLI's default stamp
     lv = f"lv_{stamp}"
     if (labels / lv).exists():
         return "refused", {"why": f"{lv} already exists (label sets are stamped by the minute): try again in a minute"}
     run_dir = Path(cfg.state_dir) / APPLY_DIR / lv
-    if run_dir.exists():                                 # an earlier attempt that made no label set: not referenced
-        shutil.rmtree(run_dir)
-    edits = run_dir / "edits"
-    edits.mkdir(parents=True)
-    for f in edit_files(got["frozen"]):
-        (edits / f.name).write_bytes(f.read_bytes())
-    if edits_sha256(edits) != sha:
+    try:
+        named = any(r.get("lv") == lv for r in read_runs(cfg))
+    except OSError as e:
+        return "refused", {"why": f"the apply log can't be read ({type(e).__name__})"}
+    if named:                                            # a folder the log names is never removed
+        return "refused", {"why": f"{run_dir} is named by the apply log; nothing was done"}
+    run = {"pkg": pkg, "edits_sha256": sha, "lv": lv, "base_lv": row["base_lv"], "who": who, "preview": ts,
+           "labels": str(labels), "edits": str(run_dir / "edits")}
+    try:
+        if run_dir.exists():                             # an earlier attempt with no label set and no log line
+            shutil.rmtree(run_dir)
+        edits = run_dir / "edits"
+        edits.mkdir(parents=True)
+        for f in edit_files(got["frozen"]):
+            (edits / f.name).write_bytes(f.read_bytes())
+        (run_dir / "run.json").write_text(json.dumps(run, indent=1), encoding="utf-8")
+        same = edits_sha256(edits) == sha
+    except OSError as e:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        return "failed", {"why": f"the decisions copy could not be made in {run_dir} ({type(e).__name__}: {e}); no "
+                                 f"label set was made"}
+    if not same:
         shutil.rmtree(run_dir, ignore_errors=True)
         return "refused", {"why": "the preview's frozen decisions changed while copying: preview again"}
     log = []
@@ -702,9 +761,8 @@ def _run_apply(cfg, row, pkg, ts, typed, who, records, now):
         (run_dir / "apply.log").write_text("\n".join(log) + "\n", encoding="utf-8")
     except OSError:
         pass
-    rec = {"t": datetime.now(timezone.utc).isoformat(timespec="seconds"), "op": "apply", "pkg": pkg,
-           "edits_sha256": sha, "lv": lv, "base_lv": row["base_lv"], "who": who, "preview": ts,
-           "labels": str(labels), "supersedes": ver.get("supersedes"), "edits": str(edits),
+    rec = {"t": datetime.now(timezone.utc).isoformat(timespec="seconds"), "op": "apply", **run,
+           "supersedes": ver.get("supersedes"),
            "steps": {"apply": "ok", **record_steps(cfg, lv, labels, ver.get("supersedes"))}}
     try:
         append_run(cfg, rec)
@@ -720,7 +778,13 @@ def run_retry(cfg, lv) -> tuple:
 
 
 def _run_retry(cfg, lv):
-    last = run_state(cfg, lv) if LV_RE.fullmatch(lv or "") else None
+    ok = bool(LV_RE.fullmatch(lv or ""))
+    try:
+        last = next((r for r in reversed(read_runs(cfg)) if r.get("lv") == lv), None) if ok else None
+    except OSError as e:
+        return "refused", {"why": f"the apply log can't be read ({type(e).__name__})"}
+    if last is None and ok and made_here(cfg, lv):        # made here, its log line lost: recorded now as its apply
+        return _record_unlogged(cfg, lv)
     if last is None:
         return "refused", {"why": "no apply of that label set is recorded here"}
     if recorded(last):
@@ -737,6 +801,27 @@ def _run_retry(cfg, lv):
     except OSError as e:
         rec["log_error"] = f"{type(e).__name__}: {e}"
     return "done", rec
+
+
+def _record_unlogged(cfg, lv):
+    """A label set this page made whose apply_runs line was never written (made_here): import + history, then its
+    "apply" line (so the (pkg, sha) rule sees it from now on)."""
+    run = json.loads((Path(cfg.state_dir) / APPLY_DIR / lv / "run.json").read_text(encoding="utf-8"))
+    labels = Path(run["labels"])
+    try:
+        sup = json.loads((labels / lv / "version.json").read_text(encoding="utf-8")).get("supersedes")
+    except (OSError, ValueError, AttributeError):
+        sup = None
+    rec = {"t": datetime.now(timezone.utc).isoformat(timespec="seconds"), "op": "apply", **run, "supersedes": sup,
+           "recovered": True, "steps": {"apply": "ok", **record_steps(cfg, lv, labels, sup)}}
+    try:
+        append_run(cfg, rec)
+    except OSError as e:
+        rec["log_error"] = f"{type(e).__name__}: {e}"
+    return "done", rec
+
+
+# ---------------------------------------------------------------- pages
 STYLE = ("<style>.cj-apply table{border-collapse:collapse;width:100%;font-size:.9rem}"
          ".cj-apply td,.cj-apply th{padding:4px 6px;border-bottom:1px solid var(--line);text-align:left;"
          "vertical-align:top}.cj-apply code,.cj-apply pre{font-size:.8rem;overflow-wrap:anywhere;white-space:pre-wrap}"
@@ -800,11 +885,18 @@ def change_line(info) -> str:
             f'{esc(str(c.get("n_conflicts") or 0))} conflicts')
 
 
-def render_confirm(pkg, ts, info, row, who, tok, why) -> str:
-    """The Apply section of a preview's page: the typed-name confirm, or why it can't be applied."""
+def retry_form(lv, tok) -> str:
+    return (f'<form method="post" action="{PREFIX}/run">{AD.hidden_token(tok)}'
+            f'<input type="hidden" name="op" value="retry"><input type="hidden" name="lv" value="{esc(lv)}">'
+            f'<button type="submit">Retry register</button></form>')
+
+
+def render_confirm(pkg, ts, info, row, who, tok, why, unrecorded=None) -> str:
+    """The Apply section of a preview's page: the typed-name confirm, or why it can't be applied (with Retry when a
+    label set this page made was never recorded)."""
     if why:
         return (f'<section class="cj-card" id="apply"><h2>Apply</h2><p class="cj-mut">Not available: {esc(why)}.</p>'
-                f'</section>')
+                + (retry_form(unrecorded, tok) if unrecorded else "") + '</section>')
     report = f'{PREFIX}/view/{quote(pkg)}/{quote(ts)}/report/index.html'
     base = esc(str(row["base_lv"]))
     return (f'<section class="cj-card" id="apply"><h2>Apply</h2>'
@@ -838,9 +930,7 @@ def render_done(lv, rec, tok, run_log="") -> str:
         out.append(f'<section class="cj-card" role="alert"><p><b><code>{esc(lv)}</code> {what}</b></p>'
                    f'<p class="cj-mut">Registry import: {esc(str(steps.get("import")))}<br>History page: '
                    f'{esc(str(steps.get("history")))}</p>'
-                   f'<form method="post" action="{PREFIX}/run">{AD.hidden_token(tok)}'
-                   f'<input type="hidden" name="op" value="retry"><input type="hidden" name="lv" value="{esc(lv)}">'
-                   f'<button type="submit">Retry register</button></form></section>')
+                   f'{retry_form(lv, tok)}</section>')
     if rec.get("log_error"):
         out.append(f'<p class="cj-card" role="alert">The apply log could not be written ({esc(rec["log_error"])}), so '
                    f'Retry is not available here: run <code>cryoev register</code>.</p>')
@@ -900,7 +990,12 @@ def render_run(pkg, ts, info, row, who, changed=False, confirm="") -> str:
 
 # ---------------------------------------------------------------- routes
 def routes(ctx) -> list:
+    global _reg_error
     secret = secrets.token_bytes(32)                     # per process, like admin's: a restart makes open forms stale
+    try:                                                 # at startup, single-threaded: requests get the cached modules
+        registry_modules()
+    except Exception as e:                               # the portal still starts; an apply shows why its import failed
+        _reg_error = f"{type(e).__name__}: {e}"[:300]
 
     def token(request: Request) -> str:
         return hmac.new(secret, hashlib.sha256(AD.binding(request).encode()).digest(), hashlib.sha256).hexdigest()[:40]
@@ -1006,10 +1101,10 @@ def routes(ctx) -> list:
         confirm = ""
         if not info.get("error"):
             try:
-                why, _ = apply_refusal(ctx.cfg, any_row, pkg, ts, pkg, who, recs)   # the typed name is checked on press
+                why, got = apply_refusal(ctx.cfg, any_row, pkg, ts, pkg, who, recs)  # the typed name: on press
             except Exception as e:                                                # never takes the page down
-                why = f"it can't be checked ({type(e).__name__})"
-            confirm = render_confirm(pkg, ts, info, any_row, who, token(request), why)
+                why, got = f"it can't be checked ({type(e).__name__})", {}
+            confirm = render_confirm(pkg, ts, info, any_row, who, token(request), why, got.get("unrecorded"))
         return show(request, f"Preview {pkg}", render_run(pkg, ts, info, row, who, changed, confirm))
 
     async def read_form(request, title):
@@ -1034,7 +1129,8 @@ def routes(ctx) -> list:
     async def run(request: Request):
         """POST /apply/run: op=apply (pkg, ts, name: the typed package name) or op=retry (lv). Admin, form token, the
         Gate's Origin check; never bearer. Success -> 303 to /apply/done/<lv> and one audit line (PA.event: the route
-        is in app.py SELF_LOGGED); a refusal -> its page (4xx), which the Gate's catch-all logs."""
+        must be in app.py AUDIT_LABELS and SELF_LOGGED: the PM adds both at merge); a refusal -> its page (4xx),
+        which the Gate's catch-all logs."""
         if (deny := admin_only(request)) is not None:
             return deny
         f, err = await read_form(request, "Apply")
@@ -1069,8 +1165,9 @@ def routes(ctx) -> list:
             return show(request, "Apply", '<p class="cj-card" role="alert">Another apply is running. Nothing was done; '
                         f'try again in a minute.</p><p><a href="{esc(back)}">Back</a></p>', 409)
         if status != "done":
+            retry = retry_form(d["unrecorded"], token(request)) if d.get("unrecorded") else ""
             return show(request, "Apply", f'<section class="cj-card" role="alert"><h2>Refused</h2><p>{esc(d["why"])}'
-                        f'.</p><p class="cj-mut">Nothing was written.</p></section>'
+                        f'.</p><p class="cj-mut">Nothing was written.</p>{retry}</section>'
                         f'<p><a href="{esc(back)}">Back</a></p>', 500 if status == "failed" else 409)
         steps = d["steps"]
         PA.event(ctx.cfg.state_dir, request, "apply" if op == "apply" else "apply retry", d.get("pkg"),
