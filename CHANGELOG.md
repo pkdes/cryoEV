@@ -7,7 +7,7 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
-## 2026-11-12 20:00 · Review page 2026-11-12.2 (ready; not yet in any package)
+## 2026-11-12 19:43 · Review page 2026-11-12.2 (blind-audit package)
 
 - Editor: the same point eraser as Quick check. Select points (click; shift-click to add; Shift-drag a box), then "Delete N points" or the Delete key. Outlines keep at least 3 points; Esc clears the selection, Z undoes.
 - The review page shows its own version in its header.
