@@ -138,7 +138,7 @@ def write_registry(root: Path, recs):
 
 def section(page: str, key: str) -> str:
     """The HTML inside <section id="cj-jobs-s-<key>">."""
-    m = re.search(r'<section class="cj-jobs-sec" id="cj-jobs-s-%s"[^>]*>(.*?)</section>' % key, page, re.S)
+    m = re.search(r'<section class="cj-jobs-sec[^"]*" id="cj-jobs-s-%s"[^>]*>(.*?)</section>' % key, page, re.S)
     assert m, key
     return m.group(1)
 
@@ -240,46 +240,44 @@ class Roles(Base):
 
 class Sections(Base):
     def test_running_now(self):
-        frag = section(self.page(), "running")
-        self.assertEqual(badge(frag), 2)
+        page = self.page()
+        frag = section(page, "training")
         self.assertIn("Train v6 on lv_20261103", frag)                  # registry name for the desktop job
         self.assertIn("job_20261104_train_live", frag)
-        self.assertIn("Epoch 12 / 300", frag)
+        self.assertIn("12 of 300 done", frag)
         self.assertIn('<progress class="cj-jobs-bar" max="300" value="12"', frag)
         self.assertIn("2 h 3 min", frag)                                # time left: 7380 s
-        self.assertIn("working normally · last update 40 s ago", frag)
-        self.assertIn("<dd>40 s ago</dd>", frag)
-        self.assertIn("0.250", frag)                                    # latest val mAP50-95
         self.assertIn("job_20261103_train_stuck", frag)
         self.assertIn("may be stuck", frag)
         self.assertIn("No progress for 2 h (normally a new epoch every 1 min).", frag)
-        self.assertIn("watcher alive", frag)                            # admin: the technical line
-        self.assertIn("gpu-desktop", frag)
-        self.assertIn("lab-login", frag)
-        self.assertNotIn("as of", self.page())
+        hw = section(page, "hardware")                                  # the strip: machine, state, current job
+        self.assertIn("gpu-desktop", hw)
+        self.assertIn("lab-login", hw)
+        self.assertIn("working normally", hw)
+        self.assertIn("Now: Train v6 on lv_20261103", hw)
+        self.assertIn('href="/train/"', hw)
+        self.assertNotIn("as of", page)
 
     def test_queue_in_ready_order(self):
-        frag = section(self.page(), "queue")
+        frag = section(self.page(), "training")
         order = ["job_20261105_train_next", "job_20261105_predict_mine", "job_20261105_predict_theirs",
                  "job_20261105_train_after", "job_20261105_train_hold"]
         pos = [frag.find(j) for j in order]
         self.assertTrue(all(p >= 0 for p in pos), pos)
         self.assertEqual(pos, sorted(pos))                              # oldest READY first, then held
-        self.assertEqual(re.findall(r'<span class="cj-jobs-pos">(\d)</span>', frag), ["1", "2", "3", "4"])
         self.assertIn("Cancel requested.", frag)
         self.assertIn("On hold on gpu-desktop: starts when someone releases it.", frag)
-        self.assertNotIn("job_20261104_train_live", frag)               # running is not "waiting"
         self.assertNotIn("job_20261101_train_old", frag)                # done is not "waiting"
-        self.assertEqual(badge(frag), 5)
+        self.assertIn("Train v7 (not pushed)", frag)                    # registry train job, never sent
+        self.assertIn("Not sent to the GPU computer yet.", frag)
+        self.assertEqual(badge(frag), 8)
 
     def test_queue_without_ready_at_has_bullets(self):
         q = queues_fixture()
         for j in q[0]["jobs"]:
             j.pop("ready_at", None)
         self.swap_live(T.live_doc(queues=q))
-        frag = section(self.page(), "queue")
-        self.assertEqual(re.findall(r'<span class="cj-jobs-pos">(\d)</span>', frag), [])
-        self.assertEqual(frag.count("cj-jobs-t-off\" aria-hidden=\"true\">•</span>"), 5)
+        frag = section(self.page(), "training")
         order = ["job_20261105_predict_mine", "job_20261105_predict_theirs", "job_20261105_train_after",
                  "job_20261105_train_next", "job_20261105_train_hold"]
         pos = [frag.find(j) for j in order]
@@ -301,19 +299,16 @@ class Sections(Base):
 
     def test_other_open_jobs(self):
         frag = section(self.page(), "review")
-        self.assertIn("Other open jobs", frag)
-        names = ["Pre-lipo review (v2)", "Old blocked labeling", "Annotate blind tiles", html.escape(XSS),
-                 "Train v7 (not pushed)"]
+        names = ["Pre-lipo review (v2)", "Old blocked labeling", "Annotate blind tiles", html.escape(XSS)]
         pos = [frag.find(n) for n in names]
         self.assertTrue(all(p >= 0 for p in pos), pos)
         self.assertEqual(pos, sorted(pos))                              # in progress, blocked, ready
-        self.assertIn("3 / 170 images reviewed", frag)
+        self.assertIn("3 of 170 done", frag)
         self.assertIn("Being reviewed in the review app.", frag)
-        self.assertIn("Not sent to the GPU computer yet.", frag)
         for on_queue in ("job_20261104_train_live", "Predict my tiles", "job_20261105_predict_theirs"):
             self.assertNotIn(on_queue, frag)                            # on a queue: shown from live.json
         self.assertNotIn("Check v5", frag)                              # done: under Recently finished
-        self.assertEqual(badge(frag), 5)
+        self.assertEqual(badge(frag), 4)
 
     def test_recently_finished(self):
         frag = section(self.page(), "finished")
@@ -353,18 +348,21 @@ class Sections(Base):
         self.assertEqual(s["queues"][0]["share"], "\\\\gpu-desktop\\cj")   # admin gets the share
         self.assertFalse(s["snapshot"]["stale"])
         self.assertIsNone(s["asof"])
-        for key in ("running", "queue", "attention", "review", "finished"):
+        for key, rows in (("attention", s["attention"]), ("finished", s["finished"])):
             frag = section(page, key)
-            self.assertEqual(badge(frag), len(s[key]), key)
-            for x in s[key]:
+            self.assertEqual(badge(frag), len(rows), key)
+            for x in rows:
                 self.assertIn(html.escape(x["name"]), frag, (key, x["name"]))
+        tr = section(page, "training")
+        for x in s["running"] + s["queue"]:
+            self.assertIn(html.escape(x["name"]), tr, x["name"])
         with_html = self.api(q="?html=1")
         self.assertEqual(set(with_html["html"]), set(J.SECTIONS))
 
         def norm(t):                                                    # "2 h ago" may tick between two requests
             return re.sub(r"(\d+ (d|h|min|s) )+ago", "ago", t)
-        for key in ("running", "queue", "attention", "review", "finished"):
-            self.assertEqual(norm(with_html["html"][key]), norm(section(page, key)))   # the refresh: same HTML
+        for key in J.SECTIONS[1:]:
+            self.assertEqual(norm(with_html["html"][key]), norm(section(page, key)), key)   # the refresh: same HTML
 
     def test_values_escaped(self):
         page = self.page()
@@ -380,7 +378,7 @@ class Privacy(Base):
         for text in ("job_20261105_predict_theirs", "Predict client-x tiles", "otherperson"):
             self.assertNotIn(text, adv_page)
             self.assertNotIn(text, adv_api)
-        self.assertIn(HIDDEN, section(adv_page, "queue"))
+        self.assertIn(HIDDEN, section(adv_page, "training"))
         q = self.api("advanced")["queue"]
         self.assertEqual([x["position"] for x in q if x["state"] == "queued"], [1, 2, 3, 4])   # place still counted
         admin_page = self.page("admin")                                 # control: admin sees it
@@ -435,7 +433,7 @@ class Privacy(Base):
         self.assertEqual(s["queues"][2]["name"], "GPU computer 3")      # the offline queue: no share path
         self.assertIn("Can&#x27;t reach GPU computer 3", page)
         admin = main_html(self.page("admin"))                           # control: admin gets the tech lines
-        for w in ("watcher", "registry", "jobs/sync", "live.json", "\\\\home-laptop\\cj", "train.log"):
+        for w in ("watcher", "registry", "live.json", "\\\\home-laptop\\cj", "train.log"):
             self.assertIn(w, admin, w)
 
 
@@ -445,9 +443,8 @@ class Snapshots(Base):
         page = self.page()
         self.assertIn("Status updates have stopped.", page)
         self.assertIn("The last one came 1 h ago", page)
-        self.assertIn("Running (as of 1 h ago)", section(page, "running"))
-        self.assertIn("working normally · last update 40 s ago (as of 1 h ago)", section(page, "running"))
-        self.assertEqual(section(page, "queue").count("(as of 1 h ago)"), 5)
+        self.assertIn("working normally (as of 1 h ago)", section(page, "hardware"))
+        self.assertEqual(section(page, "training").count("as of 1 h ago"), 7)       # every desktop card
         self.assertIn("as of 1 h ago", section(page, "attention"))
         self.assertNotIn("Nothing is running", page)
         s = self.api()
@@ -466,7 +463,7 @@ class Snapshots(Base):
         self.swap_live(None)
         page = self.page()
         self.assertIn("No status from the GPU computer.", page)
-        self.assertIn("Unknown: no status from the GPU computer.", section(page, "running"))
+        self.assertIn("Unknown: no status from the GPU computer.", section(page, "hardware"))
         self.assertIn("Pre-lipo review (v2)", section(page, "review"))   # the registry still shows
         s = self.api()
         self.assertFalse(s["snapshot"]["present"])
@@ -477,17 +474,17 @@ class Snapshots(Base):
         q[0]["running"] = {"job": "job_20261105_predict_mine", "kind": "predict", "n_done": 40, "n_total": 120,
                            "phase": "predicting", "eta_s": 300, "hung": False}
         self.swap_live(T.live_doc(queues=q))
-        frag = section(self.page("advanced"), "running")
-        self.assertIn("Images 40 / 120", frag)
+        frag = section(self.page("advanced"), "training")
+        self.assertIn("40 of 120 done", frag)
         self.assertIn("Predict my tiles", frag)
         self.assertIn("5 min", frag)
         r = self.api("advanced")["running"][0]
         self.assertEqual((r["kind"], r["done"], r["total"], r["unit"], r["pct"]), ("predict", 40, 120, "images", 33))
         q[0]["running"]["job"] = "job_20261105_predict_theirs"           # someone else's: progress yes, name no
         self.env.write_live(T.live_doc(queues=q))
-        frag = section(self.page("advanced"), "running")
+        frag = section(self.page("advanced"), "training")
         self.assertIn(HIDDEN, frag)
-        self.assertIn("Images 40 / 120", frag)
+        self.assertIn("40 of 120 done", frag)
         self.assertNotIn("predict_theirs", frag)
 
     def test_watcher_stale_and_paused(self):
@@ -641,10 +638,10 @@ class Browser(Base):
                         page.wait_for_selector("#cj-bar")
                         sw, iw = page.evaluate("[document.documentElement.scrollWidth, window.innerWidth]")
                         self.assertLessEqual(sw, iw, "horizontal scroll")
-                        self.assertEqual(page.locator("#cj-jobs-s-running article").count(), 2)
-                        self.assertEqual(page.locator("#cj-jobs-s-queue li").count(), 5)
+                        self.assertEqual(page.locator("#cj-jobs-s-training article").count(), 8)
                         self.assertEqual(page.locator("#cj-jobs-s-attention article").count(), 4)
-                        self.assertEqual(page.locator("#cj-jobs-s-review article").count(), 5)
+                        self.assertEqual(page.locator("#cj-jobs-s-review article").count(), 4)
+                        self.assertEqual(page.locator("#cj-jobs-s-raw .cj-jobs-dash").count(), 1)
                         self.assertEqual(page.locator("#cj-jobs-s-finished li").count(), 5)
                         self.assertEqual(page.locator("body img").count(), 0)          # the XSS name stayed text
                         bg = page.evaluate("getComputedStyle(document.body).backgroundColor")
@@ -669,7 +666,7 @@ class Browser(Base):
             self.assertEqual(resp.value.status, 200)
             page.wait_for_selector(".cj-jobs-banner")
             self.assertIn("Status updates have stopped", page.text_content(".cj-jobs-banner"))
-            self.assertEqual(page.locator("#cj-jobs-s-running article").count(), 2)
+            self.assertEqual(page.locator("#cj-jobs-s-training article").count(), 8)
             self.assertTrue(page.locator("#cj-jobs-err").is_hidden())
             page.screenshot(path=str(self.shots / "jobs_390_light_stale.png"), full_page=True)
             self.check_clean(rec)
@@ -681,7 +678,7 @@ class Browser(Base):
         try:
             page.goto(self.p.origin + "/jobs/")
             page.wait_for_load_state("networkidle")
-            self.assertIn(HIDDEN, page.text_content("#cj-jobs-s-queue"))
+            self.assertIn(HIDDEN, page.text_content("#cj-jobs-s-training"))
             sw, iw = page.evaluate("[document.documentElement.scrollWidth, window.innerWidth]")
             self.assertLessEqual(sw, iw)
             self.check_clean(rec)

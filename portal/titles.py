@@ -183,7 +183,7 @@ def _sig(pdir: Path):
 
 
 def package_progress(pkg_dir) -> dict | None:
-    """{'source', 'cards', 'decided', 'images', 'reviewed', 'last', 'who'} (cached), or None without a data.js."""
+    """{'source', 'cards', 'decided', 'images', 'reviewed', 'last', 'who', 'via' (the agent that acted for `who`, or None)} (cached), or None without a data.js."""
     pdir = Path(pkg_dir)
     sig = _sig(pdir)
     if sig is None:
@@ -197,7 +197,7 @@ def package_progress(pkg_dir) -> dict | None:
     if data is None:
         return None
     decided = reviewed = 0
-    last, newest_dec, who = None, -1.0, None
+    last, newest_dec, who, via = None, -1.0, None, None
     try:
         files = list((pdir / "edits").glob("*.json"))
     except OSError:
@@ -218,9 +218,9 @@ def package_progress(pkg_dir) -> dict | None:
             v = _dict(v)
             ts = v.get("server_t") or v.get("t")
             if isinstance(ts, (int, float)) and ts > newest_dec and _text(v.get("who")):
-                newest_dec, who = ts, v["who"]
+                newest_dec, who, via = ts, v["who"], _text(v.get("via"))
     out = {"source": data["source"], "cards": sum(len(v) for v in data["cards"].values()), "decided": decided,
-           "images": len(data["cards"]), "reviewed": reviewed, "last": last, "who": who}
+           "images": len(data["cards"]), "reviewed": reviewed, "last": last, "who": who, "via": via}
     with _lock:
         _cache[key] = (sig, out)
     return out
@@ -228,7 +228,7 @@ def package_progress(pkg_dir) -> dict | None:
 
 def scan_packages(root, records) -> list:
     """Lab labeling and compare packages under the review root (never pred_*, parts, sandboxes or work folders):
-    [{id, title, kind, cards, decided, images, reviewed, last, who, status, applied_by (lv id or None),
+    [{id, title, kind, cards, decided, images, reviewed, last, who, via, status, applied_by (lv id or None),
     base_lv, waiting (decisions not applied yet, 0 when applied)}]; status ready / in_progress / applied."""
     if root is None:
         return []
@@ -271,7 +271,7 @@ def _scan_packages(root, records) -> list:
         has_edits = prog["last"] is not None
         status = "applied" if by else ("in_progress" if has_edits and prog["decided"] else "ready")
         out.append({"id": d.name, "title": package_title(records, d.name, meta), "kind": meta.get("kind") or "review",
-                    **{k: prog[k] for k in ("cards", "decided", "images", "reviewed", "last", "who")},
+                    **{k: prog[k] for k in ("cards", "decided", "images", "reviewed", "last", "who", "via")},
                     "status": status, "applied_by": by, "base_lv": base_lv,
                     "waiting": 0 if by else prog["decided"], "meta": meta})
     return out

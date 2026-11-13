@@ -5,7 +5,12 @@ Jobs module (CryoEV portal): what is running, waiting, stuck and done, from two 
   - the registry's jobs: registry.current("job") (review / annotation / check jobs, and any train / predict job
     that is not on a queue), cached REGISTRY_TTL_S per registry folder (current() re-reads the files).
 
-    GET /jobs/               the page: Running now, Waiting to run, Needs attention, Other open jobs, Recently finished
+    GET /jobs/               the page (round 9): a "Training hardware" strip (the Train live view's data), then the
+                             data-flow board, left to right (stacked on a phone): 1 raw uploads not converted,
+                             2 converted with no predictions yet, 3 in review (review packages + labeling / review
+                             jobs), 4 datasets ready to train, 5 training queued / running; then Needs attention and
+                             a collapsed Finished. Every card links through ONE helper, href_for(kind, id).
+                             Each column and the strip is its own fragment for the 30 s refresh.
     GET /jobs/jobs.js        the page's refresh script (a file, so a later CSP script-src 'self' keeps working)
     GET /jobs/api/summary    the same as JSON (schema cj_jobs/1, see summary()); ?html=1 adds "html": the page's
                              section fragments, rendered and escaped here (the page swaps them in every 30 s)
@@ -18,6 +23,10 @@ Jobs module (CryoEV portal): what is running, waiting, stuck and done, from two 
   target: job, detail: {reason, result, phase: requested | result}}.
 
 Rules:
+  - Attribution: "claude for pujan" (registry/actor.label) with a small AI tag when `via` is present; the same
+    privacy mask as the owner (a hidden owner is None, so is the agent).
+  - "Finished, not recorded" (Needs attention): live.json says the run finished, the registry job is still
+    ready / in_progress.
   - A job on a queue in live.json is shown from live.json only; the registry fills in its name and owner.
   - Queue order: by ready_at (the runner takes the oldest READY first, then the name) when every waiting job has
     one; otherwise live.json order with plain bullets, no numbers.
@@ -68,7 +77,9 @@ STALE_FACTOR = 3              # live.json older than 3 x interval_s is stale (po
 RECENT_S = 48 * 3600          # a blocked job older than this (and pulled) leaves Needs attention
 N_FINISHED = 10
 OPEN = ("in_progress", "ready", "blocked")
-SECTIONS = ("head", "running", "queue", "attention", "review", "finished")
+SECTIONS = ("head", "hardware", "raw", "converted", "review", "datasets", "training", "attention", "finished")
+COLUMNS = ("raw", "converted", "review", "datasets", "training")
+N_COL = 6                     # cards shown per column before "+ N more"
 PRIVATE_NAME = "Job details hidden"
 ACTION_TIMEOUT_S = 25.0       # the SMB write runs in a worker thread; past this the page is told the result is unknown
 REASON_MAX = 300
@@ -171,6 +182,47 @@ def _registry_module():
         spec.loader.exec_module(mod)
         _reg_mod = mod
     return _reg_mod
+
+
+_actor_mod = None
+
+
+def _actor():
+    """registry/actor.py (label()), loaded once by path like registry.py."""
+    global _actor_mod
+    if _actor_mod is None:
+        spec = importlib.util.spec_from_file_location("cj_jobs_actor", REPO / "registry" / "actor.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _actor_mod = mod
+    return _actor_mod
+
+
+def who_label(who, via=None) -> str:
+    """'claude for pujan' / 'pujan' / 'claude'. Callers pass who / via ALREADY masked (a hidden owner is None)."""
+    return _actor().label(who, via)
+
+
+def href_for(kind, id_, rec_type=None):
+    """The one link every board card uses: where this thing opens. None when there is no id (hidden items)."""
+    if not isinstance(id_, str) or not id_:
+        return None
+    q = quote(id_, safe="")
+    if kind == "prediction_set":
+        return f"/predict/{q}/"
+    if kind == "conversion":
+        return f"/predict/convert/{q}/"
+    if kind == "dataset":
+        return f"/data/dataset/{q}"
+    if kind == "label_set":
+        return f"/data/labels/{q}"
+    if kind in ("training", "run"):
+        return "/train/"
+    if kind == "review_package":
+        return f"/review/{q}/app/" if id_.startswith("pred_") else "/reviews/"
+    if kind == "job":
+        return {"train": "/train/", "predict": "/predict/"}.get(rec_type, "/reviews/")
+    return None
 
 
 def registry_jobs(root, now=None) -> tuple:
@@ -447,6 +499,14 @@ def summary(cfg, user: dict, can_see, now=None) -> dict:
             st = _s(f.get("status")) or "unknown"
             label, tone = DESK_STATE.get(st, (st, "wait"))
             m, ts = _d(f.get("metrics")), parse_local(f.get("ended"))
+            if st == "done" and _d(reg.get(f["job"])).get("status") in ("ready", "in_progress"):
+                attention.append({"kind": "unrecorded", "chip": "not recorded", **ident(f["job"]), "queue": where,
+                                  "source": "desktop", "title": "Finished, not recorded",
+                                  "reason": "The GPU computer finished this run"
+                                  + (" and its results are on the laptop" if f.get("pulled") else "")
+                                  + ", but the lab job list still says it has not finished.",
+                                  "tech": f"registry status {_d(reg.get(f['job'])).get('status')}; run "
+                                  f"{f.get('run') or '?'}; jobs/sync.py pull imports it", "stale": stale})
             finished.append({**ident(f["job"]), "queue": where, "source": "desktop", "status": st, "label": label,
                              "tone": tone, "ended": _s(f.get("ended")), "ts": ts, "when": ago(ts, now),
                              "pulled": bool(f.get("pulled")), "map50_95": _n(m.get("mask_map50_95")),
@@ -469,7 +529,9 @@ def summary(cfg, user: dict, can_see, now=None) -> dict:
             plain, tech = hint(rec) if not idn["private"] else ("Details hidden.", None)
             review.append({**idn, "source": "registry", "type": typ, "type_label": TYPE_WORD.get(typ, typ),
                            "where": _s(rec.get("where")), "status": st, "label": label, "tone": tone,
-                           "who": None if idn["private"] else _s(rec.get("who")), "progress": p,
+                           "who": None if idn["private"] else _s(rec.get("who")),
+                           "via": None if idn["private"] else _s(rec.get("via") or rec.get("created_via")),
+                           "progress": p,
                            "pct": pct(p["done"], p["total"]) if p else None, "hint": plain, "tech": tech,
                            "logged": _s(rec.get("logged"))})
             ts = parse_local(rec.get("logged"))
@@ -488,7 +550,7 @@ def summary(cfg, user: dict, can_see, now=None) -> dict:
     review.sort(key=lambda x: (order.get(x["status"], 9), x["logged"] or "", x["id"] or ""))
     finished.sort(key=lambda x: x["ts"] or 0, reverse=True)
     finished = finished[:N_FINISHED]
-    kinds = {"offline": 0, "watcher": 1, "paused": 2, "hung": 3, "blocked": 4, "unknown": 5}
+    kinds = {"offline": 0, "watcher": 1, "paused": 2, "hung": 3, "unrecorded": 4, "blocked": 5, "unknown": 6}
     attention.sort(key=lambda x: kinds.get(x["kind"], 9))
     reg_info = {"present": reg_err is None, "problem": reg_err, "n_jobs": len(reg),
                 "read_age_s": None if reg_age is None else round(reg_age, 1)}
@@ -502,8 +564,10 @@ def summary(cfg, user: dict, can_see, now=None) -> dict:
         snap = {**snap, "monitor": None, "problem": None}
         if reg_err is not None:
             reg_info["problem"] = "not readable"
+    pkgs = review_packages(cfg) if admin else None
     return {"schema": SCHEMA, "now_utc": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds"),
-            "pkgs": review_packages(cfg) if admin else None, "admin": admin, "asof": asof, "snapshot": snap, "registry": reg_info, "queues": queues,
+            "pkgs": pkgs, "admin": admin,
+            "flow": build_flow(cfg, user, admin, can_see, live, queues, running, queue, review, now, pkgs, reg, reg_err is None), "asof": asof, "snapshot": snap, "registry": reg_info, "queues": queues,
             "running": running, "queue": queue, "attention": attention, "review": review, "finished": finished,
             "counts": {"running": len(running), "queued": sum(1 for x in queue if x["state"] == "queued"),
                        "held": sum(1 for x in queue if x["state"] != "queued"), "attention": len(attention),
@@ -528,11 +592,200 @@ def review_packages(cfg) -> list:
         rows.append({"id": p["id"], "title": p["title"], "kind": p["kind"], "cards": p["cards"],
                      "decided": p["decided"], "images": p["images"], "reviewed": p["reviewed"],
                      "last": NM.when(datetime.fromtimestamp(last).isoformat()) if last else None, "_ts": last or 0,
-                     "who": p["who"], "status": p["status"], "applied_by": p["applied_by"]})
+                     "who": p["who"], "via": p.get("via"), "status": p["status"], "applied_by": p["applied_by"]})
     rows.sort(key=lambda r: (r["status"] == "applied", -r["_ts"], r["id"]))
     for r in rows:
         del r["_ts"]
     return rows
+
+
+# ---------------------------------------------------------------- the board (data flows left to right)
+def _item(kind, id_, title, sub=(), href=None, link="Open", who=None, via=None, prog=None, note=None, tone=None,
+          chip_=None, rec_type=None, act=None, hidden=False, desk=False) -> dict:
+    """One board card as data. `id` is shown small under the title; the link is href_for's (None = no link, which
+    only a hidden item has). `who` / `via` arrive ALREADY masked."""
+    return {"kind": kind, "id": id_, "title": title or id_ or "?", "sub": [x for x in sub if x],
+            "href": None if hidden else (href if href is not None else href_for(kind, id_, rec_type)), "link": link,
+            "who": who, "via": via, "prog": prog, "note": note, "tone": tone, "chip": chip_, "act": act,
+            "hidden": hidden, "desk": desk}
+
+
+def hardware_rows(live, queues, admin, jobs, reg_ok) -> list:
+    """The training-hardware strip, from the Train page's own live view (train.live_for: the same filter and the same
+    privacy rule as /train/api/live.json); names come from summary()'s queues."""
+    from portal.modules import train as TR
+    lv = TR.live_for(live, admin, jobs, reg_ok)
+    if lv is None:
+        return []
+
+    def jname(j):
+        return _s(_d(jobs.get(j)).get("name")) or j
+
+    rows = []
+    for i, q in enumerate(_l(lv.get("queues"))):
+        name = _d(queues[i] if i < len(queues) else {}).get("name") or f"GPU computer {i + 1}"
+        w, run = _d(q.get("watcher")), _d(q.get("running"))
+        fin = sorted((_d(f) for f in _l(q.get("finished")) if _s(_d(f).get("job"))),
+                     key=lambda f: parse_local(f.get("ended")) or 0)
+        last = fin[-1] if fin else {}
+        rows.append({"name": name, "reach": _s(q.get("reach")) or "unknown", "display": _s(w.get("display")),
+                     "plain": WATCH_WORD.get(_s(w.get("display")) or "", "status unknown"),
+                     "job": jname(run["job"]) if _s(run.get("job")) else None,
+                     "queued": sum(1 for j in _l(q.get("jobs")) if _d(j).get("state") == "queued"),
+                     "last": jname(last["job"]) if last else None, "last_ended": _s(last.get("ended")),
+                     "last_status": _s(last.get("status"))})
+    return rows
+
+
+def conversion_columns(cfg, user, can_see, now) -> tuple:
+    """-> (raw uploads not converted, converted with no prediction set yet), as board items. Both lists come from
+    Predict's own (per-person) conversion list; a set counts when its request names the conversion's session."""
+    from portal.predict_parts import runner as RUN
+    from portal.predict_parts import sets as SETS
+    sets_all = SETS.list_sets(cfg, {"role": "admin"}, lambda u, o: True)
+    predicted = set()
+    for _dir, req, _st in sets_all:
+        src = _d(_d(req).get("source"))
+        if src.get("kind") == "session" and src.get("session"):
+            predicted.add(str(src["session"]))
+    raw, done = [], []
+    for d, meta, st in RUN.list_conversions(cfg, user, can_see):
+        meta, st = _d(meta), _d(st)
+        state = _s(st.get("state")) or "queued"
+        sess = _s(meta.get("session"))
+        title = f"Session {sess}" if sess else "Uploaded images"
+        who = _s(meta.get("owner"))
+        if state != "done":
+            label, tone = {"queued": ("waiting to convert", "wait"), "running": ("converting", "run"),
+                           "failed": ("failed", "warn")}.get(state, (state, "wait"))
+            raw.append(_item("conversion", d.name, title, (f"uploaded {ago_iso(meta.get('created'), now)}",),
+                             link="Open conversion", who=who, chip_=label, tone=tone))
+        elif sess not in predicted:
+            n = _i(st.get("n_tiles"))
+            done.append(_item("conversion", d.name, title, (f"{n} tiles" if n else None, "no analysis yet"),
+                              link="Predict", who=who))
+    return raw, done
+
+
+def build_flow(cfg, user, admin, can_see, live, queues, running, queue, review, now, pkgs=None, reg=None,
+               reg_ok=False) -> dict:
+    """The five board columns + the hardware strip, as data (each column is its own fragment). Reads the registry
+    read-only and the conversions / sets through Predict's own lists, so each person sees only what Predict and Data
+    already show them; hidden jobs stay hidden (no id, no link, no owner)."""
+    from portal import titles as TT
+    from portal.modules import data as DATA
+    records, rerr = DATA.read_registry(getattr(cfg, "registry", None))
+    viewer = DATA.Viewer(can_see, user, cfg)
+    out = {c: [] for c in COLUMNS}
+    out["more"] = {c: 0 for c in COLUMNS}
+    out["hardware"] = []
+    try:
+        out["hardware"] = hardware_rows(live, queues, admin, _d(reg), reg_ok) if live else []
+    except Exception as e:                              # the strip must not take the page down
+        log.warning("jobs: hardware strip failed (%s)", type(e).__name__)
+    try:                                                # 1 + 2
+        out["raw"], out["converted"] = conversion_columns(cfg, user, can_see, now)
+    except Exception as e:
+        log.warning("jobs: conversions unreadable (%s)", type(e).__name__)
+    # 3: in review: prediction packages, lab packages (admin), other open registry jobs (labeling / review / check)
+    rev = out["review"]
+    for pid, rec in sorted(_d(records.get("review_package")).items(), reverse=True):
+        rec = _d(rec)
+        if rec.get("status") not in ("built", "in_review"):
+            continue
+        if not (rec.get("kind") == "prediction" or rec.get("prediction_set") or pid.startswith("pred_")):
+            continue
+        if not (admin or can_see(user, rec.get("owner"))):
+            continue
+        try:
+            title = TT.package_title(records, pid, DATA.package_meta(records, pid), DATA.pred_display_name)
+        except Exception:
+            title = None
+        busy = rec.get("status") == "in_review"
+        rev.append(_item("review_package", pid, title,
+                         (_s(rec.get("model")), rec.get("n_images") and f"{rec['n_images']} images"),
+                         link="Open review", who=_s(rec.get("owner")),
+                         via=_s(rec.get("via") or rec.get("created_via")),
+                         chip_="in review" if busy else "ready to review", tone="run" if busy else "wait"))
+    for r in pkgs or []:
+        if r["status"] == "applied":
+            continue
+        label, tone = PKG_STATUS.get(r["status"], (r["status"], "wait"))
+        rev.append(_item("review_package", r["id"], r["title"],
+                         (f"{r['decided']} of {r['cards']} cards decided",
+                          f"{r['reviewed']} of {r['images']} images reviewed",
+                          f"last edit {r['last']}" if r["last"] else "no edits yet"),
+                         link="Open review", who=r.get("who"), via=r.get("via"),
+                         prog=(r["decided"], r["cards"]), chip_=label, tone=tone))
+    for x in review:
+        if x["type"] in ("train", "predict"):
+            continue
+        if x["private"]:
+            rev.append(_item("job", None, x["name"], note="Details hidden.", chip_=x["label"], tone=x["tone"],
+                             hidden=True))
+            continue
+        p = x["progress"]
+        rev.append(_item("job", x["id"], x["name"], (x["type_label"], x["where"] and f"in {x['where']}"),
+                         who=x["who"], via=x["via"], rec_type=x["type"], note=x["hint"], chip_=x["label"],
+                         tone=x["tone"], prog=(p["done"], p["total"]) if p and p["total"] and
+                         p["done"] is not None else None))
+    # 4: datasets ready to train
+    runs_by = {}
+    for rec in _d(records.get("run")).values():
+        ds = _d(rec).get("dataset")
+        if isinstance(ds, str):
+            runs_by[ds] = runs_by.get(ds, 0) + 1
+    for did, rec in sorted(_d(records.get("dataset")).items(), reverse=True):
+        rec = _d(rec)
+        if rec.get("status") not in ("frozen", "bundled"):
+            continue
+        lv = _s(rec.get("label_version"))
+        pkg = _s(_d(_d(records.get("label_version")).get(lv)).get("pkg"))
+        if pkg and not DATA.package_visible(records, viewer, pkg):
+            continue                                    # built from a package this person may not see
+        try:
+            title = TT.label_title(records, lv, lambda p: DATA.package_meta(records, p),
+                                   pkg_visible=lambda p: DATA.package_visible(records, viewer, p)) if lv else did
+        except Exception:
+            title = did
+        n = runs_by.get(did, 0)
+        out["datasets"].append(_item("dataset", did, title or did,
+                                     (rec.get("status"), f"used by {n} run{'' if n == 1 else 's'}" if n
+                                      else "not trained on yet"), link="Open dataset"))
+    # 5: training: running, waiting, not sent yet
+    tr = out["training"]
+    for r in running:
+        if r["private"]:
+            tr.append(_item("training", None, r["name"], note="Details hidden.", chip_="running", tone="run",
+                            hidden=True, act=None, prog=(r["done"], r["total"]) if r["done"] is not None and r["total"]
+                            else None, sub=(f"on {r['queue']}",), desk=True))
+            continue
+        tr.append(_item("training", r["id"], r["name"],
+                        (f"on {r['queue']}", f"time left {r['eta_text']}"), link="Open live view",
+                        prog=(r["done"], r["total"]) if r["done"] is not None and r["total"] else None,
+                        chip_="may be stuck" if r["hung"] else "running", tone="warn" if r["hung"] else "run",
+                        note=r.get("hung_text"), act=r, desk=True))
+    for x in queue:
+        if x["private"]:
+            tr.append(_item("training", None, x["name"], note="Details hidden.", chip_=x["label"], tone=x["tone"],
+                            hidden=True, sub=(f"on {x['queue']}",), desk=True))
+            continue
+        tr.append(_item("training", x["id"], x["name"], (f"on {x['queue']}",), link="Open live view",
+                        chip_=x["label"], tone=x["tone"], note=x["note"], act=x, desk=True))
+    for x in review:
+        if x["type"] in ("train", "predict") and not x["private"]:
+            tr.append(_item("job", x["id"], x["name"], (x["type_label"],), who=x["who"], via=x["via"],
+                            rec_type=x["type"], chip_=x["label"], tone=x["tone"], note=x["hint"]))
+    for c in COLUMNS:
+        if c != "training" and len(out[c]) > N_COL:      # running / waiting jobs carry buttons: never cut
+            out["more"][c] = len(out[c]) - N_COL
+            out[c] = out[c][:N_COL]
+    return out
+
+
+def ago_iso(s, now) -> str:
+    ts = parse_local(s)
+    return (ago(ts, now) or "earlier") if ts is not None else "earlier"
 
 
 # ---------------------------------------------------------------- html (every text through esc)
@@ -624,83 +877,62 @@ def render(s: dict) -> dict:
             bits.insert(1, "jobs/monitor.py has stopped or cannot write")
         head += f'<p class="cj-jobs-snap">{tech("; ".join(bits))}</p>'
     c = s["counts"]
-    links = [("running", c["running"], "running", ""), ("queue", c["queued"], "waiting", ""),
+    links = [("training", c["running"], "running", ""), ("training", c["queued"], "waiting", ""),
              ("attention", c["attention"], "need attention", " cj-jobs-t-warn" if c["attention"] else ""),
-             ("review", c["review_open"], "other open", "")]
+             ("review", len(s["flow"]["review"]) + s["flow"]["more"]["review"], "in review", "")]
     head += ('<nav class="cj-jobs-counts" aria-label="Jobs summary">'
              + "".join(f'<a class="cj-jobs-count{cls}" href="#cj-jobs-s-{k}"><b>{int(n)}</b> {esc(w)}</a>'
                        for k, n, w, cls in links) + "</nav>")
     out["head"] = head
 
-    # running now
-    parts = [sec_head("running", "Running now" if not asof else f"Running ({asof})", len(s["running"]))]
-    wl = []
-    for q in s["queues"]:
-        if q["reach"] != "ok":
-            wl.append(f'<li><span class="cj-dot down" aria-hidden="true"></span><b>{esc(q["name"])}</b> '
-                      f'<span class="cj-mut">{esc("not reachable" + sfx)}</span>'
-                      + (tech(f"queue {q['reach']}" + (f": {q['detail']}" if q["detail"] else "")) if admin else "")
-                      + "</li>")
-            continue
-        w = q["watcher"] or {}
-        dot = "unk" if asof else ("up" if w.get("display") == "alive" else "down")
-        last = f" · last update {dur(w.get('age_s'))} ago" if w.get("age_s") is not None else ""
-        t = (f"watcher {w.get('display')}" + (f", heartbeat {dur(w.get('age_s'))} ago" if w.get("age_s") is not None
-                                                else "") + (f", {w['detail']}" if w.get("detail") else ""))
-        wl.append(f'<li><span class="cj-dot {dot}" aria-hidden="true"></span><b>{esc(q["name"])}</b> '
-                  f'<span class="cj-mut">{esc(str(w.get("plain") or "?") + last + sfx)}</span>'
-                  + (tech(t) if admin else "") + "</li>")
-    if wl:
-        parts.append(f'<ul class="cj-list cj-jobs-machines">{"".join(wl)}</ul>')
-    cards = []
-    for r in s["running"]:
-        unit = "Images" if r["kind"] == "predict" else "Epoch"
-        prog = (f"{unit} {r['done']} / {r['total']}" if r["done"] is not None and r["total"]
-                else ("Setting up: nothing finished yet" if r["phase"] == "setting up" else f"{unit} ?"))
-        tags = chip(asof if asof else r["phase"], "wait" if asof else "run")
-        if r["hung"]:
-            tags += chip("may be stuck", "warn")
-        w = r["watcher"]
-        body = [f'<div class="cj-jobs-top">{name_line(r)}<span class="cj-jobs-tags">{tags}</span></div>',
-                f'<div class="cj-jobs-prog"><span>{esc(prog)}</span>'
-                + (f'<span class="cj-mut">{r["pct"]} %</span>' if r["pct"] is not None else "") + "</div>",
-                bar(r["done"], r["total"], unit),
-                kv([("Time left", r["eta_text"]),
-                    ("Running for", dur(r["elapsed_s"]) if r["elapsed_s"] is not None else None),
-                    ("On", r["queue"]),
-                    ("Last update", (f"{dur(w['age_s'])} ago" if w["age_s"] is not None else "unknown")
-                     + ("" if w["display"] == "alive" else f" ({w['plain']})")),
-                    ("Val mAP50-95", f"{r['map50_95']:.3f}" if r["map50_95"] is not None else None)])]
-        if r["hung_text"]:
-            body.append(f'<p class="cj-jobs-warn">{esc(r["hung_text"])}</p>')
-        if r["cancel_requested"]:
-            body.append(f'<p class="cj-jobs-warn">{esc("Cancel requested: it stops within a few seconds.")}</p>')
-        body.append(tech(r))
-        body.append(actions_html(r))
-        cards.append(f'<article class="cj-card cj-jobs-item">{"".join(body)}</article>')
-    if cards:
-        parts.append(f'<div class="cj-jobs-grid">{"".join(cards)}</div>')
-    elif not s["snapshot"]["present"]:
-        parts.append(empty("Unknown: no status from the GPU computer."))
-    elif asof:
-        parts.append(empty(f"Nothing was running {asof}."))
-    else:
-        parts.append(empty("Nothing is running on the GPU computer."))
-    out["running"] = "".join(parts)
+    # training hardware strip (the Train live view's data)
+    parts = [f'<h2 class="cj-sec" id="cj-jobs-h-hardware">Training hardware</h2>']
+    hw = []
+    for h in s["flow"]["hardware"]:
+        if h["reach"] != "ok":
+            dot, state = "down", "not reachable" + sfx
+        else:
+            dot = "unk" if asof else ("up" if h["display"] == "alive" else "down")
+            state = (h["plain"] or "status unknown") + sfx
+        bits = [f'<span class="cj-dot {dot}" aria-hidden="true"></span><b>{esc(h["name"])}</b> '
+                f'<span class="cj-mut">{esc(state)}</span>']
+        bits.append(f'<span>{esc("Now: " + h["job"]) if h["job"] else "Nothing running"}</span>')
+        bits.append(f'<span class="cj-mut">{esc("Queue: " + (str(h["queued"]) + " waiting" if h["queued"] else "empty"))}</span>')
+        if h["last"]:
+            when = f", {h['last_status']}" if h.get("last_status") else ""
+            bits.append(f'<span class="cj-mut">{esc("Last job: " + h["last"] + when)}</span>')
+        if admin and h["display"]:
+            bits.append(tech(f"watcher {h['display']}"))
+        hw.append(f'<li class="cj-jobs-hw">{"".join(bits)}</li>')
+    parts.append(f'<ul class="cj-card cj-jobs-hwl">{"".join(hw)}'
+                 f'<li class="cj-jobs-hw cj-jobs-hwlink"><a href="/train/">Live view &rarr;</a></li></ul>' if hw else
+                 f'<p class="cj-card cj-mut cj-jobs-empty">{esc("Unknown: no status from the GPU computer.")} '
+                 f'<a href="/train/">Live view &rarr;</a></p>')
+    out["hardware"] = "".join(parts)
 
-    # waiting to run
-    parts = [sec_head("queue", "Waiting to run", len(s["queue"]))]
-    rows = []
-    for x in s["queue"]:
-        num = (f'<span class="cj-jobs-pos">{x["position"]}</span>' if x["position"] else
-               '<span class="cj-jobs-pos cj-jobs-t-off" aria-hidden="true">•</span>')
-        rows.append(f'<li class="cj-jobs-row">{num}<span class="cj-jobs-main">{name_line(x)}'
-                    f'<span class="cj-mut">{esc(x["note"] + sfx)}</span>{tech(x)}{actions_html(x)}</span>'
-                    f'{chip(x["label"], x["tone"])}</li>')
-    parts.append(f'<ol class="cj-card cj-jobs-rows">{"".join(rows)}</ol>' if rows else
-                 empty(f"Nothing was waiting {asof}." if asof else "Nothing is waiting." if s["snapshot"]["present"]
-                       else "Unknown: no status from the GPU computer."))
-    out["queue"] = "".join(parts)
+    # the five columns
+    flow = s["flow"]
+    for key, (title, sub) in COLUMN_TITLES.items():
+        items = flow[key]
+        parts = [f'<h2 class="cj-sec cj-jobs-colh" id="cj-jobs-h-{key}">{esc(title)} '
+                 f'<span class="cj-mut cj-jobs-sub">&middot; {esc(sub)}</span> '
+                 f'<span class="cj-jobs-n">{len(items) + flow["more"][key]}</span></h2>']
+        if key == "training":
+            n_un = sum(1 for a in s["attention"] if a["kind"] == "unrecorded")
+            if n_un:
+                parts.append(f'<a class="cj-jobs-unrec" href="#cj-jobs-s-attention"><b>{n_un} finished, not '
+                             f'recorded</b><span>The GPU computer finished {"it" if n_un == 1 else "them"}, but the '
+                             f'lab job list does not say so. See below.</span></a>')
+        if not items:
+            nxt, href = EMPTY_NEXT[key]
+            parts.append(f'<div class="cj-jobs-dash">{esc(EMPTY_TEXT[key])} <a href="{esc(href)}">{esc(nxt)} '
+                         f'&rarr;</a></div>')
+        for it in items:
+            parts.append(card_html(it, asof))
+        if flow["more"][key]:
+            parts.append(f'<p class="cj-mut cj-jobs-more">{esc("+ " + str(flow["more"][key]) + " more")} '
+                         f'<a href="{esc(MORE_HREF[key])}">See all &rarr;</a></p>')
+        out[key] = "".join(parts)
 
     # needs attention
     parts = [sec_head("attention", "Needs attention", len(s["attention"]))]
@@ -712,37 +944,16 @@ def render(s: dict) -> dict:
         if a["source"] == "desktop" and asof:
             where += f" · {asof}"
         reason = f'<p class="cj-jobs-reason cj-wrap">{esc(a["reason"])}</p>' if a.get("reason") else ""
+        link = (f'<a class="cj-jobs-open" href="{esc(href_for("training", a["id"]))}">Open training &rarr;</a>'
+                if a.get("id") and a["kind"] in ("unrecorded", "hung", "blocked") and a["source"] == "desktop"
+                else "")
         cards.append(f'<article class="cj-card cj-jobs-item cj-jobs-att"><div class="cj-jobs-top">{name_line(a)}'
                      f'{chip(a["chip"], "warn")}</div><p class="cj-jobs-why"><b>{esc(a["title"])}</b>'
-                     f'<span class="cj-mut">{esc(where)}</span></p>{reason}{tech(a)}</article>')
+                     f'<span class="cj-mut">{esc(where)}</span></p>{reason}{tech(a)}{link}</article>')
     parts.append(f'<div class="cj-jobs-grid">{"".join(cards)}</div>' if cards else empty("Nothing needs attention."))
     out["attention"] = "".join(parts)
 
-    # other open jobs (open registry jobs not on a queue)
-    parts = [sec_head("review", "Other open jobs", len(s["review"]))]
-    cards = []
-    for x in s["review"]:
-        p, prog = x["progress"], ""
-        if p and (p["total"] or p["done"] is not None):
-            text = (f"{p['done'] if p['done'] is not None else '?'} / {p['total']} {p['unit']}" if p["total"]
-                    else f"{p['done']} {p['unit']}").strip()
-            prog = (f'<div class="cj-jobs-prog"><span>{esc(text)}</span>'
-                    + (f'<span class="cj-mut">{x["pct"]} %</span>' if x["pct"] is not None else "")
-                    + "</div>" + bar(p["done"], p["total"], p["unit"] or "progress"))
-        meta = " · ".join(v for v in (x["type_label"], x["where"] and f"in {x['where']}",
-                                      x["who"] and f"by {x['who']}") if v)
-        cards.append(f'<article class="cj-card cj-jobs-item"><div class="cj-jobs-top">{name_line(x)}'
-                     f'{chip(x["label"], x["tone"])}</div><div class="cj-mut">{esc(meta)}</div>{prog}'
-                     f'<p class="cj-jobs-hint">{esc(x["hint"])}</p>{tech(x)}</article>')
-    if cards:
-        parts.append(f'<div class="cj-jobs-grid">{"".join(cards)}</div>')
-    else:
-        parts.append(empty("No other open job." if s["registry"]["present"] else
-                           "Unknown: the lab job list can not be read."))
-    out["review"] = "".join(parts)
-
-    # recently finished
-    parts = [sec_head("finished", "Recently finished", len(s["finished"]))]
+    # recently finished (collapsed)
     rows = []
     for x in s["finished"]:
         bits = [x["when"] or "time unknown"]
@@ -758,18 +969,65 @@ def render(s: dict) -> dict:
         rows.append(f'<li class="cj-jobs-row"><span class="cj-jobs-main">{name_line(x)}'
                     f'<span class="cj-mut">{esc(" · ".join(bits))}</span>{tech(x)}</span>'
                     f'{chip(x["label"], x["tone"])}</li>')
-    parts.append(f'<ul class="cj-card cj-jobs-rows">{"".join(rows)}</ul>' if rows else empty("Nothing finished yet."))
-    out["finished"] = "".join(parts)
+    body = (f'<ul class="cj-card cj-jobs-rows">{"".join(rows)}</ul>' if rows else empty("Nothing finished yet."))
     if admin and s.get("pkgs") is not None:
-        out["finished"] += render_packages(s["pkgs"])
+        body += render_packages([p for p in s["pkgs"] if p["status"] == "applied"], "Applied review packages")
+    out["finished"] = (f'<details class="cj-jobs-fin"><summary><span class="cj-sec" id="cj-jobs-h-finished">'
+                       f'Finished</span> <span class="cj-jobs-n">{len(s["finished"])}</span></summary>{body}</details>')
     return out
+
+
+COLUMN_TITLES = {"raw": ("1 · Raw uploads", "not converted"), "converted": ("2 · Converted", "no predictions yet"),
+                 "review": ("3 · In review", "label sets + packages"),
+                 "datasets": ("4 · Datasets", "ready to train"), "training": ("5 · Training", "queued / running")}
+EMPTY_TEXT = {"raw": "Nothing waiting.", "converted": "Nothing waiting.", "review": "Nothing in review.",
+              "datasets": "No dataset ready.", "training": "Nothing running."}
+EMPTY_NEXT = {"raw": ("Upload raw images", "/predict/new/raw/"), "converted": ("Start an analysis", "/predict/new/"),
+              "review": ("Open the review list", "/reviews/"), "datasets": ("Browse datasets", "/data/list/datasets"),
+              "training": ("Start a training job", "/train/")}
+MORE_HREF = {"raw": "/predict/", "converted": "/predict/", "review": "/reviews/", "datasets": "/data/list/datasets",
+             "training": "/train/"}
+
+
+def who_html(who, via) -> str:
+    """'claude for pujan' + a small AI tag when an agent acted; escaped. The caller already masked who / via."""
+    t = who_label(who, via)
+    if not t:
+        return ""
+    return esc(t) + (' <span class="cj-jobs-ai" title="done by an AI agent for this person">AI</span>' if via else "")
+
+
+def card_html(it: dict, asof=None) -> str:
+    """One board card: plain title, small monospace id, where it came from, what is pending, one link (href_for's)."""
+    top = f'<div class="cj-jobs-top"><span class="cj-jobs-ttl"><b class="cj-wrap cj-jobs-name">{esc(it["title"])}</b>'
+    if it["id"] and it["id"] != it["title"]:
+        top += f'<span class="cj-mut cj-wrap cj-jobs-id">{esc(it["id"])}</span>'
+    top += "</span>" + (chip(it["chip"], it["tone"] or "wait") if it["chip"] else "") + "</div>"
+    body = [top]
+    for line in it["sub"]:
+        body.append(f'<span class="cj-mut cj-jobs-line">{esc(line)}</span>')
+    if asof and it.get("desk"):
+        body.append(f'<span class="cj-mut cj-jobs-line">{esc(asof)}</span>')
+    w = who_html(it["who"], it["via"])
+    if w:
+        body.append(f'<span class="cj-mut cj-jobs-line">by {w}</span>')
+    if it["prog"] and it["prog"][1]:
+        body.append(f'<span class="cj-jobs-line">{int(it["prog"][0])} of {int(it["prog"][1])} done</span>'
+                    + bar(it["prog"][0], it["prog"][1], "done"))
+    if it["note"]:
+        body.append(f'<span class="cj-jobs-line cj-wrap">{esc(it["note"])}</span>')
+    if it["act"]:
+        body.append(actions_html(it["act"]))
+    if it["href"]:
+        body.append(f'<a class="cj-jobs-open" href="{esc(it["href"])}">{esc(it["link"])} &rarr;</a>')
+    return f'<article class="cj-card cj-jobs-item cj-jobs-cardx">{"".join(body)}</article>'
 
 
 PKG_STATUS = {"ready": ("Ready", "wait"), "in_progress": ("In progress", "run"), "applied": ("Applied", "ok")}
 
 
-def render_packages(pkgs: list) -> str:
-    parts = [sec_head("pkgs", "Review packages", len(pkgs))]
+def render_packages(pkgs: list, title="Review packages") -> str:
+    parts = [sec_head("pkgs", title, len(pkgs))]
     items = []
     for r in pkgs:
         label, tone = PKG_STATUS.get(r["status"], (r["status"], "wait"))
@@ -777,12 +1035,15 @@ def render_packages(pkgs: list) -> str:
         if r["status"] == "applied" and r.get("applied_by"):
             status += (f' <a href="/data/labels/{esc(quote(str(r["applied_by"]), safe=""))}">'
                        f'{esc(str(r["applied_by"]))}</a>')
-        last = f"last edit {r['last']}" + (f" by {r['who']}" if r.get("who") else "") if r["last"] else "no edits yet"
+        w = who_label(r.get("who"), r.get("via"))
+        last = f"last edit {r['last']}" + (f" by {w}" if w else "") if r["last"] else "no edits yet"
         meta = (f"{r['decided']} of {r['cards']} cards decided", f"{r['reviewed']} of {r['images']} images reviewed",
                 last)
         items.append(f'<li class="cj-vis-pkg"><div class="cj-vis-pkg-top"><span><b>{esc(r["title"])}</b>'
                      f'<span class="cj-mut cj-vis-id">{esc(r["id"])}</span></span><span>{status}</span></div>'
                      f'<div class="cj-vis-pkg-meta cj-mut">' + "".join(f"<span>{esc(m)}</span>" for m in meta)
+                     + ("" if not (r.get("via") and r["last"]) else
+                        '<span class="cj-jobs-ai" title="done by an AI agent for this person">AI</span>')
                      + "</div>"
                      + bar(r["decided"], r["cards"], "cards decided") + "</li>")
     parts.append(f'<ul class="cj-card cj-vis-pkgs">{"".join(items)}</ul>' if items
@@ -790,7 +1051,7 @@ def render_packages(pkgs: list) -> str:
     return "".join(parts)
 
 
-_PH = re.compile(r"\{\{(head|running|queue|attention|review|finished)\}\}")
+_PH = re.compile(r"\{\{(" + "|".join(SECTIONS) + r")\}\}")
 
 
 def page_body(fragments: dict) -> str:
@@ -806,8 +1067,9 @@ JS = r"""// Jobs page (portal/modules/jobs.py): cancel / release buttons (two-st
 (function () {
   'use strict';
   if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
-  var IDS = {head: 'cj-jobs-head', running: 'cj-jobs-s-running', queue: 'cj-jobs-s-queue',
-             attention: 'cj-jobs-s-attention', review: 'cj-jobs-s-review', finished: 'cj-jobs-s-finished'};
+  var IDS = {head: 'cj-jobs-head', hardware: 'cj-jobs-s-hardware', raw: 'cj-jobs-s-raw',
+             converted: 'cj-jobs-s-converted', review: 'cj-jobs-s-review', datasets: 'cj-jobs-s-datasets',
+             training: 'cj-jobs-s-training', attention: 'cj-jobs-s-attention', finished: 'cj-jobs-s-finished'};
   var busy = false;
   function note(text) {
     var err = document.getElementById('cj-jobs-err');
