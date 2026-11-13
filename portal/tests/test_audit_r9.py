@@ -176,7 +176,8 @@ class RefusedAndSafe(Base):
 class NeverBreaks(Base):
     def test_failing_or_slow_write_does_not_touch_the_request(self):
         st0, b0 = self.send("POST", "/feedback/9/reply")
-        failed0 = self.w.failed
+        self.w.drain()           # the first line is written off the request: settle it before the baseline, or a
+        failed0 = self.w.failed  # late write lands inside the failing-writer window below and counts twice (2 != 1)
 
         def boom(*a, **k):
             raise OSError("the audit log is locked by another process")
