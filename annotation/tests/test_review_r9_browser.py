@@ -109,7 +109,8 @@ class Back19Tests(CardBase):
         self.wait_card(page)
         first, before = self.here(page), set(self.decided_keys(page))
         press()  # two inputs inside the 240 ms fly-off
-        time.sleep(0.8)
+        time.sleep(0.3)
+        self.idle(page)  # the fly-off is over (its decision runs in the same task)
         self.synced(page)
         new = [k for k in self.decided_keys(page) if k not in before]
         self.assertEqual(new, [first], "only the card on screen may be decided")
@@ -124,14 +125,15 @@ class Back19Tests(CardBase):
 
     def test_double_key_during_fly_off(self):
         page = self.open("&who=r19k&mode=cards", setup=PRED, **DESK)
-        self.check_double(page, lambda: (page.keyboard.press("x"), page.keyboard.press("x")))
+        # two keydowns in one task: the second is always inside the 240 ms fly-off, however loaded the machine is
+        self.check_double(page, lambda: page.evaluate(
+            "() => { for (let i = 0; i < 2; i++) document.dispatchEvent(new KeyboardEvent('keydown', {key: 'x', bubbles: true})); }"))
 
     def test_double_click_during_fly_off(self):
         page = self.open("&who=r19c&mode=cards", setup=PRED, **DESK)
         self.wait_card(page)
-        # the second click lands while the card flies off (no actionability wait between the two)
-        self.check_double(page, lambda: page.evaluate("() => { const b = document.getElementById('aYes'); b.click(); "
-                                                      "setTimeout(() => b.click(), 60); }"))
+        # the second click lands while the card flies off (same task: always inside the fly-off)
+        self.check_double(page, lambda: page.evaluate("() => { const b = document.getElementById('aYes'); b.click(); b.click(); }"))
 
     def test_editor_exit_during_fly_off(self):
         """Editor (triExit) during the fly-off is ignored: the card's own decision lands, the cards stay open. And if
@@ -139,16 +141,16 @@ class Back19Tests(CardBase):
         page = self.open("&who=r19e&mode=cards", setup=PRED, **DESK)
         self.wait_card(page)
         first, before = self.here(page), set(self.decided_keys(page))
-        page.evaluate("() => { document.getElementById('aNope').click(); "
-                      "setTimeout(() => document.getElementById('triExit').click(), 60); }")
-        time.sleep(0.8)
+        page.evaluate("() => { document.getElementById('aNope').click(); document.getElementById('triExit').click(); }")
+        time.sleep(0.3)
+        self.idle(page)  # the fly-off is over (its decision runs in the same task)
         self.synced(page)
         self.assertTrue(page.locator("#tri").is_visible())
         self.assertEqual([k for k in self.decided_keys(page) if k not in before], [first])
         second, before = self.here(page), set(self.decided_keys(page))
-        page.evaluate("() => { document.getElementById('aNope').click(); "
-                      "setTimeout(() => { document.getElementById('tri').hidden = true; }, 60); }")
-        time.sleep(0.8)
+        page.evaluate("() => { document.getElementById('aNope').click(); document.getElementById('tri').hidden = true; }")
+        time.sleep(0.3)
+        self.idle(page)  # the fly-off is over (its decision runs in the same task)
         self.synced(page)
         self.assertEqual([k for k in self.decided_keys(page) if k not in before], [], second)
 
