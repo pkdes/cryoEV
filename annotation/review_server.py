@@ -381,7 +381,10 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
             why = rg.check_body(body, REJECT_REASONS)
             if why:
                 return self._json(400, {"error": why})
-            images = package_meta(pkg, valid_files)["images"]
+            meta = package_meta(pkg, valid_files)
+            if meta.get("package", {}).get("kind") != "prediction":  # samples are a prediction package's (the page agrees)
+                return self._json(404, {"error": "group actions are for prediction packages"})
+            images = meta["images"]
             with lock:
                 code, ans = rg.act(sys.modules[__name__], edits_dir, pkg_id, images, body, who,
                                    claims=active_claims(time.time()))

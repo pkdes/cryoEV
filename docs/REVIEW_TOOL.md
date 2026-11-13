@@ -316,7 +316,8 @@ open image is elsewhere; N / P then step through it. The side panel's **◀ Samp
 sample. Sort **Sample · montage · tile** orders by sample, montage (natural order), row, column, with a header per
 sample and per montage (size, ✎ note, Rejected). With **All samples** and the other sorts, nothing changed.
 
-**Groups** (`annotation/review_groups.py`; side panel **Sample**, prediction packages): **Comment on sample /
+**Groups** (`annotation/review_groups.py`; side panel **Sample**; prediction packages only, the route answers 404 for a
+lab / compare package): **Comment on sample /
 montage...**, **Reject sample / montage...** (a reason is required, an optional detail; the dialog says how many images it
 rejects and how many already rejected stay as they are), **Undo sample / montage reject**.
 - A group reject is the image reject on every image of the group: each gets `i:reject` `reject:<reason>` with `who`,

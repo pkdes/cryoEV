@@ -310,6 +310,28 @@ class RouteTests(ServerCase):
         self.assertEqual((st, ans["error"]), (404, "no images in this group"))
         self.assertFalse((self.pkg / "edits" / rg.GROUPS_FILE).exists())   # nothing written by a refusal
 
+    def test_no_group_actions_on_a_lab_package(self):
+        """A lab / compare package (no prediction set, split = train / valid): the route refuses, nothing written."""
+        from http.server import ThreadingHTTPServer
+        lab = self.tmp / "lab"
+        make_fixture.build(lab)
+        files = {im["file"] for im in pp.read_datajs(lab)["images"]}
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), rs.make_handler(lab, "k1", files, "lab", []))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+            c.request("POST", "/api/group?who=t", body=json.dumps({"action": "reject", "kind": "sample", "sample": "train",
+                                                                   "reason": "empty"}), headers={"X-Review-Key": "k1"})
+            r = c.getresponse()
+            self.assertEqual((r.status, json.loads(r.read())["error"]), (404, "group actions are for prediction packages"))
+            c.request("GET", "/api/meta", headers={"X-Review-Key": "k1"})
+            r = c.getresponse()
+            self.assertEqual(json.loads(r.read())["images"]["fixB_old.png"], {"split": "valid"})
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertEqual(sorted(p.name for p in (lab / "edits").iterdir()), [])
+
     def test_echo_of_a_grp_decision(self):
         """The page PUTs whole records back, group-rejected ones included: grp is valid on i:reject only."""
         self.assertEqual(self.group(action="reject", kind="sample", sample=HEK, reason="empty")[0], 200)
