@@ -7,9 +7,16 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-12 20:00 · Review page 2026-11-12.2 (ready; not yet in any package)
+
+- Editor: the same point eraser as Quick check. Select points (click; shift-click to add; Shift-drag a box), then "Delete N points" or the Delete key. Outlines keep at least 3 points; Esc clears the selection, Z undoes.
+- The review page shows its own version in its header.
+
+**Components:** review page
+
 ## 2026-11-12 19:30 · Round 9 platform (preview, not live yet)
 
-- **Jobs** is a flow board: click any job to see its details, with a strip showing what each machine is doing.
+- **Jobs** is a left-to-right flow board (raw uploads, converted, in review, datasets, training); every card opens its work, and a strip on top shows what each training machine is doing.
 - **Data** pages list the label classes, trace a label set back through its lineage to the imaging sessions it came from, and show lanes (automatic, human, revised) with arrows between them.
 - **Admin > Recent actions** logs every portal action, sign-ins, and actions run from the command line.
 - A new **About** page (link at the foot of every page) and this **What's new** page.
@@ -21,11 +28,11 @@ near the top of annotation/review_tool/index.html.
 
 ## 2026-11-12 19:08 · Review page update (blind-audit package only)
 
-- Back no longer jumps two images on a quick double tap.
-- The image list shows as cards.
+- Quick check: a fast double tap no longer decides the next card before you see it, and Back returns to exactly the last card.
+- Quick check: a list of the cards (side column; a drawer on phones) to jump back to any card.
 - Pinch to zoom on phones and tablets.
-- Quick check has a point eraser.
-- A Fun-mode switch.
+- Quick check: select several outline points (drag a box, or shift-click) and delete them together.
+- A Fun-mode switch (settings): off gives plain wording, no pop-ups. Saved decisions are identical either way.
 - Only the blind-audit review package got this page; the portal itself did not change.
 
 **Components:** review page
