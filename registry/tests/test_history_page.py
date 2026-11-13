@@ -798,7 +798,7 @@ class Browser(unittest.TestCase):
             note = page.inner_text("#lbody")
             self.assertIn("python jobs/monitor.py --share \\\\gpu-desktop\\cj", note)
             self.assertIn("served by the history server", note)
-            page.wait_for_timeout(500)
+            page.wait_for_load_state("networkidle")      # a request, if the page made one, has been issued by now
             self.assertEqual(errors, [])
             self.assertTrue(requests and all(u.startswith("file:") for u in requests), requests)
             self.assertFalse(any("live.json" in u for u in requests))
@@ -848,10 +848,11 @@ class LiveServed(unittest.TestCase):
             threading.Thread(target=srv.serve_forever, daemon=True).start()
             cls.servers.append(srv)
         import socket
-        s = socket.socket()
-        s.bind(("127.0.0.1", 0))
-        dead = s.getsockname()[1]
-        s.close()
+        # "down" fixture: a port that is bound but never listens, and stays bound until teardown. (It used to be
+        # bound-then-closed, so another process could take the port and make "sandbox" read as up.)
+        cls.dead_sock = socket.socket()
+        cls.dead_sock.bind(("127.0.0.1", 0))
+        dead = cls.dead_sock.getsockname()[1]
         # the Servers bar's fixture: review and history = the two test servers (up), sandbox = a closed port (down)
         cls.ports = {"review": cls.servers[0].server_address[1], "sandbox": dead,
                      "history": cls.servers[1].server_address[1]}
@@ -881,6 +882,7 @@ class LiveServed(unittest.TestCase):
         for s in cls.servers:
             s.shutdown()
             s.server_close()
+        cls.dead_sock.close()
         cls.tmp.cleanup()
 
     def open(self, srv, width):

@@ -14,9 +14,11 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cjtest as T  # noqa: E402
@@ -579,12 +581,17 @@ class Hardening(Base):
                     f.write(blk)
         try:
             ck = T.cookie(self.w.tok["owner"])["Cookie"]
-            for _ in range(2):                                              # mid-stream
-                self.assertGreater(raw_get(self.w.portal.port, f"/gallery/{cid}/images.zip", ck, read=2_000_000), 1_000_000)
-            for _ in range(2):                                              # before a byte is read
-                raw_get(self.w.portal.port, f"/gallery/{cid}/images.zip", ck, read=0)
-            import time
-            time.sleep(1.5)                                                 # the hung-up requests may still be arriving
+            # count the requests as the server takes their slots: the sleep this replaces was "the hung-up requests may
+            # still be arriving", which is exactly what the count proves has finished
+            with mock.patch.object(G, "take_slot", wraps=G.take_slot) as took:
+                for _ in range(2):                                          # mid-stream
+                    self.assertGreater(raw_get(self.w.portal.port, f"/gallery/{cid}/images.zip", ck, read=2_000_000), 1_000_000)
+                for _ in range(2):                                          # before a byte is read
+                    raw_get(self.w.portal.port, f"/gallery/{cid}/images.zip", ck, read=0)
+                end = time.time() + 20
+                while took.call_count < 4 and time.time() < end:
+                    time.sleep(0.05)
+                self.assertEqual(took.call_count, 4)
             self.assertTrue(self.wait_slots(), {k: [(s.done, s.t) for s in v] for k, v in G._ZIPS.items()})
             st, _, body = self.w.get("owner", f"/gallery/{cid}/images.zip")                    # the 3rd is not refused
             self.assertEqual(st, 200)

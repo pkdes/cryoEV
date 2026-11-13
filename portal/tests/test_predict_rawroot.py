@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from collections import namedtuple
@@ -25,6 +26,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_predict_convert as TC  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import process_lock  # noqa: E402  (shared helpers, round 10)
 from portal import app as APP  # noqa: E402
 from portal import predict_sources as PSRC  # noqa: E402
 from portal.modules import admin as ADM  # noqa: E402
@@ -357,13 +360,25 @@ class RawRoot(RawBase):
         self.assertNotIn(b.key, P._RES_DEV)
 
     def test_health_disks_cannot_stall_the_page(self):
+        # Failure mode: the request thread waits for a hung disk probe (an unreachable UNC path). Structural check, not
+        # a stopwatch (a wall-clock bound flaked under load): the probe is blocked on an Event the test controls, so
+        # disks_bounded can only return if it does NOT wait for the probe; if it did, the 30 s safety expiry fires and
+        # `released_by_timeout` fails the test.
+        started, release, released_by_timeout = threading.Event(), threading.Event(), []
+
         def hang(cfg):
-            time.sleep(3)
-            return {"rows": []}
+            started.set()
+            if not release.wait(30):
+                released_by_timeout.append(True)
+            return {"rows": [{"fake": 1}]}
         with mock.patch.object(ADM, "disks", side_effect=hang), mock.patch.object(ADM, "DISK_TIMEOUT_S", 0.3):
-            t0 = time.time()
-            out = ADM.disks_bounded(self.w.cfg)
-        self.assertLess(time.time() - t0, 2.0)
+            try:
+                out = ADM.disks_bounded(self.w.cfg)
+                self.assertTrue(started.is_set())
+                self.assertFalse(release.is_set())               # returned while the probe was still blocked
+            finally:
+                release.set()
+        self.assertEqual(released_by_timeout, [])
         self.assertEqual(out["rows"], [])
         self.assertNotIn("same", ADM.disks(self.w.cfg))
 
@@ -382,6 +397,10 @@ class RawRootOnSubstDrive(RawBase):
     @classmethod
     def make_raw_dir(cls) -> Path:
         cls.raw_tmp = Path(tempfile.mkdtemp(prefix="cj_rawroot_"))
+        # Drive letters are machine-wide: two gates (or worktrees) picking "the first free letter" at once took the
+        # same one. Hold a cross-process lock from picking the letter until it is released again.
+        cls._letter_lock = process_lock("subst_drive_letter", timeout=300)
+        cls._letter_lock.__enter__()
         cls.letter = free_letter()
         subprocess.run(["subst", f"{cls.letter}:", str(cls.raw_tmp)], check=True)
         return Path(f"{cls.letter}:\\rawdrive")
@@ -393,6 +412,7 @@ class RawRootOnSubstDrive(RawBase):
         finally:
             subprocess.run(["subst", f"{cls.letter}:", "/d"], check=False)
             shutil.rmtree(cls.raw_tmp, ignore_errors=True)
+            cls._letter_lock.__exit__(None, None, None)
 
     def test_flow_on_the_other_drive_letter(self):
         self.assertNotEqual(os.path.splitdrive(str(self.w.raw_base))[0].upper(),

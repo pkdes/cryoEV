@@ -342,7 +342,11 @@ class OldPackageCopy(unittest.TestCase):
                         break
                     page.wait_for_timeout(100)
                 self.assertGreater(len(claims_seen), n)
-                page.wait_for_timeout(500)
+                for _ in range(150):                                      # one more poll: it had its chance to move us
+                    if len(claims_seen) > n + 1:
+                        break
+                    page.wait_for_timeout(100)
+                self.assertGreater(len(claims_seen), n + 1)
                 self.assertEqual(fr.evaluate(state), [0, 1])              # still on its own card
                 self.assertTrue(frame.locator("#whoDlg").is_hidden())
                 self.assertEqual(errs, [])
