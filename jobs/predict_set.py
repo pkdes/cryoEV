@@ -604,10 +604,12 @@ def _set_record(ps_id, created, owner, model, where, path, session, n_images, co
 
 
 # ---------------------------------------------------------------- CLI
-def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def build_parser(allow_abbrev=True) -> argparse.ArgumentParser:
+    """The CLI parser; `.create` is the create subparser (python -m cryoev predict new reads its exact options)."""
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+                                 allow_abbrev=allow_abbrev)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    c = sub.add_parser("create", help="make a prediction set (status queued)")
+    c = sub.add_parser("create", help="make a prediction set (status queued)", allow_abbrev=allow_abbrev)
     c.add_argument("--from-dir", required=True, type=Path, help="folder of 8-bit PNG/JPG tiles")
     c.add_argument("--manifest", type=Path, help="tile MANIFEST.csv (output_name, nm_per_px, sample columns)")
     c.add_argument("--only", type=Path, help="list file: only these file names from --from-dir (one per line)")
@@ -629,7 +631,17 @@ def main(argv=None):
     c.add_argument("--registry", type=Path, help="registry folder (default <CryoAI-laptop>/registry)")
     c.add_argument("--root", type=Path, help=f"where sets live (default <CryoAI-laptop>/{PREDICT_DIR})")
     c.add_argument("--dry-run", action="store_true", help="every check, then the plan; nothing is written")
-    a = ap.parse_args(argv)
+    ap.create = c
+    return ap
+
+
+def create_options() -> dict:
+    """{exact option string of `create`: number of values it takes (0 for a flag)}."""
+    return {o: (0 if act.nargs == 0 else 1) for o, act in build_parser(False).create._option_string_actions.items()}
+
+
+def main(argv=None):
+    a = build_parser().parse_args(argv)
     try:
         names = None
         if a.only:

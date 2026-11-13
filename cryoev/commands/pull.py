@@ -108,6 +108,13 @@ def run(a) -> int:
     src, files = plan_files(a.kind, a.id, a.with_images)
     if not files:
         raise CM.CliError(f"nothing to pull: {src} has no files")
+    for path in [src] + [f for f, _ in files]:        # the sources too: never read from Box / a protected root
+        problem = CM.box_problem(path)
+        if problem:
+            raise CM.Refused(f"refused: the record points under Box ({problem}); agents never read it ({CM.GUIDE})")
+        problem = CM.path_guard.protected_problem(path)
+        if problem:
+            raise CM.CliError(f"refused: source {problem}")
     total = sum(p.stat().st_size for p, _ in files)
     args = {"kind": a.kind, "id": a.id, "with_images": bool(a.with_images)}
 

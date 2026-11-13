@@ -50,7 +50,7 @@ AFFECTS = [
     ("cryoev/", {"cryoev"}),                 # the agent CLI (docs/AGENTS.md)
     ("tests/", {"tests"}),
     ("inference/", {"jobs", "portal"}),
-    ("models/", {"jobs", "portal", "registry"}),
+    ("models/", {"jobs", "portal", "registry", "cryoev"}),
 ]
 DOC_ONLY = re.compile(r"(\.md|\.txt|\.png|\.jpg|\.svg)$", re.I)
 ALWAYS = {"tests"}                           # repo-wide checks, ~1 min

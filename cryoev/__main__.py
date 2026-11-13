@@ -17,7 +17,8 @@ Write (a DRY RUN that writes nothing unless --do; each --do is logged to <CryoAI
 
 Who: --who, else $CRYOEV_FOR; the agent: $CRYOEV_VIA (Claude Code sets both). Never automated (refused, exit 3):
 Roboflow uploads / relabels, production / promotion, git push, desktop training sends, anything under Box.
-Exit codes: 0 ok, 1 not found / partly failed, 2 refused or failed, 3 refused by rule.
+Exit codes: 0 ok; 1 not found (unknown id / package, no match) or done but its result line could not be logged;
+2 refused or failed (bad arguments, a guard, an error); 3 refused by rule (never automated, blind audit).
 """
 from __future__ import annotations
 

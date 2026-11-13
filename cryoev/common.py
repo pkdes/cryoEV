@@ -32,7 +32,10 @@ from data_utils.oslock import acquire_lock  # noqa: E402
 ACTION_LOG = "agent_actions.jsonl"          # = portal/audit.py CLI_FILE
 LOG_WAIT_S = 5.0
 GUIDE = "docs/AGENTS.md"
-EXIT_REFUSED = 3                             # never-automated actions and the blind-audit rule
+# exit codes (the same in __main__'s help and docs/AGENTS.md): 0 ok; 1 not found (unknown id / package, no match) or
+# done but its result line could not be logged; 2 refused or failed (bad arguments, a guard, an error); 3 refused by
+# rule (never automated, the blind-audit rule)
+EXIT_REFUSED = 3
 
 
 class CliError(Exception):
@@ -114,8 +117,13 @@ def label(who, via) -> str:
 
 # ---------------------------------------------------------------- paths
 def under(path, root) -> bool:
-    p, r = path_guard.normalize(path), path_guard.normalize(root)
-    return p == r or p.startswith(r.rstrip("\\/") + os.sep)
+    """path is root or inside it, compared as typed AND by real path (links, junctions and 8.3 names resolved on
+    the part that exists)."""
+    def inside(p, r):
+        return p == r or p.startswith(r.rstrip("\\/") + os.sep)
+    ps = {path_guard.normalize(path), path_guard.normalize(os.path.realpath(path))}
+    rs = {path_guard.normalize(root), path_guard.normalize(os.path.realpath(root))}
+    return any(inside(p, r) for p in ps for r in rs)
 
 
 def box_problem(path) -> str | None:

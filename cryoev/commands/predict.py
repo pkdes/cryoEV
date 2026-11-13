@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from cryoev import common as CM
 
-PATH_FLAGS = ("--from-dir", "--manifest", "--only", "--registry", "--root")
+READ_SOURCES = ("--from-dir", "--manifest", "--only")   # read only: Box refused; Cryo-image-processing allowed
 OWN = {"--do": 0, "--who": 1}                       # this CLI's flags (number of values) taken out of the args
 
 
@@ -39,26 +39,55 @@ def split_argv(argv) -> tuple:
     return rest, own
 
 
-def _paths(args) -> list:
-    out = []
-    for i, w in enumerate(args):
+def check_args(args) -> list:
+    """The user's args for `predict_set create`, normalised and checked: every option must be an EXACT create option
+    (predict_set's own parser; abbreviations such as --from or --man are refused, since argparse would expand them);
+    `--dry-run` is dropped (only this CLI adds it); every value is refused under Box, and the values of the flags
+    that write (--root, --registry, and anything that is not a read source) under any protected root
+    (data_utils/path_guard.py). -> the args to forward. Raises Refused (Box) or CliError."""
+    from jobs import predict_set as PS
+    opts = PS.create_options()
+    out, i = [], 0
+    while i < len(args):
+        w = args[i]
+        if not w.startswith("-"):
+            if CM.box_problem(w):
+                raise CM.Refused(f"refused: {CM.box_problem(w)}. Nothing under Box is read or written by agents.")
+            raise CM.CliError(f"refused: unexpected argument {w!r} (create takes options only)")
         key, eq, val = w.partition("=")
-        if key in PATH_FLAGS:
-            v = val if eq else (args[i + 1] if i + 1 < len(args) else None)
-            if v:
-                out.append(v)
+        if key == "--dry-run" and not eq:
+            i += 1
+            continue
+        if key not in opts or key in ("-h", "--help"):
+            raise CM.CliError(f"refused: {key} is not an exact `jobs/predict_set.py create` option (no abbreviations; "
+                              f"see python -m jobs.predict_set create --help)")
+        if opts[key] == 0:
+            if eq:
+                raise CM.CliError(f"refused: {key} takes no value")
+            out.append(w)
+            i += 1
+            continue
+        if eq:
+            value, take = val, 1
+        elif i + 1 < len(args):
+            value, take = args[i + 1], 2
+        else:
+            raise CM.CliError(f"refused: {key} needs a value")
+        problem = CM.box_problem(value)
+        if problem:
+            raise CM.Refused(f"refused: {key} {problem}. Nothing under Box is read or written by agents ({CM.GUIDE}).")
+        if key not in READ_SOURCES:
+            problem = CM.path_guard.protected_problem(value)
+            if problem:
+                raise CM.CliError(f"refused: {key} {problem}")
+        out += args[i:i + take]
+        i += take
     return out
 
 
 def new(a) -> int:
     from jobs import predict_set as PS
-    args = list(a.extra)
-    if "--dry-run" in args:
-        args.remove("--dry-run")
-    for p in _paths(args):
-        problem = CM.box_problem(p)
-        if problem:
-            raise CM.Refused(f"refused: {problem}. Nothing under Box is read or written by agents ({CM.GUIDE}).")
+    args = check_args(list(a.extra))
     safe = {"argv": args[:40]}                       # flags and local paths/labels only; nothing secret
 
     def plan():

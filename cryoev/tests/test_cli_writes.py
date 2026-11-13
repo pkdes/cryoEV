@@ -40,6 +40,9 @@ class DryRun(F.Platform):
         self.assertIn("[predict_set] DRY RUN, nothing written", results[("predict", "new")][1])
         self.assertIn("appended (dry run)", results[("register",)][1])
         self.assertIn("regenerates", results[("register",)][1])
+        # the samples' production model reads "candidate": the real import would restate the user's decision
+        self.assertIn(f"would restate production for {F.MODEL} as recorded by the user", results[("register",)][1])
+        self.assertIn("model (set-status production)=1", results[("register",)][1])
         # control: the same pull with --do changes the snapshot (the hash check sees writes)
         with self.as_agent():
             rc, out, err = self.cli("pull", "predictions", F.PS_ID, "--out", self.out, "--do")
@@ -187,6 +190,81 @@ class FeedbackStoreVia(F.Platform):
         with self.assertRaises(FS.Invalid):
             FS.set_status(self.feedback, 1, "pujan", "Done", via="Claude!")
         self.assertEqual(FS.read_all(self.feedback)[1]["status"], "Planned")    # fold ignores via
+
+
+class Round9QC(F.Platform):
+    """QC rulings on r9-cli: exact predict_set options only, Box on every value, pull sources guarded, realpath
+    containment, register --do."""
+
+    def box(self):
+        return path_guard.PROTECTED_ROOTS[-1] / "tiles"          # ~/Box as the guard knows it (never created)
+
+    def test_predict_abbreviations_and_box_values(self):
+        before = self.snapshot()
+        base = self.predict_args[2:]                               # everything but --from-dir <src>
+        cases = [(["--from", str(self.box())] + base, 2), (["--from-d=" + str(self.box())] + base, 2),
+                 (self.predict_args[:2] + ["--man", str(self.box())] + base[2:], 2),
+                 (["--from-dir=" + str(self.box())] + base, 3), (["--from-dir", str(self.box())] + base, 3),
+                 (self.predict_args + ["--root", str(self.box())], 3),
+                 (self.predict_args + ["--dry"], 2), (self.predict_args + ["--dry-run=1"], 2),
+                 (self.predict_args + ["--help"], 2), (self.predict_args + [str(self.box())], 3)]
+        for args, code in cases:
+            with self.subTest(args=args[:3]), self.as_agent():
+                rc, out, err = self.cli("predict", "new", *args, "--do")
+                self.assertEqual(rc, code, err)
+                self.assertIn("refused", err)
+        self.assertEqual(self.snapshot(), before)                  # nothing written, nothing logged
+        # control: the exact options pass, and a user's own --dry-run is dropped (the CLI decides): still a dry run
+        rc, out, err = self.cli("predict", "new", *self.predict_args, "--dry-run")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.count("--dry-run"), 1)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_pull_source_under_box_refused(self):
+        lv_dir = self.home / "Box" / "labels" / "lv_20261112_0000"         # this test's home: Path.home()/Box
+        lv_dir.mkdir(parents=True)
+        (lv_dir / "version.json").write_text("{}", encoding="utf-8")
+        with open(self.reg / "label_version.jsonl", "a", encoding="utf-8") as f:   # fixture setup, not the CLI
+            f.write(json.dumps({"schema": "label_version/1", "id": "lv_20261112_0000",
+                                "owner": str(lv_dir / "version.json"), "logged": "2026-11-12T00:00:00"}) + "\n")
+        with self.as_agent():
+            rc, out, err = self.cli("pull", "labels", "lv_20261112_0000", "--out", self.out)
+        self.assertEqual(rc, 3, err)
+        self.assertIn("Box", err)
+        self.assertFalse(self.out.exists())
+
+    @unittest.skipUnless(os.name == "nt", "junctions are Windows-only")
+    def test_out_through_a_junction_into_the_data_refused(self):
+        import _winapi
+        link = self.tmp / "looks_outside"
+        _winapi.CreateJunction(str(self.lap), str(link))
+        try:
+            with self.as_agent():
+                rc, out, err = self.cli("pull", "predictions", F.PS_ID, "--out", link / "pulls", "--do")
+            self.assertEqual(rc, 2, err)
+            self.assertIn("CryoAI-laptop data folder", err)
+            self.assertFalse((self.lap / "pulls").exists())
+        finally:
+            os.rmdir(link)
+
+    def test_register_do(self):
+        page = self.reg / "history.html"
+        self.assertFalse(page.exists())
+        with self.as_agent():
+            rc, out, err = self.cli("register", "--do")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("history page regenerated", out)
+        self.assertTrue(page.is_file() and page.stat().st_size > 1000)
+        log = self.action_log()
+        self.assertEqual([(x["action"], x["detail"]["phase"], x["actor"], x["detail"]["via"]) for x in log],
+                         [("registry import", "requested", "pujan", "claude"), ("registry import", "result", "pujan",
+                                                                                "claude")])
+        self.assertEqual(log[1]["detail"]["result"]["history_page"], "regenerated")
+        self.assertEqual(log[1]["detail"]["result"]["rc"], 0)
+        from cryoev import common as CM
+        model = CM.registry().current("model", self.reg)[F.MODEL]
+        self.assertEqual((model["status"], model["status_by"]), ("production", "pujan"))   # restated, user's
+        self.assertNotIn("status_via", model)
 
 
 if __name__ == "__main__":

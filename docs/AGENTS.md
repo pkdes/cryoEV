@@ -6,7 +6,8 @@ down and reviews, without leaving a mess. The short version:
 - **Use `python -m cryoev`** (run from the repo root) for what it covers, and the tools' own commands for the rest.
   Never write a record, a JSONL line or a data file by hand.
 - **Every write is a dry run first.** `cryoev` writes nothing without `--do`; the wrapped scripts have `--dry-run`.
-- **Everything an agent does is credited "claude for pujan"**: the person it acts for, plus the agent.
+- **After go-live, everything an agent does is credited as "claude for pujan"**: the person it acts for, plus the
+  agent. Until then, see the caveat under Identity: `CRYOEV_VIA` stays unset.
 - **Some things are never automated** (below). The CLI refuses them and points here.
 
 Machines are named by codename only (this repo is public): **home-laptop** (home base: registry, review servers,
@@ -15,6 +16,11 @@ folder, `\\<gpu-desktop>\cj`), **lab-login** (the lab's login node). Data paths 
 `<CryoAI>`; `data_utils/config.py` finds them.
 
 ## Identity: who did it, and through which agent
+
+> **Caveat: keep `CRYOEV_VIA` UNSET until the new registry code (with the `FORMAT.json` `min_reader` guard) is
+> deployed on EVERY machine that runs registry code** (home-laptop, gpu-desktop, lab-login). Older registry code
+> does not know the `via` field. Until then, identify the person only: `--who <id>` or `CRYOEV_FOR`. Everything below
+> about "claude for pujan" describes the state after that go-live.
 
 | Variable | Meaning | Set by |
 |---|---|---|
@@ -32,9 +38,9 @@ folder, `\\<gpu-desktop>\cj`), **lab-login** (the lab's login node). Data paths 
 
 | Write | Field | Where it shows |
 |---|---|---|
-| registry lines (`registry.py import`, `set-status`, `job new`, `jobs/sync.py pull`, prediction sets) | `via` on the line; `status_by` + `status_via` for an explicit status | history page and portal Data / Jobs pages: "claude for pujan" with an **AI** tag |
+| registry lines (`registry.py import`, `set-status`, `job new`, `jobs/sync.py pull`; prediction sets from `jobs/predict_set.py` / `predict_local.py` via the registry's env default) | `via` on the line; `status_by` + `status_via` for an explicit status | history page and portal Data / Jobs pages: "claude for pujan" with an **AI** tag |
 | label versions (`apply_review_edits.py`) | `version.json` `created_by` / `created_via` | Data page, history page |
-| feedback status / reply (`cryoev feedback`) | `who` + `via` on the event | `/feedback/all`; Admin, Recent actions |
+| feedback status / reply (`cryoev feedback`) | `who` + `via` on the event in the raw feedback file | the new status / reply on `/feedback/all` (that page does not show `via`); the agent shows in Admin, Recent actions (the action log) |
 | every `cryoev ... --do` | two lines in `<CryoAI-laptop>/logs/agent_actions.jsonl` | Admin, **Recent actions**: "claude for pujan" **AI**, door **"laptop CLI (unverified)"** |
 
 The action log is the portal audit's shape, `{t, actor, action, target, detail: {via, phase, args, result}}`: a
@@ -50,7 +56,8 @@ the portal; that is why the Admin page labels this door "unverified". The portal
 2. **Dry run first, read the plan, then `--do`.** A dry run prints exactly what would be written; for a wrapped
    script without its own dry run it prints the command and says the outputs are not checked.
 3. **Nothing under Box**, read or write. Pull destinations are refused under Box / `Cryo-image-processing`
-   (`data_utils/path_guard.py`) and inside the data folders or the repo.
+   (`data_utils/path_guard.py`) and inside the data folders or the repo (compared by real path); pull sources under
+   them are refused too.
 4. **Blind audits stay blind.** Never open a `_work_*` folder under `<CryoAI-laptop>/review` (a compare package's
    answer key, `decoys.json`) and never read individual review decisions while a package is not applied. `cryoev
    review progress` gives counts only and refuses the rest.
@@ -84,11 +91,12 @@ set-production`, `cryoev roboflow ...`: exit 3, with a pointer here). The user r
 | `feedback status <n> "<status>" [--do]` | write | New / Planned / "In progress" / Done / "Won't do"; backs the file up to `~/.cryoev/backups/feedback/<UTC>.jsonl` first |
 | `feedback reply <n> "<text>" [--do]` | write | a reply its author sees; backup first |
 | `pull labels\|predictions\|results\|dataset <id> --out DIR [--with-images] [--do]` | write (outside the data) | copies what the record points to into `DIR/<id>/` + `MANIFEST.sha256` + `pull.json`; never overwrites |
-| `register [--do]` | write | `registry.py import`, then `registry/history_page.py` **regenerates** `<registry>/history.html` |
-| `predict new <predict_set create args> [--do]` | write | `jobs/predict_set.py create` (dry run = its `--dry-run`: every check, nothing written) |
+| `register [--do]` | write | `registry.py import`, then `registry/history_page.py` **regenerates** `<registry>/history.html`. The import may **restate production** (the user's recorded decision for the production model, when its current line lost it); the dry run says so |
+| `predict new <predict_set create args> [--do]` | write | `jobs/predict_set.py create` (dry run = its `--dry-run`: every check, nothing written). Only exact create options (no abbreviations); `--dry-run` is the CLI's own; values under Box refused |
 
 Common flags: `--do` (really do it), `--who <id>` (else `CRYOEV_FOR`; required with `--do`), `--json` (reads).
-Exit codes: 0 ok, 1 not found, 2 refused / failed, 3 refused by rule (never automated, blind audit).
+Exit codes: 0 ok; 1 not found (unknown id / package, no match) or done but its result line could not be logged;
+2 refused or failed (bad arguments, a guard, an error); 3 refused by rule (never automated, blind audit).
 
 ## Recipes
 
@@ -106,8 +114,8 @@ Each recipe says what is recorded and where it shows. Details live in the linked
    Recorded: `<CryoAI-laptop>/predict/<ps id>/`, a `prediction_set` registry line (status queued), two action-log
    lines. Shows: the owner's Predict / Results pages, Data page (image sets), Admin Recent actions.
 3. Predict on home-laptop: `python -m jobs.predict_local --ps <ps id>` ([JOBS.md](JOBS.md), "Predict jobs").
-   Updates `status.json` and the registry line (stamped). gpu-desktop instead (`sync.py push-predict`): the user's
-   call.
+   Updates `status.json` and the registry line (stamped through the registry's env default). gpu-desktop instead
+   (`sync.py push-predict`): the user's call.
 4. `python -m cryoev register --do` if anything was made outside the tools.
 
 ### Analyse
@@ -146,9 +154,13 @@ action log. Shows: Admin Recent actions.
 1. A train job: `python registry/registry.py job new --type train --where desktop --name <name> --images <list>`
    (stamped from the env).
 2. Bundle: `python training/make_job_bundle.py --dataset-dir <dataset> -- --single-run ...` ([JOBS.md](JOBS.md)).
-   Code the job needs must be on GitHub main first: **pushing is the user's.**
+   It writes a thin job zip plus a content-keyed dataset pack (`ds_<sha12>.zip`, sent to the desktop once);
+   `--single-zip` is the old one-zip format. Count EVs with the `classes:` map, never raw `n_detections`. Code the
+   job needs must be on GitHub main first: **pushing is the user's.**
 3. **Stop: the user sends it** (`jobs/sync.py push <job> --bundle <zip> --share \\<gpu-desktop>\cj`).
-4. Watch: `python -m cryoev status` (Jobs page, Live tab).
+4. Watch: `python -m cryoev status`, or `python jobs/sync.py status --share \\<gpu-desktop>\cj` (agents may run
+   it). The history page's **Live** tab (and the Jobs page) need `jobs/monitor.py` running (a laptop service).
+   `sync.py cancel <job>` and `sync.py stop` / `start` (pause / resume the watcher) only with the user's OK.
 5. Bring results home: `python jobs/sync.py pull --share \\<gpu-desktop>\cj` (runs the importer and sets the job
    done / blocked, stamped), then `python -m cryoev register --do` to regenerate the history page. Promotion to
    production is the user's.

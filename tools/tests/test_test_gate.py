@@ -17,6 +17,7 @@ class Affected(unittest.TestCase):
         self.assertEqual(G.affected_suites(["registry/registry.py"])[0],
                          {"tests", "registry", "portal", "jobs", "data_utils", "cryoev"})
         self.assertEqual(G.affected_suites(["cryoev/common.py"])[0], {"tests", "cryoev"})
+        self.assertEqual(G.affected_suites(["models/models.yaml"])[0], {"tests", "jobs", "portal", "registry", "cryoev"})
 
     def test_shared_code_and_unknown_files_run_everything(self):
         self.assertEqual(G.affected_suites(["data_utils/oslock.py"])[0], set(G.SUITES))
