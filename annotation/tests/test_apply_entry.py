@@ -16,6 +16,7 @@ import contextlib
 import hashlib
 import io
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -34,15 +35,16 @@ PEOPLE = {"people": [{"id": "pujan", "name": "Pujan", "aliases": ["Puj", "Septem
                      {"id": "au1", "name": "AU 1", "aliases": []}]}
 
 # sha256 per scenario, computed with the pre-refactor CLI (r10-platform 1b3d43c)
-GOLDEN = {
-    "all_edits": "e5e417ef49f2ee41769573ca8fb147305323be49c35cd1cb9d545a8fda9aec1f",
-    "dry_run": "27d39c65a999eb749801167b0a9f5f8a37c95cc49a60a59e4a11822ef2f9c135",
+GOLDEN = {  # recomputed 2026-11-13 with class_groups_sha256 masked; pre-refactor code (1b3d43c) gives the same 8 digests
+
+    "all_edits": "9fdc3e1e7b5b6cd396d44820e367a8486f9d875b381d138da8127da8d6ebf18a",
+    "dry_run": "cf4b8a8238b833d400f29e9965a88e05c3bdaedc6d2ec02b9a2b4703288b751c",
     "refuse_exists": "76b9dbea0f214cd0370a22dda61290a9db107d1e1a38572a1ad3a1a008ce75bc",
     "refuse_source": "472f14086be522b894fa623b49512c879e63e2af4e92ae7da16e9de6366d76bf",
     "refuse_stamp": "64e1837520499ed913938a011b0d7b3cb278db722dc2395e13ba7f8692a29451",
     "refuse_who": "a788af461213788254bcdc02370bee36fa12063c0e109270a566e2831890e3c9",
-    "reviewed_only_who": "5489e744b730eeb3ff08337be8085cd3bbbb423f3e07edb339fca383f710e609",
-    "source_named": "fd5880429c4a3df64fa14dea39508183114b12e0ccde6fc35d131136be6c0196",
+    "reviewed_only_who": "4303a52d97fe2fa792f1841e4998dc507e01c95305767c893f91d771043511f4",
+    "source_named": "422ad28aa9ac53d158c2f4bacec9925f3873ffefcd93057d083eab35f9641090",
 }
 
 
@@ -95,10 +97,31 @@ class World:
         return ret, buf.getvalue(), exit_text
 
     def files(self, out: Path) -> dict:
-        return {p.name: self.norm(p.read_text(encoding="utf-8")) for p in sorted(Path(out).glob("*")) if p.is_file()}
+        """Output files, normalised. version.json's class_groups_sha256 hashes annotation/class_groups.yaml's raw bytes,
+        which differ by checkout (core.autocrlf: LF in one tree, CRLF in another) though git's content is the same; it is
+        checked against the real file here and then masked, so the digest doesn't depend on the checkout."""
+        out_files = {}
+        for p in sorted(Path(out).glob("*")):
+            if not p.is_file():
+                continue
+            text = p.read_text(encoding="utf-8")
+            if p.name == "version.json":
+                v = json.loads(text)
+                assert v.get("class_groups_sha256") == ar.sha256_file(ar.CLASS_GROUPS), "class_groups_sha256 is not the file's"
+                text = re.sub(r'"class_groups_sha256": "[0-9a-f]{64}"', '"class_groups_sha256": "<CG>"', text)
+            out_files[p.name] = self.norm(text)
+        return out_files
 
     def cleanup(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+
+def mask_cg(v):
+    """The return value carries class_groups_sha256 too: check it is the real file's, then mask it (see World.files)."""
+    if isinstance(v, dict) and "class_groups_sha256" in v:
+        assert v["class_groups_sha256"] == ar.sha256_file(ar.CLASS_GROUPS), "class_groups_sha256 is not the file's"
+        v = {**v, "class_groups_sha256": "<CG>"}
+    return v
 
 
 def digest(obj) -> str:
@@ -119,7 +142,7 @@ def scenarios() -> dict:
             lv = root / f"lv_{STAMP}"
             files = w.files(lv) if lv.is_dir() and not (prep and exit_text) else {}
             out[name] = {"files": files, "stdout": w.norm(log), "exit": w.norm(exit_text) if exit_text else None,
-                         "ret": json.loads(w.norm(json.dumps(ret, sort_keys=True))) if ret is not None else None}
+                         "ret": mask_cg(json.loads(w.norm(json.dumps(ret, sort_keys=True)))) if ret is not None else None}
         finally:
             w.cleanup()
 
