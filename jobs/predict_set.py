@@ -6,6 +6,7 @@
         (--sample-label <label> | --sample-label-from manifest:<column>)
         (--nm-per-px <x> | --nm-from-manifest) --nm-confirmed-by <person>
         [--conf 0.25] [--max-det 1000] [--imgsz N] [--session YYYYMMDD] [--name <text>] [--link] [--registry <dir>] [--root <dir>]
+        [--dry-run]
 
 Writes <root>/<ps id>/ (default root <CryoAI-laptop>/predict; the id ps_<YYYYMMDD>_<6 hex> is made here):
   images/<nnnn>.png|.jpg   the tiles, numbered in name order; the extension comes from the content. Copied (md5
@@ -19,6 +20,10 @@ Writes <root>/<ps id>/ (default root <CryoAI-laptop>/predict; the id ps_<YYYYMMD
                            waiting null
 and appends a prediction_set/1 record (status queued) to the registry. The folder is built in <root>/.incoming/ and
 renamed into place, so a reader never sees half a set.
+
+--dry-run (create(dry_run=True)): every check below runs (the tiles are read, md5'd and decoded) and the registry
+record is validated with a placeholder id, then the plan is printed; nothing is written, no lock file either. The id
+itself is chosen only by a real create. `python -m cryoev predict new` uses it as its dry run.
 
 Refused, with every problem listed and nothing written: no images, or more than 1000; a file that is not an 8-bit
 PNG or JPEG by its content (the extension is not trusted; MANIFEST.csv, the --manifest file and OS files such as
@@ -385,12 +390,12 @@ def _place(src: Path, dst: Path, md5: str, link: bool) -> str:
 # ---------------------------------------------------------------- create
 def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_label_column=None, nm_per_px=None,
            nm_from_manifest=False, manifest=None, names=None, conf=0.25, max_det=1000, imgsz=None, session=None,
-           registry_root=None, root=None, link=False, where="laptop", name=None, progress=None) -> Path:
+           registry_root=None, root=None, link=False, where="laptop", name=None, progress=None, dry_run=False):
     """Make a prediction set (see the module doc). -> its folder. Raises PredictSetError (nothing written).
     Slow (md5 + decode of every tile): the portal calls it from a worker thread.
     name: an optional display name (clean_name) written to request.json only when set. progress: optional
     callback(done, total, phase) with phase "checking" (md5 + decode) then "placing" (copy or link); additive, the
-    CLI passes none."""
+    CLI passes none. dry_run: all checks, then -> the plan dict (nothing written; the id is a placeholder)."""
     note = progress or (lambda *a: None)
     set_name = clean_name(name)                 # `name` is reused below as a file name
     from_dir = Path(from_dir)
@@ -517,9 +522,21 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
     if problems:
         raise PredictSetError(f"refused ({len(problems)} problem(s)); results would refuse mixed sets:"
                               + _list(problems))
-    # ---- id + record, validated before anything is written; the id is reserved by its .incoming folder
     regm = registry_module()
     day = datetime.now().strftime("%Y%m%d")
+    if dry_run:
+        ps_id = f"ps_{day}_000000"                   # placeholder: a real create picks a free random id
+        rec = _set_record(ps_id, C.now(), owner, model, where, record_path(root / ps_id), session, len(items), conf,
+                          max_det)
+        errs = regm.check_record(rec, regm.schemas())
+        if errs:
+            raise PredictSetError(f"refused: registry record invalid: {'; '.join(errs[:4])}")
+        return {"would_create": str(root / f"ps_{day}_<6 hex>"), "registry": str(reg), "n_images": len(items),
+                "samples": {k: len(v) for k, v in sorted(by_label.items())}, "model": model, "owner": owner,
+                "conf": conf, "max_det": max_det, "imgsz": imgsz, "session": session, "name": set_name,
+                "place": "hard-link where possible" if link else "copy (md5 checked)",
+                "record": {k: v for k, v in rec.items() if k not in ("id", "path", "logged", "created")}}
+    # ---- id + record, validated before anything is written; the id is reserved by its .incoming folder
     with locked(reg / REGISTRY_LOCK):
         taken = set(regm.current("prediction_set", reg))
         for _ in range(50):
@@ -532,11 +549,7 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
         (inc / IMAGES).mkdir(parents=True)
     created = C.now()
     final = root / ps_id
-    src = {"kind": "session", "session": str(session)} if session else {"kind": "upload"}
-    rec = {"schema": "prediction_set/1", "id": ps_id, "logged": created, "created": created, "owner": owner,
-           "model": model, "job": None, "where": where, "path": record_path(final), "source": src,
-           "n_images": len(items), "conf": conf, "max_det": max_det, "status": "queued",
-           "review_package": None, "results": None, "recorded_by": "jobs/predict_set.py create"}
+    rec = _set_record(ps_id, created, owner, model, where, record_path(final), session, len(items), conf, max_det)
     try:
         errs = regm.check_record(rec, regm.schemas())
         if errs:
@@ -581,6 +594,15 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
     return final
 
 
+def _set_record(ps_id, created, owner, model, where, path, session, n_images, conf, max_det) -> dict:
+    """The prediction_set/1 line create appends (status queued)."""
+    src = {"kind": "session", "session": str(session)} if session else {"kind": "upload"}
+    return {"schema": "prediction_set/1", "id": ps_id, "logged": created, "created": created, "owner": owner,
+            "model": model, "job": None, "where": where, "path": path, "source": src,
+            "n_images": n_images, "conf": conf, "max_det": max_det, "status": "queued",
+            "review_package": None, "results": None, "recorded_by": "jobs/predict_set.py create"}
+
+
 # ---------------------------------------------------------------- CLI
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -606,6 +628,7 @@ def main(argv=None):
     c.add_argument("--link", action="store_true", help="hard-link tiles on the same drive instead of copying")
     c.add_argument("--registry", type=Path, help="registry folder (default <CryoAI-laptop>/registry)")
     c.add_argument("--root", type=Path, help=f"where sets live (default <CryoAI-laptop>/{PREDICT_DIR})")
+    c.add_argument("--dry-run", action="store_true", help="every check, then the plan; nothing is written")
     a = ap.parse_args(argv)
     try:
         names = None
@@ -616,10 +639,17 @@ def main(argv=None):
                     sample_label_column=a.sample_label_from, nm_per_px=a.nm_per_px,
                     nm_from_manifest=a.nm_from_manifest, manifest=a.manifest, names=names, conf=a.conf,
                     max_det=a.max_det, imgsz=a.imgsz, session=a.session, registry_root=a.registry, root=a.root,
-                    link=a.link, name=a.name)
+                    link=a.link, name=a.name, dry_run=a.dry_run)
     except (PredictSetError, config.ConfigError, OSError) as e:
         print(f"[predict_set] {e}", file=sys.stderr)
         return 2
+    if a.dry_run:
+        print(f"[predict_set] DRY RUN, nothing written: would create {ps['would_create']} ({ps['n_images']} "
+              f"image(s), {ps['place']}) and append a prediction_set/1 line (status queued) to "
+              f"{ps['registry']}/prediction_set.jsonl")
+        print(json.dumps({k: v for k, v in ps.items() if k not in ("would_create", "registry")}, indent=1,
+                         default=str))
+        return 0
     print(ps.name)
     return 0
 

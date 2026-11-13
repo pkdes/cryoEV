@@ -6,6 +6,8 @@ One append-only JSON-lines file; the current state of every report is the fold o
      "text": <=4000, "steps": <=4000, "page": "/path" (no query, no fragment), "status": "New"}
     {"type": "status", "id": 12, "who": admin id, "t": ..., "status": "Planned"}
     {"type": "reply",  "id": 12, "who": admin id, "t": ..., "reply": <=2000}
+Any event may carry "via": the agent that acted for `who` (registry/actor.py, round 9: e.g. "claude" for the
+`python -m cryoev feedback status|reply` CLI). The portal never passes it; fold() ignores it.
 
 Location: env CJ_FEEDBACK_FILE (an absolute path) else <state dir>/feedback.jsonl. The live portals have two state
 dirs (:8770 key mode and :8448 access mode); the live setup sets CJ_FEEDBACK_FILE for both services to ONE file, so
@@ -13,12 +15,14 @@ both see the same reports. Writers take a thread lock plus an OS lock (data_util
 the rate limit (20 creates per user per UTC day) is counted and the create appended under that same lock.
 
 Read-only triage for agents:   python -m portal.feedback_store list --file <path> [--json]
+Status / reply from an agent:   python -m cryoev feedback status|reply ... (dry run unless --do; docs/AGENTS.md)
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import unicodedata
@@ -37,6 +41,7 @@ STATUSES = ("New", "Planned", "In progress", "Done", "Won't do")
 TEXT_MAX, STEPS_MAX, REPLY_MAX, PAGE_MAX = 4000, 4000, 2000, 200
 DAILY_MAX = 20
 LOCK_WAIT_S = 5.0
+VIA_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")    # = registry/actor.py VIA_RE (an agent id, e.g. "claude")
 _lock = threading.Lock()
 
 
@@ -69,6 +74,15 @@ def clean_page(p) -> str:
 def norm(x) -> str:
     """Line endings as \n (a browser form sends \r\n) so the limits count what is stored and shown."""
     return (x or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _via(rec: dict, via) -> dict:
+    """rec with "via" set when an agent acted (a short lower-case id, registry/actor.py VIA_RE), else unchanged."""
+    if via:
+        if not isinstance(via, str) or not VIA_RE.match(via):
+            raise Invalid(f"via {via!r} is not a short lower-case id")
+        rec["via"] = via
+    return rec
 
 
 def _now() -> str:
@@ -144,8 +158,9 @@ def _append(path: Path, rec: dict, check=None):
     return rec
 
 
-def create(path, who, kind, text, steps="", page="") -> dict:
-    """-> the create event (with the new id). Raises Invalid, RateLimited (20 per user per UTC day), OSError."""
+def create(path, who, kind, text, steps="", page="", via=None) -> dict:
+    """-> the create event (with the new id). Raises Invalid, RateLimited (20 per user per UTC day), OSError.
+    via: the agent acting for `who`, or None."""
     text, steps = norm(text), norm(steps)
     if kind not in KINDS:
         raise Invalid("Choose what kind of report this is.")
@@ -155,6 +170,7 @@ def create(path, who, kind, text, steps="", page="") -> dict:
         raise Invalid("That is too long.")
     rec = {"type": "create", "id": 0, "who": str(who), "t": _now(), "kind": kind, "text": text, "steps": steps,
            "page": clean_page(page), "status": "New"}
+    _via(rec, via)
 
     def check(events, r):
         day = r["t"][:10]
@@ -174,18 +190,18 @@ def _must_exist(events, r):
     return r
 
 
-def set_status(path, rid: int, who, status: str) -> dict:
+def set_status(path, rid: int, who, status: str, via=None) -> dict:
     if status not in STATUSES:
         raise Invalid("Unknown status.")
-    return _append(Path(path), {"type": "status", "id": rid, "who": str(who), "t": _now(), "status": status},
-                   _must_exist)
+    return _append(Path(path), _via({"type": "status", "id": rid, "who": str(who), "t": _now(), "status": status},
+                                    via), _must_exist)
 
 
-def set_reply(path, rid: int, who, reply: str) -> dict:
+def set_reply(path, rid: int, who, reply: str, via=None) -> dict:
     reply = norm(reply)
     if len(reply) > REPLY_MAX:
         raise Invalid("That reply is too long.")
-    return _append(Path(path), {"type": "reply", "id": rid, "who": str(who), "t": _now(), "reply": reply},
+    return _append(Path(path), _via({"type": "reply", "id": rid, "who": str(who), "t": _now(), "reply": reply}, via),
                    _must_exist)
 
 

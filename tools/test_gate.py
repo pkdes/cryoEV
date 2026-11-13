@@ -35,18 +35,19 @@ REPO = Path(__file__).resolve().parent.parent
 SUITES = {                       # name -> test dir (relative to the repo)
     "jobs": "jobs/tests", "tests": "tests", "registry": "registry/tests", "results": "results/tests",
     "tools": "tools/tests", "annotation": "annotation/tests", "data_utils": "data_utils/tests",
-    "portal": "portal/tests",
+    "portal": "portal/tests", "cryoev": "cryoev/tests",
 }
 # changed path prefix -> suites that exercise it (a file's own suite plus the suites that import it)
 AFFECTS = [
-    ("portal/", {"portal"}),
-    ("annotation/", {"annotation", "portal", "results"}),
+    ("portal/", {"portal", "cryoev"}),
+    ("annotation/", {"annotation", "portal", "results", "cryoev"}),
     ("results/", {"results", "portal"}),
-    ("jobs/", {"jobs", "portal", "tools"}),
+    ("jobs/", {"jobs", "portal", "tools", "cryoev"}),
     ("training/", {"jobs", "portal"}),
-    ("registry/", {"registry", "portal", "jobs"}),
+    ("registry/", {"registry", "portal", "jobs", "data_utils", "cryoev"}),   # dataset_from_lv uses the registry
     ("data_utils/", set(SUITES)),            # oslock etc. are used everywhere
-    ("tools/", {"tools"}),
+    ("tools/", {"tools", "cryoev"}),
+    ("cryoev/", {"cryoev"}),                 # the agent CLI (docs/AGENTS.md)
     ("tests/", {"tests"}),
     ("inference/", {"jobs", "portal"}),
     ("models/", {"jobs", "portal", "registry"}),
