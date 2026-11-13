@@ -755,7 +755,7 @@ class ActionBase(unittest.TestCase):
             else:
                 r.write_text("x", encoding="utf-8")
         self.audit_file = self.env.state / "audit" / "portal.jsonl"
-        self.audit_file.unlink(missing_ok=True)
+        T.remove_file(self.audit_file)
         self.write_live()
 
     def post(self, path, body, role="admin", origin="same", raw=None):

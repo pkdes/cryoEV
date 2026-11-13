@@ -640,8 +640,7 @@ class PortalCase(unittest.TestCase):
 
     def setUp(self):
         for f in (self.env.state / "predict_sources.json", PA.audit_path(self.env.state)):
-            if f.exists():
-                f.unlink()
+            T.remove_file(f)
         PSRC.clear_cache()
 
     def get(self, path, who="admin"):

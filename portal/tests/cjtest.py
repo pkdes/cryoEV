@@ -174,6 +174,20 @@ def login(port, key) -> str:
 GATE_DETAIL_KEYS = {"status", "from", "to", "n"}
 
 
+def remove_file(path, wait_s=5.0) -> None:
+    """Delete a file a test reset needs gone, retrying while the Gate's audit worker (another thread) still has it
+    open: on Windows an open handle makes unlink fail with PermissionError for a moment."""
+    end = time.monotonic() + wait_s
+    while True:
+        try:
+            Path(path).unlink(missing_ok=True)
+            return
+        except PermissionError:
+            if time.monotonic() > end:
+                raise
+            time.sleep(0.05)
+
+
 def gate_line(rec) -> bool:
     """A line from the Gate's audit catch-all (portal/app.py, round 9 #17): a sign-in, or detail {"status": n} (plus
     a counter line's from / to / n). Module tests that count their own lines filter these out."""
