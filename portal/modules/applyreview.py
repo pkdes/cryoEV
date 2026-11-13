@@ -212,7 +212,11 @@ def prune(root: Path, now=None, keep_days=KEEP_DAYS) -> list:
     except OSError:
         return gone
     for d in pkgs:
-        for t in list(d.iterdir()):
+        try:
+            kids = list(d.iterdir())
+        except OSError:
+            continue
+        for t in kids:
             when = ts_time(t.name) if t.is_dir() else None
             if when is not None and now - when > timedelta(days=keep_days):
                 shutil.rmtree(t, ignore_errors=True)

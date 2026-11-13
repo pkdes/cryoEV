@@ -93,6 +93,7 @@ class World:
         make_package(self.review, "pred_x", self.base)
         shutil.rmtree(self.review.parent / "_build")
         shutil.rmtree(self.tmp / "_seed")
+        self.env.write_live(T.live_doc())                                            # a registry file to hash
         self.services = self.tmp / "services.json"
         self.services.write_text(json.dumps({"services": [
             {"name": "review", "argv": ["{python}", "annotation/review_server.py", "--package",
@@ -163,6 +164,18 @@ class Eligibility(unittest.TestCase):
         self.assertIn(f'--base "{self.w.base}"', cmd)
         self.assertIn(f'--out-root "{self.w.lap / "labels"}"', cmd)                   # not the CLI default labels/labels
         self.assertTrue(cmd.endswith("--who pujan"))
+
+    def test_refused_apply_is_recorded(self):
+        row = self.rows()["lab_ok"]
+        coco = json.loads(self.w.base.read_text(encoding="utf-8"))
+        coco["annotations"] = coco["annotations"][1:]                                 # the base changed since packaging
+        self.w.base.write_text(json.dumps(coco), encoding="utf-8")
+        ts, info = M.run_preview(self.w.cfg(), row, "pujan")
+        self.assertIn("[ERROR] the package was not built from this base", info["error"])
+        folder = M.scratch_root(self.w.cfg()) / "lab_ok" / ts
+        self.assertFalse((folder / "labels").exists())
+        self.assertFalse((folder / "report").exists())
+        self.assertEqual(json.loads((folder / "preview.json").read_text(encoding="utf-8"))["error"], info["error"])
 
     def test_prune(self):
         root = M.scratch_root(self.w.cfg())
@@ -254,6 +267,8 @@ class Portal(unittest.TestCase):
         scratch = M.scratch_root(self.w.cfg())
         state_before = {p for p in self.w.env.state.rglob("*") if p.is_file()}
         before = tree_hash(self.w.tmp, self.w.env.state)
+        self.assertIn(str(self.w.base.relative_to(self.w.tmp)), before)         # control: the hash sees the label set
+        self.assertIn(str(Path("registry", "live", "live.json")), before)       # and the registry folder
         st, h, _ = self.preview()
         self.assertEqual(st, 303)
         loc = T.hget(h, "location")
