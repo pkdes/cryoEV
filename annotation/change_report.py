@@ -65,8 +65,10 @@ def build(lv: Path, images: Path, out: Path, title: str | None, max_side: int, e
     if edits_sha:
         ver["edits_sha256"] = edits_sha
     rows = [json.loads(x) for x in (lv / "changes.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
-    conflicts = list(csv.DictReader((lv / "conflicts.csv").open(encoding="utf-8"))) \
-        if (lv / "conflicts.csv").exists() else []
+    conflicts = []
+    if (lv / "conflicts.csv").exists():   # closed at once: the portal's preview prunes this folder later (Windows)
+        with (lv / "conflicts.csv").open(encoding="utf-8") as fh:
+            conflicts = list(csv.DictReader(fh))
     base = load_coco(ver["base_path"])
     new = load_coco(lv / "labels.coco.json")
     out.mkdir(parents=True, exist_ok=False)
