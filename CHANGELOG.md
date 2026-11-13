@@ -7,6 +7,16 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-13 07:00 · Round 10: agent API (read-only), apply preview, eval jobs, sturdier tests
+
+- **Agent API (read-only, tailnet for now):** on **My account** you can make a token for your own AI agent (shown once, up to 90 days, revocable). The agent can read data, lineage, your predictions and results status, and job summaries, with your own permissions, capped at advanced. Its visits show in Recent actions as "<agent> for <you>" [AI]. Admins see and revoke everyone's tokens in People. See docs/API.md.
+- **Label sets:** a replaced label set now links to its replacement ("Replaced by").
+- **Apply preview (admins):** for review packages built on a label set, "Preview apply" shows the change report from a scratch run. Nothing is written to the labels; the real apply stays a command for now.
+- **Desktop eval jobs (code only):** a new job type runs the test-set metrics (model.val, overlap_mask off) on the desktop and writes a metrics file. It is off until switched on at the desktop.
+- **Behind the scenes:** the production model is no longer re-promoted by imports after you change it; tests run one at a time per machine and no longer flake on timing.
+
+**Components:** portal, registry, jobs, CLI
+
 ## 2026-11-12 19:43 · Review page 2026-11-12.2 (blind-audit package)
 
 - Editor: the same point eraser as Quick check. Select points (click; shift-click to add; Shift-drag a box), then "Delete N points" or the Delete key. Outlines keep at least 3 points; Esc clears the selection, Z undoes.
