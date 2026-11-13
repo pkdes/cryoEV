@@ -2126,6 +2126,7 @@ function cardPinchMove() {  // tri.wt (the wheel zoom's transform) from the pinc
 tcv.addEventListener("pointerdown", ev => {
   if (tri.busy) return;  // the card is flying off (#19)
   try { tcv.setPointerCapture(ev.pointerId); } catch (e) {}
+  if (ev.isPrimary) { tptr.clear(); tri.pinch = null; }  // a new gesture: nothing left over from a lost pointerup
   tptr.set(ev.pointerId, cardXY(ev));
   if (tptr.size === 2) return cardPinchStart();
   if (tptr.size > 2 || tri.pinch) return;
