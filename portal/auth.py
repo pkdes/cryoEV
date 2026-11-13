@@ -58,6 +58,7 @@ COOKIE = "__Host-cj_session"
 SESSION_S = 30 * 86400            # 30 days
 ROLES = ("admin", "advanced", "basic")   # admin > advanced > basic; modules list every role they allow
 ID_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,39}")
+RESERVED_IDS = frozenset({"cli", "-"})   # audit actors that are never a person (the token CLI, anonymous)
 EMAIL_RE = re.compile(r"(?=.{3,254}\Z)[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+")
 KEY_BYTES = 32
 REPLACE_TRIES = 10                # os.replace retries on PermissionError; backoff totals ~0.23 s
@@ -298,11 +299,17 @@ def email_taken(people, email: str, pid: str) -> str | None:
     return None
 
 
-def add_key(path: Path, pid: str, role: str, email: str | None = None) -> str:
+def id_ok(pid) -> bool:
+    """A person id: ID_RE and not a reserved audit actor (RESERVED_IDS)."""
+    return isinstance(pid, str) and bool(ID_RE.fullmatch(pid)) and pid not in RESERVED_IDS
+
+
+def add_key(path: Path, pid: str, role: str, email: str | None = None, tokens: Path | None = None) -> str:
     """Give `pid` a new key (replacing any old one, which ends its sessions). -> the key, shown once.
-    The entry's email is kept (or set to `email`; emails are unique among active people)."""
-    if not ID_RE.fullmatch(pid):
-        raise ValueError(f"bad id {pid!r}: lower-case letters, digits, '_', '.', '-'")
+    The entry's email is kept (or set to `email`; emails are unique among active people). Re-keying an existing
+    person with `tokens` (a token store path) revokes their agent tokens too."""
+    if not id_ok(pid):
+        raise ValueError(f"bad id {pid!r}: lower-case letters, digits, '_', '.', '-' (not {', '.join(sorted(RESERVED_IDS))})")
     if role not in ROLES:
         raise ValueError(f"role must be one of {ROLES}")
     new_email = norm_email(email) if email is not None else None
@@ -320,6 +327,11 @@ def add_key(path: Path, pid: str, role: str, email: str | None = None) -> str:
             entry["email"] = keep
         doc["people"] = [p for p in doc["people"] if p.get("id") != pid] + [entry]
         write_json_atomic(path, doc)
+    if old and tokens is not None:                  # a re-key: the old key may be lost, so are its agent's tokens
+        try:
+            revoke_person_tokens(tokens, pid, by=CLI_ACTOR)
+        except (OSError, TokenError) as e:
+            print(f"[WARN] {pid}'s agent tokens were not revoked ({e}). Run revoke-token for each.", file=sys.stderr)
     return key
 
 
@@ -358,7 +370,7 @@ def revoke(path: Path, pid: str, tokens: Path | None = None) -> bool:
             write_json_atomic(path, doc)
     if hit and tokens is not None:
         try:
-            revoke_person_tokens(tokens, pid, by="cli")
+            revoke_person_tokens(tokens, pid, by=CLI_ACTOR)
         except (OSError, TokenError) as e:          # the person is revoked; their tokens fail the person check
             print(f"[WARN] {pid}'s agent tokens were not marked revoked ({e}); they stop working anyway while "
                   f"{pid} is revoked. Run revoke-token for each.", file=sys.stderr)
@@ -370,6 +382,8 @@ TOKENS_ENV = "CJ_AGENT_TOKENS"
 TOKEN_PREFIX = "cev_"
 TOKEN_RE = re.compile(r"cev_[A-Za-z0-9_-]{43}\Z")       # tools/prepush_scan.py blocks this shape in pushes
 TOKEN_ID_RE = re.compile(r"tk_[0-9a-f]{12}\Z")
+PURGE_AFTER_S = 30 * 86400                              # revoked / expired records are dropped this long after
+CLI_ACTOR = "cli"                                       # = portal.audit.CLI_ACTOR (a reserved id)
 TOKEN_MAX_DAYS = 90
 TOKEN_DEFAULT_DAYS = 30
 TOKENS_PER_PERSON = 10                                  # live (not revoked, not expired) tokens per person
@@ -452,6 +466,17 @@ def token_state(rec: dict, now: float | None = None) -> str:
     return "expired" if exp is None or exp <= now else "active"
 
 
+def purgeable(rec, now: float) -> bool:
+    """A record create_token drops: revoked or expired more than PURGE_AFTER_S ago (or not a record at all)."""
+    if not isinstance(rec, dict):
+        return True
+    state = token_state(rec, now)
+    if state == "active":
+        return False
+    t = _ts(rec.get("revoked")) if state == "revoked" else _ts(rec.get("expires"))
+    return t is None or now - t > PURGE_AFTER_S
+
+
 def public_token(rec: dict, now: float | None = None) -> dict:
     """The only token fields that leave the store (never sha256)."""
     out = {k: rec.get(k) for k in ("id", "person", "agent", "scope", "created", "expires", "revoked",
@@ -472,7 +497,7 @@ def create_token(path: Path, person: str, agent: str, days: int = TOKEN_DEFAULT_
     agent name / days / scope, a person who isn't active on `roster` (when given), TOKENS_PER_PERSON live tokens
     already; OSError when the store is locked or can't be written."""
     now = time.time() if now is None else now
-    if not isinstance(person, str) or not ID_RE.fullmatch(person):
+    if not id_ok(person):
         raise TokenError("bad person id")
     if not isinstance(agent, str) or not ACTOR.VIA_RE.match(agent):
         raise TokenError("The agent name is 1 to 32 lower-case letters, digits, '_' or '-', starting with a letter "
@@ -491,6 +516,7 @@ def create_token(path: Path, person: str, agent: str, days: int = TOKEN_DEFAULT_
         raise TokenError(f"{person} is not on the list, or revoked.")
     with tokens_lock(path):
         doc = _load_tokens(path)
+        doc["tokens"] = [r for r in doc["tokens"] if not purgeable(r, now)]
         live = [r for r in doc["tokens"] if isinstance(r, dict) and r.get("person") == person
                 and token_state(r, now) == "active"]
         if len(live) >= TOKENS_PER_PERSON:
@@ -664,9 +690,20 @@ def token_audit(state_dir, action, rec) -> None:
     if v:
         detail["via"] = v
     try:
-        PA.audit(state_dir or default_state_dir(), "cli", action, rec.get("id"), detail)
+        PA.audit(state_dir or default_state_dir(), CLI_ACTOR, action, rec.get("id"), detail)
     except OSError as e:
         print(f"[WARN] audit line not written ({type(e).__name__})", file=sys.stderr)
+
+
+def cli_tokens(args) -> Path | None:
+    """The token store a roster command (revoke, add-key) also updates: --tokens, else $CJ_AGENT_TOKENS, else the
+    default store only with the default roster (a --roster elsewhere, e.g. a test's, never touches the real store)."""
+    t = getattr(args, "tokens", None)
+    if t:
+        return Path(t)
+    if os.environ.get(TOKENS_ENV):
+        return Path(os.environ[TOKENS_ENV])
+    return default_tokens() if args.roster is None else None
 
 
 def token_cli(args) -> int:
@@ -681,7 +718,7 @@ def token_cli(args) -> int:
             print(token)
             return 0
         if args.cmd == "revoke-token":
-            rec = revoke_token(path, args.token_id, by="cli")
+            rec = revoke_token(path, args.token_id, by=CLI_ACTOR)
             token_audit(args.state_dir, "agent token revoked", rec)
             print(f"[OK] {rec['id']} ({rec['agent']} for {rec['person']}) revoked")
             return 0
@@ -723,7 +760,7 @@ def main(argv=None):
     rt.add_argument("--token-id", required=True, help="tk_... (from list-tokens)")
     for p in (a, r, e, sub.choices["list"], m):
         p.add_argument("--roster", type=Path, default=None, help=f"default {default_roster()}")
-    for p in (r, m, lt, rt):
+    for p in (a, r, m, lt, rt):
         p.add_argument("--tokens", type=Path, default=None,
                        help=f"the agent token store (default ${TOKENS_ENV}, else {default_dir() / 'agent_tokens.json'})")
     for p in (m, rt):
@@ -743,7 +780,7 @@ def main(argv=None):
         return 0
     if args.cmd == "add-key":
         try:
-            key = add_key(path, args.id, args.role, args.email)
+            key = add_key(path, args.id, args.role, args.email, tokens=cli_tokens(args))
         except ValueError as e:
             ap.error(str(e))
         base = (args.base or default_base()).rstrip("/")
@@ -753,9 +790,7 @@ def main(argv=None):
     if args.cmd == "revoke":
         # the person's agent tokens too: the store named (or $CJ_AGENT_TOKENS), else the default store only with the
         # default roster (a --roster elsewhere, e.g. a test's, never touches the real store)
-        tokens = args.tokens or (Path(os.environ[TOKENS_ENV]) if os.environ.get(TOKENS_ENV) else
-                                 default_tokens() if args.roster is None else None)
-        ok = revoke(path, args.id, tokens=tokens)
+        ok = revoke(path, args.id, tokens=cli_tokens(args))
         print(f"[OK] {args.id} revoked" if ok else f"[--] {args.id} not found or already revoked")
         return 0 if ok else 1
     for p in _load(path)["people"]:

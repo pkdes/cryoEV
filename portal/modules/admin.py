@@ -315,7 +315,7 @@ BAD_ID = "An id is 1 to 40 lower-case letters, digits, '_', '.' or '-', starting
 
 
 def _check_id(pid) -> None:
-    if not isinstance(pid, str) or not A.ID_RE.fullmatch(pid):
+    if not A.id_ok(pid):                                 # ID_RE, and never a reserved audit actor ("cli", "-")
         raise Refused(BAD_ID, 400)
 
 
@@ -1310,8 +1310,10 @@ def audit_row(e0, own_door="this door") -> dict:
     door = str(e0.get("door") or "this door")
     door = own_door if door == "this door" else door
     name = ACTOR.label(e.get("actor") or "-", via) or "-"
+    if e.get("actor") == PA.CLI_ACTOR:                         # the token CLI: whoever ran it, a declared via
+        door = PA.CLI_DOOR
     unv = door == PA.CLI_DOOR or "unverified" in door          # a self-declared identity (the laptop CLI)
-    if via and not unv and (act != "signed in" or d.get("door") == PA.API_DOOR) and e.get("actor") != "cli":
+    if via and not unv and (act != "signed in" or d.get("door") == PA.API_DOOR):
         door = PA.API_DOOR                                      # a bearer token the portal verified
     return {"when": when, "name": name, "who": f"{name} (unverified)" if unv else name, "ai": bool(via),
             "what": word, "target": "" if e.get("target") is None else str(e.get("target")),
@@ -1544,7 +1546,16 @@ def routes(ctx) -> list:
         if err:
             return err
         key, had = res
-        warn = await run_in_threadpool(try_audit, actor, "key_made", pid, {"rotated": had})
+        detail = {"rotated": had}
+        if had:                                          # a re-key: the person's agent tokens go too
+            try:
+                n_tok = await run_in_threadpool(A.revoke_person_tokens, A.tokens_path(ctx.cfg), pid, actor)
+                if n_tok:
+                    detail["tokens_revoked"] = n_tok
+            except (OSError, A.TokenError) as e:
+                log.error("admin: %s's agent tokens not revoked on re-key (%s)", pid, type(e).__name__)
+                detail["tokens_revoked"] = "failed"
+        warn = await run_in_threadpool(try_audit, actor, "key_made", pid, detail)
         base = await run_in_threadpool(link_base, ctx.cfg, request.headers.get("origin"))
         link = f"{base}/login?k={key}"
         del key

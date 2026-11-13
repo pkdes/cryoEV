@@ -277,12 +277,13 @@ def bearer_of(scope) -> str | None:
     (any other scheme is ignored, as before); "" for a bearer header that is empty or not the only Authorization
     header (refused, never guessed)."""
     vals = [v.decode("latin-1").strip() for k, v in scope.get("headers", []) if k.lower() == b"authorization"]
-    bearers = [v for v in vals if v.partition(" ")[0].lower() == "bearer"]
+    parts = [v.split(None, 1) for v in vals]            # the scheme ends at any whitespace (a tab too)
+    bearers = [p for p in parts if p and p[0].lower() == "bearer"]
     if not bearers:
         return None
-    if len(vals) != 1:
+    if len(vals) != 1 or len(bearers[0]) != 2:
         return ""
-    return bearers[0].partition(" ")[2].strip()
+    return bearers[0][1].strip()
 
 
 def api_error(status: int, text: str) -> Response:

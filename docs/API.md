@@ -24,7 +24,10 @@ Limits:
 To revoke a token:
 - you revoke your own on My account;
 - an admin revokes anyone's on Admin > People (each person's card lists their tokens);
-- revoking a person revokes all their tokens.
+- revoking a person revokes all their tokens;
+- making a new key link for a person (re-keying them) revokes all their tokens too.
+
+Revoked and expired tokens are dropped from the store 30 days later. The ids `cli` and `-` are reserved: no person can have them.
 
 **CLI fallback** (on the portal computer):
 

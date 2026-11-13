@@ -52,6 +52,7 @@ MAX_WINDOWS = 5000               # open counting windows; beyond this, new keys 
 OVERFLOW_KEY = ("-", "other frequent actions (window table full)", None, None, None)
 CLI_FILE = "agent_actions.jsonl"     # the laptop CLI's own log (self-declared identity), read via CJ_AUDIT_EXTRA
 CLI_DOOR = "laptop CLI (unverified)"
+CLI_ACTOR = "cli"                    # the actor of portal.auth CLI lines (a reserved person id: never a person)
 DOOR_NAMES = {"key": "tailnet key", "access": "access"}   # this portal's door, by its --auth mode
 API_DOOR = "API (verified)"                               # bearer-token requests (portal/app.py Gate)
 _lock = threading.Lock()

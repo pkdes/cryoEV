@@ -111,6 +111,55 @@ class Store(unittest.TestCase):
             A.create_token(self.path, "nobody", "claude", roster=self.roster)
         self.assertFalse(self.path.exists())                       # nothing was written
 
+    def test_agent_name_with_a_trailing_newline_is_refused(self):
+        with self.assertRaises(A.TokenError):
+            A.create_token(self.path, "ann", "claude\n")
+        tok, _ = A.create_token(self.path, "ann", "claude")                     # control
+        st, ro = A.TokenStore(self.path), A.Roster(self.roster)
+        self.assertIsNotNone(st.check(tok, ro)[0])
+        doc = json.loads(self.path.read_text(encoding="utf-8"))
+        doc["tokens"][0]["agent"] = "claude\n"                                   # hand-planted
+        A.write_json_atomic(self.path, doc)
+        self.assertEqual(st.check(tok, ro), (None, "scope"))
+
+    def test_old_revoked_and_expired_records_are_purged_on_create(self):
+        now = time.time()
+        _, old_rev = A.create_token(self.path, "ann", "claude", 30, now=now - 50 * 86400)
+        A.revoke_token(self.path, old_rev["id"], by="t", now=now - 40 * 86400)
+        _, old_exp = A.create_token(self.path, "ann", "claude", 30, now=now - 80 * 86400)    # expired 50 d ago
+        _, new_rev = A.create_token(self.path, "ann", "claude", 30, now=now - 20 * 86400)
+        A.revoke_token(self.path, new_rev["id"], by="t", now=now - 10 * 86400)
+        _, new_exp = A.create_token(self.path, "ann", "claude", 1, now=now - 5 * 86400)      # expired 4 d ago
+        _, live = A.create_token(self.path, "ann", "claude", 30, now=now - 1)
+        ids = {r["id"] for r in A.list_tokens(self.path)}
+        self.assertEqual(ids & {old_rev["id"], old_exp["id"]}, set())
+        self.assertTrue({new_rev["id"], new_exp["id"], live["id"]} <= ids)
+
+    def test_reserved_person_ids(self):
+        for pid in ("cli", "-"):
+            with self.subTest(pid=pid):
+                with self.assertRaises(ValueError):
+                    A.add_key(self.roster, pid, "basic")
+                with self.assertRaises(ADM.Refused):
+                    ADM.add_person(self.roster, pid, "basic", f"x{len(pid)}@example.org", with_key=False)
+                with self.assertRaises(A.TokenError):
+                    A.create_token(self.path, pid, "claude")
+        A.add_key(self.roster, "clio", "basic")                                  # control: a normal id
+
+    def test_rekey_revokes_the_persons_tokens(self):
+        A.create_token(self.path, "ann", "claude")
+        A.create_token(self.path, "mail", "claude")
+        A.add_key(self.roster, "newbie", "basic", tokens=self.path)              # a new person: nobody's tokens
+        self.assertEqual(A.list_tokens(self.path, "ann")[0]["state"], "active")
+        A.add_key(self.roster, "ann", "advanced", tokens=self.path)              # a re-key
+        self.assertEqual(A.list_tokens(self.path, "ann")[0]["state"], "revoked")
+        self.assertEqual(A.list_tokens(self.path, "mail")[0]["state"], "active")
+        _, ann2 = A.create_token(self.path, "ann", "claude")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(A.main(["add-key", "--id", "ann", "--role", "advanced", "--roster", str(self.roster),
+                                     "--tokens", str(self.path), "--base", "http://x"]), 0)
+        self.assertEqual({r["id"]: r["state"] for r in A.list_tokens(self.path, "ann")}[ann2["id"]], "revoked")
+
     def test_at_most_ten_live_tokens_per_person(self):
         old = time.time() - 40 * 86400
         A.create_token(self.path, "ann", "claude", 30, now=old)    # expired: doesn't count
@@ -241,6 +290,15 @@ class Store(unittest.TestCase):
         self.assertEqual([(x["action"], x["target"]) for x in lines],
                          [("agent token made", rec["id"]), ("agent token revoked", rec["id"])])
         self.assertEqual(lines[0]["detail"]["for"], "ann")
+        row = ADM.audit_row(lines[0], own_door="tailnet key")
+        self.assertEqual((row["door"], row["unverified"]), (PA.CLI_DOOR, True))      # not the verified API door
+        with mock.patch.dict(os.environ, {"CRYOEV_VIA": "claude"}), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(A.main(["mint-token", "--id", "ann", "--agent", "codex", "--roster", str(self.roster),
+                                     "--state-dir", str(state), *common]), 0)
+        last = json.loads(PA.audit_path(state).read_text(encoding="utf-8").splitlines()[-1])
+        row = ADM.audit_row(last, own_door="tailnet key")
+        self.assertEqual((last["detail"]["via"], row["ai"], row["unverified"], row["door"]),
+                         ("claude", True, True, PA.CLI_DOOR))
         blob = PA.audit_path(state).read_text(encoding="utf-8")
         self.assertNotIn(tok, blob)
         self.assertNotIn(A.sha256_hex(tok), blob)
@@ -440,6 +498,17 @@ class Gate(Base):
         self.assertEqual(T.raw_status(T.raw(self.p.port, raw)), 401)
         st, _, _ = T.request(self.p.port, "GET", "/cj/me.json", {"Authorization": f"bearer {tok}"})
         self.assertEqual(st, 200)                                                        # scheme case-insensitive
+
+    def test_bearer_after_a_tab_is_still_bearer_never_the_cookie(self):
+        admin = T.cookie(self.cookies["tester"])
+        st, _, body = T.request(self.p.port, "GET", "/cj/me.json",
+                                {"Authorization": f"Bearer\t{self.tok['tester']}", **admin})
+        self.assertEqual((st, json.loads(body)["id"], json.loads(body)["role"]), (200, "tester", "advanced"))
+        st, _, _ = T.request(self.p.port, "GET", "/admin/api/people",
+                             {"Authorization": f"Bearer\t{self.tok['tester']}", **admin})
+        self.assertEqual(st, 401)                                                   # not the admin cookie
+        st, _, _ = T.request(self.p.port, "GET", "/cj/me.json", {"Authorization": "Bearer\tcev_bad", **admin})
+        self.assertEqual(st, 401)
 
     def test_cookies_are_ignored_with_a_bearer(self):
         admin = T.cookie(self.cookies["tester"])
@@ -668,6 +737,17 @@ class Account(Base):
         self.assertEqual(self.bget("/cj/me.json", tok)[0], 401)
         line = self.wait_lines(lambda x: x["target"] == rec["id"] and x["action"] == "agent token revoked")
         self.assertEqual((line[0]["actor"], line[0]["detail"]["for"]), ("tester", "other"))
+
+    def test_admin_rekey_revokes_their_tokens(self):
+        A.add_key(self.env.roster, "rekey", "basic")
+        tok = self.mint("rekey")
+        self.assertEqual(self.bget("/cj/me.json", tok)[0], 200)                       # control
+        t = self.form_t("tester", "/admin/")
+        st, _, _ = self.post("tester", "/admin/people/key", {"t": t, "id": "rekey"})
+        self.assertEqual(st, 200)
+        self.assertEqual(self.bget("/cj/me.json", tok)[0], 401)
+        line = self.wait_lines(lambda x: x["target"] == "rekey" and x["action"] == "key_made")
+        self.assertEqual(line[0]["detail"], {"rotated": True, "tokens_revoked": 1})
 
     def test_admin_revoking_a_person_revokes_their_tokens(self):
         ADM.add_person(self.env.roster, "leaver", "basic", "leaver@example.org", with_key=False)

@@ -32,7 +32,7 @@ KEY_RULES = [
     ("sk-key", r"\b(sk-[A-Za-z0-9_-]{20,})"),
     ("aws-access-key", r"\b(AKIA[0-9A-Z]{16})\b"),
     ("private-key-block", r"(-----BEGIN [A-Z ]*PRIVATE KEY-----)"),
-    ("cryoev-agent-token", r"\b(cev_[A-Za-z0-9_-]{43})"),     # portal agent API tokens (portal/auth.py, round 10)
+    ("cryoev-agent-token", r"(?<![A-Za-z0-9])(cev_[A-Za-z0-9_-]{43})"),     # portal agent API tokens (portal/auth.py, round 10)
     ("generic-secret", r"(?i)(?:api[_-]?key|secret|token|password)\s*[:=]\s*['\"]([^'\"\s]{12,})['\"]"),
 ]
 KEY_RULES = [(name, re.compile(rx)) for name, rx in KEY_RULES]
@@ -219,9 +219,11 @@ def self_test():
         "generic-secret": "pass" + "word = '" + "w" * 14 + "'",
         "roboflow-key": "ROBOFLOW_" + "API_KEY=" + "a" * 24,
         "cryoev-agent-token": "Authorization: Bearer " + "cev" + "_" + "Q7-" * 14 + "z",
+        "cryoev-agent-token-in-name": "TOKEN_" + "cev" + "_" + "Q7-" * 14 + "z",
     }
     ok = True
     for rule, line in fake.items():
+        rule = rule.replace("-in-name", "")
         got = [r for r, _ in scan_line(line, rules)]
         if rule not in got:
             print(f"self-test FAIL: {rule} not detected")
