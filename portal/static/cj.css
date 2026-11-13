@@ -426,6 +426,12 @@ a.cj-data-graph-node:focus-visible{outline:2px solid var(--acc);outline-offset:1
 .cj-version-bar{margin:0 8px;white-space:nowrap}
 @media (max-width:700px){.cj-version-bar{display:none}}
 /* cj-version:end */
+/* cj-data-r9: dataset class list + class mapping (#14) */
+.cj-data-vlist{margin:0;padding-left:1.2em}
+.cj-data-vlist li{margin:1px 0}
+.cj-data-cmap{border:1px solid var(--line);border-radius:var(--cj-r);background:var(--card);padding:8px 12px;margin:10px 0}
+.cj-data-cmap summary{cursor:pointer;font-weight:600}
+.cj-data-cmap ul{margin:8px 0 0;padding-left:1.2em}
 /* cj-feedback-table:begin */
 .cj-fbt-wrap{overflow-x:auto;max-width:100%}
 .cj-fbt{border-collapse:collapse;width:100%;font-size:14px}
