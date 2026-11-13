@@ -29,6 +29,7 @@ GOLDEN_PRED = GOLDEN / "p" / MODEL / "predictions"
 FAKE_PRED = [sys.executable, str(T.TESTS / "fake_predictor.py")]
 STATUS_KEYS = set(PS.STATUS_KEYS)              # the contract keys + pid, waiting
 REQUEST_KEYS = {"ps", "owner", "model", "conf", "max_det", "imgsz", "source", "created"}
+OPTIONAL_REQUEST_KEYS = {"name", "owner_via", "nm_confirmed_via", "note", "provenance", "source_manifest"}
 
 
 def png(path, size=(64, 48), mode="L", value=128):
@@ -40,6 +41,11 @@ def png(path, size=(64, 48), mode="L", value=128):
 def assert_contract_layout(tc, ps_dir: Path, model=MODEL, done=True):
     """The prediction_set folder exactly as BUILD_CONTRACTS.md section 2 (+ predict.log, the predictor's log)."""
     allowed = {"images", "images.csv", "request.json", "status.json", C.PREDICT_LOG} | ({C.PS_PRED} if done else set())
+    req = C.read_json(ps_dir / "request.json")
+    if "source_manifest" in req:                       # round 11b: a byte-identical copy of --manifest
+        allowed.add(PS.SOURCE_MANIFEST)
+        tc.assertEqual(req["source_manifest"], PS.SOURCE_MANIFEST)
+        tc.assertTrue((ps_dir / PS.SOURCE_MANIFEST).is_file())
     names = {p.name for p in ps_dir.iterdir()}
     tc.assertTrue(names <= allowed, f"unexpected entries {names - allowed}")
     tc.assertTrue({"images", "images.csv", "request.json", "status.json"} <= names)
@@ -49,7 +55,7 @@ def assert_contract_layout(tc, ps_dir: Path, model=MODEL, done=True):
         rows = list(csv.DictReader(f))
     tc.assertEqual(list(rows[0]), PS.CSV_COLUMNS)
     tc.assertEqual([r["file"] for r in rows], [f"images/{n}" for n in imgs])
-    tc.assertEqual(set(C.read_json(ps_dir / "request.json")), REQUEST_KEYS)
+    tc.assertTrue(REQUEST_KEYS <= set(req) <= REQUEST_KEYS | OPTIONAL_REQUEST_KEYS, set(req))
     st = C.read_json(ps_dir / "status.json")
     tc.assertEqual(set(st), STATUS_KEYS)
     if done:

@@ -24,7 +24,7 @@ from cryoev import common as CM
 
 KINDS = ("labels", "predictions", "results", "dataset")
 MANIFEST, INFO = "MANIFEST.sha256", "pull.json"
-PS_FILES = ("images.csv", "request.json", "status.json")
+PS_FILES = ("images.csv", "request.json", "status.json", "source_manifest.csv")   # the last only with --manifest
 
 
 def add(sub):

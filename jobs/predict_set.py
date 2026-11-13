@@ -6,7 +6,7 @@
         (--sample-label <label> | --sample-label-from manifest:<column>)
         (--nm-per-px <x> | --nm-from-manifest) --nm-confirmed-by <person>
         [--conf 0.25] [--max-det 1000] [--imgsz N] [--session YYYYMMDD] [--name <text>] [--link] [--registry <dir>] [--root <dir>]
-        [--dry-run]
+        [--note <text>] [--provenance <provenance.json>] [--dry-run]
 
 Writes <root>/<ps id>/ (default root <CryoAI-laptop>/predict; the id ps_<YYYYMMDD>_<6 hex> is made here):
   images/<nnnn>.png|.jpg   the tiles, numbered in name order; the extension comes from the content. Copied (md5
@@ -15,11 +15,31 @@ Writes <root>/<ps id>/ (default root <CryoAI-laptop>/predict; the id ps_<YYYYMMD
   images.csv               image,file,orig_name,sample_label,nm_per_px,nm_confirmed_by,source,md5 (raw values: it is
                            machine-read; labels and names a spreadsheet would run are refused at create)
   request.json             ps, owner, model, conf, max_det, imgsz, source, created, and `name` (only when one was
-                           given: clean_name(), at most 80 characters; not in the registry; the portal renames it)
+                           given: clean_name(), at most 80 characters; not in the registry; the portal renames it);
+                           `note` and `provenance` (only when given; also in the registry record), and
+                           `source_manifest` ("source_manifest.csv", only with --manifest)
+  source_manifest.csv      only with --manifest: a byte-identical copy of it (md5 checked), so per-tile columns
+                           (parent image, x/y offset, ...) stay with the set
   status.json              state queued, n_done 0, n_total, where laptop, job null, error null, updated, pid null,
                            waiting null
 and appends a prediction_set/1 record (status queued) to the registry. The folder is built in <root>/.incoming/ and
 renamed into place, so a reader never sees half a set.
+
+How the images were made (round 11b), for a set made in an unusual way (tiling, resampling, a subset):
+  --note TEXT          free text, at most 500 characters and 10 lines; no control or format characters but newline;
+                       not starting like a spreadsheet formula (= + - @). Stored as `note`.
+  --provenance FILE    a JSON object of at most 16 KB with only these keys (anything else is refused):
+                         derived_from  [{"kind": dataset|label_version|session|prediction_set|model|other,
+                                         "id": str <= 80}]  (at most 10)
+                         source_images str <= 300
+                         steps         [str <= 200]  (at most 15)
+                         tiling        {"tile_px": int, "overlap_px": int, "overlap_frac": number in [0, 1),
+                                        "nm_per_px": number, "downsample": number}  (any, at least one)
+                         script        str <= 200
+                         git           hex str <= 40
+                       Stored as `provenance`. Both are data fields of the prediction_set record, so update_record
+                       carries them to every later status line. The Data page shows them (Note, How the images
+                       were made, Derived from).
 
 --dry-run (create(dry_run=True)): every check below runs (the tiles are read, md5'd and decoded) and the registry
 record is validated with a placeholder id, then the plan is printed; nothing is written, no lock file either. The id
@@ -96,6 +116,14 @@ LAPTOP_PREFIX = "<CryoAI-laptop>"
 REGISTRY_LOCK = ".prediction_set.lock"           # in the registry folder: id choice + read-modify-append
 LOCK_WAIT = 30.0
 SHOW = 12                                        # problems listed per refusal
+SOURCE_MANIFEST = "source_manifest.csv"          # a copy of --manifest in the set folder
+NOTE_MAX, NOTE_LINES = 500, 10                   # --note: characters, lines
+PROV_MAX_BYTES = 16 * 1024                       # --provenance file size
+DERIVED_KINDS = ("dataset", "label_version", "session", "prediction_set", "model", "other")
+DERIVED_MAX, ID_MAX, STEPS_MAX, STEP_MAX, SOURCE_IMAGES_MAX, SCRIPT_MAX, GIT_MAX = 10, 80, 15, 200, 300, 200, 40
+TILING_KEYS = {"tile_px": "int", "overlap_px": "int", "overlap_frac": "frac", "nm_per_px": "pos",
+               "downsample": "pos"}
+GIT_RE = re.compile(r"^[0-9a-fA-F]{1,40}\Z")
 
 
 class PredictSetError(ValueError):
@@ -369,6 +397,144 @@ def clean_name(s) -> str | None:
     return s.strip() or None
 
 
+def _bad_chars(s, allow="") -> list:
+    """The control (Cc), format (Cf) and line/paragraph separator characters in s, except those in `allow`."""
+    return sorted({f"U+{ord(ch):04X}" for ch in s if ch not in allow
+                   and (unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp"))})
+
+
+def check_note(note) -> tuple:
+    """--note -> (the note to store or None, [problems]). NFC, CRLF/CR made LF, trimmed; at most NOTE_MAX characters
+    and NOTE_LINES lines; no control or format character but newline; not starting like a spreadsheet formula."""
+    if note is None:
+        return None, []
+    if not isinstance(note, str):
+        return None, [f"note must be text, not {type(note).__name__}"]
+    s = unicodedata.normalize("NFC", note).replace("\r\n", "\n").strip()
+    if not s:
+        return None, ["note is empty (leave --note out instead)"]
+    problems = []
+    bad = _bad_chars(s, allow="\n")
+    if bad:
+        problems.append(f"note has control or format characters ({', '.join(bad[:6])}); only newline is allowed")
+    if len(s) > NOTE_MAX:
+        problems.append(f"note is {len(s)} characters; at most {NOTE_MAX}")
+    if s.count("\n") + 1 > NOTE_LINES:
+        problems.append(f"note has {s.count(chr(10)) + 1} lines; at most {NOTE_LINES}")
+    if _formula_like(s):
+        problems.append(f"note starts with {s[0]!r}: a spreadsheet would run it as a formula; start it with a "
+                        f"letter or digit")
+    return (None if problems else s), problems
+
+
+def _text_problem(where, v, limit, empty_ok=False):
+    if not isinstance(v, str):
+        return f"{where} must be a string, not {type(v).__name__}"
+    if not v.strip() and not empty_ok:
+        return f"{where} is empty"
+    if len(v) > limit:
+        return f"{where} is {len(v)} characters; at most {limit}"
+    bad = _bad_chars(v)
+    if bad:
+        return f"{where} has control or format characters ({', '.join(bad[:6])})"
+    return None
+
+
+def _number_problem(where, v, kind):
+    """kind int: a whole number >= 0 (tile_px >= 1); frac: 0 <= x < 1; pos: a finite number > 0. No booleans."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        return f"{where} must be a number, not {json.dumps(v)}"
+    if kind == "int":
+        if not isinstance(v, int):
+            return f"{where} must be a whole number, not {v!r}"
+        low = 1 if where.endswith("tile_px") else 0
+        return None if v >= low else f"{where} must be >= {low}"
+    if kind == "frac":
+        return None if 0 <= v < 1 else f"{where} must be from 0 up to (not including) 1"
+    return None if v > 0 else f"{where} must be > 0"
+
+
+def check_provenance(obj) -> list:
+    """[problems] for a provenance object (see the module doc); [] when valid. Unknown keys and wrong types are
+    problems, never ignored."""
+    if not isinstance(obj, dict):
+        return [f"provenance must be a JSON object, not {type(obj).__name__}"]
+    if not obj:
+        return ["provenance is empty (leave --provenance out instead)"]
+    allowed = ("derived_from", "source_images", "steps", "tiling", "script", "git")
+    problems = [f"provenance: unknown key {k!r} (allowed: {', '.join(allowed)})" for k in obj if k not in allowed]
+    if "derived_from" in obj:
+        d = obj["derived_from"]
+        if not isinstance(d, list):
+            problems.append("provenance.derived_from must be a list of {\"kind\", \"id\"}")
+        else:
+            if len(d) > DERIVED_MAX:
+                problems.append(f"provenance.derived_from has {len(d)} entries; at most {DERIVED_MAX}")
+            for n, e in enumerate(d):
+                w = f"provenance.derived_from[{n}]"
+                if not isinstance(e, dict):
+                    problems.append(f"{w} must be an object {{\"kind\", \"id\"}}")
+                    continue
+                problems += [f"{w}: unknown key {k!r} (allowed: kind, id)" for k in e if k not in ("kind", "id")]
+                if e.get("kind") not in DERIVED_KINDS:
+                    problems.append(f"{w}.kind {json.dumps(e.get('kind'))} must be one of {', '.join(DERIVED_KINDS)}")
+                problems.append(_text_problem(f"{w}.id", e.get("id"), ID_MAX))
+    if "source_images" in obj:
+        problems.append(_text_problem("provenance.source_images", obj["source_images"], SOURCE_IMAGES_MAX))
+    if "steps" in obj:
+        st = obj["steps"]
+        if not isinstance(st, list):
+            problems.append("provenance.steps must be a list of strings")
+        else:
+            if len(st) > STEPS_MAX:
+                problems.append(f"provenance.steps has {len(st)} entries; at most {STEPS_MAX}")
+            problems += [_text_problem(f"provenance.steps[{n}]", v, STEP_MAX) for n, v in enumerate(st)]
+    if "tiling" in obj:
+        t = obj["tiling"]
+        if not isinstance(t, dict) or not t:
+            problems.append(f"provenance.tiling must be an object with at least one of {', '.join(TILING_KEYS)}")
+        else:
+            for k, v in t.items():
+                if k not in TILING_KEYS:
+                    problems.append(f"provenance.tiling: unknown key {k!r} (allowed: {', '.join(TILING_KEYS)})")
+                else:
+                    problems.append(_number_problem(f"provenance.tiling.{k}", v, TILING_KEYS[k]))
+    if "script" in obj:
+        problems.append(_text_problem("provenance.script", obj["script"], SCRIPT_MAX))
+    if "git" in obj:
+        g = obj["git"]
+        if not isinstance(g, str) or not GIT_RE.match(g):
+            problems.append(f"provenance.git {json.dumps(g)} must be a hex commit id of 1-{GIT_MAX} characters")
+    return [p for p in problems if p]
+
+
+def load_provenance(path) -> tuple:
+    """--provenance FILE -> (the object, [problems]): at most PROV_MAX_BYTES, UTF-8 JSON (a BOM is allowed), no
+    duplicate keys, no NaN/Infinity, then check_provenance. Nothing is read past the size cap."""
+    path = Path(path)
+    if not path.is_file():
+        return None, [f"--provenance {path} not found"]
+    size = path.stat().st_size
+    if size > PROV_MAX_BYTES:
+        return None, [f"--provenance {path.name} is {size} bytes; at most {PROV_MAX_BYTES}"]
+
+    def pairs(kv):
+        keys = [k for k, _ in kv]
+        dup = sorted({k for k in keys if keys.count(k) > 1})
+        if dup:
+            raise ValueError(f"duplicate key(s) {', '.join(map(repr, dup))}")
+        return dict(kv)
+
+    def no_constant(c):
+        raise ValueError(f"{c} is not a number JSON allows")
+    try:
+        obj = json.loads(path.read_bytes().decode("utf-8-sig"), object_pairs_hook=pairs, parse_constant=no_constant)
+    except (UnicodeDecodeError, ValueError) as e:
+        return None, [f"--provenance {path.name} is not valid UTF-8 JSON: {e}"]
+    problems = check_provenance(obj)
+    return (None if problems else obj), problems
+
+
 def _place(src: Path, dst: Path, md5: str, link: bool) -> str:
     """Copy (md5 checked), or with link=True hard-link when on one drive and not from a protected folder."""
     if link and protected_problem(src) is None and os.stat(src).st_dev == os.stat(dst.parent).st_dev:
@@ -387,7 +553,7 @@ def _place(src: Path, dst: Path, md5: str, link: bool) -> str:
 def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_label_column=None, nm_per_px=None,
            nm_from_manifest=False, manifest=None, names=None, conf=0.25, max_det=1000, imgsz=None, session=None,
            registry_root=None, root=None, link=False, where="laptop", name=None, progress=None, dry_run=False,
-           via=None):
+           via=None, note=None, provenance=None):
     """Make a prediction set (see the module doc). -> its folder. Raises PredictSetError (nothing written).
     Slow (md5 + decode of every tile): the portal calls it from a worker thread.
     via: the agent that asked for the set for `owner` (the portal passes a write token's agent; round 11 #65), or
@@ -397,8 +563,11 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
     registry.append's usual ($CRYOEV_VIA, which the portal strips).
     name: an optional display name (clean_name) written to request.json only when set. progress: optional
     callback(done, total, phase) with phase "checking" (md5 + decode) then "placing" (copy or link); additive, the
-    CLI passes none. dry_run: all checks, then -> the plan dict (nothing written; the id is a placeholder)."""
-    note = progress or (lambda *a: None)
+    CLI passes none. dry_run: all checks, then -> the plan dict (nothing written; the id is a placeholder).
+    note: free text (check_note). provenance: a provenance.json path, or the object itself (check_provenance). Both
+    are refused before anything is written, and stored (when given) in request.json and the registry record. With
+    a manifest, request.json also gets source_manifest and the set a byte-identical source_manifest.csv."""
+    tick = progress or (lambda *a: None)
     set_name = clean_name(name)                 # `name` is reused below as a file name
     from_dir = Path(from_dir)
     root = Path(root) if root else default_root()
@@ -455,6 +624,16 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
         problems.append(f"where {where!r} must be laptop or desktop")
     if via is not None and not re.match(r"^[a-z][a-z0-9_-]{0,31}\Z", str(via)):
         problems.append(f"via {via!r} is not an agent name (lower-case, e.g. claude)")
+    set_note, why = check_note(note)
+    problems += why
+    prov = None
+    if provenance is not None:
+        if isinstance(provenance, dict):
+            why = check_provenance(provenance)
+            prov = None if why else json.loads(json.dumps(provenance))     # a plain copy
+        else:
+            prov, why = load_provenance(provenance)
+        problems += why
     try:
         model_spec(model)
     except PredictSetError as e:
@@ -483,7 +662,7 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
         raise PredictSetError(f"refused: {manifest.name} has no {NM_COLUMN} column")
     items = []
     for k, p in enumerate(files, 1):
-        note(k - 1, len(files), "checking")
+        tick(k - 1, len(files), "checking")
         try:
             ext, size = inspect_image(p)
         except (ValueError, OSError) as e:
@@ -531,7 +710,7 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
     if dry_run:
         ps_id = f"ps_{day}_000000"                   # placeholder: a real create picks a free random id
         rec = _set_record(ps_id, C.now(), owner, model, where, record_path(root / ps_id), session, len(items), conf,
-                          max_det, via)
+                          max_det, via, set_note, prov)
         errs = regm.check_record(rec, regm.schemas())
         if errs:
             raise PredictSetError(f"refused: registry record invalid: {'; '.join(errs[:4])}")
@@ -539,6 +718,8 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
                 "samples": {k: len(v) for k, v in sorted(by_label.items())}, "model": model, "owner": owner,
                 "conf": conf, "max_det": max_det, "imgsz": imgsz, "session": session, "name": set_name,
                 "place": "hard-link where possible" if link else "copy (md5 checked)",
+                "note": set_note, "provenance": prov,
+                "source_manifest": f"{SOURCE_MANIFEST} (a copy of {manifest})" if manifest is not None else None,
                 "record": {k: v for k, v in rec.items() if k not in ("id", "path", "logged", "created")}}
     # ---- id + record, validated before anything is written; the id is reserved by its .incoming folder
     with locked(reg / REGISTRY_LOCK):
@@ -554,7 +735,7 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
     created = C.now()
     final = root / ps_id
     rec = _set_record(ps_id, created, owner, model, where, record_path(final), session, len(items), conf, max_det,
-                      via)
+                      via, set_note, prov)
     try:
         errs = regm.check_record(rec, regm.schemas())
         if errs:
@@ -563,11 +744,15 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
         tag = f"session:{session}" if session else "upload"
         for i, it in enumerate(items, 1):
             name = f"{i:04d}{it['ext']}"
-            note(i - 1, len(items), "placing")
+            tick(i - 1, len(items), "placing")
             how[_place(it["src"], inc / IMAGES / name, it["md5"], link)] += 1
             rows.append({"image": f"{i:04d}", "file": f"{IMAGES}/{name}", "orig_name": it["src"].name,
                          "sample_label": it["label"], "nm_per_px": repr(float(it["nm"])),
                          "nm_confirmed_by": nm_confirmed_by, "source": tag, "md5": it["md5"]})
+        if manifest is not None:                 # per-tile columns (parent image, x/y offset, ...) stay with the set
+            shutil.copyfile(manifest, inc / SOURCE_MANIFEST)
+            if md5_file(inc / SOURCE_MANIFEST) != md5_file(manifest):
+                raise PredictSetError(f"copy of {manifest.name} differs from the source (md5)")
         with open(inc / IMAGES_CSV, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=CSV_COLUMNS, lineterminator="\n")
             w.writeheader()
@@ -581,11 +766,17 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
         if via:                                  # an agent asked, and the pixel size was confirmed through it
             request["owner_via"] = via
             request["nm_confirmed_via"] = via
+        if set_note:
+            request["note"] = set_note
+        if prov:
+            request["provenance"] = prov
+        if manifest is not None:
+            request["source_manifest"] = SOURCE_MANIFEST
         write_json_atomic(inc / REQUEST, request)
         write_json_atomic(inc / STATUS, {"state": "queued", "n_done": 0, "n_total": len(rows), "where": where,
                                          "job": None, "error": None, "updated": created, "pid": None,
                                          "waiting": None})
-        note(len(items), len(items), "placing")
+        tick(len(items), len(items), "placing")
         with locked(reg / REGISTRY_LOCK):
             inc.rename(final)
             try:
@@ -602,8 +793,10 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
     return final
 
 
-def _set_record(ps_id, created, owner, model, where, path, session, n_images, conf, max_det, via=None) -> dict:
-    """The prediction_set/1 line create appends (status queued); owner_via only when an agent asked for it."""
+def _set_record(ps_id, created, owner, model, where, path, session, n_images, conf, max_det, via=None, note=None,
+                provenance=None) -> dict:
+    """The prediction_set/1 line create appends (status queued); owner_via only when an agent asked for it; note
+    and provenance only when given (data fields: update_record carries them to every later line)."""
     src = {"kind": "session", "session": str(session)} if session else {"kind": "upload"}
     rec = {"schema": "prediction_set/1", "id": ps_id, "logged": created, "created": created, "owner": owner,
            "model": model, "job": None, "where": where, "path": path, "source": src,
@@ -611,6 +804,10 @@ def _set_record(ps_id, created, owner, model, where, path, session, n_images, co
            "review_package": None, "results": None, "recorded_by": "jobs/predict_set.py create"}
     if via:
         rec["owner_via"] = rec["nm_confirmed_via"] = via
+    if note:
+        rec["note"] = note
+    if provenance:
+        rec["provenance"] = provenance
     return rec
 
 
@@ -641,6 +838,9 @@ def build_parser(allow_abbrev=True) -> argparse.ArgumentParser:
     c.add_argument("--link", action="store_true", help="hard-link tiles on the same drive instead of copying")
     c.add_argument("--registry", type=Path, help="registry folder (default <CryoAI-laptop>/registry)")
     c.add_argument("--root", type=Path, help=f"where sets live (default <CryoAI-laptop>/{PREDICT_DIR})")
+    c.add_argument("--note", help=f"free text: how/why this set was made (at most {NOTE_MAX} characters)")
+    c.add_argument("--provenance", type=Path, help="provenance.json: derived_from, source_images, steps, tiling, "
+                                                    "script, git (module doc; at most 16 KB)")
     c.add_argument("--dry-run", action="store_true", help="every check, then the plan; nothing is written")
     ap.create = c
     return ap
@@ -662,7 +862,7 @@ def main(argv=None):
                     sample_label_column=a.sample_label_from, nm_per_px=a.nm_per_px,
                     nm_from_manifest=a.nm_from_manifest, manifest=a.manifest, names=names, conf=a.conf,
                     max_det=a.max_det, imgsz=a.imgsz, session=a.session, registry_root=a.registry, root=a.root,
-                    link=a.link, name=a.name, dry_run=a.dry_run)
+                    link=a.link, name=a.name, dry_run=a.dry_run, note=a.note, provenance=a.provenance)
     except (PredictSetError, config.ConfigError, OSError) as e:
         print(f"[predict_set] {e}", file=sys.stderr)
         return 2

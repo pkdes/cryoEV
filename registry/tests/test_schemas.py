@@ -88,6 +88,37 @@ class TestSchemas(unittest.TestCase):
         with self.assertRaises(UnsupportedKeyword):
             errors("x", {"type": "string", "format": "date-time"})
 
+    def test_length_keywords(self):
+        """maxLength / maxItems / minProperties (round 11b): at the limit passes, one over fails."""
+        self.assertEqual(errors("x" * 3, {"type": "string", "maxLength": 3}), [])
+        self.assertTrue(errors("x" * 4, {"type": "string", "maxLength": 3}))
+        self.assertEqual(errors([1, 2], {"type": "array", "maxItems": 2}), [])
+        self.assertTrue(errors([1, 2, 3], {"type": "array", "maxItems": 2}))
+        self.assertEqual(errors({"a": 1}, {"type": "object", "minProperties": 1}), [])
+        self.assertTrue(errors({}, {"type": "object", "minProperties": 1}))
+
+    def test_prediction_set_note_and_provenance(self):
+        """note and provenance (round 11b) validate; unknown keys, wrong types and overlong values fail."""
+        good = dict(self.samples["prediction_set"][0], note="native tiles\nno downsampling", provenance={
+            "derived_from": [{"kind": "dataset", "id": "ds_x"}], "source_images": "44 Jul30",
+            "steps": ["cut 1440 px tiles"], "script": "tools/cut.py", "git": "e69366f",
+            "tiling": {"tile_px": 1440, "overlap_px": 288, "overlap_frac": 0.2, "nm_per_px": 0.368, "downsample": 1}})
+        self.assertEqual(check_record(good, self.schemas), [])
+        sch = self.schemas["prediction_set/1"]
+        self.assertTrue(sch["additionalProperties"])                       # the top level is unchanged
+        self.assertFalse(sch["properties"]["provenance"]["additionalProperties"])
+        prov = good["provenance"]
+        bad = [dict(good, note="x" * 501), dict(good, note=5), dict(good, provenance=dict(prov, colour="blue")),
+               dict(good, provenance=dict(prov, tiling={})), dict(good, provenance=dict(prov, tiling={"stride": 1})),
+               dict(good, provenance=dict(prov, derived_from=[{"kind": "folder", "id": "a"}])),
+               dict(good, provenance=dict(prov, derived_from=[{"kind": "other", "id": "a", "x": 1}])),
+               dict(good, provenance=dict(prov, derived_from=[{"kind": "other", "id": "a"}] * 11)),
+               dict(good, provenance=dict(prov, steps=["s"] * 16)), dict(good, provenance=dict(prov, steps=["s" * 201])),
+               dict(good, provenance=dict(prov, git="main")), dict(good, provenance=dict(prov, source_images="s" * 301)),
+               dict(good, provenance=dict(prov, tiling={"tile_px": 1.5}))]
+        for b in bad:
+            self.assertTrue(check_record(b, self.schemas), b.get("note", b.get("provenance")))
+
     def test_cross_check_with_jsonschema_if_installed(self):
         try:
             import jsonschema

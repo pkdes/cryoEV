@@ -113,6 +113,91 @@
    ],
    "pattern": "^[a-z][a-z0-9_-]{0,31}$",
    "description": "the agent through which the owner confirmed the nm/px (a write token's agent, round 11 #65)"
+  },
+  "note": {
+   "type": "string",
+   "maxLength": 500,
+   "description": "free text: how and why the set was made (predict_set create --note; round 11b); carried to every later line"
+  },
+  "provenance": {
+   "type": "object",
+   "description": "how the images were made and what they derive from (predict_set create --provenance; round 11b); carried to every later line",
+   "properties": {
+    "derived_from": {
+     "type": "array",
+     "maxItems": 10,
+     "items": {
+      "type": "object",
+      "properties": {
+       "kind": {
+        "enum": [
+         "dataset",
+         "label_version",
+         "session",
+         "prediction_set",
+         "model",
+         "other"
+        ]
+       },
+       "id": {
+        "type": "string",
+        "maxLength": 80
+       }
+      },
+      "required": [
+       "kind",
+       "id"
+      ],
+      "additionalProperties": false
+     }
+    },
+    "source_images": {
+     "type": "string",
+     "maxLength": 300
+    },
+    "steps": {
+     "type": "array",
+     "maxItems": 15,
+     "items": {
+      "type": "string",
+      "maxLength": 200
+     }
+    },
+    "tiling": {
+     "type": "object",
+     "minProperties": 1,
+     "properties": {
+      "tile_px": {
+       "type": "integer",
+       "minimum": 1
+      },
+      "overlap_px": {
+       "type": "integer",
+       "minimum": 0
+      },
+      "overlap_frac": {
+       "type": "number",
+       "minimum": 0
+      },
+      "nm_per_px": {
+       "type": "number"
+      },
+      "downsample": {
+       "type": "number"
+      }
+     },
+     "additionalProperties": false
+    },
+    "script": {
+     "type": "string",
+     "maxLength": 200
+    },
+    "git": {
+     "type": "string",
+     "pattern": "^[0-9a-fA-F]{1,40}$"
+    }
+   },
+   "additionalProperties": false
   }
  },
  "required": [
