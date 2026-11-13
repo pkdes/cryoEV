@@ -124,3 +124,8 @@ The review server, review sandbox, history server and job monitor (and later the
   - A file that fails is re-run alone once. If it then passes it is reported as **FLAKY**, never as a plain pass.
   - The pre-push scan runs at the end.
 - **Timings:** each file's time is appended to `~/.cryoev/gate/timings.jsonl`. `--times` lists the slowest files.
+
+## Agent CLI: `python -m cryoev` (package `cryoev/`, not under `tools/`)
+- **What:** one entry point for agents (and people) to read the platform and make the few writes agents may make: `status`, `find` / `show` / `lineage`, `review progress` (counts only), `feedback list|status|reply`, `pull labels|predictions|results|dataset`, `register`, `predict new`. Thin wrappers over the registry, `jobs/predict_set.py`, `portal/feedback_store.py`, `tools/services.py` and the portal's read helpers.
+- **Writes:** a dry run unless `--do`; each `--do` appends a `requested` and a `result` line to `<CryoAI-laptop>/logs/agent_actions.jsonl` (the Admin page's "laptop CLI (unverified)" door). Never-automated actions are refused (exit 3).
+- **Guide:** [`AGENTS.md`](AGENTS.md). **Tests:** `cryoev/tests` (temp roots only; the `cryoev` suite of the test gate).

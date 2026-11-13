@@ -228,7 +228,7 @@ class Base(unittest.TestCase):
         return f
 
     def audit_lines(self):
-        return lines(PA.audit_path(self.env.state))
+        return T.module_lines(PA.audit_path(self.env.state))   # Train's own lines (not the Gate's, round 9)
 
 
 class Roles(Base):
@@ -481,7 +481,12 @@ class QueueOff(Base):
         st, _, _ = self.post("/train/queue", self.good(name="off_queue", epochs="abc"))
         self.assertEqual(st, 409)
         self.assertEqual(snap(self.env.registry, self.share), before)
-        self.assertFalse(PA.audit_path(self.env.state).exists())
+        self.assertEqual(self.audit_lines(), [])               # no Train line: only the Gate's (round 9)
+        self.p.app.writer.drain()
+        gate = [(x["action"], x["detail"]) for x in lines(PA.audit_path(self.env.state))
+                if T.gate_line(x) and x["action"] != "signed in"]
+        self.assertEqual(gate, [("training checked", {"status": 200}), ("training queued", {"status": 409}),
+                                ("training queued", {"status": 409})])            # the two refused queue POSTs
         self.assertFalse((self.env.registry / "lists" / f"job_{TODAY}_off_queue.txt").exists())
 
 

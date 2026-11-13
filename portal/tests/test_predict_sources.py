@@ -640,8 +640,7 @@ class PortalCase(unittest.TestCase):
 
     def setUp(self):
         for f in (self.env.state / "predict_sources.json", PA.audit_path(self.env.state)):
-            if f.exists():
-                f.unlink()
+            T.remove_file(f)
         PSRC.clear_cache()
 
     def get(self, path, who="admin"):
@@ -666,8 +665,7 @@ class PortalCase(unittest.TestCase):
         return st, hd, body.decode("utf-8", "replace")
 
     def audit_lines(self) -> list:
-        p = PA.audit_path(self.env.state)
-        return [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines()] if p.exists() else []
+        return T.module_lines(PA.audit_path(self.env.state))   # Admin's own lines (not the Gate's, round 9)
 
     def follow(self, h):
         loc = T.hget(h, "location")

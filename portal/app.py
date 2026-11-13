@@ -14,9 +14,17 @@ Two sign-in modes, one app, never mixed on one port (--auth):
 
 Routes (everything except OPEN needs a session; see Gate):
   /                      home: platform status from <registry>/live/live.json + module cards from modules.json
+  /about                 About CryoEV (every signed-in role): text from a private JSON file outside the repo
+                         ($CJ_ABOUT_FILE, default ~/.cryoev/about.json; keys platform, credit, support, cite);
+                         missing -> "[not set yet]" placeholders. Never under static/ (served without sign-in)
+  /changes               What changed (every signed-in role): the repo's CHANGELOG.md ($CJ_CHANGELOG_FILE overrides)
+                         as escaped HTML (render_changelog: headings, bullets, **bold**, `code`; no raw HTML)
   /login?k=<key>         key link -> session cookie -> relative redirect to /
   /healthz               {"ok": true}
   /cj/cj.css, brand.json, header.js, live.js, review.js, modules.json, me.json     the shell's own files
+  /cj/version.json       {"version": the portal's stamp, "review_page": {"version", "updated"} of the real review
+                         package's index.html, "review_tool": the same for the repo's review tool (prediction
+                         packages)}: PAGE_VERSION parsed from the page ("unknown" without it) + the file's mtime
   /history/history.html, /history/live/live.json               served from the registry folder (allowlist only);
                          history.html gets the cj.css / header.js include lines before </head> (file untouched).
                          A hidden "classic" page: not in the nav, linked from home's footer.
@@ -35,10 +43,17 @@ A top-level document GET of /review/app/ (a copied tool link) answers 302 /revie
 Defaults: --registry = data_utils.config.registry_root(); --review-package = the newest open revise job on port
 8766 in that registry (its review_package path); roster and state dir under %USERPROFILE%\\.cryoev (portal/auth.py).
 uvicorn runs with its access log OFF and proxy headers OFF; the app writes its own access log with `k` redacted.
+
+Audit (Admin > Recent actions): after every POST/PUT/DELETE/PATCH, done or refused, the Gate queues one line in
+<state dir>/audit/portal.jsonl (portal/audit.py Writer: one worker thread, never blocks or raises): actor, a readable
+action from AUDIT_LABELS (keyed by the matched route template), a safe id target, {"status"}. Upload chunks, review
+saves / claims and gallery marks: the first per person x action x target per 10 min, then a counter line. Plus the
+first sign-in per person per day on this door. main() removes CRYOEV_VIA / CRYOEV_FOR (registry/actor.strip_env).
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import errno
 import html
@@ -62,9 +77,10 @@ if str(REPO) not in sys.path:
 from starlette.applications import Starlette  # noqa: E402
 from starlette.requests import Request, cookie_parser  # noqa: E402
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response  # noqa: E402
-from starlette.routing import Route  # noqa: E402
+from starlette.routing import Match, Route  # noqa: E402
 
 from data_utils import config as repo_config  # noqa: E402
+from portal import audit as PA  # noqa: E402
 from portal import auth as A  # noqa: E402
 from portal import feedback_store as FEEDBACK  # noqa: E402
 from portal import modules as M  # noqa: E402
@@ -118,6 +134,61 @@ KEY_PORT = 8770
 ACCESS_PORT = 8448
 ACCESS_SIGN_IN = ("This address is reached through the lab's Cloudflare sign-in. If you signed in and still see this, "
                   "ask the admin to add your email to the portal.")
+# ---- the Gate's audit catch-all (round 9 #17): one line per POST/PUT/DELETE/PATCH, successful or refused. The action
+# is a readable name keyed by the matched route TEMPLATE (never the request path); the target is a safe id path
+# parameter only (AUDIT_IDS, SAFE_ID_RE); detail = {"status"}. Never a body, key, token, cookie or session id.
+_CONVERT = (("stop", "stopped"), ("retry", "retried"), ("inputs", "inputs changed"), ("stitch", "stitch run"),
+            ("register", "registration run"), ("details", "details edited"), ("preview", "preview made"),
+            ("reconvert", "reconverted"))
+AUDIT_LABELS = {      # route template -> (action, frequent: first per 10 min written, then counted)
+    "/predict/api/upload": ("upload started", False),
+    "/predict/api/upload/{uid}/file": ("upload chunk", True),
+    "/predict/api/upload/{uid}/create": ("prediction set created", False),
+    "/predict/api/upload/{uid}/cancel": ("upload cancelled", False),
+    "/predict/new/upload/": ("prediction set created", False),
+    "/predict/new/session/{key}/": ("prediction set created", False),
+    "/predict/new/raw/": ("conversion started", False),
+    "/predict/new/raw/sessions/{key}/": ("conversion started", False),
+    "/predict/preparing/{tid}/retry": ("prediction set retried", False),
+    "/predict/{ps}/start": ("prediction set started", False),
+    "/predict/{ps}/rename": ("prediction set renamed", False),
+    "/predict/{ps}/review": ("review package made", False),
+    "/predict/{ps}/results": ("results requested", False),
+    **{f"/predict/convert/{{cid}}/{a}": (f"conversion {w}", False) for a, w in _CONVERT},
+    "/results/{ps}/compute": ("results computed", False),
+    "/gallery/{cid}/api/event": ("gallery mark", True),
+    "/feedback/": ("feedback filed", False),
+    "/feedback/{rid:int}/status": ("feedback status changed", False),
+    "/feedback/{rid:int}/reply": ("feedback reply", False),
+    "/data/session/{eid}/details": ("session details edited", False),
+    "/train/check": ("training checked", False),
+    "/train/queue": ("training queued", False),
+    "/jobs/api/cancel": ("job cancel", False),
+    "/jobs/api/release": ("job release", False),
+    "/admin/people/add": ("person added", False),
+    "/admin/people/role": ("role changed", False),
+    "/admin/people/email": ("sign-in email changed", False),
+    "/admin/people/key": ("key link made", False),
+    "/admin/people/revoke": ("person revoked", False),
+    "/admin/predict/label": ("Predict session renamed", False),
+    "/admin/predict/show": ("Predict session shown / hidden", False),
+    "/review/{rest:path}": ("review write (no such page)", False),
+}
+REVIEW_TOOL_TEMPLATES = frozenset({"/review/app/{path:path}", "/review/{pkg_id}/app/{path:path}"})
+REVIEW_TOOL_ACTIONS = {"api/edits": ("review save", True), "api/claim": ("review claim", True)}   # review_server.py
+# routes whose handler writes its own, richer line on success: the catch-all logs them only when refused / failed
+SELF_LOGGED = frozenset({"/admin/people/add", "/admin/people/role", "/admin/people/email", "/admin/people/key",
+                         "/admin/people/revoke", "/admin/predict/label", "/admin/predict/show", "/jobs/api/cancel",
+                         "/jobs/api/release", "/train/queue"})
+AUDIT_IDS = ("ps", "pkg_id", "cid", "rid", "eid", "uid", "tid")      # the only path parameters a line may carry
+SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}\Z")
+SWEEP_S = 60.0                                                       # close due 10-min windows this often
+ABOUT_ENV = "CJ_ABOUT_FILE"                                          # /about's private text (never under static/)
+ABOUT_KEYS = (("platform", "The platform"), ("credit", "Who builds it"), ("support", "Support"),
+              ("cite", "How to cite"))
+ABOUT_UNSET = "[not set yet]"
+CHANGELOG_ENV = "CJ_CHANGELOG_FILE"                                  # /changes' source (default: REPO/CHANGELOG.md)
+PAGE_VERSION_RE = re.compile(r'\bPAGE_VERSION\s*=\s*"([0-9A-Za-z][0-9A-Za-z._-]{0,39})"')
 log = logging.getLogger("cj")
 access_log = logging.getLogger("cj.access")
 
@@ -259,6 +330,122 @@ def registry_review_package(registry: Path | None, port: int = REVIEW_PORT) -> P
     return Path(path) if path else None
 
 
+def audit_label(template, params, method) -> tuple:
+    """-> (readable action, frequent) for a write on `template` (None = no route matched). The review tool's
+    proxied writes are told apart by their API path (a fixed set), never logged as a path."""
+    if template in REVIEW_TOOL_TEMPLATES:
+        return REVIEW_TOOL_ACTIONS.get(str((params or {}).get("path") or "").strip("/"), ("review tool write", False))
+    if template is None:
+        return "write to an unknown address", False
+    return AUDIT_LABELS.get(template, (f"{method} {template}", False))
+
+
+def audit_target(params) -> str | None:
+    """The first safe id among the path parameters (AUDIT_IDS, SAFE_ID_RE), else None. "#<n>" for a feedback id."""
+    for k in AUDIT_IDS:
+        v = (params or {}).get(k)
+        if v is not None and SAFE_ID_RE.match(str(v)) and ".." not in str(v):
+            return f"#{v}" if k == "rid" else str(v)
+    return None
+
+
+def about_path() -> Path:
+    return Path(os.environ.get(ABOUT_ENV) or (Path.home() / ".cryoev" / "about.json"))
+
+
+def render_about(doc, version: str) -> str:
+    """/about's body: each ABOUT_KEYS text (escaped; blank lines = paragraphs), ABOUT_UNSET when missing."""
+    doc = doc if isinstance(doc, dict) else {}
+    secs = []
+    for key, head in ABOUT_KEYS:
+        v = doc.get(key)
+        text = v.strip() if isinstance(v, str) else ""
+        paras = [p.strip() for p in text.split("\n\n") if p.strip()] or [ABOUT_UNSET]
+        body = "".join(f'<p{" class=cj-mut" if p == ABOUT_UNSET else ""}>{html.escape(p)}</p>' for p in paras)
+        secs.append(f'<section class="cj-about-sec" data-key="{key}"><h2>{html.escape(head)}</h2>{body}</section>')
+    return (f'<div class="cj-about"><h1>About CryoEV</h1>{"".join(secs)}'
+            f'<p class="cj-mut cj-about-ver">Portal version: {html.escape(version)} · '
+            '<a href="/changes">What changed (changelog)</a></p>'
+            '<p class="cj-mut cj-about-ver">Only signed-in people see this page.</p></div>')
+
+
+def changelog_path() -> Path:
+    return Path(os.environ.get(CHANGELOG_ENV) or (REPO / "CHANGELOG.md"))
+
+
+def _md_inline(text: str) -> str:
+    """Escaped text with `code` and **bold** (the markers survive html.escape; nothing else becomes markup)."""
+    if text.count("`") % 2:                         # an unpaired backtick: no code spans at all
+        text = text.replace("`", "'")
+    out = []
+    for i, part in enumerate(text.split("`")):
+        if i % 2:
+            out.append(f"<code>{html.escape(part)}</code>")
+        else:
+            out.append(re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", html.escape(part)))
+    return "".join(out)
+
+
+def render_changelog(md: str) -> str:
+    """CHANGELOG.md -> HTML, in file order (newest first by convention). A tiny subset: #/##/### headings, "- "/"* "
+    bullets, paragraphs (blank-line separated), **bold**, `code`. Every character of text is escaped: raw HTML in the
+    file shows as text."""
+    out, para, items = [], [], []
+
+    def flush():
+        if para:
+            out.append(f"<p>{_md_inline(' '.join(para))}</p>")
+            para.clear()
+        if items:
+            out.append("<ul>" + "".join(f"<li>{_md_inline(t)}</li>" for t in items) + "</ul>")
+            items.clear()
+    for raw in md.splitlines():
+        line = raw.strip()
+        m = re.match(r"^(#{1,3})\s+(.*)$", line)
+        if not line:
+            flush()
+        elif m:
+            flush()
+            n = len(m.group(1)) + 1                     # # -> h2 (the page's own h1 is the title)
+            out.append(f'<h{n} class="cj-chg-h{n}">{_md_inline(m.group(2))}</h{n}>')
+        elif re.match(r"^[-*]\s+", line):
+            if para:
+                flush()
+            items.append(re.sub(r"^[-*]\s+", "", line))
+        elif items and raw[:1] in (" ", "\t"):      # a bullet's wrapped continuation line
+            items[-1] += " " + line
+        else:
+            if items:
+                flush()
+            para.append(line)
+    flush()
+    return "".join(out)
+
+
+_PAGE_VER_CACHE: dict = {}
+
+
+def page_version(path: Path | None) -> dict:
+    """{"version": PAGE_VERSION in the page (else "unknown"), "updated": the file's mtime "YYYY-MM-DD HH:MM" (None when
+    there is no file)}. Re-read only when the file's mtime/size change (one stat per call). Never shows a path."""
+    try:
+        st = Path(path).stat()
+    except (OSError, TypeError):
+        return {"version": "unknown", "updated": None}
+    key = str(path)
+    hit = _PAGE_VER_CACHE.get(key)
+    if hit and hit[0] == (st.st_mtime_ns, st.st_size):
+        return dict(hit[1])
+    try:
+        m = PAGE_VERSION_RE.search(Path(path).read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        m = None
+    res = {"version": m.group(1) if m else "unknown",
+           "updated": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")}
+    _PAGE_VER_CACHE[key] = ((st.st_mtime_ns, st.st_size), res)
+    return dict(res)
+
+
 def read_review_key(pkg: Path | None) -> str | None:
     if pkg is None:
         return None
@@ -274,7 +461,7 @@ class Gate:
     Origin check on unsafe methods, and the access log with `k` redacted (never cookies or keys)."""
 
     def __init__(self, app: Starlette, auth: A.Auth, origins=(), rules=(), mode: str = "key", verifier=None,
-                 access_admin: bool = False):
+                 access_admin: bool = False, writer=None, review_target=None):
         if mode not in AUTH_MODES or (mode == "access") != (verifier is not None):
             raise ValueError(f"auth mode {mode!r} needs {'a' if mode == 'access' else 'no'} JWT verifier")
         self.app = app
@@ -285,6 +472,58 @@ class Gate:
         self.mode = mode                    # "key": key-link session cookie only; "access": Cloudflare JWT only
         self.verifier = verifier            # portal.access.Verifier in access mode
         self.access_admin = bool(access_admin)
+        self.writer = writer                # portal.audit.Writer: the catch-all (None = no audit lines)
+        self.review_target = review_target  # the real review package's id, the target of /review/app/ writes
+
+    def route_of(self, scope) -> tuple:
+        """-> (route template or None, path params) of this request. The endpoint the router chose when it ran (one
+        route with that endpoint), else the router's own matching (a refused request never reached it): the first
+        FULL match, else the first PARTIAL (wrong method)."""
+        ep = scope.get("endpoint")
+        if ep is not None:
+            hits = [r for r in self.routes if getattr(r, "endpoint", None) is ep]
+            if len(hits) == 1:
+                return getattr(hits[0], "path", None), dict(scope.get("path_params") or {})
+        partial = (None, {})
+        probe = {**scope, "type": "http", "path_params": {}}
+        for r in self.routes:
+            try:
+                m, child = r.matches(probe)
+            except Exception:                           # noqa: BLE001  a route that can't match this scope
+                continue
+            if m == Match.FULL:
+                return getattr(r, "path", None), dict(child.get("path_params") or {})
+            if m == Match.PARTIAL and partial[0] is None:
+                partial = (getattr(r, "path", None), dict(child.get("path_params") or {}))
+        return partial
+
+    def record(self, scope, user, status) -> None:
+        """The audit catch-all, after the response: the day's first sign-in per person on this door, and one line
+        per unsafe-method request (successful or refused). Only queues work (portal.audit.Writer); never raises."""
+        w = self.writer
+        if w is None:
+            return
+        try:
+            door = PA.DOOR_NAMES.get(self.mode, self.mode)
+            if scope.get("cj_login") and status == 303:
+                w.signin(scope["cj_login"], door, "key link")
+            elif user and user.get("id"):
+                w.signin(user["id"], door, "session" if self.mode == "key" else "cloudflare")
+            method = scope.get("method")
+            if method not in UNSAFE:
+                return
+            st = int(status or 500)                     # no response started = the app raised
+            tpl, params = self.route_of(scope)
+            if tpl in SELF_LOGGED and st < 400:
+                return
+            action, frequent = audit_label(tpl, params, method)
+            target = audit_target(params)
+            if target is None and tpl == REVIEW_BASE + "/app/{path:path}":
+                target = self.review_target
+            actor = (user or {}).get("id") or "-"
+            w.event(actor, action, target, {"status": st}, frequent=frequent or actor == "-")
+        except Exception as e:                          # noqa: BLE001  the audit never breaks a request
+            log.error("audit catch-all failed (%s)", type(e).__name__)
 
     async def access_user(self, scope):
         """Access mode: -> (roster person, None) or (None, the 403 page). Only the verified JWT counts; cookies and
@@ -367,6 +606,7 @@ class Gate:
             who = (user or {}).get("id") or scope.get("cj_login") or "-"
             access_log.info('%s "%s %s%s" %s %s', client, scope.get("method"), scope.get("path"),
                             f"?{qs}" if qs else "", box["status"], who)
+            self.record(scope, user, box["status"])
 
     def origin_allowed(self, scope) -> bool:
         """Key mode: origin_ok (this portal's own scheme://Host, or an --origin). Access mode: ONLY the configured
@@ -790,8 +1030,10 @@ def create_app(cfg: Config) -> Gate:
                 and not (access and m.get("external"))]            # no host:port links through the tunnel
         return no_store(JSONResponse({"schema": "cj_modules/1", "modules": mods}))
 
-    async def version_json(request: Request):
-        return no_store(JSONResponse({"version": version}))
+    def version_json(request: Request):                 # sync: a stat (and a read when a page changed)
+        pkg_page = (Path(cfg.review_package) / "index.html") if cfg.review_package else None
+        return no_store(JSONResponse({"version": version, "review_page": page_version(pkg_page),
+                                      "review_tool": page_version(MRS.TOOL_PAGE)}))
 
     async def me(request: Request):
         u = request.scope["cj_user"]
@@ -834,8 +1076,23 @@ def create_app(cfg: Config) -> Gate:
     async def review_free(request: Request):
         return page(404, "Not found", "Nothing here yet. The review is at /review/.")
 
+    def about(request: Request):                    # sync: Starlette runs it in the threadpool (a file read)
+        doc = read_json(about_path())
+        return M.Ctx.page(request, "About CryoEV", render_about(doc, version), active="about")
+
+    def changes(request: Request):                  # sync: a file read
+        try:
+            md = changelog_path().read_text(encoding="utf-8")
+        except OSError:
+            md = ""
+        body = render_changelog(md) or '<p class="cj-mut">No changelog yet.</p>'
+        return M.Ctx.page(request, "What changed", '<div class="cj-about cj-changes"><h1>What changed</h1>'
+                          f'<p class="cj-mut">Portal: {html.escape(version)}</p>{body}</div>', active="about")
+
     routes = [
         Route("/", home, methods=["GET"]),
+        Route("/about", about, methods=["GET"]),
+        Route("/changes", changes, methods=["GET"]),
         Route("/login", login, methods=["GET"]),
         Route("/healthz", healthz, methods=["GET"]),
         *[Route(f"/cj/{n}", static(n), methods=["GET"]) for n in STATIC],
@@ -861,19 +1118,34 @@ def create_app(cfg: Config) -> Gate:
     rules = sorted(rules + core, key=lambda pr: -len(pr[0]))
     rules_box[:] = rules
 
+    writer = PA.Writer(cfg.state_dir)               # the Gate's audit catch-all (one worker thread)
+
+    async def sweeper():
+        while True:
+            await asyncio.sleep(SWEEP_S)
+            try:
+                writer.sweep()                       # memory only: due windows -> queued counter lines
+            except Exception as e:                  # noqa: BLE001
+                log.error("audit sweep failed (%s)", type(e).__name__)
+
     @contextlib.asynccontextmanager
     async def lifespan(app):
         await proxy.start()
         await pred_proxy.start()
+        sweep = asyncio.create_task(sweeper())
         try:
             yield
         finally:
+            sweep.cancel()
             await proxy.close()
             await pred_proxy.close()
+            await asyncio.get_running_loop().run_in_executor(None, writer.close)   # open windows -> counter lines
 
     star = Starlette(routes=routes, lifespan=lifespan)
     star.router.redirect_slashes = False
-    gate = Gate(star, auth, origins, rules, mode=cfg.auth, verifier=verifier, access_admin=access_admin)
+    pkg_name = cfg.review_package.name if cfg.review_package else None
+    gate = Gate(star, auth, origins, rules, mode=cfg.auth, verifier=verifier, access_admin=access_admin,
+                writer=writer, review_target=pkg_name if pkg_name and SAFE_ID_RE.match(pkg_name) else None)
     gate.proxy = proxy
     gate.pred_proxy = pred_proxy
     gate.auth = auth
@@ -952,6 +1224,13 @@ def startup_lines(cfg: Config, host: str, port: int) -> list:
         "[cj] sandbox: hidden (its host:port links don't exist through the tunnel)",
         "[cj] logs: uvicorn access log off, proxy headers off; own access log with k= redacted"
         + ("; refusals logged with reason + Cf-Connecting-IP, never the token" if access else ""),
+        f"[cj] audit: {PA.audit_path(cfg.state_dir)}: every {'/'.join(sorted(UNSAFE))} (done or refused; route "
+        f"name + safe ids only), frequent saves counted per {PA.WINDOW_S // 60:g} min, the first sign-in per person "
+        "per day; written off the event loop",
+        f"[cj] about: /about (signed in) from {about_path()}"
+        + ("" if about_path().is_file() else " (missing: placeholders shown)"),
+        f"[cj] changes: /changes (signed in) from {changelog_path()}"
+        + ("" if changelog_path().is_file() else " (missing: empty page)"),
     ]
 
 
@@ -1022,6 +1301,11 @@ def main(argv=None):
     port = args.port or (ACCESS_PORT if access else KEY_PORT)
     import uvicorn
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s", stream=sys.stdout)
+    gone = PA.actor_module().strip_env()             # here, never at import: the CLI imports portal modules.
+    if gone:                                         # A server never credits people's actions to an agent, and
+                                                     # the children it spawns inherit the clean env
+        print(f"[cj] removed {', '.join(gone)} from this server's environment (agent attribution is for CLI runs "
+              "only)", flush=True)
     try:
         cfg = build_config(args)
     except ValueError as e:                          # access mode without its config: no start

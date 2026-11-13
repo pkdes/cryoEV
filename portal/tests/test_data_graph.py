@@ -161,6 +161,8 @@ REVERSE_SHORT = {v: k for k, v in D.GRAPH_SHORT.items()}
 
 
 def node_key(n):
+    if n["kind"] == "session" and n["title"] == "Session unknown" and not n["url"]:
+        return D.GRAPH_UNKNOWN_SESSION
     return REVERSE_SHORT.get(n["kind"], n["kind"]) + "|" + n["title"]
 
 
@@ -217,7 +219,8 @@ class Function(Roots, unittest.TestCase):
         ref = hp.build_model(cur, his, st, [str(self.reg)], changes)["graph"]
         g = self.graph(ADMIN)
         self.assertEqual(g["cols"], ref["cols"])
-        self.assertEqual([[node_key(n), n["col"], n["hist"], n["part"], n["sub"]] for n in g["nodes"]], ref["nodes"])
+        self.assertEqual([[node_key(n), n["col"], n["hist"], n["part"], n["sub"], n["maker"]] for n in g["nodes"]],
+                         ref["nodes"])
         self.assertEqual(g["edges"], ref["edges"])
         self.assertGreater(len(ref["edges"]), 5)                 # the fixture is not trivially empty
         keys = {node_key(n) for n in g["nodes"]}
@@ -342,7 +345,7 @@ class Function(Roots, unittest.TestCase):
         n = by_title(self.graph(ADV))[NOTED]
         self.assertEqual((n["sub"], n["status"]), ("", ""))
         a = self.graph(ADMIN)
-        self.assertEqual(by_title(a)[NOTED]["sub"], "copied from " + HID_PS)      # control: the admin sees the note
+        self.assertEqual(by_title(a)[NOTED]["sub"], "image list not recorded · copied from " + HID_PS)  # control
         self.assertIn("checked against " + HID_PS, [e[2] for e in a["edges"]])
         self.assertIn("input", [e[2] for e in self.graph(ADV)["edges"]])
 
@@ -350,7 +353,7 @@ class Function(Roots, unittest.TestCase):
         clear_caches()
         hpm = D._history_module()
         real, calls = hpm.build_model, []
-        hpm.build_model = lambda *a: (calls.append(1), real(*a))[1]
+        hpm.build_model = lambda *a, **kw: (calls.append(1), real(*a, **kw))[1]
         try:
             self.graph(ADV)
             self.graph(ADV)
@@ -527,8 +530,14 @@ class Browser(Base):
                             self.assertLessEqual(sw, iw, "the page scrolls sideways")
                             wrap = page.evaluate("(w => [w.scrollWidth, w.clientWidth])"
                                                  "(document.getElementById('cj-data-graph-wrap'))")
-                            if width == 390:
-                                self.assertGreater(wrap[0], wrap[1], "the graph box should scroll inside")
+                            if width == 390:                    # #16: on a phone the lanes stack instead
+                                self.assertLessEqual(wrap[0], wrap[1], "stacked lanes need no sideways scroll")
+                                tops = page.eval_on_selector_all(".cj-data-graph-head",
+                                                                 "es => es.map(e => e.offsetTop)")
+                                self.assertEqual(tops, sorted(set(tops)))
+                            else:
+                                self.assertEqual(len(set(page.eval_on_selector_all(
+                                    ".cj-data-graph-head", "es => es.map(e => e.offsetTop)"))), 1)
                             self.assertEqual(page.locator("script:not([src])").count(), 0)
                             self.assertGreater(page.locator("svg#cj-data-graph-svg path").count(), 4)
                             # analyses start hidden; the checkbox shows them

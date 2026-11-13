@@ -630,12 +630,13 @@ class SharedAudit(Base):
         J.audit(cfg, "adv", "cancel", "job_20261105_new", "wrong set", "requested")
         J.audit(cfg, "adv", "cancel", "job_20261105_new", "wrong set", "ok")
         self.add("mixed1", "basic")
-        rows = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()]
+        rows = [r for r in (json.loads(x) for x in path.read_text(encoding="utf-8").splitlines())
+                if not T.gate_line(r)]                          # the Gate's sign-in / catch-all lines (round 9)
         for r in rows[1:]:
             self.assertEqual(set(r), {"t", "actor", "action", "target", "detail"})
         self.assertEqual(rows[1]["detail"], {"reason": "wrong set", "result": "requested", "phase": "requested"})
         self.assertEqual(rows[2]["detail"]["phase"], "result")
-        api = json.loads(self.get("/admin/api/audit")[2])["entries"]
+        api = [e for e in json.loads(self.get("/admin/api/audit")[2])["entries"] if not T.gate_line(e)]
         self.assertEqual([(e["actor"], e["action"], e["target"]) for e in api[:4]],
                          [("tester", "person_added", "mixed1"), ("adv", "cancel", "job_20261105_new"),
                           ("adv", "cancel", "job_20261105_new"), ("adv", "cancel", "job_20261105_old")])

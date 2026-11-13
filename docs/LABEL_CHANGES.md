@@ -50,6 +50,9 @@ Since 2026-11-04 (user decision), the default is **only reviewed**. `version.jso
 - Folder: `labels.coco.json`, `changes.jsonl`, `conflicts.csv`, `version.json`.
 - `version.json`: `{id, base, pkg, edits_dir, n_images_applied, counts_by_op, class_groups_sha256, people_sha256,
   tool: "apply_review_edits.py <git sha>", created}`.
+  - Attribution (round 9): `created_by` = `--who`, else `$CRYOEV_FOR`, else null (a `people.json` id);
+    `created_via` = `$CRYOEV_VIA` (the agent that ran it, e.g. `"claude"`), else null. Never a key named `via`:
+    the registry merges `version.json` under its later `label_version` lines, where `via` is that line's writer.
   - Review scope (2026-11-04): `review_scope`, `n_package_images`, `reviewed_images` (sorted image keys),
     `n_reviewed`, `held_back_images`, `n_held_back`.
   - `supersedes`: the newest earlier `lv_*` under `--out-root` with the same `pkg` and `base`, else null. Each partial

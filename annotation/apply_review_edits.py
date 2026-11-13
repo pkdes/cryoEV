@@ -73,9 +73,14 @@ version id inside labels.coco.json, so the same inputs give the same file hash.
 Read-only on the base, package and edits. Refuses --out-root under Box or Cryo-image-processing, and
 never overwrites an existing lv_ folder.
 
+Who made the version (round 9, registry/actor.py): version.json `created_by` = --who, else $CRYOEV_FOR, else null
+(a people.json id from --people); `created_via` = $CRYOEV_VIA (the agent that ran it, e.g. "claude"), else null.
+Never a key named `via`: the registry merges version.json under its later label_version lines, where `via` is the
+writer of that line.
+
   python annotation/apply_review_edits.py --base <pull>/current.coco.json --package <review package> [--dry-run]
       [--all-edits] [--edits <dir>] [--out-root <CryoAI-laptop>/labels] [--people annotation/people.json]
-      [--stamp YYYYMMDD_HHMM]
+      [--stamp YYYYMMDD_HHMM] [--who <people.json id>]
 """
 from __future__ import annotations
 
@@ -103,6 +108,7 @@ sys.path.insert(0, str(REPO))
 from review_server import (LOW_CONF_EV, _migrate, _num, effective_labels, image_flags, is_low_conf,  # noqa: E402
                            load_people, object_key, tag_of)
 from data_utils.path_guard import PROTECTED_ROOTS, normalize, protected_problem  # noqa: E402
+from registry import actor  # noqa: E402
 
 SCHEMA = "label_change/1"
 DUP_IOU = 0.9
@@ -849,8 +855,15 @@ def main(argv=None):
     ap.add_argument("--all-edits", action="store_true",
                     help="Apply every record with changes, reviewed or not (default: only images marked reviewed)")
     ap.add_argument("--dry-run", action="store_true", help="Report only; write nothing")
+    ap.add_argument("--who", default=None, help="people.json id recorded as version.json created_by "
+                    "(default: $CRYOEV_FOR, else none)")
     a = ap.parse_args(argv)
     scope = "all_edits" if a.all_edits else "reviewed_only"
+    try:                                       # version.json created_by / created_via (registry/actor.py)
+        created_by = actor.who(a.who, default=None, people_path=a.people)
+        created_via = actor.via()
+    except actor.ActorError as e:
+        raise SystemExit(f"[ERROR] {e}")
 
     base, package = a.base.resolve(), a.package.resolve()
     edits_dir = (a.edits or package / "edits").resolve()
@@ -871,6 +884,8 @@ def main(argv=None):
         if not p.exists():
             raise SystemExit(f"[ERROR] {what} not found: {p}")
     people = load_people(a.people)
+    if created_by is not None and created_by not in {p.get("id") for p in people}:
+        raise SystemExit(f"[ERROR] --who {created_by!r} is not a people.json id ({a.people})")
     print(f"[steps] scope {scope} ({'only images marked reviewed; unreviewed edits held back' if scope == 'reviewed_only' else 'every record with changes, reviewed or not'}); "
           "effective_labels() per record -> per-object diff vs package labels; "
           f"duplicates at mask IoU >= {a.dup_iou}; pixels = normalized x w/h, clamped, 0.01 px; "
@@ -900,7 +915,8 @@ def main(argv=None):
                "class_groups_sha256": sha256_file(a.class_groups), "people_sha256": sha256_file(a.people),
                "rejected_images": info["rejected_images"], "n_rejected": len(info["rejected_images"]),
                "low_conf": info["low_conf"], "n_low_conf": len(info["low_conf"]), "object_notes": info["object_notes"],
-               "tool": f"apply_review_edits.py {git_sha()}", "created": datetime.now().isoformat(timespec="seconds")}
+               "tool": f"apply_review_edits.py {git_sha()}", "created": datetime.now().isoformat(timespec="seconds"),
+               "created_by": created_by, "created_via": created_via}
     if scope == "reviewed_only":
         print(f"[OK] reviewed only: {info['n_reviewed']} of {info['n_package_images']} images; "
               f"{info['n_held_back']} edited images held back (not reviewed)")

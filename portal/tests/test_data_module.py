@@ -349,7 +349,8 @@ class Pages(Base):
     def test_dataset_labels_and_images_pages(self):
         t = main_html(self.page("/data/dataset/roboflow_20261028_cryoai_v5_S1_evnonev"))
         self.assertIn("114/26/39 train/valid/test", t)
-        self.assertIn("MV as EV", t)
+        self.assertIn("<summary>Class mapping (from the source labels)</summary>", t)    # #14: collapsed remap
+        self.assertIn("<li><b>EV</b> ← MV, Low conf EV</li>", t)
         self.assertIn("v5_evnonev_y8m_20261029", t)               # models trained on it
         self.assertIn("No example images are linked", t)
         t = main_html(self.page("/data/labels/lv_20261030_0846"))
@@ -404,7 +405,8 @@ class Pages(Base):
                 page = main_html(self.page(f"/data/{kind}/{eid}"))
                 for label, value, _ in d["fields"]:
                     self.assertIn(D.esc(label), page)
-                    self.assertIn(D.esc(value), page)
+                    for v in (value if isinstance(value, list) else [value]):     # a list: one bullet per value
+                        self.assertIn(D.esc(v), page)
                 self.assertEqual(page.count('class="cj-data-img"'), len(d["thumbs"]))
         rows = self.api("/data/api/list/models")["rows"]
         self.assertEqual({r["id"] for r in rows}, {"v9_prod_20261101", "v5_evnonev_y8m_20261029"})
@@ -796,6 +798,9 @@ def lineage_records() -> dict:
                             rec("roboflow_export", id="list exp S1", derived_from="list exp", classes=[],
                                 image_list={"file": "lists/export_list_exp_S1.tsv", "n": 2,
                                             "method": "export COCO split folders"}),
+                            rec("roboflow_export", id="same resplit", derived_from="list exp", classes=[],
+                                image_list={"file": "lists/export_list_exp.tsv", "n": 3,
+                                            "method": "export COCO split folders"}),
                             rec("roboflow_export", id="drop resplit", derived_from="list exp", classes=[],
                                 image_list={"file": "lists/export_drop.tsv", "n": 1,
                                             "method": "export COCO split folders"}),
@@ -883,9 +888,9 @@ class Lineage(LineageBase):
         ps = kinds["images"]["parents"][0]                           # review package -> prediction set -> session
         self.assertEqual((ps["type"], ps["id"]), ("images", "ps_20261105_aaaaaa"))
         self.assertEqual([p["id"] for p in ps["parents"]], ["20261104"])
-        grid = kinds["pull"]["parents"][0]                           # download -> grid -> session
-        self.assertEqual((grid["type"], grid["id"]), ("grid", "2602"))
-        self.assertIn("20261104", [p["id"] for p in grid["parents"]])
+        sess = kinds["pull"]["parents"][0]                           # download -> session (#15: with its count)
+        self.assertEqual((sess["type"], sess["id"], sess["images"]), ("session", "20261104", 2))
+        self.assertIn(["Grids", "Grid 2602 (1); 1 with no grid recorded", None], sess["fields"])
         session = next(n for n in walk(root) if n["type"] == "session" and n["id"] == "20261104")
         shown = {f[0]: f[1] for f in session["fields"]}
         self.assertEqual(shown["Instrument"], "Glacios")
@@ -1077,8 +1082,8 @@ class Lineage(LineageBase):
     def test_dataset_image_list_traces_sessions(self):
         t = self.tree("dataset", "ds_listed")
         self.assertEqual(t["root"]["note"], "2 of 3 images traced to sessions 20261104.")
-        ids = [(n["type"], n["id"]) for n in t["root"]["parents"]]
-        self.assertEqual(ids, [("grid", "2602"), ("session", "20261104")])
+        ids = [(n["type"], n["id"], n.get("images"), n["title"]) for n in t["root"]["parents"]]
+        self.assertEqual(ids, [("session", "20261104", 2, "Session 20261104"), ("session", None, 1, "Session unknown")])
         self.assertIn("2 of 3 images traced", main_html(self.page("/data/lineage/dataset/ds_listed/")))
         self.assertIsNone(self.tree("dataset", "ds_chain")["root"]["note"])    # control: no list, no note
 
@@ -1089,12 +1094,12 @@ class Lineage(LineageBase):
     def test_export_image_list_traces_sessions(self):
         t = self.tree("images", "list exp")
         self.assertEqual(t["root"]["note"], "2 of 3 images traced to sessions 20261104.")
-        self.assertEqual(self.parents(t["root"]), [("grid", "2602", "ok"), ("session", "20261104", "ok")])
+        self.assertEqual(self.parents(t["root"]), [("session", "20261104", "ok"), ("session", None, "unknown")])
         self.assertIn("2 of 3 images traced", main_html(self.page("/data/lineage/images/list%20exp/")))
         plain = self.tree("images", "plain exp")["root"]                     # control: no list -> unknown, no note
         self.assertIsNone(plain["note"])
-        self.assertEqual([(n["status"], n["note"]) for n in plain["parents"]],
-                         [("unknown", "The registry does not record which images went into this export.")])
+        self.assertEqual([(n["status"], n["title"]) for n in plain["parents"]],
+                         [("unknown", "Image list not recorded")])
         none = self.tree("images", "untraced exp")["root"]                   # a list with no traced image
         self.assertEqual(none["note"], "0 of 1 images traced to a session.")
         self.assertEqual([n["status"] for n in none["parents"]], ["unknown"])
@@ -1102,27 +1107,29 @@ class Lineage(LineageBase):
     def test_resplit_traces_through_its_parent_export(self):
         t = self.tree("images", "list exp S1")
         self.assertEqual(t["root"]["note"], "2 of 2 images traced to sessions 20261104.")
-        self.assertEqual(self.parents(t["root"]), [("export", "list exp", "ok")])      # no duplicate grids here
-        self.assertEqual(self.parents(t["root"]["parents"][0]), [("grid", "2602", "ok"), ("session", "20261104", "ok")])
+        # #15: a re-split whose list gives other counts (here one untraced image fewer) shows its own sessions
+        self.assertEqual(self.parents(t["root"]), [("export", "list exp", "ok"), ("session", "20261104", "ok")])
+        self.assertEqual(self.parents(t["root"]["parents"][0]), [("session", "20261104", "ok"),
+                                                                 ("session", None, "unknown")])
+        same = self.tree("images", "same resplit")["root"]                   # same sessions, counts and grids
+        self.assertEqual(self.parents(same), [("export", "list exp", "ok")])            # no duplicate sessions here
         drop = self.tree("images", "drop resplit")["root"]                   # drops a grid: shows its own
         self.assertEqual(self.parents(drop), [("export", "list exp", "ok"), ("session", "20261104", "ok")])
         self.assertEqual(drop["note"], "1 of 1 images traced to sessions 20261104.")
         orphan = self.tree("images", "orphan resplit")["root"]               # parent not in the registry
-        self.assertEqual(self.parents(orphan), [("export", "gone exp", "unknown"), ("grid", "2602", "ok"),
-                                                ("session", "20261104", "ok")])
+        self.assertEqual(self.parents(orphan), [("export", "gone exp", "unknown"), ("session", "20261104", "ok")])
 
     def test_resplit_of_a_hidden_export(self):
         t = self.tree("images", "resplit of priv", "advanced")
-        self.assertEqual([n["status"] for n in t["root"]["parents"]], ["hidden", "ok", "ok"])
+        self.assertEqual([n["status"] for n in t["root"]["parents"]], ["hidden", "ok"])
         self.assertNotIn("priv exp", json.dumps(t))
         self.assertNotIn("priv exp", self.page("/data/lineage/images/resplit%20of%20priv/", "advanced"))
         ta = self.tree("images", "resplit of priv", "admin")                 # control: admin sees the parent
-        self.assertEqual(self.parents(ta["root"]), [("export", "priv exp", "ok"), ("grid", "2602", "ok"),
-                                                    ("session", "20261104", "ok")])
+        self.assertEqual(self.parents(ta["root"]), [("export", "priv exp", "ok"), ("session", "20261104", "ok")])
 
     def test_summary_counts_listed_images_with_no_session(self):
         t = self.tree("images", "list exp")
-        self.assertEqual((t["summary"]["unknown"], t["summary"]["untraced_images"]), (0, 1))     # zz_untraced
+        self.assertEqual((t["summary"]["unknown"], t["summary"]["untraced_images"]), (1, 1))     # zz_untraced
         self.assertNotIn("zz_untraced", json.dumps(t))                        # a number, never the ids
         self.assertIn("1 listed image not traced to an imaging session.",
                       main_html(self.page("/data/lineage/images/list%20exp/")))

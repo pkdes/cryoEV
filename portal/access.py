@@ -1,8 +1,8 @@
 """
 CryoEV portal sign-in, Cloudflare Access mode (C4): `python -m portal.app --auth access --port 8448`.
 
-Lab members reach the portal from the internet through a Cloudflare Tunnel guarded by Cloudflare Access (one-time PIN
-email login). Access adds a signed JWT to every request in the `Cf-Access-Jwt-Assertion` header. This mode trusts
+Lab members reach the portal from the internet through a Cloudflare Tunnel guarded by Cloudflare Access (Google sign-in,
+or an email one-time PIN). Access adds a signed JWT to every request in the `Cf-Access-Jwt-Assertion` header. This mode trusts
 ONLY that verified JWT; key links and session cookies are off on its port (portal/app.py).
 
 - Header `Cf-Access-Jwt-Assertion` only (no cookie fallback). PyJWT, RS256 only; `aud` = the configured AUD, `iss` =

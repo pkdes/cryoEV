@@ -5,7 +5,7 @@
     python registry/registry.py import [--dry-run]
     python registry/registry.py list [--entity model] [--status production]
     python registry/registry.py show <id>
-    python registry/registry.py set-status <id> <status> --who <people.json id> [--note ...] [--reason ...]
+    python registry/registry.py set-status <id> <status> [--who <people.json id>] [--note ...] [--reason ...]
     python registry/registry.py job new --type {annotate,revise,train,check} --where {app,roboflow,desktop,laptop}
                                         --name NAME (--images LISTFILE | --session YYYYMMDD) [--who ID] [--total N]
 
@@ -23,6 +23,21 @@ inference_check and label_version are pointer records (`owner` = batches.jsonl /
 stores the id, status lines and anything that differs from the owner file; the rest is read from the owner
 file at read time. Explicit status lines (`status_by`, from set-status) beat derived statuses.
 Writes go through data_utils.path_guard (never under Box or Cryo-image-processing). Session 20261012 is refused.
+
+Attribution (round 9, registry/actor.py): `via` (envelope) = the agent that wrote the line, e.g. "claude"; absent
+when a person ran the command. append(record, via=...) always drops a `via` the record arrived with and sets only
+its own, so a line copied from an agent's line (set-status, the importer) never carries the agent onto a person's
+write. append / set_status / new_job (and the importer) take `via` from $CRYOEV_VIA when the argument is not
+passed (via=None explicitly = none): a script an agent runs is stamped; servers strip the variable in main(). The
+CLI commands take the person from --who, else $CRYOEV_FOR (set-status: one of the two is required; job new: else
+none, as before). An agent never sets production: a model line with `via` and status production is refused, even
+when the model already is production (the user's decision is never restamped by an agent).
+Format marker: the first line carrying via / status_via writes <root>/FORMAT.json {"min_reader": 2}; append and the
+importer refuse a registry whose min_reader is above READER_VERSION (an older checkout would mis-read the lines).
+`status_via` = the agent that set the explicit status (next to `status_by`): written by set-status (absent when a
+person sets it), carried with `status_by` wherever that is carried (set-status's own copy, the importers), so an
+agent-set status still reads "claude for pujan" after later lines; a person's new status clears it. append() never
+strips it (only the top-level `via`).
 """
 import argparse
 import hashlib
@@ -36,6 +51,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO))
+import actor  # noqa: E402
 import ids  # noqa: E402
 from data_utils.oslock import acquire_lock  # noqa: E402
 from data_utils.path_guard import protected_problem  # noqa: E402
@@ -45,8 +61,10 @@ from validate import ENTITIES, EXCLUDED_SESSIONS, read_json  # noqa: E402
 
 PEOPLE = REPO / "annotation" / "people.json"
 POINTER = {"inference_check", "label_version"}
-ENVELOPE = {"schema", "id", "logged", "recorded_by", "note", "owner", "status_by"}
+ENVELOPE = {"schema", "id", "logged", "recorded_by", "note", "owner", "status_by", "status_via", "via"}
 PRODUCTION_WHO = "pujan"
+FORMAT, READER_VERSION = "FORMAT.json", 2          # registry format marker; 2 = lines may carry via / status_via
+_ENV = object()                                   # append(via=...) not passed: take it from $CRYOEV_VIA
 LOCK, LOCK_WAIT = ".registry.lock", 30.0          # OS write lock in the registry folder (append holds it per line)
 UPLOAD_LOCK = ".upload_session.lock"              # session read -> merge -> append (= importers / upload_sessions)
 _SCHEMAS = None
@@ -180,6 +198,9 @@ def _check(rec, root, via_set_status=False):
         prev = current("model", root).get(rec["id"], {})
         kept = prev.get("status") == "production" and prev.get("status_by") == PRODUCTION_WHO \
             and rec.get("status_by") == PRODUCTION_WHO
+        if rec.get("via"):                                # agents never set (or restamp) production: user only
+            raise RegistryError(f"refused: an agent (via {rec['via']!r}) never writes a production model line; "
+                                f"only `set-status <id> production --who {PRODUCTION_WHO}` run by the user does")
         if not (kept or via_set_status and rec.get("status_by") == PRODUCTION_WHO):
             raise RegistryError(f"refused: only `set-status <id> production --who {PRODUCTION_WHO}` sets production")
     return e
@@ -228,13 +249,59 @@ def _write_files(root, files, replace=False):
     return len(todo)
 
 
-def append(record, root=None, _via_set_status=False, new_only=False, files=None, replace_files=False):
+def check_format(root):
+    """Refuse a registry written for a newer reader (<root>/FORMAT.json min_reader > READER_VERSION). No file = OK."""
+    p = Path(root) / FORMAT
+    if not p.exists():
+        return None
+    try:
+        need = int(json.loads(p.read_text(encoding="utf-8"))["min_reader"])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise RegistryError(f"refused: {p} unreadable ({e}); not writing to a registry of unknown format")
+    if need > READER_VERSION:
+        raise RegistryError(f"refused: {p} needs reader version {need}, this code is {READER_VERSION}: "
+                            "update this checkout (git pull) before writing to the registry")
+    return need
+
+
+def _mark_format(root):
+    """FORMAT.json min_reader >= READER_VERSION (under the lock, before a line with via / status_via)."""
+    if (check_format(root) or 0) < READER_VERSION:
+        p = Path(root) / FORMAT
+        _guard(p)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps({"min_reader": READER_VERSION, "why": "lines may carry via / status_via (round 9)",
+                                   "written": now()}) + "\n", encoding="utf-8")
+        tmp.replace(p)
+
+
+def resolve_via(via=_ENV):
+    """The via argument: not passed -> $CRYOEV_VIA (actor.via()); None -> none; else checked."""
+    if via is _ENV:
+        try:
+            via = actor.via()
+        except actor.ActorError as e:
+            raise RegistryError(f"refused: {e}") from e
+    if via and not actor.VIA_RE.match(str(via)):
+        raise RegistryError(f"refused: via {via!r} is not a short lower-case id")
+    return via or None
+
+
+def append(record, root=None, _via_set_status=False, new_only=False, files=None, replace_files=False, via=_ENV):
     """Validate, then append one line to <root>/<entity>.jsonl. Returns the stored line.
+    via: the agent writing this line; not passed = $CRYOEV_VIA (actor.via()), None = a person. Any `via` in `record`
+    is dropped first: a line copied from an agent's line must not carry the agent onto someone else's write.
     new_only: refuse an id already used by any record (creators: new_job, dataset_from_lv), checked under the lock.
     files: {registry-relative path: bytes} written under the lock after the checks, before the line; a file there
     with other content is refused unless replace_files (the importer: a list whose record changes with it)."""
     root = Path(root or default_root())
     rec = dict(record)
+    rec.pop("via", None)
+    via = resolve_via(via)
+    if via:
+        rec["via"] = via
+    if rec.get("status_via") is not None and not actor.VIA_RE.match(str(rec["status_via"])):
+        raise RegistryError(f"refused: status_via {rec['status_via']!r} is not a short lower-case id")
     rec.setdefault("logged", now())
     _guard(root)
     root.mkdir(parents=True, exist_ok=True)
@@ -242,6 +309,7 @@ def append(record, root=None, _via_set_status=False, new_only=False, files=None,
     if lock is None:
         raise RegistryError(f"registry busy: another process held {root / LOCK} for {LOCK_WAIT:.0f} s")
     try:
+        check_format(root)
         e = _check(rec, root, _via_set_status)
         if new_only:
             used = id_used_by(rec.get("id"), root)
@@ -249,6 +317,8 @@ def append(record, root=None, _via_set_status=False, new_only=False, files=None,
                 raise RegistryError(f"refused: id {rec.get('id')} is already used by {used}/1 (new_only)")
         path = root / f"{e}.jsonl"
         _guard(path)
+        if rec.get("via") or rec.get("status_via"):
+            _mark_format(root)
         _write_files(root, files, replace_files)
         line = compact(e, rec)
         lead = ""
@@ -263,9 +333,11 @@ def append(record, root=None, _via_set_status=False, new_only=False, files=None,
         lock.close()
 
 
-def set_status(id, status, who, note=None, root=None, reason=None):
+def set_status(id, status, who, note=None, root=None, reason=None, via=_ENV):
     """Explicit status line (wins over derived ones). Jobs: ready / in_progress / done / blocked (needs a
-    reason: `reason` or `note`) / cancelled; leaving `blocked` drops blocked_reason."""
+    reason: `reason` or `note`) / cancelled; leaving `blocked` drops blocked_reason. via: the agent (not passed =
+    $CRYOEV_VIA, None = a person); it is also the line's status_via."""
+    via = resolve_via(via)
     if who not in roster():
         raise RegistryError(f"refused: --who {who!r} is not in people.json")
     if current("session", root).get(id) is not None:
@@ -278,13 +350,13 @@ def set_status(id, status, who, note=None, root=None, reason=None):
         if lk is None:
             raise RegistryError(f"registry busy: {r / UPLOAD_LOCK} held for {LOCK_WAIT:.0f} s")
         try:
-            return _set_status(id, status, who, note, root, reason)
+            return _set_status(id, status, who, note, root, reason, via)
         finally:
             lk.close()
-    return _set_status(id, status, who, note, root, reason)
+    return _set_status(id, status, who, note, root, reason, via)
 
 
-def _set_status(id, status, who, note=None, root=None, reason=None):
+def _set_status(id, status, who, note=None, root=None, reason=None, via=None):
     cur = current(root=root).get(id)
     if cur is None:
         raise RegistryError(f"unknown id {id}")
@@ -294,6 +366,9 @@ def _set_status(id, status, who, note=None, root=None, reason=None):
     rec = {k: v for k, v in cur.items()} if e not in POINTER else \
         {k: v for k, v in _lines_last(root, e, id).items()}
     rec.update(status=status, status_by=who, logged=now(), recorded_by="registry.py set-status")
+    rec.pop("status_via", None)                         # this status's agent only: a person's status clears it
+    if via:
+        rec["status_via"] = via
     if note:
         rec["note"] = note
     if e == "job":
@@ -305,7 +380,7 @@ def _set_status(id, status, who, note=None, root=None, reason=None):
             rec.pop("blocked_reason", None)
     elif reason:
         raise RegistryError("refused: --reason is only for jobs")
-    return append(rec, root, _via_set_status=True)
+    return append(rec, root, _via_set_status=True, via=via)
 
 
 # ---------------------------------------------------------------- jobs (contract v2 addendum)
@@ -330,7 +405,8 @@ def read_image_list(path):
     return out
 
 
-def new_job(type, where, name, images=None, session=None, who=None, total=None, root=None, date=None, note=None):
+def new_job(type, where, name, images=None, session=None, who=None, total=None, root=None, date=None, note=None,
+            via=_ENV):
     """Append a `job/1` line (status ready) with its image list copied to <root>/lists/<job id>.txt."""
     root = Path(root or default_root())
     if type not in JOB_TYPES or where not in JOB_WHERE:
@@ -369,7 +445,7 @@ def new_job(type, where, name, images=None, session=None, who=None, total=None, 
     _guard(root)
     # the check above is only the early refusal: the id, the list file and the line are settled under one lock, so
     # of two `job new` racing for one id exactly one wins and the list file is the winner's
-    return append(rec, root, new_only=True, files={rel: text.encode("utf-8")})
+    return append(rec, root, new_only=True, files={rel: text.encode("utf-8")}, via=via)
 
 
 def _lines_last(root, entity, id):
@@ -395,7 +471,7 @@ def main(argv=None):
     ss = sub.add_parser("set-status")
     ss.add_argument("id")
     ss.add_argument("status")
-    ss.add_argument("--who", required=True)
+    ss.add_argument("--who", help="people.json id (default: $CRYOEV_FOR; one of the two is required)")
     ss.add_argument("--note")
     ss.add_argument("--reason", help="blocked_reason (jobs set to blocked)")
     jb = sub.add_parser("job").add_subparsers(dest="jcmd", required=True)
@@ -406,7 +482,7 @@ def main(argv=None):
     g = jn.add_mutually_exclusive_group(required=True)
     g.add_argument("--images", type=Path, help="list file: one image key/name per line (first tab field)")
     g.add_argument("--session", help="YYYYMMDD: every registry image of that session")
-    jn.add_argument("--who", help="people.json id")
+    jn.add_argument("--who", help="people.json id (default: $CRYOEV_FOR, else none)")
     jn.add_argument("--total", type=int, help="progress total (default: n images)")
     jn.add_argument("--note")
     a = ap.parse_args(argv)
@@ -415,10 +491,16 @@ def main(argv=None):
     except config.ConfigError as e:
         print(f"{e} (or pass --root)", file=sys.stderr)
         return 2
+    try:                                                # writers only: flag > $CRYOEV_FOR; via from $CRYOEV_VIA
+        me = actor.current(flag=getattr(a, "who", None), default=None) if a.cmd in ("import", "set-status", "job") \
+            else {}
+    except actor.ActorError as e:
+        print(e, file=sys.stderr)
+        return 2
     try:
         if a.cmd == "import":
             import importers
-            res = importers.run(root, dry_run=a.dry_run)
+            res = importers.run(root, dry_run=a.dry_run, via=me.get("via"))
             importers.print_result(res)
         elif a.cmd == "list":
             for i, r in sorted(current(a.entity, root).items(), key=lambda kv: (kv[1]["schema"], kv[0])):
@@ -432,11 +514,15 @@ def main(argv=None):
             print(json.dumps(h[-1], indent=1, ensure_ascii=False, default=str))
             print(f"({len(h)} line(s); statuses: {' -> '.join(str(x.get('status')) for x in h)})")
         elif a.cmd == "set-status":
-            line = set_status(a.id, a.status, a.who, a.note, root, reason=a.reason)
-            print(f"appended: {line['id']} status={line.get('status')} by {line.get('status_by')}")
+            if not me["who"]:
+                print("set-status needs --who <people.json id> (or $CRYOEV_FOR)", file=sys.stderr)
+                return 2
+            line = set_status(a.id, a.status, me["who"], a.note, root, reason=a.reason, via=me.get("via"))
+            print(f"appended: {line['id']} status={line.get('status')} by "
+                  f"{actor.label(line.get('status_by'), line.get('via'))}")
         elif a.cmd == "job":
-            line = new_job(a.type, a.where, a.name, images=a.images, session=a.session, who=a.who,
-                           total=a.total, root=root, note=a.note)
+            line = new_job(a.type, a.where, a.name, images=a.images, session=a.session, who=me["who"],
+                           total=a.total, root=root, note=a.note, via=me.get("via"))
             print(f"appended: {line['id']} ({line['type']}, {line['n_images']} images, list {line['image_list']['file']})")
     except RegistryError as e:
         print(e, file=sys.stderr)

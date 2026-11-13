@@ -1,6 +1,24 @@
 <style>
 /* Jobs module (portal/modules/jobs.py). cj.css tokens only; every class is cj-jobs-*. Phone first. */
 .cj-jobs{min-width:0}
+.cj-jobs-lede{margin:0 0 6px}
+.cj-jobs-flow{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px;align-items:start}
+@media (max-width:900px){.cj-jobs-flow{grid-template-columns:minmax(0,1fr)}}
+.cj-jobs-col{display:flex;flex-direction:column;gap:10px}
+.cj-main .cj-jobs-col h2.cj-sec.cj-jobs-colh{margin:14px 0 0;font-size:.78rem}
+.cj-jobs-sub{font-weight:400;text-transform:none;letter-spacing:0}
+.cj-jobs-dash{border:1px dashed var(--line);border-radius:10px;padding:14px;font-size:.9rem;color:var(--mut);background:var(--card)}
+.cj-jobs-cardx .cj-jobs-line{font-size:.85rem;overflow-wrap:anywhere}
+.cj-jobs-cardx .cj-jobs-id{font-family:ui-monospace,Consolas,monospace;font-size:.72rem}
+.cj-page a.cj-jobs-open{font-weight:600;font-size:.9rem}
+.cj-jobs-more{margin:0;font-size:.85rem}
+.cj-jobs-ai{display:inline-block;padding:0 6px;border-radius:999px;background:var(--accbg);color:var(--acc);font-size:.68rem;font-weight:700;line-height:1.5;vertical-align:1px}
+.cj-page a.cj-jobs-unrec{display:flex;flex-direction:column;gap:3px;padding:12px 14px;border:1px solid var(--warn);border-radius:10px;background:var(--warnbg);color:var(--warn);text-decoration:none;font-size:.85rem}
+.cj-jobs-hwl{list-style:none;margin:0;display:flex;flex-wrap:wrap;gap:6px 28px;align-items:center}
+.cj-jobs-hw{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 14px;font-size:.9rem}
+.cj-jobs-hwlink{margin-left:auto;font-weight:600}
+.cj-jobs-fin>summary{cursor:pointer;margin:20px 0 8px}
+.cj-jobs-fin>summary .cj-sec{display:inline}
 .cj-jobs-snap{margin:2px 0 8px}
 .cj-jobs-banner{margin:0 0 10px;padding:8px 12px;border:1px solid var(--warn);border-left-width:4px;border-radius:8px;
   background:var(--warnbg);color:var(--fg);overflow-wrap:anywhere}
@@ -73,13 +91,19 @@
 </style>
 <div class="cj-jobs" id="cj-jobs">
 <h1>Jobs</h1>
+<p class="cj-mut cj-jobs-lede">Data flows left to right. Each card opens its work. Updates every 30 s.</p>
 <div id="cj-jobs-head">{{head}}</div>
 <p id="cj-jobs-err" class="cj-mut cj-jobs-err" role="status" hidden></p>
-<section class="cj-jobs-sec" id="cj-jobs-s-running" aria-labelledby="cj-jobs-h-running">{{running}}</section>
-<section class="cj-jobs-sec" id="cj-jobs-s-queue" aria-labelledby="cj-jobs-h-queue">{{queue}}</section>
+<section class="cj-jobs-sec" id="cj-jobs-s-hardware" aria-label="Training hardware">{{hardware}}</section>
+<div class="cj-jobs-flow">
+<section class="cj-jobs-sec cj-jobs-col" id="cj-jobs-s-raw" aria-label="Raw uploads not converted">{{raw}}</section>
+<section class="cj-jobs-sec cj-jobs-col" id="cj-jobs-s-converted" aria-label="Converted, no predictions yet">{{converted}}</section>
+<section class="cj-jobs-sec cj-jobs-col" id="cj-jobs-s-review" aria-label="In review">{{review}}</section>
+<section class="cj-jobs-sec cj-jobs-col" id="cj-jobs-s-datasets" aria-label="Datasets ready to train">{{datasets}}</section>
+<section class="cj-jobs-sec cj-jobs-col" id="cj-jobs-s-training" aria-label="Training queued or running">{{training}}</section>
+</div>
 <section class="cj-jobs-sec" id="cj-jobs-s-attention" aria-labelledby="cj-jobs-h-attention">{{attention}}</section>
-<section class="cj-jobs-sec" id="cj-jobs-s-review" aria-labelledby="cj-jobs-h-review">{{review}}</section>
-<section class="cj-jobs-sec" id="cj-jobs-s-finished" aria-labelledby="cj-jobs-h-finished">{{finished}}</section>
+<section class="cj-jobs-sec" id="cj-jobs-s-finished" aria-label="Finished">{{finished}}</section>
 <p class="cj-mut cj-jobs-foot">This page refreshes every 30 s.</p>
 </div>
 <script src="/jobs/jobs.js" defer></script>
