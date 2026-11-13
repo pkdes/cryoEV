@@ -108,7 +108,7 @@ from portal import upload_sessions as US
 PREFIX = "/data"
 ROLES = ("admin", "advanced")
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parent.parent       # portal/modules (this file is one level down, in data/)
 REPO = HERE.parent.parent
 TEMPLATE = HERE.parent / "templates" / "data.html"
 SCHEMA = "cj_data/1"

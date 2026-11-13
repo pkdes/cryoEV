@@ -27,6 +27,8 @@ yolo_results/
 
 # Data and experiment outputs (stored outside repo)
 data/
+# ... but not the Data module's package (round 11)
+!portal/modules/data/
 
 # OS
 .DS_Store
