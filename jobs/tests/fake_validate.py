@@ -4,7 +4,8 @@
 Records what it was called with, and what it found on disk, to $FAKE_VAL_RECORD (JSON): the kwargs, the weights'
 md5, the dataset.yaml text, the test images under the yaml's folder, and whether train_yolo / ultralytics were
 imported in this process. $FAKE_VAL_FAIL=1 raises instead (a val that crashes). Returns an object shaped like
-Ultralytics SegmentMetrics: .seg / .box (map, map50, ap_class_index, class_result(i)), .names.
+Ultralytics SegmentMetrics: .seg / .box (map, map50, ap_class_index, class_result(i)), .names, and
+.overlap_mask_used as validate_yolo_model sets it (the kwarg; $FAKE_VAL_USED true / false overrides, none omits it).
 """
 import hashlib
 import json
@@ -50,4 +51,8 @@ def validate(model_path, data_yaml, imgsz=1024, batch_size=16, device="0", split
     (out / "confusion_matrix.png").write_bytes(b"png")          # as Ultralytics' plots
     if os.environ.get("FAKE_VAL_RECORD"):
         Path(os.environ["FAKE_VAL_RECORD"]).write_text(json.dumps(rec), encoding="utf-8")
-    return _Results()
+    res = _Results()
+    used = os.environ.get("FAKE_VAL_USED")             # what the validator "ran with": default the kwarg, as the
+    if used != "none":                                 # real callback reports; "none" = could not be read
+        res.overlap_mask_used = {"true": True, "false": False}.get(used, overlap_mask)
+    return res

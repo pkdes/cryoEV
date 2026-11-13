@@ -382,7 +382,8 @@ EVAL_DIR = "eval"                                # <CryoAI-laptop>/eval/<job>/: 
 
 
 def push_eval(share, bundle=None, weights=None, dataset=None, job_id=None, model=None, copier="auto",
-              check_origin=True, max_hours=EVAL_HOURS, hold=False, out=None, allow_dirty=False):
+              check_origin=True, max_hours=EVAL_HOURS, hold=False, out=None, allow_dirty=False,
+              force_unwatched=False):
     """Queue an eval job for the desktop (docs/JOBS.md, "Eval jobs"; needs $CRYOEV_EVAL_JOBS=1). Either `bundle` (a
     zip from make_job_bundle.py --eval) or `weights` + `dataset` (a registry dataset id or folder: the bundle is made
     here, into `out`, default <CryoAI-laptop>/job_bundles, reusing the dataset's pack).
@@ -390,7 +391,8 @@ def push_eval(share, bundle=None, weights=None, dataset=None, job_id=None, model
       images), made only after the push succeeded; if that then fails, q/<job>/CANCEL is written (nothing deleted);
     - push as a train job's (the dataset pack once per queue, then the thin zip), job.json type eval.
     Holds <CryoAI-laptop>/jobs/eval.lock for the whole push. -> q/<job>. Refused: the flag off, no share, neither or
-    both of bundle and weights+dataset, a bundle that is not an eval bundle, the job id not an eval job."""
+    both of bundle and weights+dataset, the share's watch.json not saying eval_jobs true (unreadable: refused unless
+    force_unwatched), a bundle that is not an eval bundle, the job id not an eval job."""
     from data_utils.oslock import acquire_lock
     if not C.eval_enabled():
         raise SyncError(f"eval jobs are off: set {C.EVAL_ENV}=1 (on this machine, and on the desktop runner "
@@ -400,6 +402,14 @@ def push_eval(share, bundle=None, weights=None, dataset=None, job_id=None, model
         raise SyncError(f"share {share} not found: a desktop share is \\\\host\\cj (two leading backslashes)")
     if (bundle is None) == (weights is None or dataset is None):
         raise SyncError("give either --bundle (make_job_bundle.py --eval) or --weights and --dataset")
+    w = watch_state(share)                             # the desktop's own flag, from its watcher's watch.json
+    if w is None:
+        if not force_unwatched:
+            raise SyncError(f"can't read {share / C.WATCH_JSON}, so it is unknown whether the desktop runs eval jobs "
+                            f"({C.EVAL_ENV}); nothing was queued (--force-unwatched queues anyway)")
+    elif w.get("eval_jobs") is not True:
+        raise SyncError(f"the desktop has eval jobs off ({C.EVAL_ENV}); set it there first (watch.json eval_jobs: "
+                        f"{w.get('eval_jobs')!r}); nothing was queued")
     lock_path = config.laptop_root() / EVAL_LOCK
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock = acquire_lock(lock_path, 0)
@@ -932,6 +942,8 @@ def main(argv=None):
     ep.add_argument("--copier", choices=["auto", "robocopy", "shutil"], default="auto")
     ep.add_argument("--max-hours", type=float, default=EVAL_HOURS)
     ep.add_argument("--hold", action="store_true")
+    ep.add_argument("--force-unwatched", action="store_true",
+                    help="queue even when the share's watch.json can't be read (eval_jobs unknown)")
     for name in ("push", "push-pack", "pull", "status", "retry", "release", "stop", "start", "cancel"):
         p = sub.add_parser(name)
         if name in ("push", "retry", "release", "cancel"):
@@ -968,7 +980,7 @@ def main(argv=None):
             print(f"[push-predict] {'held' if a.hold else 'queued'}: {q}")
         elif a.cmd == "push-eval":
             q = push_eval(a.share, a.bundle, a.weights, a.dataset, a.job, a.model, a.copier, max_hours=a.max_hours,
-                          hold=a.hold)
+                          hold=a.hold, force_unwatched=a.force_unwatched)
             print(f"[push-eval] {'held' if a.hold else 'queued'}: {q}")
         elif a.cmd == "push-pack":
             print(f"[push-pack] {push_bundle_pack(a.bundle, a.share, a.copier)}")

@@ -51,7 +51,7 @@ class EvalRoots(T.TempRoots):
 
     def setUp(self):
         super().setUp()
-        for k in ("CRYOEV_VIA", "CRYOEV_FOR", "CRYOEV_REGISTRY", C.PREDICT_ENV, "FAKE_VAL_FAIL"):
+        for k in ("CRYOEV_VIA", "CRYOEV_FOR", "CRYOEV_REGISTRY", C.PREDICT_ENV, "FAKE_VAL_FAIL", "FAKE_VAL_USED"):
             os.environ.pop(k, None)
         self.lap = self.tmp / "lap"
         self.reg = self.lap / "registry"
@@ -239,6 +239,21 @@ class RunnerTests(EvalRoots, unittest.TestCase):
         self.assertIn("CUDA out of memory (fake)", done["reason"])
         self.assertTrue((self.share / C.D / EVAL / C.EVAL_LOG).is_file())
 
+    def test_overlap_mask_used_must_be_false(self):
+        """The check reads what the validator ran with, not the kwarg: True or unreadable blocks the job."""
+        for used, shown in (("true", "True"), ("none", "'unknown'")):
+            job = f"job_20261112_eval_{used}"
+            self.queue_eval(job)
+            os.environ["FAKE_VAL_USED"] = used
+            try:
+                self.assertEqual(self.run_job("--job", job), 1)
+            finally:
+                os.environ.pop("FAKE_VAL_USED")
+            done = self.done(job)
+            self.assertEqual((done["status"], done["metrics"]), ("blocked", None))
+            self.assertIn(f"not scored with overlap_mask=False (the validator used {shown})", done["reason"])
+            self.assertFalse(json.loads(self.record.read_text(encoding="utf-8"))["overlap_mask"])   # kwarg was False
+
     def test_weights_changed_after_bundling_blocked(self):
         b = self.eval_bundle()
         T.rewrite_zip(b["zip"], lambda m: m.__setitem__("ds_eval/weights/best.pt", b"other weights"))
@@ -258,7 +273,9 @@ class ChildTests(EvalRoots, unittest.TestCase):
 
         def validate(*a, **kw):
             calls.append((a, kw))
-            return fake_validate._Results()
+            res = fake_validate._Results()
+            res.overlap_mask_used = kw["overlap_mask"]   # as validate_yolo_model's on_val_end callback reports it
+            return res
         out = self.tmp / "e"
         req = {"weights": str(self.weights), "data": str(self.ds / "dataset.yaml"), "split": "test", "imgsz": 1440,
                "batch": 8, "device": "0", "out": str(out), "model": "m1", "dataset": "ds_eval", "n_images": 2,
@@ -271,8 +288,9 @@ class ChildTests(EvalRoots, unittest.TestCase):
         self.assertEqual(kw, {"imgsz": 1440, "batch_size": 8, "device": "0", "split": "test", "project": str(out),
                               "name": "val", "overlap_mask": False})
         m = C.read_json(out / C.METRICS)
-        self.assertEqual((m["schema"], m["model"], m["mask_map50_95"], m["per_class_box_map50_95"]),
-                         ("eval_metrics/1", "m1", 0.6, {"EV": 0.8, "non-EV": 0.6}))
+        self.assertEqual((m["schema"], m["model"], m["mask_map50_95"], m["per_class_box_map50_95"], m["overlap_mask"]),
+                         ("eval_metrics/1", "m1", 0.6, {"EV": 0.8, "non-EV": 0.6}, False))
+        self.assertEqual(run_job.metrics_from_val(fake_validate._Results(), req)["overlap_mask"], "unknown")
 
     def test_validate_entry_takes_overlap_mask(self):
         """train_yolo.validate_yolo_model passes overlap_mask=False through, over the checkpoint's train_args (read
@@ -283,6 +301,8 @@ class ChildTests(EvalRoots, unittest.TestCase):
         self.assertIn("overlap_mask", [a.arg for a in fn.args.args])
         body = ast.get_source_segment(src, fn)
         self.assertIn("if overlap_mask is not None:\n        val_kwargs['overlap_mask'] = bool(overlap_mask)", body)
+        self.assertIn('model.add_callback("on_val_end"', body)      # what it actually ran with
+        self.assertIn('results.overlap_mask_used = used.get("overlap_mask")', body)
 
     @unittest.skipUnless(os.environ.get("CRYOEV_REAL_EVAL_TEST") == "1",
                          "a real Ultralytics val: set CRYOEV_REAL_EVAL_TEST=1, CRYOEV_REAL_EVAL_WEIGHTS=<pt> and "
@@ -381,6 +401,18 @@ class PullTests(EvalRoots, unittest.TestCase):
 
 
 class PushEvalTests(EvalRoots, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.watch(True)
+
+    def watch(self, eval_jobs):
+        """The share's watch.json as the desktop watcher writes it (eval_jobs = its CRYOEV_EVAL_JOBS)."""
+        T.watch_fixture(self.share, state="idle")
+        w = C.read_json(self.share / C.WATCH_JSON)
+        if eval_jobs is not None:
+            w["eval_jobs"] = eval_jobs
+        C.write_json(self.share / C.WATCH_JSON, w)
+
     def push(self, **kw):
         kw.setdefault("weights", self.weights)
         kw.setdefault("dataset", "ds_eval")
@@ -406,6 +438,23 @@ class PushEvalTests(EvalRoots, unittest.TestCase):
                          ("eval", "desktop", 2, "images scored"))
         with self.assertRaisesRegex(sync.SyncError, "already in the queue"):
             self.push()
+
+    def test_desktop_flag_from_watch_json(self):
+        """on: queued (test_push_eval_queues...); off or missing key: refused; unreadable: refused unless forced."""
+        for value in (False, None):
+            self.watch(value)
+            with self.assertRaisesRegex(sync.SyncError, r"the desktop has eval jobs off \(CRYOEV_EVAL_JOBS\); set it "
+                                                        r"there first"):
+                self.push()
+        (self.share / C.WATCH_JSON).write_text("{not json", encoding="utf-8")
+        with self.assertRaisesRegex(sync.SyncError, "--force-unwatched"):
+            self.push()
+        (self.share / C.WATCH_JSON).unlink()
+        with self.assertRaisesRegex(sync.SyncError, "--force-unwatched"):
+            self.push()
+        self.assertEqual(list((self.share / C.Q).iterdir()), [])
+        q = self.push(force_unwatched=True)
+        self.assertEqual(C.read_json(q / C.JOB_FILE)["type"], "eval")
 
     def test_bundle_or_weights_not_both(self):
         b = self.eval_bundle()

@@ -518,8 +518,10 @@ def metrics_from_val(res, req: dict) -> dict:
         name = str(names.get(int(c), int(c)))
         per_mask[name] = float(seg.class_result(i)[3])
         per_box[name] = float(box.class_result(i)[3])
+    used = getattr(res, "overlap_mask_used", None)     # what the validator ran with (validate_yolo_model's callback)
     return {"schema": "eval_metrics/1", "model": req.get("model"), "dataset": req.get("dataset"),
-            "split": req.get("split"), "imgsz": req.get("imgsz"), "overlap_mask": False,
+            "split": req.get("split"), "imgsz": req.get("imgsz"),
+            "overlap_mask": used if isinstance(used, bool) else "unknown",   # finish_eval needs False
             "n_images": req.get("n_images"), "mask_map50_95": float(seg.map), "mask_map50": float(seg.map50),
             "box_map50_95": float(box.map), "box_map50": float(box.map50),
             "per_class_mask_map50_95": per_mask, "per_class_box_map50_95": per_box,
@@ -563,8 +565,9 @@ def finish_eval(work: Path, st: dict, rc: int, max_hours, log: Path):
         raise Blocked(f"eval wrote no readable {C.EVAL_OUT}/{C.METRICS}: {e}")
     if not all(isinstance(m.get(k), (int, float)) for k in ("mask_map50_95", "box_map50_95")):
         raise Blocked(f"{C.METRICS} has no mask / box mAP50-95")
-    if m.get("overlap_mask") is not False:
-        raise Blocked(f"{C.METRICS} was not scored with overlap_mask=False")
+    if m.get("overlap_mask") is not False:             # as the validator reported it; "unknown" fails too
+        raise Blocked(f"{C.METRICS} was not scored with overlap_mask=False (the validator used "
+                      f"{m.get('overlap_mask')!r})")
     st["metrics"] = {k: m.get(k) for k in EVAL_KEYS}
 
 

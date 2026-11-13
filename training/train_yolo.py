@@ -632,8 +632,14 @@ def validate_yolo_model(model_path: str, data_yaml: str, imgsz: int = 1024, batc
     if project is not None:
         val_kwargs['project'] = project
         val_kwargs['name'] = name
+    used = {}                                           # the overlap_mask the validator actually ran with
+    model.add_callback("on_val_end", lambda v: used.__setitem__("overlap_mask", getattr(v.args, "overlap_mask", None)))
     results = model.val(**val_kwargs)
-    
+    try:
+        results.overlap_mask_used = used.get("overlap_mask")   # read by jobs/run_job.py metrics_from_val
+    except AttributeError:
+        pass
+
     if results.seg:
         print(f"[OK] Validation Metrics:")
         print(f"  Box mAP@0.5: {results.box.map50:.4f}")
