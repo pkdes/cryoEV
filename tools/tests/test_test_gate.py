@@ -192,5 +192,60 @@ class Run(unittest.TestCase):
         self.assertGreater(r["tests"], 0)
 
 
+class BrowserSkip(unittest.TestCase):
+    """Round 11 #6: --affected skips the pure-browser files only when every changed file is non-UI."""
+
+    def test_known_answers(self):
+        for files in (["registry/store.py"], ["jobs/sync.py", "docs/TOOLS.md"], ["training/x.py", "inference/y.py"],
+                      ["data_utils/oslock.py"], ["tools/services.py"], ["cryoev/common.py"],
+                      ["registry/importers.py", ".claude/settings.json"]):
+            self.assertTrue(G.ui_untouched(files), files)
+        for files in (["registry/history_page.py"], ["tools/test_gate.py"], ["tools/tests/test_test_gate.py"],
+                      ["registry/store.py", "portal/modules/jobs.py"], ["annotation/review_tool/index.html"],
+                      ["proxy.py"], ["README.md"], ["results/compute.py"], [], [".claude/x"]):
+            self.assertFalse(G.ui_untouched(files), files)
+
+    def test_control_a_predict_parts_change_runs_them(self):
+        files = ["portal/predict_parts/uploads.py"]
+        units, skipped, _ = G.select(G.affected_suites(files)[0], "affected", files)
+        self.assertEqual(skipped, [])
+        self.assertTrue(any(b for _, _, b in units))
+
+    def test_real_tree_skips_24_and_keeps_the_mixed_files(self):
+        files = ["registry/store.py"]
+        units, skipped, _ = G.select(set(G.SUITES), "affected", files)
+        browser = [u for u in G.units_for(set(G.SUITES)) if u[2]]
+        self.assertEqual(len(browser), 27)                 # known answer (round 11 survey): 24 pure + 3 mixed
+        self.assertEqual(len(skipped), 24)
+        kept = {f"{s}/{n}" for s, n, b in units if b}
+        self.assertEqual(kept, G.MIXED)
+        self.assertTrue(all(b for _, _, b in skipped))
+
+    def test_a_changed_browser_test_file_still_runs(self):
+        files = ["registry/tests/test_jobs.py"]
+        units, skipped, _ = G.select({"registry"}, "affected", files)
+        self.assertIn(("registry", "test_jobs.py", True), units)
+        self.assertIn(("registry", "test_history_page.py", True), skipped)
+
+    def test_full_and_suites_never_skip(self):
+        files = ["registry/store.py"]
+        for mode in ("full", "suites"):
+            _, skipped, _ = G.select(set(G.SUITES), mode, files)
+            self.assertEqual(skipped, [], mode)
+
+    def test_plan_runs_nothing_and_prints_the_skip(self):
+        r = subprocess.run([sys.executable, str(G.REPO / "tools" / "test_gate.py"), "--plan", "--files",
+                            "jobs/sync.py"], cwd=G.REPO, capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("browser files skipped (no UI change)", r.stdout)
+        self.assertIn("estimated", r.stdout)
+
+    def test_estimate_known_answer(self):
+        units = [("a", "x", False), ("a", "y", True), ("a", "z", True)]
+        times = {"a/x": 10.0, "a/y": 5.0, "a/z": 5.0}
+        self.assertEqual(G.estimate_wall(units, times, jobs=3, browser_jobs=1), 10.0)   # y then z on the one lane
+        self.assertEqual(G.estimate_wall(units, times, jobs=1, browser_jobs=2), 20.0)   # one worker: serial
+
+
 if __name__ == "__main__":
     unittest.main()

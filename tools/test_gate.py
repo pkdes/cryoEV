@@ -4,6 +4,7 @@
   python tools/test_gate.py --full                            # every suite (big go-lives)
   python tools/test_gate.py --suites portal,results           # named suites
   python tools/test_gate.py --times                           # slowest test files from past runs, then exit
+  python tools/test_gate.py --plan [--files a.py,b.py]        # what a gate would run + estimated wall; runs nothing
 
 Each test file is one unit: `python -m unittest discover -s <suite dir> -p <file>`, the same import setup as the
 classic `discover -s <suite dir>` gate. Units run in parallel (--jobs, default CPU count // 2), slowest first (from
@@ -14,6 +15,12 @@ load-sensitive tests flaky.
 A failed file is run once more on its own (--retry 1). One that then passes is reported as FLAKY, never as a plain
 pass; the gate still exits 0 for it, so say so when reporting. Anything that fails twice fails the gate.
 The pre-push scan (tools/prepush_scan.py --range <base>..HEAD) runs at the end unless --no-scan.
+
+Browser skip (round 11 #6, --affected only): when EVERY changed file is on the non-UI allowlist (NON_UI: registry/
+except history_page.py, jobs/, training/, inference/, data_utils/, docs/, tools/ except this gate and its test,
+cryoev/), the pure-browser files are skipped and the gate prints "N browser files skipped (no UI change)". The mixed
+files (MIXED: mostly unit tests that also drive a browser) and a changed test file always run; --full and --suites
+never skip. --plan prints the selection and an estimate from past timings without running anything.
 
 One gate runs at a time per machine (round 10): a lock directory in ~/.cryoev/gate/ is shared by every worktree. A
 second gate waits up to --lock-wait minutes (default 45) and then fails "gate busy"; a lock whose owner process is gone,
@@ -74,6 +81,11 @@ NOT_DOC = re.compile(r"(^|/)(CHANGELOG\.md|requirements[^/]*\.txt)$", re.I)
 ALWAYS = {"tests"}                           # repo-wide checks, ~1 min
 BROWSER_HELPERS = {"test_review_tool_browser"}   # test modules wrapping Playwright; importing one = a browser file
 ENV_STRIP = ("CRYOEV_VIA", "CRYOEV_FOR")
+# --affected only: the pure-browser files are skipped when EVERY changed file is on this non-UI allowlist (round 11 #6)
+NON_UI = ("registry/", "jobs/", "training/", "inference/", "data_utils/", "docs/", "tools/", "cryoev/")
+NON_UI_EXCEPT = {"registry/history_page.py", "tools/test_gate.py", "tools/tests/test_test_gate.py"}
+# browser files that are mostly unit tests (they drive a browser for a few checks only): never skipped
+MIXED = {"portal/test_predict_convert.py", "portal/test_data_module.py", "portal/test_admin_module.py"}
 AGENT_ENV = {"CRYOEV_VIA": "claude", "CRYOEV_FOR": "pujan"}
 LOCK_DIR = Path.home() / ".cryoev" / "gate" / "lock"
 LOCK_WAIT_MIN = 45.0
@@ -108,6 +120,23 @@ def affected_suites(files: list[str]) -> tuple[set[str], list[str]]:
     if unknown:
         out = set(SUITES)
     return out, unknown
+
+
+def ui_untouched(files: list[str]) -> bool:
+    """True when there is a changed file and every one is on the non-UI allowlist (.claude/ ignored)."""
+    files = [f.replace("\\", "/") for f in files if not f.startswith(".claude/")]
+    return bool(files) and all(f.startswith(NON_UI) and f not in NON_UI_EXCEPT for f in files)
+
+
+def drop_browser(units: list, files: list[str]) -> tuple[list, list]:
+    """-> (units to run, pure-browser units skipped). MIXED files and a changed test file always run."""
+    changed = {f.replace("\\", "/") for f in files}
+    keep, skipped = [], []
+    for u in units:
+        s, n, b = u
+        pure = b and f"{s}/{n}" not in MIXED and f"{SUITES[s]}/{n}" not in changed
+        (skipped if pure else keep).append(u)
+    return keep, skipped
 
 
 def is_browser_file(path: Path) -> bool:
@@ -349,6 +378,68 @@ def record(results: list[dict], mode: str, agent_env: bool = False, path: Path =
         print(f"(timings not recorded: {e})", file=sys.stderr)
 
 
+def estimate_wall(units: list, times: dict, jobs: int, browser_jobs: int) -> float:
+    """Seconds the gate would take for `units` (already in run order): the median per file (60 s if unknown) run on
+    `jobs` workers, browser files also holding one of `browser_jobs` lanes (a worker waits for a lane, as in
+    run_gate). No retries, no scan."""
+    import heapq
+    from collections import deque
+    running, blocked = [], deque()
+    t, free, lane, i = 0.0, jobs, browser_jobs, 0
+    while i < len(units) or running:
+        while free > 0 and i < len(units):
+            s, n, b = units[i]
+            i += 1
+            free -= 1
+            d = times.get(f"{s}/{n}", 60.0)
+            if b and lane <= 0:
+                blocked.append(d)
+            else:
+                lane -= b
+                heapq.heappush(running, (t + d, b))
+        if not running:
+            break
+        t, b = heapq.heappop(running)
+        free += 1
+        if b:
+            lane += 1
+            if blocked:
+                lane -= 1
+                heapq.heappush(running, (t + blocked.popleft(), True))
+    return t
+
+
+def select(suites: set[str], mode: str, files: list | None) -> tuple[list, list, dict]:
+    """-> (units in run order, browser units skipped, past medians). Skipping only in --affected (see NON_UI)."""
+    units, skipped = units_for(suites), []
+    if mode == "affected" and files is not None and ui_untouched(files):
+        units, skipped = drop_browser(units, files)
+    order = past_times()
+    units.sort(key=lambda u: -order.get(f"{u[0]}/{u[1]}", 60.0))
+    return units, skipped, order
+
+
+def skip_note(skipped: list) -> str:
+    return f"{len(skipped)} browser files skipped (no UI change)" if skipped else ""
+
+
+def plan(a, suites: set[str], mode: str, files: list | None) -> int:
+    """--plan: the selection and an estimate from past timings; nothing runs and no lock is taken."""
+    units, skipped, order = select(suites, mode, files)
+    serial = sum(order.get(f"{s}/{n}", 60.0) for s, n, _ in units)
+    nb = sum(1 for u in units if u[2])
+    print(f"plan ({mode}): suites {', '.join(sorted(suites))}")
+    if files is not None:
+        print(f"changed files ({len(files)}): {', '.join(files[:8])}" + (" ..." if len(files) > 8 else ""))
+    print(f"{len(units)} test files ({nb} browser); estimated {estimate_wall(units, order, a.jobs, a.browser_jobs) / 60:.1f} "
+          f"min wall at {a.jobs} jobs / {a.browser_jobs} browser ({serial / 60:.1f} min serial), from past medians")
+    if skipped:
+        print(skip_note(skipped) + f": {sum(order.get(f'{s}/{n}', 60.0) for s, n, _ in skipped):.0f} s serial")
+    for s, n, b in units:
+        print(f"  {order.get(f'{s}/{n}', 60.0):7.1f}s  {s}/{n}" + ("  [browser]" if b else ""))
+    return 0
+
+
 def show_times(n: int) -> int:
     t = past_times()
     if not t:
@@ -369,6 +460,8 @@ def main(argv=None) -> int:
     g.add_argument("--suites", help="comma-separated: " + ",".join(SUITES))
     g.add_argument("--times", action="store_true", help="show the slowest test files from past runs")
     ap.add_argument("--base", default="origin/main")
+    ap.add_argument("--plan", action="store_true", help="print the selection and estimated wall time; run nothing")
+    ap.add_argument("--files", help="comma-separated changed files to use instead of git diff (with --affected)")
     ap.add_argument("--jobs", type=int, default=max(2, (os.cpu_count() or 4) // 2))
     ap.add_argument("--browser-jobs", type=int, default=2)
     ap.add_argument("--retry", type=int, default=1)
@@ -381,6 +474,7 @@ def main(argv=None) -> int:
     if a.times:
         return show_times(25)
 
+    files = None
     if a.full:
         suites, mode = set(SUITES), "full"
     elif a.suites:
@@ -391,25 +485,27 @@ def main(argv=None) -> int:
             return 2
         mode = "suites"
     else:
-        files = changed_files(a.base)
+        files = [f.strip() for f in a.files.split(",") if f.strip()] if a.files else changed_files(a.base)
         suites, unknown = affected_suites(files)
         mode = "affected"
         print(f"{len(files)} changed file(s) vs {a.base}" + (f"; unmatched code files -> full run: {unknown[:5]}"
                                                             if unknown else ""))
+    if a.plan:
+        return plan(a, suites, mode, files)
     lk = GateLock(wait_min=a.lock_wait)
     if not lk.acquire():
         print(f"gate busy: another gate held the lock for {a.lock_wait:.0f} min ({lk.owner()})", file=sys.stderr)
         return 1
     try:
-        return run_gate(a, suites, mode)
+        return run_gate(a, suites, mode, files)
     finally:
         lk.release()
 
 
-def run_gate(a, suites: set[str], mode: str) -> int:
-    units = units_for(suites)
-    order = past_times()
-    units.sort(key=lambda u: -order.get(f"{u[0]}/{u[1]}", 60.0))
+def run_gate(a, suites: set[str], mode: str, files: list | None = None) -> int:
+    units, skipped, order = select(suites, mode, files)
+    if skipped:
+        print(skip_note(skipped))
     print(f"gate ({mode}): suites {', '.join(sorted(suites))}; {len(units)} test files; "
           f"{a.jobs} at once ({a.browser_jobs} browser); child env: "
           + ("CRYOEV_VIA=claude CRYOEV_FOR=pujan (--agent-env)" if a.agent_env else "CRYOEV_VIA/CRYOEV_FOR removed"))
