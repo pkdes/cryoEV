@@ -444,6 +444,22 @@ a.cj-data-graph-node:focus-visible{outline:2px solid var(--acc);outline-offset:1
 .cj-vis-pkg-top { display: flex; flex-wrap: wrap; gap: 0.4rem 0.8rem; align-items: baseline; justify-content: space-between; }
 .cj-vis-pkg-meta { display: flex; flex-wrap: wrap; gap: 0.2rem 1rem; margin-top: 0.25rem; }
 
+/* cj-audit:begin (Admin > Recent actions, round 9; /about) */
+.cj-admin-audf{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin:10px 0 0}
+.cj-admin-audf[hidden],.cj-admin-aud[hidden]{display:none}
+.cj-admin-audf .cj-admin-lbl{display:inline-flex;align-items:center;gap:8px}
+.cj-admin-audf .cj-admin-in{min-height:40px}
+.cj-admin-ai{display:inline-block;margin-left:6px;font-size:11px;font-weight:600;letter-spacing:.04em;padding:1px 6px;border-radius:4px;background:var(--accbg);color:var(--acc);vertical-align:middle}
+.cj-admin-door{font-size:13px}
+.cj-admin-auds>.cj-admin-aud>span.cj-admin-what{flex:1 1 16em;min-width:0;overflow-wrap:anywhere}
+.cj-admin-auds>.cj-admin-aud>span.cj-admin-door{flex:0 0 auto;margin-left:auto}
+.cj-admin-unv{color:var(--warn)}
+.cj-about{max-width:760px;margin:0 auto}
+.cj-about-sec h2{font-size:16px;margin:18px 0 6px}
+.cj-about-sec p{margin:0 0 8px;line-height:1.5;overflow-wrap:anywhere}
+.cj-about-ver{font-size:13px;margin-top:18px}
+.cj-version .cj-about-link{color:inherit}
+/* cj-audit:end */
 /* cj-feedback:begin */
 .cj-bar .cj-feedback-link{flex:none;align-self:center;margin-left:auto;font-size:13px;color:var(--mut);text-decoration:none;white-space:nowrap;padding:6px 4px}
 .cj-bar .cj-feedback-link:hover,.cj-bar .cj-feedback-link[aria-current]{color:var(--fg)}

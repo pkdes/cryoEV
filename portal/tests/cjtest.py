@@ -163,6 +163,34 @@ def login(port, key) -> str:
     return sc.split(";", 1)[0].split("=", 1)[1]
 
 
+GATE_DETAIL_KEYS = {"status", "from", "to", "n"}
+
+
+def gate_line(rec) -> bool:
+    """A line from the Gate's audit catch-all (portal/app.py, round 9 #17): a sign-in, or detail {"status": n} (plus
+    a counter line's from / to / n). Module tests that count their own lines filter these out."""
+    if not isinstance(rec, dict):
+        return False
+    d = rec.get("detail")
+    return rec.get("action") == "signed in" or (isinstance(d, dict) and "status" in d and set(d) <= GATE_DETAIL_KEYS)
+
+
+def module_lines(path) -> list:
+    """The audit file's lines minus the Gate's (gate_line). A line the Gate's worker is still writing is skipped."""
+    p = Path(path)
+    if not p.exists():
+        return []
+    out = []
+    for x in p.read_text(encoding="utf-8").splitlines():
+        try:
+            rec = json.loads(x)
+        except ValueError:
+            continue
+        if not gate_line(rec):
+            out.append(rec)
+    return out
+
+
 def cookie(token) -> dict:
     return {"Cookie": f"{A.COOKIE}={token}"}
 

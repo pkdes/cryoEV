@@ -770,9 +770,7 @@ class ActionBase(unittest.TestCase):
         return (root or self.share) / "q" / job / "CANCEL"
 
     def audit_lines(self):
-        if not self.audit_file.exists():
-            return []
-        return [json.loads(x) for x in self.audit_file.read_text(encoding="utf-8").splitlines()]
+        return T.module_lines(self.audit_file)          # Jobs' own lines (not the Gate's catch-all, round 9)
 
 
 class Actions(ActionBase):

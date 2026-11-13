@@ -11,13 +11,25 @@ append. Never put a key, hash or session id in a line.
 `read_audit()` returns the newest lines first, normalised to that schema; lines written before it (Jobs' first
 format {time, actor, action, job, reason, result}) are read too: `time` -> t, `job` -> target, reason / result ->
 detail.
+
+`Writer` is the Gate's catch-all (portal/app.py, round 9 #17): one line per portal write, written by one worker
+thread so a slow or locked log never blocks the event loop and a failed write never fails the request (logged).
+Frequent routes (upload chunks, review saves and claims, gallery marks) are grouped per actor x action x target
+(x status) in WINDOW_S windows: the first event is written at once, then one counter line with detail {from, to, n} (n = every
+event in the window, the first included; only when n > 1) when the window closes, on the next sweep, or at shutdown.
+A crash loses only the count, never the fact. Sign-ins: the first per person per day per door (in memory: a
+restart may log one more).
 """
 from __future__ import annotations
 
+import importlib.util
 import json
+import logging
 import os
 import sys
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,7 +42,25 @@ from data_utils.oslock import acquire_lock  # noqa: E402
 LOCK_WAIT_S = 5.0
 SHOW = 200
 TAIL_BYTES = 2 * 1024 * 1024
+WINDOW_S = 600                   # frequent routes: one counter line per actor x action x target per 10 min
+MAX_PENDING = 2000               # queued writes beyond this are dropped (logged): a stuck lock never eats memory
+CLI_FILE = "agent_actions.jsonl"     # the laptop CLI's own log (self-declared identity), read via CJ_AUDIT_EXTRA
+CLI_DOOR = "laptop CLI (unverified)"
+DOOR_NAMES = {"key": "tailnet key", "access": "access"}   # this portal's door, by its --auth mode
 _lock = threading.Lock()
+log = logging.getLogger("cj.audit")
+
+
+def actor_module():
+    """registry/actor.py (who / via, label, strip_env), loaded by its file path: the name `registry` may already be
+    registry/registry.py in a process that put registry/ on sys.path."""
+    m = sys.modules.get("cj_registry_actor")
+    if m is None:
+        spec = importlib.util.spec_from_file_location("cj_registry_actor", REPO / "registry" / "actor.py")
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        sys.modules["cj_registry_actor"] = m
+    return m
 
 
 def audit_path(state_dir) -> Path:
@@ -72,9 +102,13 @@ def audit(state_dir, actor, action, target, detail=None) -> dict:
 
 
 def normalise(rec: dict) -> dict:
-    """Any line -> {t, actor, action, target, detail} (the old Jobs format included)."""
+    """Any line -> {t, actor, action, target, detail} (the old Jobs format included). A top-level "via" (an agent
+    acting for the actor) is kept as detail["via"], where the CLI writes it."""
     if "t" in rec and "target" in rec:
-        return {k: rec.get(k) for k in ("t", "actor", "action", "target", "detail")}
+        out = {k: rec.get(k) for k in ("t", "actor", "action", "target", "detail")}
+        if rec.get("via") and (out["detail"] is None or isinstance(out["detail"], dict)):
+            out["detail"] = {**(out["detail"] or {}), "via": rec["via"]}
+        return out
     detail = rec.get("detail")
     if detail is None and ("reason" in rec or "result" in rec):
         detail = {k: rec.get(k) for k in ("reason", "result") if rec.get(k) is not None}
@@ -103,8 +137,11 @@ def extra_paths(env=None) -> list:
 
 
 def door_label(path) -> str:
-    """A label for an extra file without showing a path: its state folder's name (<state>/audit/portal.jsonl)."""
+    """A label for an extra file without showing a path: its state folder's name (<state>/audit/portal.jsonl); the
+    laptop CLI's file (CLI_FILE) is CLI_DOOR: its actor is whatever the caller declared."""
     p = Path(path)
+    if p.name == CLI_FILE:
+        return CLI_DOOR
     name = p.parent.parent.name if p.parent.name == "audit" else p.parent.name
     return (name or "other")[:40]
 
@@ -170,3 +207,146 @@ def read_file(path, n=SHOW) -> tuple:
             if len(out) >= n:
                 break
     return out, None
+
+
+# ---------------------------------------------------------------- the Gate's writer (round 9 #17)
+def _iso(ts) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds")
+
+
+class Writer:
+    """Audit lines from the event loop without blocking it: event() / signin() only touch memory and queue the write
+    on one worker thread (never anyio's pool); the write is audit() inside try/except, a failure is logged and
+    counted (self.failed), never raised. sweep() closes due windows (the portal calls it every minute), close()
+    flushes every open window and waits for the queue (lifespan shutdown). drain() waits for the queue (tests)."""
+
+    def __init__(self, state_dir, window_s=WINDOW_S, clock=time.time, max_pending=MAX_PENDING, write=None):
+        self.state_dir = state_dir
+        self.window_s = float(window_s)
+        self.clock = clock
+        self.max_pending = int(max_pending)
+        self._write_fn = write or audit
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cj-audit")
+        self._mu = threading.Lock()
+        self._pending = 0
+        self._windows = {}           # (actor, action, target, status) -> {"start", "last", "n"}
+        self._signins = {}           # (actor, door) -> "YYYY-MM-DD" (UTC) of the last sign-in line
+        self.failed = 0
+        self.dropped = 0
+        self.closed = False
+
+    # -- queue
+    def _run(self, actor, action, target, detail):
+        try:
+            self._write_fn(self.state_dir, actor, action, target, detail)
+        except Exception as e:                            # noqa: BLE001  never into the request
+            self.failed += 1
+            log.error("audit line not written (%s): %s %s", type(e).__name__, action, target)
+        finally:
+            with self._mu:
+                self._pending -= 1
+
+    def submit(self, actor, action, target, detail=None) -> bool:
+        """Queue one line. -> False when it was dropped (queue full or writer closed)."""
+        with self._mu:
+            why = ("writer closed" if self.closed else
+                   "queue full" if self._pending >= self.max_pending else None)
+            if why:
+                self.dropped += 1
+            else:
+                self._pending += 1
+        if why:
+            log.error("audit line dropped (%s): %s %s", why, action, target)
+            return False
+        try:
+            self._pool.submit(self._run, actor, action, target, detail)
+        except RuntimeError as e:                         # the pool was shut down under us
+            with self._mu:
+                self._pending -= 1
+                self.dropped += 1
+            log.error("audit line dropped (%s): %s %s", e, action, target)
+            return False
+        return True
+
+    # -- events
+    def event(self, actor, action, target=None, detail=None, frequent=False) -> None:
+        """One portal action. frequent=True: the first per actor x action x target window is written at once, the
+        rest are counted."""
+        if not frequent:
+            self.submit(actor, action, target, detail)
+            return
+        now = self.clock()
+        status = detail.get("status") if isinstance(detail, dict) else None
+        key = (actor, action, target, status)          # done and refused are counted apart
+        closed = None
+        with self._mu:
+            w = self._windows.get(key)
+            if w is not None and now - w["start"] < self.window_s:
+                w["n"] += 1
+                w["last"] = now
+                return
+            if w is not None:
+                closed = self._windows.pop(key)
+            self._windows[key] = {"start": now, "last": now, "n": 1}
+        if closed:
+            self._count(key, closed)
+        self.submit(actor, action, target, detail)
+
+    def _count(self, key, w) -> None:
+        if w["n"] > 1:
+            actor, action, target, status = key
+            d = {"from": _iso(w["start"]), "to": _iso(w["last"]), "n": w["n"]}
+            if status is not None:
+                d["status"] = status
+            self.submit(actor, action, target, d)
+
+    def sweep(self, now=None) -> int:
+        """Close the windows that are due. -> how many closed."""
+        now = self.clock() if now is None else now
+        with self._mu:
+            due = [(k, w) for k, w in self._windows.items() if now - w["start"] >= self.window_s]
+            for k, _ in due:
+                self._windows.pop(k, None)
+        for k, w in due:
+            self._count(k, w)
+        return len(due)
+
+    def flush(self) -> int:
+        """Close every open window (shutdown). -> how many."""
+        with self._mu:
+            due = list(self._windows.items())
+            self._windows.clear()
+        for k, w in due:
+            self._count(k, w)
+        return len(due)
+
+    def signin(self, actor, door, how=None) -> bool:
+        """The first sign-in per person per (UTC) day per door. -> True when a line was queued."""
+        if not actor:
+            return False
+        day = _iso(self.clock())[:10]
+        with self._mu:
+            if self._signins.get((actor, door)) == day:
+                return False
+            self._signins[(actor, door)] = day
+        detail = {"door": door}
+        if how:
+            detail["how"] = how
+        return self.submit(actor, "signed in", None, detail)
+
+    # -- life
+    def drain(self, timeout=15.0) -> None:
+        """Wait until every line queued so far is written (or failed)."""
+        if not self.closed:
+            self._pool.submit(lambda: None).result(timeout)
+
+    def close(self, timeout=15.0) -> None:
+        """Shutdown: flush the open windows, write the queue, stop the worker. Never raises."""
+        try:
+            self.flush()
+            self.drain(timeout)
+        except Exception as e:                            # noqa: BLE001
+            log.error("audit flush at shutdown incomplete (%s)", type(e).__name__)
+        with self._mu:
+            self.closed = True
+        self._pool.shutdown(wait=False)
