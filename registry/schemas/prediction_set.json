@@ -105,6 +105,14 @@
    ],
    "pattern": "^[a-z][a-z0-9_-]{0,31}$",
    "description": "the agent that made the set for its owner (a write token's agent, round 11 #65); carried to every later line"
+  },
+  "nm_confirmed_via": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+   "description": "the agent through which the owner confirmed the nm/px (a write token's agent, round 11 #65)"
   }
  },
  "required": [

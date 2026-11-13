@@ -22,5 +22,26 @@ class ViaRe(unittest.TestCase):
         self.assertEqual(actor.via({actor.ENV_VIA: "claude"}), "claude")
 
 
+class OwnerVia(unittest.TestCase):
+    """owner -> owner_via (round 11 #65): an agent-made prediction set shows "claude for X" on every later line."""
+
+    def test_owner_pairs_with_owner_via_after_a_status_line(self):
+        create = {"id": "ps_1", "owner": "alyssia", "owner_via": "claude", "via": "claude", "status": "queued"}
+        later = {"id": "ps_1", "owner": "alyssia", "owner_via": "claude", "status": "done"}   # no line via
+        for rec in (create, later):
+            self.assertEqual(actor.label_of(rec, "owner"), "claude for alyssia")
+            self.assertEqual(actor.via_of(rec, "owner"), "claude")
+            self.assertTrue(actor.is_agent(rec))
+        person = {"id": "ps_2", "owner": "alyssia", "status": "done"}             # control: a person's own set
+        self.assertEqual(actor.label_of(person, "owner"), "alyssia")
+        self.assertIsNone(actor.via_of(person, "owner"))
+        self.assertFalse(actor.is_agent(person))
+        self.assertEqual(actor.label_of({"owner": "a", "via": "codex"}, "owner"), "codex for a")   # older lines
+        # the other pairs are unchanged
+        self.assertEqual(actor.label_of({"status_by": "a", "status_via": "claude", "via": "x"}, "who"),
+                         "claude for a")
+        self.assertEqual(actor.label_of({"who": "a", "via": "claude", "owner_via": "zzz"}), "claude for a")
+
+
 if __name__ == "__main__":
     unittest.main()

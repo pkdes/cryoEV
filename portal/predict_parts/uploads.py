@@ -482,6 +482,7 @@ def check_upload_fields(cfg, user, kind, fields, has_files=True, via=None) -> di
 
 
 AGENT_UPLOADS = 1                       # open upload sessions an agent (all of one person's agents together) may have
+_START_LOCK = threading.Lock()           # upload_start's check-then-create (one portal process per door)
 
 
 def open_uploads(cfg) -> list:
@@ -529,36 +530,39 @@ def upload_start(cfg, user, body, via=None) -> dict:
             meta["fields"] = fields
             PS.write_json_atomic(d / UPLOAD_META, meta)
             return upload_state(d, meta)
-    # one open session per person, agent (None: the browser) and kind: an earlier one (other files) is given up.
-    # Another agent's, or the browser's, is never touched (round 11 #65: the key was (person, kind) before)
-    mine = [(p, m) for p, m in open_uploads(cfg) if m.get("owner") == user.get("id")]
-    for p, m in mine:
-        if m.get("kind") == kind and (m.get("owner_via") or None) == via and not create_running(p.name):
-            drop_upload(p, p.name)
-    if via:
-        busy = [p for p, m in mine if m.get("owner_via") and p.is_dir()]
-        if len(busy) >= AGENT_UPLOADS:
-            raise Refusal(f"Your agents already have {len(busy)} upload open (at most {AGENT_UPLOADS} at a time). "
-                          f"Finish it (create) or cancel it first.", 429)
-    d = scratch(cfg, "us", raw=(kind == "raw"))
-    uid = d.name
-    res = Reservation(d, sum(decl.values()))
-    try:
-        res.check()
-        (d / UPLOAD_FILES).mkdir()
-        # left-out files count as done (an older page sends only what is not done) and are never received
-        meta = {"schema": SCHEMA_UPLOAD, "id": uid, "owner": user["id"], "kind": kind, "fields": fields,
-                "declared": decl, "done": [x["name"] for x in left], "skipped": left, "created": now_iso()}
+    # one start at a time per portal process: the scan, the drops, the agent-upload check and the new session's
+    # upload.json are one step (concurrent starts by two agents could otherwise both pass the check)
+    with _START_LOCK:
+        # one open session per person, agent (None: the browser) and kind: an earlier one (other files) is given up.
+        # Another agent's, or the browser's, is never touched (round 11 #65: the key was (person, kind) before)
+        mine = [(p, m) for p, m in open_uploads(cfg) if m.get("owner") == user.get("id")]
+        for p, m in mine:
+            if m.get("kind") == kind and (m.get("owner_via") or None) == via and not create_running(p.name):
+                drop_upload(p, p.name)
         if via:
-            meta["owner_via"] = via
-        PS.write_json_atomic(d / UPLOAD_META, meta)
-    except BaseException:
-        res.release()
-        shutil.rmtree(d, ignore_errors=True)
-        raise
-    with _UP_RES_LOCK:
-        _UP_RES[uid] = res
-    return upload_state(d, meta)
+            busy = [p for p, m in mine if m.get("owner_via") and p.is_dir()]
+            if len(busy) >= AGENT_UPLOADS:
+                raise Refusal(f"Your agents already have {len(busy)} upload open (at most {AGENT_UPLOADS} at a time). "
+                              f"Finish it (create) or cancel it first.", 429)
+        d = scratch(cfg, "us", raw=(kind == "raw"))
+        uid = d.name
+        res = Reservation(d, sum(decl.values()))
+        try:
+            res.check()
+            (d / UPLOAD_FILES).mkdir()
+            # left-out files count as done (an older page sends only what is not done) and are never received
+            meta = {"schema": SCHEMA_UPLOAD, "id": uid, "owner": user["id"], "kind": kind, "fields": fields,
+                    "declared": decl, "done": [x["name"] for x in left], "skipped": left, "created": now_iso()}
+            if via:
+                meta["owner_via"] = via
+            PS.write_json_atomic(d / UPLOAD_META, meta)
+        except BaseException:
+            res.release()
+            shutil.rmtree(d, ignore_errors=True)
+            raise
+        with _UP_RES_LOCK:
+            _UP_RES[uid] = res
+        return upload_state(d, meta)
 
 
 class Resync(Exception):

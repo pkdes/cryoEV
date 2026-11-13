@@ -106,22 +106,32 @@ gets `403 "This token is read-only..."`.
 | `POST /predict/api/upload/{uid}/create` | `upload(..., create=True)` | starts the analysis (tiles) or the conversion (raw) |
 | `POST /predict/api/upload/{uid}/cancel` | `cancel_upload(uid)` | gives the upload up |
 | `GET /predict/api/preparing/{tid}` | `preparing(tid)`, `wait(tid)` | the new set's progress; `href` names the set when done |
-| `GET /predict/new/session/{key}/?json=1` | `session_form(key)` | a session's form data: `sig`, its samples, the models you may pick |
+| `GET /predict/new/session/{key}/?json=1` | `session_form(key)` | a session's form data: `sig`, its samples, the models you may pick (an agent gets 404 without `json=1`) |
 | `POST /predict/new/session/{key}/` | `predict_session(key, ...)` | starts an analysis of a session's tiles |
-| `POST /results/{ps}/compute` | `compute(ps)` | computes a finished set's results; poll `results_status(ps)` |
+| `GET /predict/api/convert/{cid}` | `convert(cid)` | a raw upload's conversion: state, tiles, and `key` when done |
+| `POST /results/{ps}/compute` | `compute(ps)` | computes a finished set's results; poll `results_status(ps)`; `409` while the predictions aren't finished |
 | `POST /feedback/` | `feedback(text, kind)` | a bug report, feature idea or question |
 
 ```python
 c = Client()                                  # a read + write token
-up = c.upload(["a.png", "b.png", "c.png"], sample_label="EV prep", nm_per_px=1.47, model="<model id>")
+up = c.upload(["a.png", "b.png", "c.png"], sample_label="EV prep", nm_per_px=1.47, model="<model id>",
+             confirm_nm=True)
 done = c.wait(up["tid"])                      # {"state": "done", "ps": "ps_20261113_0a1b2c", ...}
-c.predict_session("<key>", nm={"S1": 1.47})   # the key is in the session's address: /predict/new/session/<key>/
+c.predict_session("<key>", nm={"S1": 1.47}, confirm_nm=True)
 c.compute(done["ps"]); c.results_status(done["ps"])
 c.feedback("The upload page ...", kind="bug") # {"id": 12, ...}
 ```
 
-Passing `nm_per_px` (or calling `predict_session`) **confirms the pixel size**, as the page's tick box does: the
-person is recorded as the one who confirmed it, so the agent must use the value the person gave.
+**The pixel size.** `upload` and `predict_session` refuse without `confirm_nm=True`: it confirms the pixel size, as
+the page's tick box does. The person is recorded as the one who confirmed it (`nm_confirmed_by`) and the agent as the
+way it came (`nm_confirmed_via` in `request.json` and the registry record), so use only the value the person gave.
+
+**Session keys.** There is no list of them on the API. Ask the person: a session's key is in its address on the New
+analysis page, `/predict/new/session/<key>/`. For a raw upload your agent made, `convert(cid)` gives the `key` of its
+tiles once the conversion is done.
+
+**Only your own.** On the upload routes and `/predict/api/convert/{cid}` an agent reaches only what it made itself
+(the same person and agent): the person's browser uploads, and another agent's, answer `404`.
 
 **Answers.** The routes answer as they do for the browser. The forms (`/predict/new/session/...`,
 `/results/.../compute`, `/feedback/`) answer `303`; the client reads `Location` and **never follows it** (the HTML
@@ -172,7 +182,8 @@ Errors come back as JSON: `{"error": "..."}` (a refused write form: its HTML pag
   - The portal re-reads the file when it changes.
   - `last_used` is merged in at most every 5 minutes, and that merge never undoes a revoke.
 - **Kill switches.** `CJ_API=off` in the portal's environment refuses every bearer request; `CJ_API_WRITE=off`
-  refuses only the write routes (reads go on). Browsers are not affected. Restart the portal to apply either.
+  refuses only the write routes (reads go on). `off`, `0`, `false` and `no` all mean off (any case, spaces ignored).
+  Browsers are not affected. Restart the portal to apply either.
 - **Logs.** The token is never logged. The access log shows `alice via claude (bearer)`. A refusal logs only its
   reason.
 - **Pre-push scan.** `tools/prepush_scan.py` blocks anything shaped like a token (`cev_` + 43 characters) from

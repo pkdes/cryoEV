@@ -531,8 +531,7 @@ def summary(cfg, user: dict, can_see, now=None) -> dict:
             review.append({**idn, "source": "registry", "type": typ, "type_label": TYPE_WORD.get(typ, typ),
                            "where": _s(rec.get("where")), "status": st, "label": label, "tone": tone,
                            "who": None if idn["private"] else _s(rec.get("who")),
-                           "via": None if idn["private"] else _s(rec.get("via") or rec.get("created_via")
-                                                                  or rec.get("owner_via")),
+                           "via": None if idn["private"] else _s(rec.get("via") or rec.get("created_via")),
                            "progress": p,
                            "pct": pct(p["done"], p["total"]) if p else None, "hint": plain, "tech": tech,
                            "logged": _s(rec.get("logged"))})
@@ -721,7 +720,7 @@ def build_flow(cfg, user, admin, can_see, live, queues, running, queue, review, 
         rev.append(_item("review_package", pid, title,
                          (_s(rec.get("model")), rec.get("n_images") and f"{rec['n_images']} images"),
                          link="Open review", who=_s(rec.get("owner")),
-                         via=_s(rec.get("via") or rec.get("created_via") or rec.get("owner_via")),
+                         via=_s(_actor().via_of(rec, "owner")),
                          chip_="in review" if busy else "ready to review", tone="run" if busy else "wait"))
     for r in pkgs or []:
         if r["status"] == "applied":

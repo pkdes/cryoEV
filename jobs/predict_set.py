@@ -398,7 +398,8 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
     Slow (md5 + decode of every tile): the portal calls it from a worker thread.
     via: the agent that asked for the set for `owner` (the portal passes a write token's agent; round 11 #65), or
     None. Stored as "owner_via" in request.json and in the registry record (a data field: update_record carries it
-    to every later line), and as the create line's own `via`. Not given: nothing is stored and the line's via is
+    to every later line), and as the create line's own `via`; also "nm_confirmed_via" (the nm/px confirmation of
+    nm_confirmed_by came through that agent) in both. Not given: nothing is stored and the line's via is
     registry.append's usual ($CRYOEV_VIA, which the portal strips).
     name: an optional display name (clean_name) written to request.json only when set. progress: optional
     callback(done, total, phase) with phase "checking" (md5 + decode) then "placing" (copy or link); additive, the
@@ -583,8 +584,9 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
                    "source": source, "created": created}
         if set_name:
             request["name"] = set_name
-        if via:
+        if via:                                  # an agent asked, and the pixel size was confirmed through it
             request["owner_via"] = via
+            request["nm_confirmed_via"] = via
         write_json_atomic(inc / REQUEST, request)
         write_json_atomic(inc / STATUS, {"state": "queued", "n_done": 0, "n_total": len(rows), "where": where,
                                          "job": None, "error": None, "updated": created, "pid": None,
@@ -614,7 +616,7 @@ def _set_record(ps_id, created, owner, model, where, path, session, n_images, co
            "n_images": n_images, "conf": conf, "max_det": max_det, "status": "queued",
            "review_package": None, "results": None, "recorded_by": "jobs/predict_set.py create"}
     if via:
-        rec["owner_via"] = via
+        rec["owner_via"] = rec["nm_confirmed_via"] = via
     return rec
 
 

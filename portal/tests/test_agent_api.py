@@ -19,6 +19,7 @@ import importlib.util
 import inspect
 import io
 import json
+import threading
 import logging
 import os
 import re
@@ -131,6 +132,7 @@ class Store(unittest.TestCase):
             if r["id"] == rec["id"]:
                 r["expires"] = A._utc(A._ts(r["created"]) + 31 * 86400)
         A.write_json_atomic(self.path, doc)
+        st = A.TokenStore(self.path)          # fresh: a same-size rewrite within one file-time tick keeps the cache
         self.assertEqual(st.check(w30, ro), (None, "expired"))
         self.assertEqual(st.check(r90, ro)[1]["scope"], "read")                   # a 90-day READ token still fine
         # the same lifetime as read (90 days) is refused for write; flipping a read record to write too
@@ -138,7 +140,7 @@ class Store(unittest.TestCase):
             if r["id"] == rrec["id"]:
                 r["scope"] = "write"
         A.write_json_atomic(self.path, doc)
-        self.assertEqual(st.check(r90, ro), (None, "expired"))
+        self.assertEqual(A.TokenStore(self.path).check(r90, ro), (None, "expired"))
 
     def test_agent_name_with_a_trailing_newline_is_refused(self):
         with self.assertRaises(A.TokenError):
@@ -454,7 +456,7 @@ class Gate(Base):
             "/cj/cryoev_client.py", "/about", "/changes", "/account/", "/admin/", "/admin/api/people",
             "/admin/api/audit", "/data/", "/data/search?q=x", "/data/api/overview/", "/DATA/api/overview",
             "/data/lineage/graph", "/data/thumb/session/x/1.jpg", "/jobs/", "/jobs/api/summary/", "/predict/",
-            "/predict/api/convert/x", "/predict/api/recipe/x", f"/predict/{ps}/",
+            "/predict/api/recipe/x", f"/predict/{ps}/",
             f"/results/{ps}/", f"/results/{ps}/download/x", "/gallery/", "/train/api/runs", "/feedback/",
             "/reviews/", "/history/live/live.json", "/review/", "/review/app/", "/nope")]
         refused += [("HEAD", "/cj/me.json"), ("POST", "/cj/me.json"), ("PUT", "/data/api/overview"),
@@ -875,6 +877,9 @@ class AccessDoor(unittest.TestCase):
 
 # ================================================================ write scope (round 11 #65)
 FORM_TOKEN_MARKS = ("compare_digest(",)          # how every portal form-token check compares the posted "t"
+BINDING_MARKS = ("binding(", "flash_put(", "flash_take(")   # anything keyed by the sign-in binding
+BINDING_REVIEWED = {("POST", "/feedback/")}      # its browser branch flashes a thank-you; the bearer branch returns
+                                                 # before it, and binding() is per person + agent for bearer anyway
 
 
 def endpoint_sources(fn, depth=4, seen=None) -> list:
@@ -899,12 +904,12 @@ def endpoint_sources(fn, depth=4, seen=None) -> list:
     return out
 
 
-def checks_form_token(routes, method, tpl) -> bool:
-    """Whether the handler of (method, template) checks a form token (one of FORM_TOKEN_MARKS in its code)."""
+def checks_form_token(routes, method, tpl, marks=FORM_TOKEN_MARKS) -> bool:
+    """Whether the handler of (method, template) checks a form token (one of `marks` in its code or its helpers)."""
     hits = [r for r in routes if getattr(r, "path", None) == tpl and method in (getattr(r, "methods", None) or ())]
     if not hits:
         raise AssertionError(f"no route {method} {tpl}")
-    return any(m in src for r in hits for src in endpoint_sources(r.endpoint) for m in FORM_TOKEN_MARKS)
+    return any(m in src for r in hits for src in endpoint_sources(r.endpoint) for m in marks)
 
 
 class WriteStatic(unittest.TestCase):
@@ -926,7 +931,7 @@ class WriteStatic(unittest.TestCase):
             ("POST", "/predict/api/upload/{uid}/create"), ("POST", "/predict/api/upload/{uid}/cancel"),
             ("GET", "/predict/api/upload/{uid}"), ("GET", "/predict/api/preparing/{tid}"),
             ("GET", "/predict/new/session/{key}/"), ("POST", "/predict/new/session/{key}/"),
-            ("POST", "/results/{ps}/compute"), ("POST", "/feedback/")}))
+            ("GET", "/predict/api/convert/{cid}"), ("POST", "/results/{ps}/compute"), ("POST", "/feedback/")}))
         self.assertEqual(APP.BEARER_WRITE_ROUTES & APP.BEARER_ROUTES, frozenset())
         have = {(m, getattr(r, "path", None)) for r in self.app.routes for m in (getattr(r, "methods", None) or ())}
         self.assertEqual(APP.BEARER_WRITE_ROUTES - have, set())                  # every pair is a real route
@@ -944,6 +949,34 @@ class WriteStatic(unittest.TestCase):
         for method, tpl in sorted(APP.BEARER_ROUTES | APP.BEARER_WRITE_ROUTES):
             with self.subTest(route=f"{method} {tpl}"):
                 self.assertFalse(checks_form_token(self.app.routes, method, tpl))
+        # binding() / flash use: only the reviewed route(s); control: Account's index uses both
+        self.assertTrue(checks_form_token(self.app.routes, "GET", "/account/", BINDING_MARKS))
+        used = {(m, t) for m, t in APP.BEARER_ROUTES | APP.BEARER_WRITE_ROUTES
+                if checks_form_token(self.app.routes, m, t, BINDING_MARKS)}
+        self.assertEqual(used, BINDING_REVIEWED)
+
+    def test_binding_is_per_person_and_agent_for_bearer(self):
+        from types import SimpleNamespace as NS
+
+        def req(auth, uid, via=None, cookie=""):
+            return NS(scope={"cj_auth": auth, "cj_user": {"id": uid}, "cj_via": via},
+                      cookies={A.COOKIE: cookie} if cookie else {})
+        a, b, c = (ADM.binding(req("bearer", "adv", "claude")), ADM.binding(req("bearer", "adv", "codex")),
+                   ADM.binding(req("bearer", "bas", "claude")))
+        self.assertEqual(a, "bearer:adv:claude")
+        self.assertEqual(len({a, b, c, ""}), 4)                                 # never the shared ""
+        self.assertEqual(ADM.binding(req("key", "adv", cookie="sess1")), "sess1")      # browsers unchanged
+        self.assertEqual(ADM.binding(req("access", "adv")), "access-user:adv")
+
+    def test_kill_switch_words(self):
+        for v in ("off", "OFF", " Off ", "0", "false", "False", "no", " NO"):
+            with self.subTest(v=v):
+                self.assertFalse(APP.api_enabled({"CJ_API": v}))
+                self.assertFalse(APP.api_writes_enabled({"CJ_API_WRITE": v}))
+        for v in ("", "on", "1", "yes", "true", "offline"):                     # controls: still on
+            with self.subTest(v=v):
+                self.assertTrue(APP.api_enabled({"CJ_API": v}))
+                self.assertTrue(APP.api_writes_enabled({"CJ_API_WRITE": v}))
 
     def test_limiter_counts_per_person_and_an_upload_once(self):
         now = [1000.0]
@@ -1024,6 +1057,7 @@ class Writes(TPM.Base):
                                                  "application/json"),
             "GET /predict/api/upload/{uid}": ("GET", f"/predict/api/upload/{UPLOAD_X}", None, None),
             "/predict/api/preparing/{tid}": ("GET", f"/predict/api/preparing/{UPLOAD_X}", None, None),
+            "/predict/api/convert/{cid}": ("GET", "/predict/api/convert/20261111_abcdef", None, None),
             "GET /predict/new/session/{key}/": ("GET", "/predict/new/session/nokey/?json=1", None, None),
             "/predict/new/session/{key}/": ("POST", "/predict/new/session/nokey/", b"confirm=yes", form),
             "/results/{ps}/compute": ("POST", f"/results/{ps}/compute", b"", form),
@@ -1086,6 +1120,9 @@ class Writes(TPM.Base):
                 self.assertEqual(self.b(method, path, self.wt["advanced"], b"")[0], 401)
 
     def test_kill_switches(self):
+        with mock.patch.dict(os.environ, {"CJ_API_WRITE": " False "}):
+            self.assertEqual(self.b("POST", "/feedback/", self.wt["basic"], b"kind=bug&text=x",
+                                    "application/x-www-form-urlencoded")[0], 403)
         with mock.patch.dict(os.environ, {"CJ_API_WRITE": "off"}):
             st, _, body = self.b("POST", "/feedback/", self.wt["basic"], b"kind=bug&text=x",
                                  "application/x-www-form-urlencoded")
@@ -1184,6 +1221,9 @@ class Writes(TPM.Base):
                              self.session_body(), "application/x-www-form-urlencoded")
         self.assertEqual(st, 429, body[:300])
         self.assertIn("already have", body.decode("utf-8"))
+        st, h, _ = self.b("POST", f"/predict/new/session/{self.key_a}/", self.wt["admin"], self.session_body(),
+                          "application/x-www-form-urlencoded")
+        self.assertEqual((st, T.hget(h, "retry-after")), (429, "60"))
         st, _, body = self.start_upload(self.wt["advanced"])                     # another person's agent: fine
         self.assertEqual(st, 200, body)
 
@@ -1221,7 +1261,13 @@ class Writes(TPM.Base):
         before = set(self.sets())
         with mock.patch.object(TPM.P.PL, "start_detached") as spawn:              # nothing runs, nothing is queued
             # upload 3 tiles; the session's upload.json carries the agent before create
-            up = c.upload(self.tiles(3), sample_label="Agent S", nm_per_px=1.4724, model=TPM.MODEL, create=False)
+            with self.assertRaisesRegex(ValueError, "confirm_nm=True"):         # no silent confirmation
+                c.upload(self.tiles(1), sample_label="Agent S", nm_per_px=1.4724, model=TPM.MODEL)
+            with self.assertRaisesRegex(ValueError, "confirm_nm=True"):
+                c.predict_session(self.key_a, model=TPM.MODEL)
+            self.assertFalse(list((self.root / ".portal").glob("us_*")))         # nothing was sent
+            up = c.upload(self.tiles(3), sample_label="Agent S", nm_per_px=1.4724, model=TPM.MODEL, create=False,
+                          confirm_nm=True)
             meta = json.loads((self.staged(up["upload"]) / "upload.json").read_text(encoding="utf-8"))
             self.assertEqual(meta.get("owner_via"), "smoketest")
             st, _, body = self.bjson(f"/predict/api/upload/{up['upload']}/create", tok, {})
@@ -1233,7 +1279,7 @@ class Writes(TPM.Base):
             self.assertEqual(set(self.sets()) - before, {ps})
             self.addCleanup(shutil.rmtree, self.root / ps, True)
             # a session pick through the JSON form (the second write path)
-            got = c.predict_session(self.key_a, model=TPM.MODEL, name="agent pick")
+            got = c.predict_session(self.key_a, model=TPM.MODEL, name="agent pick", confirm_nm=True)
             self.assertRegex(got["tid"] or "", r"^sc_[0-9a-f]{12}$")
             done2 = c.wait(got["tid"], timeout=120, every=0.2)
             self.assertEqual(done2["state"], "done", done2)
@@ -1242,16 +1288,33 @@ class Writes(TPM.Base):
         self.assertEqual(spawn.call_count, 2)
         for s in (ps, ps2):
             req = json.loads((self.root / s / "request.json").read_text(encoding="utf-8"))
-            self.assertEqual((req["owner"], req.get("owner_via")), ("adv", "smoketest"))
+            self.assertEqual((req["owner"], req.get("owner_via"), req.get("nm_confirmed_via")),
+                             ("adv", "smoketest", "smoketest"))
         reg = [json.loads(x) for x in (self.env.registry / "prediction_set.jsonl").read_text("utf-8").splitlines()]
         line = [x for x in reg if x["id"] == ps][-1]
-        self.assertEqual((line["owner"], line.get("owner_via"), line.get("via")), ("adv", "smoketest", "smoketest"))
+        self.assertEqual((line["owner"], line.get("owner_via"), line.get("via"), line.get("nm_confirmed_via")),
+                         ("adv", "smoketest", "smoketest", "smoketest"))
         # owner_via survives a later status line (written by someone else: no line via of its own)
         from jobs import predict_set as PSET
         upd = PSET.update_record(ps, registry_root=self.env.registry, status="running")
         self.assertEqual((upd.get("owner_via"), upd.get("via"), upd["status"]), ("smoketest", None, "running"))
         cur = PSET.registry_module().current("prediction_set", self.env.registry)[ps]
         self.assertEqual(cur.get("owner_via"), "smoketest")
+        from data_utils import actor as ACT
+        self.assertEqual(ACT.label_of(cur, "owner"), "smoketest for adv")       # what Jobs / Data display
+        # its review package's line carries owner_via too (build_review -> register_package)
+        from annotation import prediction_package as PP
+        from portal.predict_parts import sets as SETS_
+        pkg = self.review / f"pred_{ps}"
+        pkg.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, pkg, True)
+        rp = PP.registry_record(pkg, {"id": pkg.name, "prediction_set": ps, "model": TPM.MODEL, "images": [],
+                                      "owner": "adv"}, "2026-11-13T10:00:00")
+        (pkg / "review_package.json").write_text(json.dumps(rp), encoding="utf-8")
+        cfg = __import__("types").SimpleNamespace(registry=self.env.registry, review_root=self.review)
+        line = SETS_.register_package(cfg, pkg, owner_via=req.get("owner_via"))
+        self.assertEqual((line.get("owner"), line.get("owner_via")), ("adv", "smoketest"))
+        self.assertEqual(ACT.label_of(line, "owner"), "smoketest for adv")
         # compute on a finished fixture set of adv's, then poll its status (a read route)
         fin = self.fake_set("adv", "done", n_done=3)
         self.addCleanup(shutil.rmtree, self.root / fin, True)
@@ -1260,6 +1323,15 @@ class Writes(TPM.Base):
         while c.results_status(fin)["state"] in ("queued", "running") and time.time() < end:
             time.sleep(0.2)
         self.assertEqual(c.results_status(fin)["state"], "ready")
+        # a set whose predictions aren't finished: 409 JSON with the reason (not the browser's 303)
+        running = self.fake_set("adv", "running")
+        self.addCleanup(shutil.rmtree, self.root / running, True)
+        with self.assertRaises(Writes.C.ApiError) as e:
+            c.compute(running)
+        self.assertEqual(e.exception.status, 409)
+        self.assertIn("not finished (state running)", e.exception.message)
+        st, h, _ = self.post(f"/results/{running}/compute", b"", "advanced")
+        self.assertEqual(st, 303)                                                # the browser: as before
         # someone else's set: the same 404 as no set (the owner check applies)
         other = self.fake_set("bas", "done", n_done=3)
         self.addCleanup(shutil.rmtree, self.root / other, True)
@@ -1294,6 +1366,75 @@ class Writes(TPM.Base):
             self.assertNotIn(secret, buf.getvalue())
             self.assertNotIn(secret, files)
 
+    def test_concurrent_agent_starts_exactly_one_wins(self):
+        self.addCleanup(self.drop_all_uploads)
+        toks = [A.create_token(self.env.tokens, "bas2", f"racer{i}", 30, scope="write", roster=self.env.roster)[0]
+                for i in range(6)]
+        go, out = threading.Barrier(len(toks)), []
+
+        def start(tok):
+            go.wait()
+            out.append(self.start_upload(tok)[0])
+        ts = [threading.Thread(target=start, args=(t,)) for t in toks]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(60)
+        self.assertEqual(sorted(out), [200] + [429] * (len(toks) - 1))
+        left = [p for p in (self.root / ".portal").glob("us_*")
+                if json.loads((p / "upload.json").read_text(encoding="utf-8")).get("owner") == "bas2"]
+        self.assertEqual(len(left), 1)
+
+    def test_an_agent_acts_only_on_its_own_upload(self):
+        self.addCleanup(self.drop_all_uploads)
+        st, _, mine = self.start_upload(cookie_who="basic", n=1)                 # the person's browser upload
+        self.assertEqual(st, 200, mine)
+        st, _, theirs = self.start_upload(self.wt["basic2"])                     # bas's codex
+        self.assertEqual(st, 200, theirs)
+        data = (TPM.GOLDEN / "images" / "0001.png").read_bytes()
+        for uid in (mine, theirs):                                               # bas's claude: neither is its own
+            for method, path, body, ctype in (
+                    ("GET", f"/predict/api/upload/{uid}", None, None),
+                    ("POST", f"/predict/api/upload/{uid}/file?name=t1.png&offset=0", data, "application/octet-stream"),
+                    ("POST", f"/predict/api/upload/{uid}/create", b"{}", "application/json"),
+                    ("POST", f"/predict/api/upload/{uid}/cancel", b"{}", "application/json")):
+                with self.subTest(uid=uid, path=path):
+                    self.assertEqual(self.b(method, path, self.wt["basic"], body, ctype)[0], 404)
+        for uid in (mine, theirs):
+            self.assertTrue(self.staged(uid).is_dir())
+            self.assertFalse((self.staged(uid) / "files" / "t1.png.part").exists())
+        self.assertEqual(self.b("GET", f"/predict/api/upload/{theirs}", self.wt["basic2"])[0], 200)   # controls
+        self.assertEqual(self.get(f"/predict/api/upload/{theirs}", "basic")[0], 200)  # the person's browser: all
+
+    def test_an_agent_polls_its_own_raw_conversion_and_gets_the_key(self):
+        from portal.predict_parts import runner as RUN
+        from portal import predict_sources as PSRC
+        base = RUN.raw_root(self.cfg_full())
+        made = []
+        for via in ("claude", None):
+            d = base / f"20261111_{'abcdef' if via else 'fedcba'}"
+            (d / "tiles").mkdir(parents=True, exist_ok=True)
+            self.addCleanup(shutil.rmtree, d, True)
+            meta = {"schema": "cj_convert/1", "id": d.name, "owner": "adv", "session": "20261111", "recipe": "x",
+                    "gpu": False, "source": {"kind": "upload"}, "inputs": [], "sample_key": None,
+                    "created": "2026-11-13T10:00:00"}
+            if via:
+                meta["made_via"] = via
+            (d / "convert.json").write_text(json.dumps(meta), encoding="utf-8")
+            (d / "status.json").write_text(json.dumps({"state": "done", "n_tiles": 0}), encoding="utf-8")
+            made.append(d)
+        st, _, body = self.b("GET", f"/predict/api/convert/{made[0].name}", self.wt["advanced"])
+        self.assertEqual(st, 200, body[:300])
+        doc = json.loads(body)
+        self.assertEqual((doc["state"], doc["key"]), ("done", PSRC.source_key(made[0] / "tiles")))
+        self.assertEqual(self.b("GET", f"/predict/api/convert/{made[1].name}", self.wt["advanced"])[0], 404)  # browser's
+        self.assertEqual(self.b("GET", f"/predict/api/convert/{made[0].name}", self.wt["advanced2"])[0], 404)  # codex
+        self.assertEqual(self.b("GET", f"/predict/api/convert/{made[0].name}", self.rt["advanced"])[0], 403)
+        self.assertEqual(self.get(f"/predict/api/convert/{made[1].name}", "advanced")[0], 200)     # the browser
+
+    def cfg_full(self):
+        return __import__("types").SimpleNamespace(registry=self.env.registry, review_root=self.review)
+
     def test_session_form_json_is_the_pages_data(self):
         form = self.client(self.wt["basic"]).session_form(self.key_a)
         self.assertEqual(form["schema"], "cj_predict_session_form/1")
@@ -1303,6 +1444,10 @@ class Writes(TPM.Base):
         self.assertIn(TPM.MODEL, form["models"])
         st, _, body = self.b("GET", "/predict/new/session/nokey/?json=1", self.wt["basic"])
         self.assertEqual((st, json.loads(body)), (404, {"error": "not found"}))
+        st, h, body = self.b("GET", f"/predict/new/session/{self.key_a}/", self.wt["basic"])   # no json=1
+        self.assertEqual(st, 404)
+        self.assertIn("application/json", T.hget(h, "content-type"))
+        self.assertEqual(self.get(f"/predict/new/session/{self.key_a}/", "basic")[0], 200)  # browser: the page
 
 
 def P_MAX_ACTIVE() -> int:

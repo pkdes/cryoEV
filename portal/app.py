@@ -120,20 +120,22 @@ BEARER_ROUTES = frozenset({
     ("GET", "/jobs/api/summary"),
 })
 # ---- write scope (round 11 #65): the ONLY extra pairs a "write" token opens. Exact templates again; the GETs are the
-# upload's state, the create's progress (polled) and the session form (?json=1: its sig and samples, which a POST of
-# it needs); they are never counted as writes.
+# upload's state, the create's progress (polled), the session form (?json=1 only: its sig and samples, which a POST
+# of it needs) and an agent's own raw conversion (polled; its tiles' key when done); they are never counted as writes.
+# On the upload and conversion routes an agent reaches only what it made itself (owner_via / made_via).
 BEARER_WRITE_ROUTES = frozenset({
     ("POST", "/predict/api/upload"), ("POST", "/predict/api/upload/{uid}/file"),
     ("POST", "/predict/api/upload/{uid}/create"), ("POST", "/predict/api/upload/{uid}/cancel"),
     ("GET", "/predict/api/upload/{uid}"), ("GET", "/predict/api/preparing/{tid}"),
     ("GET", "/predict/new/session/{key}/"), ("POST", "/predict/new/session/{key}/"),
+    ("GET", "/predict/api/convert/{cid}"),
     ("POST", "/results/{ps}/compute"),
     ("POST", "/feedback/"),
 })
 BEARER_ONCE_PER = {"/predict/api/upload/{uid}/file": "uid"}   # counted once per this path parameter (an upload)
 BEARER_ROLE_CAP = {"admin": "advanced"}       # an agent never acts as an admin
-API_ENV = "CJ_API"                            # "off": every bearer request refused (the kill switch)
-API_WRITE_ENV = "CJ_API_WRITE"                # "off": every write-scope route refused (reads go on)
+API_ENV = "CJ_API"                            # off / 0 / false / no: every bearer request refused (the kill switch)
+API_WRITE_ENV = "CJ_API_WRITE"                # off / 0 / false / no: every write-scope route refused (reads go on)
 WRITE_LIMIT = A.WRITE_LIMIT                   # bearer writes per person per rolling WRITE_WINDOW_S, across tokens
 WRITE_WINDOW_S = 3600.0
 API_DOCS = "See docs/API.md."
@@ -321,12 +323,19 @@ def api_error(status: int, text: str) -> Response:
     return r
 
 
+OFF_WORDS = ("off", "0", "false", "no")       # a kill switch's "off", any case, spaces around ignored
+
+
+def switch_off(name, env=None) -> bool:
+    return str((os.environ if env is None else env).get(name) or "").strip().lower() in OFF_WORDS
+
+
 def api_enabled(env=None) -> bool:
-    return str((os.environ if env is None else env).get(API_ENV) or "").strip().lower() != "off"
+    return not switch_off(API_ENV, env)
 
 
 def api_writes_enabled(env=None) -> bool:
-    return str((os.environ if env is None else env).get(API_WRITE_ENV) or "").strip().lower() != "off"
+    return not switch_off(API_WRITE_ENV, env)
 
 
 class WriteLimiter:

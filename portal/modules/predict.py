@@ -314,6 +314,12 @@ def routes(ctx) -> list:
     def admin_text(e: Refusal, user) -> str:
         return e.msg + (f"\n(admin) {e.tech}" if e.tech and user.get("role") == "admin" else "")
 
+    def agent_mismatch(request, made_via) -> bool:
+        """A bearer request on an upload / conversion another agent (or the person's browser) made: True (the
+        handler answers 404, as for no such thing). An agent acts only on what it made itself (round 11 #65)."""
+        via = PA.request_via(request)
+        return via is not None and (made_via or None) != via
+
     def refusal_json(e: Refusal, user, dropped: bool, extra=None):
         doc = {"error": admin_text(e, user), "dropped": dropped}
         doc.update(extra or {})
@@ -337,6 +343,8 @@ def routes(ctx) -> list:
     def session_form(request: Request):
         user = ctx.user(request)
         as_json = request.query_params.get("json") == "1"         # the form's data for an agent (round 11 #65)
+        if PA.request_via(request) is not None and not as_json:    # an agent gets the JSON only
+            return ctx.json({"error": "not found (agents: add ?json=1)"}, 404)
         src = find_source(request.path_params["key"], user)
         if src is None:
             return ctx.json({"error": "not found"}, 404) if as_json else not_found(request)
@@ -373,7 +381,10 @@ def routes(ctx) -> list:
                     form.pop("samples", None)
                     for k in [k for k in form if k.startswith("nm_")]:
                         del form[k]
-                return refused_page(request, src["label"], page_session_form(cfg, user, src, t, form, msg), status)
+                r = refused_page(request, src["label"], page_session_form(cfg, user, src, t, form, msg), status)
+                if status == 429:                          # a limit (the active-analysis cap): try again later
+                    r.headers["Retry-After"] = "60"
+                return r
             return await run_in_threadpool(again)
         # the work runs in a task, keyed by the pick: pressing the button twice (or a retried request) joins it
         if not recently_done(plan["tid"]):
@@ -634,7 +645,7 @@ def routes(ctx) -> list:
     def api_convert(request: Request):
         user = ctx.user(request)
         d, meta, st = load_conversion(cfg, user, ctx.can_see, request.path_params["cid"])
-        if d is None:
+        if d is None or agent_mismatch(request, meta.get("made_via")):
             return ctx.json({"error": "not found"}, 404)
         if st.get("state") in ("queued", "running"):
             kick(cfg)
@@ -645,6 +656,8 @@ def routes(ctx) -> list:
                "n_tiles": st.get("n_tiles"), "warnings": st.get("warnings") or [], "live": fr["live"]}
         if request.query_params.get("html") == "1":
             out["html"] = {"status": fr["status"], "result": fr["result"]}
+        if st.get("state") == "done" and (d / CONVERT_TILES).is_dir():     # the key its tiles are picked by (an
+            out["key"] = PSRC.source_key(d / CONVERT_TILES)                # agent: session_form / predict_session)
         return ctx.json(out)
 
     # ---- the upload API (one file, or one piece of a file, per request)
@@ -682,15 +695,22 @@ def routes(ctx) -> list:
 
     GONE = {"error": "This upload is gone (finished, refused, or unused for an hour). Start again.", "dropped": True}
 
+    def own_upload(request: Request, uid):
+        """load_upload (the person's own), and for an agent only an upload that agent started."""
+        d, meta = load_upload(cfg, ctx.user(request), uid)
+        if d is None or agent_mismatch(request, meta.get("owner_via")):
+            return None, None
+        return d, meta
+
     def api_upload_state(request: Request):
-        d, meta = load_upload(cfg, ctx.user(request), request.path_params["uid"])
+        d, meta = own_upload(request, request.path_params["uid"])
         if d is None:
             return ctx.json(GONE, 404)
         return ctx.json(upload_state(d, meta))
 
     async def api_upload_file(request: Request):
         user, uid = ctx.user(request), request.path_params["uid"]
-        d, _ = await run_in_threadpool(load_upload, cfg, user, uid)
+        d, _ = await run_in_threadpool(own_upload, request, uid)
         if d is None:
             return ctx.json(GONE, 404)
         async with upload_lock(uid):
@@ -715,7 +735,7 @@ def routes(ctx) -> list:
 
     async def api_upload_create(request: Request):
         user, uid = ctx.user(request), request.path_params["uid"]
-        d, meta = await run_in_threadpool(load_upload, cfg, user, uid)
+        d, meta = await run_in_threadpool(own_upload, request, uid)
         if d is None:
             return ctx.json(GONE, 404)
         async with upload_lock(uid):
@@ -734,7 +754,7 @@ def routes(ctx) -> list:
 
     async def api_upload_cancel(request: Request):
         user, uid = ctx.user(request), request.path_params["uid"]
-        d, _ = await run_in_threadpool(load_upload, cfg, user, uid)
+        d, _ = await run_in_threadpool(own_upload, request, uid)
         if d is None:
             return ctx.json(GONE, 404)
         if create_running(uid):                          # its images are being added to an analysis

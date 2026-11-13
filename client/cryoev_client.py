@@ -12,15 +12,17 @@ for now.
     python cryoev_client.py me
     python cryoev_client.py overview | search <text> | list <kind> | item <kind> <id> | lineage <kind> <id> | graph
     python cryoev_client.py mine | set <ps id> | results <ps id> | jobs
-    python cryoev_client.py session-form <key> | wait <tid> | compute <ps id> | feedback <text>      (write token)
+    python cryoev_client.py session-form <key> | wait <tid> | convert <cid> | compute <ps id> | feedback <text>
+                                                                                              (write token)
 
     from cryoev_client import Client
     c = Client()                     # CRYOEV_URL / CRYOEV_TOKEN, or Client(url, token)
     c.me()                           # {"id": ..., "role": ..., "via": <agent>, "auth": "bearer", "scope": "read"}
     # a write token:
-    up = c.upload(["a.png", "b.png"], sample_label="EV prep", nm_per_px=1.47, model="<model id>")
+    up = c.upload(["a.png", "b.png"], sample_label="EV prep", nm_per_px=1.47, model="<model id>", confirm_nm=True)
     c.wait(up["tid"])                # {"state": "done", "ps": "ps_...", ...}
-    c.predict_session("<key>")       # the key is in the session's address: /predict/new/session/<key>/
+    c.predict_session("<key>", confirm_nm=True)   # the key: ask the person (/predict/new/session/<key>/), or
+                                                  # convert(cid)["key"] for a raw upload's finished conversion
     c.compute("ps_...")              # then poll c.results_status("ps_...")
     c.feedback("The upload page ...", kind="bug")
 
@@ -189,12 +191,17 @@ class Client:
 
     # ---- writes (a read + write token; portal/app.py BEARER_WRITE_ROUTES)
     def upload(self, files, sample_label: str | None = None, nm_per_px=None, model: str | None = None,
-               name: str | None = None, kind: str = "tiles", fields: dict | None = None, create: bool = True):
+               name: str | None = None, kind: str = "tiles", fields: dict | None = None, create: bool = True,
+               confirm_nm: bool = False):
         """Upload image files (paths) as one upload session, piece by piece, then (create=True) start the analysis.
         Tiles: 8-bit PNG/JPEG, one sample label and pixel size (nm per pixel) for all, a model id (see the portal's
-        New analysis page; None = the production model is NOT guessed: the portal refuses). By passing nm_per_px you
-        confirm the pixel size, as the page's tick box does. kind="raw" (advanced): `fields` as the raw form's.
-        -> {"upload": id, "tid": progress id or None, "conversion": id or None, "href": where the page would go}."""
+        New analysis page; None = the production model is NOT guessed: the portal refuses). confirm_nm=True is
+        required for tiles: it confirms the pixel size, as the page's tick box does (the person is recorded as having
+        confirmed it, through this agent: only pass the value the person gave). kind="raw" (advanced): `fields` as
+        the raw form's. -> {"upload": id, "tid": progress id or None, "conversion": id or None, "href": where the
+        page would go}."""
+        if kind == "tiles" and confirm_nm is not True:
+            raise ValueError("pass confirm_nm=True to confirm the pixel size (only the value the person gave)")
         paths = [os.fspath(p) for p in files]
         decl = [{"name": os.path.basename(p), "size": os.path.getsize(p)} for p in paths]
         f = dict(fields or {})
@@ -261,11 +268,15 @@ class Client:
         return self.get(f"/predict/new/session/{_seg(key)}/", {"json": "1"})
 
     def predict_session(self, key: str, nm: dict | None = None, samples=None, model: str | None = None,
-                        label: str | None = None, count: int | None = None, name: str | None = None):
-        """Start an analysis of a session's tiles (its key is in its address /predict/new/session/<key>/). samples:
-        gids or labels (default every sample that can be analysed); nm: {gid or label: nm per pixel} (default the
-        manifest's value; a sample with no value needs one). Calling this confirms the pixel sizes, as the page's
-        tick box does. -> {"tid": progress id, "href"}; then wait(tid)."""
+                        label: str | None = None, count: int | None = None, name: str | None = None,
+                        confirm_nm: bool = False):
+        """Start an analysis of a session's tiles (its key: ask the person, it is in the session's address
+        /predict/new/session/<key>/; or convert(cid)["key"] for a raw upload's finished conversion). samples: gids
+        or labels (default every sample that can be analysed); nm: {gid or label: nm per pixel} (default the
+        manifest's value; a sample with no value needs one). confirm_nm=True is required: it confirms the pixel
+        sizes, as the page's tick box does. -> {"tid": progress id, "href"}; then wait(tid)."""
+        if confirm_nm is not True:
+            raise ValueError("pass confirm_nm=True to confirm the pixel sizes (check them in session_form first)")
         form = self.session_form(key)
         nm = dict(nm or {})
         groups = [g for g in form["groups"] if not g.get("mixed")]
@@ -291,8 +302,13 @@ class Client:
         loc = self.post_form(f"/predict/new/session/{_seg(key)}/", fields)
         return {"tid": location_part(loc, r"^/predict/preparing/([^/]+)/"), "href": loc}
 
+    def convert(self, cid: str):
+        """A raw upload's conversion (one this agent made): state, tiles; "key" when done (for predict_session)."""
+        return self.get(f"/predict/api/convert/{_seg(cid)}")
+
     def compute(self, ps: str):
-        """Compute (or refresh) a finished set's results; poll results_status(ps). -> {"ps", "href"}."""
+        """Compute (or refresh) a finished set's results; poll results_status(ps). -> {"ps", "href"}. A set whose
+        predictions are not finished: ApiError 409."""
         loc = self.post_form(f"/results/{_seg(ps)}/compute", {})
         return {"ps": location_part(loc, r"^/results/([^/]+)/"), "href": loc}
 
@@ -307,7 +323,8 @@ COMMANDS = {                                  # name -> (Client method, number o
     "me": ("me", 0), "overview": ("overview", 0), "search": ("search", 1), "list": ("list", 1),
     "item": ("item", 2), "lineage": ("lineage", 2), "graph": ("graph", 0), "mine": ("mine", 0),
     "set": ("prediction_set", 1), "results": ("results_status", 1), "jobs": ("jobs_summary", 0),
-    "session-form": ("session_form", 1), "wait": ("wait", 1), "compute": ("compute", 1), "feedback": ("feedback", 1),
+    "session-form": ("session_form", 1), "wait": ("wait", 1), "convert": ("convert", 1), "compute": ("compute", 1),
+    "feedback": ("feedback", 1),
 }
 
 

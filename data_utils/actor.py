@@ -81,22 +81,37 @@ def label(who_=None, via_=None) -> str:
     return v or w
 
 
+# the agent field(s) that go with a person field, first found wins. owner -> owner_via (round 11 #65): the agent
+# that made a prediction set (or its review package) for its owner; a data field, so it stays on every later line,
+# where the envelope `via` (that line's own writer) does not.
+VIA_PAIRS = {"status_by": ("status_via",), "created_by": ("created_via",),
+             "owner": ("owner_via", "via", "created_via")}
+
+
+def via_of(rec: dict, who_key="who"):
+    """The agent that goes with the person in rec[who_key] (VIA_PAIRS; any other key: via, else created_via), or
+    None."""
+    if not isinstance(rec, dict):
+        return None
+    return next((rec[v] for v in VIA_PAIRS.get(who_key, ("via", "created_via")) if rec.get(v)), None)
+
+
 def label_of(rec: dict, who_key="who") -> str:
     """label() from a record's own fields: the person from who_key, else status_by, else created_by; the agent that
-    goes with that person: status_by -> status_via (who set the status, which may differ from the line's writer
-    `via`), created_by -> created_via, who_key -> via, else created_via."""
+    goes with that person (via_of): status_by -> status_via (who set the status, which may differ from the line's
+    writer `via`), created_by -> created_via, owner -> owner_via (else via, created_via), who_key -> via, else
+    created_via."""
     if not isinstance(rec, dict):
         return ""
-    pair = {"status_by": ("status_via",), "created_by": ("created_via",)}
     for key in (who_key, "status_by", "created_by"):
         if rec.get(key):
-            via_keys = pair.get(key, ("via", "created_via"))
-            return label(rec[key], next((rec[v] for v in via_keys if rec.get(v)), None))
+            return label(rec[key], via_of(rec, key))
     return label(None, rec.get("via") or rec.get("created_via"))
 
 
 def is_agent(rec: dict) -> bool:
-    return isinstance(rec, dict) and bool(rec.get("via") or rec.get("created_via") or rec.get("status_via"))
+    return isinstance(rec, dict) and bool(rec.get("via") or rec.get("created_via") or rec.get("status_via")
+                                          or rec.get("owner_via"))
 
 
 def strip_env(environ=None) -> list:
