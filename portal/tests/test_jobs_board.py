@@ -179,6 +179,18 @@ class Board(unittest.TestCase):
             self.assertIsNone(J.href_for("dataset", bad))
         self.assertIsNone(J.href_for("nonsense", "x"))
 
+    def test_conversion_scan_is_cached_across_viewers(self):
+        from portal.predict_parts import sets as SETS
+        J._scan_cache.clear()
+        cfg, calls = self.env.config(), []
+        real = SETS.list_sets
+        with mock.patch.object(SETS, "list_sets", lambda *a, **k: (calls.append(1), real(*a, **k))[1]):
+            a = J.summary(cfg, {"id": "tester", "role": "admin"}, lambda u, o: True)
+            b = J.summary(cfg, {"id": "adv", "role": "advanced"}, lambda u, o: o == "adv")
+        self.assertEqual(len(calls), 1)                                # one scan serves both viewers
+        self.assertTrue(a["flow"]["raw"])
+        self.assertEqual(b["flow"]["raw"], [])                         # visibility applied after the cache
+
     # ---- attribution
     def test_agent_label_and_tag(self):
         rev = self.col("review")

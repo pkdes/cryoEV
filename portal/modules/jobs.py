@@ -601,13 +601,13 @@ def review_packages(cfg) -> list:
 
 # ---------------------------------------------------------------- the board (data flows left to right)
 def _item(kind, id_, title, sub=(), href=None, link="Open", who=None, via=None, prog=None, note=None, tone=None,
-          chip_=None, rec_type=None, act=None, hidden=False, desk=False) -> dict:
+          chip_=None, rec_type=None, act=None, hidden=False, desk=False, pos=False, tech_=None) -> dict:
     """One board card as data. `id` is shown small under the title; the link is href_for's (None = no link, which
     only a hidden item has). `who` / `via` arrive ALREADY masked."""
     return {"kind": kind, "id": id_, "title": title or id_ or "?", "sub": [x for x in sub if x],
             "href": None if hidden else (href if href is not None else href_for(kind, id_, rec_type)), "link": link,
             "who": who, "via": via, "prog": prog, "note": note, "tone": tone, "chip": chip_, "act": act,
-            "hidden": hidden, "desk": desk}
+            "hidden": hidden, "desk": desk, "pos": pos, "tech": tech_}
 
 
 def hardware_rows(live, queues, admin, jobs, reg_ok) -> list:
@@ -637,19 +637,33 @@ def hardware_rows(live, queues, admin, jobs, reg_ok) -> list:
     return rows
 
 
+SCAN_TTL_S = 15.0
+_scan_lock = threading.Lock()
+_scan_cache: dict = {}           # (raw roots, predict root) -> (monotonic time, conversions newest first, sessions with a set)
+
+
 def conversion_columns(cfg, user, can_see, now) -> tuple:
     """-> (raw uploads not converted, converted with no prediction set yet), as board items. Both lists come from
     Predict's own (per-person) conversion list; a set counts when its request names the conversion's session."""
     from portal.predict_parts import runner as RUN
     from portal.predict_parts import sets as SETS
-    sets_all = SETS.list_sets(cfg, {"role": "admin"}, lambda u, o: True)
-    predicted = set()
-    for _dir, req, _st in sets_all:
-        src = _d(_d(req).get("source"))
-        if src.get("kind") == "session" and src.get("session"):
-            predicted.add(str(src["session"]))
+    key = (tuple(str(r) for r in RUN.raw_roots(cfg)), str(SETS.COMMON.predict_root(cfg)))
+    mono = time.monotonic()
+    with _scan_lock:
+        hit = _scan_cache.get(key)
+    if hit is not None and 0 <= mono - hit[0] < SCAN_TTL_S:
+        convs_all, predicted = hit[1], hit[2]
+    else:                                   # one disk scan per TTL for everyone; visibility is applied below
+        convs_all = list(reversed(RUN.all_conversions(cfg)))
+        predicted = set()
+        for _dir, req, _st in SETS.list_sets(cfg, {"role": "admin"}, lambda u, o: True):
+            src = _d(_d(req).get("source"))
+            if src.get("kind") == "session" and src.get("session"):
+                predicted.add(str(src["session"]))
+        with _scan_lock:
+            _scan_cache[key] = (mono, convs_all, predicted)
     raw, done = [], []
-    for d, meta, st in RUN.list_conversions(cfg, user, can_see):
+    for d, meta, st in [t for t in convs_all if can_see(user, _d(t[1]).get("owner"))]:
         meta, st = _d(meta), _d(st)
         state = _s(st.get("state")) or "queued"
         sess = _s(meta.get("session"))
@@ -761,7 +775,9 @@ def build_flow(cfg, user, admin, can_see, live, queues, running, queue, review, 
                             else None, sub=(f"on {r['queue']}",), desk=True))
             continue
         tr.append(_item("training", r["id"], r["name"],
-                        (f"on {r['queue']}", f"time left {r['eta_text']}"), link="Open live view",
+                        (f"on {r['queue']}", f"time left {r['eta_text']}",
+                         f"Val mAP50-95 {r['map50_95']:.3f}" if r["map50_95"] is not None else None),
+                        link="Open live view",
                         prog=(r["done"], r["total"]) if r["done"] is not None and r["total"] else None,
                         chip_="may be stuck" if r["hung"] else "running", tone="warn" if r["hung"] else "run",
                         note=r.get("hung_text"), act=r, desk=True))
@@ -771,7 +787,8 @@ def build_flow(cfg, user, admin, can_see, live, queues, running, queue, review, 
                             hidden=True, sub=(f"on {x['queue']}",), desk=True))
             continue
         tr.append(_item("training", x["id"], x["name"], (f"on {x['queue']}",), link="Open live view",
-                        chip_=x["label"], tone=x["tone"], note=x["note"], act=x, desk=True))
+                        chip_=x["label"], tone=x["tone"], note=x["note"], act=x, desk=True,
+                        pos=x["position"] or "bullet", tech_=x.get("tech")))
     for x in review:
         if x["type"] in ("train", "predict") and not x["private"]:
             tr.append(_item("job", x["id"], x["name"], (x["type_label"],), who=x["who"], via=x["via"],
@@ -999,7 +1016,12 @@ def who_html(who, via) -> str:
 
 def card_html(it: dict, asof=None) -> str:
     """One board card: plain title, small monospace id, where it came from, what is pending, one link (href_for's)."""
-    top = f'<div class="cj-jobs-top"><span class="cj-jobs-ttl"><b class="cj-wrap cj-jobs-name">{esc(it["title"])}</b>'
+    badge = ""
+    if it.get("pos") == "bullet":
+        badge = '<span class="cj-jobs-pos cj-jobs-t-off" aria-hidden="true">&bull;</span>'
+    elif it.get("pos"):
+        badge = f'<span class="cj-jobs-pos">{int(it["pos"])}</span>'
+    top = f'<div class="cj-jobs-top">{badge}<span class="cj-jobs-ttl"><b class="cj-wrap cj-jobs-name">{esc(it["title"])}</b>'
     if it["id"] and it["id"] != it["title"]:
         top += f'<span class="cj-mut cj-wrap cj-jobs-id">{esc(it["id"])}</span>'
     top += "</span>" + (chip(it["chip"], it["tone"] or "wait") if it["chip"] else "") + "</div>"
@@ -1016,6 +1038,8 @@ def card_html(it: dict, asof=None) -> str:
                     + bar(it["prog"][0], it["prog"][1], "done"))
     if it["note"]:
         body.append(f'<span class="cj-jobs-line cj-wrap">{esc(it["note"])}</span>')
+    if it.get("tech"):
+        body.append(tech(it["tech"]))                       # admin only: summary() blanks it for everyone else
     if it["act"]:
         body.append(actions_html(it["act"]))
     if it["href"]:

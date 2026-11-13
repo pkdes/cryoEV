@@ -254,6 +254,8 @@ class Sections(Base):
         self.assertIn("gpu-desktop", hw)
         self.assertIn("lab-login", hw)
         self.assertIn("working normally", hw)
+        self.assertIn("watcher alive", hw)                              # admin: the technical line, in the strip
+        self.assertIn("0.250", frag)                                    # latest val mAP50-95
         self.assertIn("Now: Train v6 on lv_20261103", hw)
         self.assertIn('href="/train/"', hw)
         self.assertNotIn("as of", page)
@@ -270,6 +272,7 @@ class Sections(Base):
         self.assertNotIn("job_20261101_train_old", frag)                # done is not "waiting"
         self.assertIn("Train v7 (not pushed)", frag)                    # registry train job, never sent
         self.assertIn("Not sent to the GPU computer yet.", frag)
+        self.assertEqual(re.findall(r'<span class="cj-jobs-pos">(\d)</span>', frag), ["1", "2", "3", "4"])
         self.assertEqual(badge(frag), 8)
 
     def test_queue_without_ready_at_has_bullets(self):
@@ -282,6 +285,8 @@ class Sections(Base):
                  "job_20261105_train_next", "job_20261105_train_hold"]
         pos = [frag.find(j) for j in order]
         self.assertEqual(pos, sorted(pos))                              # live.json order, not claimed as run order
+        self.assertEqual(re.findall(r'<span class="cj-jobs-pos">(\d)</span>', frag), [])
+        self.assertEqual(frag.count('cj-jobs-t-off" aria-hidden="true">&bull;</span>'), 5)
         self.assertEqual([x["position"] for x in self.api()["queue"]], [None] * 5)
 
     def test_needs_attention(self):
@@ -433,7 +438,7 @@ class Privacy(Base):
         self.assertEqual(s["queues"][2]["name"], "GPU computer 3")      # the offline queue: no share path
         self.assertIn("Can&#x27;t reach GPU computer 3", page)
         admin = main_html(self.page("admin"))                           # control: admin gets the tech lines
-        for w in ("watcher", "registry", "live.json", "\\\\home-laptop\\cj", "train.log"):
+        for w in ("watcher", "registry", "jobs/sync", "live.json", "\\\\home-laptop\\cj", "train.log"):
             self.assertIn(w, admin, w)
 
 
