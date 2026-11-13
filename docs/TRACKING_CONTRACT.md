@@ -11,7 +11,11 @@ Registry style follows `batches.jsonl` ([INFERENCE_CHECK.md](INFERENCE_CHECK.md)
 - Checker: `python registry/validate.py [--jsonl f ...] [--report out.json] [--verbose]`.
   - It is read-only and refuses a `--report` path under a protected root (`data_utils/config.protected_roots()`: Box and the processing datasets).
   - Tests: `python -m unittest discover -s registry/tests`.
-- Every entity record carries `schema: "<entity>/1"`, `id` and `logged` (ISO time of the line). Optional: `recorded_by` (`<tool> <git sha>` or `backfill:<importer> <sha>`), `note`.
+- Every entity record carries `schema: "<entity>/1"`, `id` and `logged` (ISO time of the line). Optional: `recorded_by` (`<tool> <git sha>` or `backfill:<importer> <sha>`), `note`, `via`.
+  - `via` (round 9): the agent that wrote the line (e.g. `"claude"`, `^[a-z][a-z0-9_-]{0,31}$`); absent when a person ran the command. The responsible person stays in the line's own field (`status_by`, `who`, ...); together they display as "claude for pujan" (`registry/actor.py` `label()`).
+  - Source: `$CRYOEV_VIA` (set only in Claude Code sessions), read by the CLI commands (`registry.py import`, `set-status`, `job new`, and the scripts that call them, e.g. `jobs/sync.py`). The person: `--who`, else `$CRYOEV_FOR` (a `people.json` id), else the command's old default. Servers and `tools/services.py` children never carry either variable.
+  - `registry.append(record, via=...)` always drops a `via` the record arrived with, so a line copied from an agent's line (a later `set-status`, an importer carry-forward) never credits the agent with a person's write.
+  - The importers' no-change check ignores `via` (as `logged` / `recorded_by`): who ran the import is not a change, so a rerun appends 0 whoever runs it.
   `label_change/1` is the existing `changes.jsonl` row. It is unchanged and has no envelope.
 
 ## Ids
@@ -126,7 +130,7 @@ Registry style follows `batches.jsonl` ([INFERENCE_CHECK.md](INFERENCE_CHECK.md)
 - **Explicit beats derived.** A `set-status` line (with `status_by`, a `people.json` id) wins over any derived status, and the importers keep it.
 - **Upload sessions (round 7).** The portal (`portal/upload_sessions.py`, only with `CJ_UPLOAD_SESSIONS=on`) turns a finished raw-upload conversion into its session's `session/1` line: read → merge → append under `<registry>/.upload_session.lock`. It owns `conversions` ([{`id`, `uploaded_by`, grids, labels, tile counts, acquisition}]) and `details` (grid ids, display sample names, prep notes); lab fields are never replaced. The importer (and `registry.py set-status` on a session) holds the same lock while it writes, and the importer carries those two keys forward, as it keeps `status_by`. A lab-recorded sample label is never replaced: an upload that names the grid otherwise is shown as "Lab label (upload: X)", and an uploader may rename (display only) just the grids of their own uploads.
   **Known limit: a mistyped imaging date.** The session id is the date the uploader types, so a wrong date files the upload under another (possibly a lab) session. Fix (admin): re-upload under the right date, then `python -m portal.upload_sessions unregister --registry <registry> --session <wrong id> --conversion <cid> --who <id>` appends the wrong session's line without that conversion (a session the portal made and left empty becomes `excluded`; nothing is deleted).
-- Model `production` is set only by `registry.py set-status <id> production --who pujan`.
+- Model `production` is set only by `registry.py set-status <id> production --who pujan`, run by the user: a line with `via` that would make a model production is refused (agents never promote; re-appending an already-production model is not a promotion).
 - **Image keys.** Legacy keys (in a pull or `tracking/v2`) stay as they are. New session tiles (only in a session MANIFEST) are `<session>__<key>`.
   Generic upload/labeling copies (`blind_NN`) are `<session>_<key>` (e.g. `20261027_blind_03_png`), with `copy_of` from `*selection_PRIVATE.csv` when it names a registered tile. Files are not renamed.
   The importer refuses an existing key that arrives with a different session, and a stem that a second Roboflow id claims. It reports them and writes nothing for them.
