@@ -1628,6 +1628,10 @@ def routes(ctx) -> list:
             return not_found(request)
         if predictions_ready(ps):
             start_compute(ctx.cfg, ps)
+        elif request.scope.get("cj_auth") == "bearer":   # an agent can't see the page's "not finished" note
+            state = (ps["status"] or {}).get("state") or "unknown"
+            return ctx.json({"error": f"The predictions of {ps['id']} are not finished (state {state}): results can "
+                                      f"be computed once it is done.", "state": state}, 409)
         return ctx.no_store(RedirectResponse(f"/results/{ps['id']}/", status_code=303))
 
     def api_status(request: Request):

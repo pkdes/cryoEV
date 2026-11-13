@@ -19,7 +19,8 @@ Registration
     lab labelled a grid, an upload's other name is shown as "Lab label (upload: X)" (effective_labels).
   - Upload-owned keys (UPLOAD_KEYS): `conversions` [{id, uploaded_by, grids, sample_labels, tiles_per_grid, n_tiles,
     n_montages, acquisition}] (one entry per conversion id; `owner` is NOT used: in the registry it names an owner
-    file) and `details` (below).
+    file; `uploaded_via`, the agent that uploaded it for uploaded_by, from convert.json made_via, round 11 #65) and
+    `details` (below).
   - The acquisition summary comes from <conv>/acquisition.json (written by jobs/convert_raw.py with the importer's
     file_summary / session_acquisition / scope_model): only the session/1 acquisition keys, each checked against the
     schema, never a raw header, serial or path. A missing file registers without it.
@@ -281,6 +282,8 @@ def conversion_entry(conv_dir: Path, meta: dict, sid: str) -> dict:
              "n_tiles": info["n_tiles"], "n_montages": n_mont, "acquisition": acq or None}
     if isinstance(meta.get("derived_from"), str):       # a re-conversion with other settings: not new tiles
         entry["derived_from"] = meta["derived_from"]
+    if isinstance(meta.get("made_via"), str) and meta["made_via"]:   # an agent's upload (convert.json, round 11 #65)
+        entry["uploaded_via"] = meta["made_via"]
     return {k: v for k, v in entry.items() if v is not None or k == "uploaded_by"}
 
 
@@ -535,7 +538,7 @@ def merge_details(cur: dict, upd: dict, who: str) -> dict:
     return out
 
 
-def save_details(session_id: str, fields: dict, who: str, cfg, admin: bool = False) -> dict:
+def save_details(session_id: str, fields: dict, who: str, cfg, admin: bool = False, request=None) -> dict:
     """Merge the form into the session record's `details` and append (under the upload lock). -> {"ok": True,
     "appended": bool} | {"ok": False, "error": text, "busy"?: True}. The caller has checked who may edit (may_edit
     / can_see). A display name: the admin anywhere, an uploader only on the grids of their own conversions. Only a
@@ -575,15 +578,10 @@ def save_details(session_id: str, fields: dict, who: str, cfg, admin: bool = Fal
     except OSError as e:
         return {"ok": False, "error": "Not saved: the registry could not be written. Ask the admin.",
                 "tech": f"{type(e).__name__}: {str(e)[:250]}"}
-    state = getattr(cfg, "state_dir", None)
-    try:
-        if state is None:
-            raise OSError("no state folder")
-        from portal import audit as PA
-        PA.audit(state, who, "session_details", session_id,
-                 {"grids": len(upd["grid_ids"]) + len(upd["sample_display"]),
-                  "notes_chars": len(upd["prep_notes"] or "")})
-    except (OSError, TypeError):
+    from portal import audit as PA                  # the one audit helper (round 11 #3): never raises
+    if not PA.event(getattr(cfg, "state_dir", None), request, "session_details", session_id,
+                    {"grids": len(upd["grid_ids"]) + len(upd["sample_display"]),
+                     "notes_chars": len(upd["prep_notes"] or "")}, actor=who):
         print(f"[upload_sessions] {session_id}: details saved, audit line not written", file=sys.stderr, flush=True)
     return {"ok": True, "appended": True}
 

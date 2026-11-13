@@ -247,7 +247,9 @@ def read_images(ps_dir) -> list:
 
 def update_record(ps_id, registry_root=None, recorded_by="jobs/predict_set.py", **fields):
     """Append the set's registry line with `fields` changed (status, where, job, ...): read and append under the
-    registry's prediction_set lock. -> the stored line. Raises PredictSetError when the set has no record."""
+    registry's prediction_set lock. -> the stored line. Raises PredictSetError when the set has no record.
+    Every data field of the current line carries forward (owner_via: the agent the set was made by stays on every
+    later status line); the envelope `via` does not (registry.append sets it for the line's own writer)."""
     reg = registry_module()
     root = Path(registry_root) if registry_root else config.registry_root()
     with locked(root / REGISTRY_LOCK):
@@ -384,9 +386,15 @@ def _place(src: Path, dst: Path, md5: str, link: bool) -> str:
 # ---------------------------------------------------------------- create
 def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_label_column=None, nm_per_px=None,
            nm_from_manifest=False, manifest=None, names=None, conf=0.25, max_det=1000, imgsz=None, session=None,
-           registry_root=None, root=None, link=False, where="laptop", name=None, progress=None, dry_run=False):
+           registry_root=None, root=None, link=False, where="laptop", name=None, progress=None, dry_run=False,
+           via=None):
     """Make a prediction set (see the module doc). -> its folder. Raises PredictSetError (nothing written).
     Slow (md5 + decode of every tile): the portal calls it from a worker thread.
+    via: the agent that asked for the set for `owner` (the portal passes a write token's agent; round 11 #65), or
+    None. Stored as "owner_via" in request.json and in the registry record (a data field: update_record carries it
+    to every later line), and as the create line's own `via`; also "nm_confirmed_via" (the nm/px confirmation of
+    nm_confirmed_by came through that agent) in both. Not given: nothing is stored and the line's via is
+    registry.append's usual ($CRYOEV_VIA, which the portal strips).
     name: an optional display name (clean_name) written to request.json only when set. progress: optional
     callback(done, total, phase) with phase "checking" (md5 + decode) then "placing" (copy or link); additive, the
     CLI passes none. dry_run: all checks, then -> the plan dict (nothing written; the id is a placeholder)."""
@@ -445,6 +453,8 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
         problems.append(f"session {session!r} is not YYYYMMDD[-N]")
     if where not in ("laptop", "desktop"):
         problems.append(f"where {where!r} must be laptop or desktop")
+    if via is not None and not re.match(r"^[a-z][a-z0-9_-]{0,31}\Z", str(via)):
+        problems.append(f"via {via!r} is not an agent name (lower-case, e.g. claude)")
     try:
         model_spec(model)
     except PredictSetError as e:
@@ -521,7 +531,7 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
     if dry_run:
         ps_id = f"ps_{day}_000000"                   # placeholder: a real create picks a free random id
         rec = _set_record(ps_id, C.now(), owner, model, where, record_path(root / ps_id), session, len(items), conf,
-                          max_det)
+                          max_det, via)
         errs = regm.check_record(rec, regm.schemas())
         if errs:
             raise PredictSetError(f"refused: registry record invalid: {'; '.join(errs[:4])}")
@@ -543,7 +553,8 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
         (inc / IMAGES).mkdir(parents=True)
     created = C.now()
     final = root / ps_id
-    rec = _set_record(ps_id, created, owner, model, where, record_path(final), session, len(items), conf, max_det)
+    rec = _set_record(ps_id, created, owner, model, where, record_path(final), session, len(items), conf, max_det,
+                      via)
     try:
         errs = regm.check_record(rec, regm.schemas())
         if errs:
@@ -567,6 +578,9 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
                    "source": source, "created": created}
         if set_name:
             request["name"] = set_name
+        if via:                                  # an agent asked, and the pixel size was confirmed through it
+            request["owner_via"] = via
+            request["nm_confirmed_via"] = via
         write_json_atomic(inc / REQUEST, request)
         write_json_atomic(inc / STATUS, {"state": "queued", "n_done": 0, "n_total": len(rows), "where": where,
                                          "job": None, "error": None, "updated": created, "pid": None,
@@ -575,7 +589,7 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
         with locked(reg / REGISTRY_LOCK):
             inc.rename(final)
             try:
-                regm.append(rec, reg)
+                regm.append(rec, reg, **({"via": via} if via else {}))
             except Exception as e:
                 write_status(final, state="failed", error=f"registry record not written: {e}")
                 raise PredictSetError(f"{final} was written but its registry record was not ({e}); "
@@ -588,13 +602,16 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
     return final
 
 
-def _set_record(ps_id, created, owner, model, where, path, session, n_images, conf, max_det) -> dict:
-    """The prediction_set/1 line create appends (status queued)."""
+def _set_record(ps_id, created, owner, model, where, path, session, n_images, conf, max_det, via=None) -> dict:
+    """The prediction_set/1 line create appends (status queued); owner_via only when an agent asked for it."""
     src = {"kind": "session", "session": str(session)} if session else {"kind": "upload"}
-    return {"schema": "prediction_set/1", "id": ps_id, "logged": created, "created": created, "owner": owner,
-            "model": model, "job": None, "where": where, "path": path, "source": src,
-            "n_images": n_images, "conf": conf, "max_det": max_det, "status": "queued",
-            "review_package": None, "results": None, "recorded_by": "jobs/predict_set.py create"}
+    rec = {"schema": "prediction_set/1", "id": ps_id, "logged": created, "created": created, "owner": owner,
+           "model": model, "job": None, "where": where, "path": path, "source": src,
+           "n_images": n_images, "conf": conf, "max_det": max_det, "status": "queued",
+           "review_package": None, "results": None, "recorded_by": "jobs/predict_set.py create"}
+    if via:
+        rec["owner_via"] = rec["nm_confirmed_via"] = via
+    return rec
 
 
 # ---------------------------------------------------------------- CLI

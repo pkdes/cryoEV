@@ -718,7 +718,7 @@ def build_flow(cfg, user, admin, can_see, live, queues, running, queue, review, 
         rev.append(_item("review_package", pid, title,
                          (_s(rec.get("model")), rec.get("n_images") and f"{rec['n_images']} images"),
                          link="Open review", who=_s(rec.get("owner")),
-                         via=_s(rec.get("via") or rec.get("created_via")),
+                         via=_s(_actor().via_of(rec, "owner")),
                          chip_="in review" if busy else "ready to review", tone="run" if busy else "wait"))
     for r in pkgs or []:
         if r["status"] == "applied":

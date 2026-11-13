@@ -1,7 +1,9 @@
 """
-The agent API, read-only (round 10 #60; docs/API.md): the token store (portal/auth.py), the Gate's bearer branch
-(portal/app.py BEARER_ROUTES), its audit lines (portal/audit.py), My account (portal/modules/account.py), the tokens on
-Admin > People, the CLI, the one-file client (client/cryoev_client.py) and the pre-push pattern.
+The agent API (round 10 #60, write scope round 11 #65; docs/API.md): the token store (portal/auth.py), the Gate's
+bearer branch (portal/app.py BEARER_ROUTES, BEARER_WRITE_ROUTES, WriteLimiter), its audit lines (portal/audit.py), My
+account (portal/modules/account.py), the tokens on Admin > People, the CLI, the one-file client
+(client/cryoev_client.py), the pre-push pattern, and the writes: via stamped on every record (request.json, the
+registry's owner_via, upload.json, feedback, audit), the per-person limits, the upload fix, the kill switches.
 
 Positive controls first in each class (a valid token answers 200 as that person), or the refusals prove nothing.
 Temp roster / state dir / token store / predict root only (cjtest.Env); never ~/.cryoev.
@@ -14,8 +16,10 @@ import asyncio
 import contextlib
 import hashlib
 import importlib.util
+import inspect
 import io
 import json
+import threading
 import logging
 import os
 import re
@@ -36,6 +40,8 @@ import cjtest as T  # noqa: E402
 from portal import app as APP  # noqa: E402
 from portal import audit as PA  # noqa: E402
 from portal import auth as A  # noqa: E402
+from portal import feedback_store as FS  # noqa: E402
+from portal import upload_sessions as US  # noqa: E402
 from portal.modules import admin as ADM  # noqa: E402
 
 TOKEN_SHAPE = re.compile(r"cev_[A-Za-z0-9_-]{43}")
@@ -45,8 +51,8 @@ SETS = {"tester": "ps_20261112_a00001", "adv": "ps_20261112_a00002", "bas": "ps_
 
 
 def clean_env():
-    """No agent / API env from the outside (CRYOEV_*, CJ_API, CJ_AGENT_TOKENS) leaks into a test."""
-    T.TK.strip_environ(strip_all=True, drop=("CJ_API", "CJ_AGENT_TOKENS"))
+    """No agent / API env from the outside (CRYOEV_*, CJ_API, CJ_API_WRITE, CJ_AGENT_TOKENS) leaks into a test."""
+    T.TK.strip_environ(strip_all=True, drop=("CJ_API", "CJ_API_WRITE", "CJ_AGENT_TOKENS"))
 
 
 def load_client():
@@ -100,15 +106,39 @@ class Store(unittest.TestCase):
 
     def test_create_refusals(self):
         for kw in ({"days": 0}, {"days": 91}, {"days": "x"}, {"agent": "Claude"}, {"agent": ""}, {"agent": "9x"},
-                   {"agent": "a" * 33}, {"scope": "write"}, {"scope": "admin"}):
+                   {"agent": "a" * 33}, {"scope": "admin"}, {"scope": "write", "days": 31},
+                   {"scope": "write", "days": 90}, {"scope": "Write"}):
             args = {"days": 30, "agent": "claude", "scope": "read", **kw}
             with self.subTest(kw=kw), self.assertRaises(A.TokenError):
                 A.create_token(self.path, "ann", args["agent"], args["days"], args["scope"], roster=self.roster)
-        with self.assertRaisesRegex(A.TokenError, "not available yet"):
-            A.create_token(self.path, "ann", "claude", scope="write")
+        with self.assertRaisesRegex(A.TokenError, "read \\+ write token lasts 1 to 30 days"):
+            A.create_token(self.path, "ann", "claude", 31, scope="write")
         with self.assertRaises(A.TokenError):
             A.create_token(self.path, "nobody", "claude", roster=self.roster)
         self.assertFalse(self.path.exists())                       # nothing was written
+
+    def test_write_scope_tokens_are_made_and_capped_at_30_days(self):
+        st, ro = A.TokenStore(self.path), A.Roster(self.roster)
+        w30, rec = A.create_token(self.path, "ann", "claude", 30, scope="write", roster=self.roster)
+        r90, rrec = A.create_token(self.path, "ann", "claude", 90, scope="read", roster=self.roster)
+        self.assertEqual((rec["scope"], rrec["scope"]), ("write", "read"))
+        self.assertEqual(st.check(w30, ro)[1]["scope"], "write")                  # positive controls
+        self.assertEqual(st.check(r90, ro)[1]["scope"], "read")
+        # the 30-day cap is enforced in check() too: a write record hand-edited to 31 days is refused
+        doc = json.loads(self.path.read_text(encoding="utf-8"))
+        for r in doc["tokens"]:
+            if r["id"] == rec["id"]:
+                r["expires"] = A._utc(A._ts(r["created"]) + 31 * 86400)
+        A.write_json_atomic(self.path, doc)
+        st = A.TokenStore(self.path)          # fresh: a same-size rewrite within one file-time tick keeps the cache
+        self.assertEqual(st.check(w30, ro), (None, "expired"))
+        self.assertEqual(st.check(r90, ro)[1]["scope"], "read")                   # a 90-day READ token still fine
+        # the same lifetime as read (90 days) is refused for write; flipping a read record to write too
+        for r in doc["tokens"]:
+            if r["id"] == rrec["id"]:
+                r["scope"] = "write"
+        A.write_json_atomic(self.path, doc)
+        self.assertEqual(A.TokenStore(self.path).check(r90, ro), (None, "expired"))
 
     def test_agent_name_with_a_trailing_newline_is_refused(self):
         with self.assertRaises(A.TokenError):
@@ -181,11 +211,11 @@ class Store(unittest.TestCase):
         self.assertEqual(st.check("cev_" + "A" * 43, ro), (None, "unknown"))
         for bad in ("", "cev_short", "Bearer x", None, "cev_" + "A" * 44, "xev_" + "A" * 43):
             self.assertEqual(st.check(bad, ro), (None, "malformed"), bad)
-        # a hand-planted write-scope or over-long token is refused
+        # a hand-planted unknown-scope or over-long token is refused
         doc = json.loads(self.path.read_text(encoding="utf-8"))
         w = "cev_" + "w" * 43
         long_ = "cev_" + "L" * 43
-        doc["tokens"] += [dict(doc["tokens"][0], id="tk_00000000000a", sha256=A.sha256_hex(w), scope="write",
+        doc["tokens"] += [dict(doc["tokens"][0], id="tk_00000000000a", sha256=A.sha256_hex(w), scope="admin",
                                person="ann"),
                           dict(doc["tokens"][0], id="tk_00000000000b", sha256=A.sha256_hex(long_), person="ann",
                                expires=A._utc(time.time() + 400 * 86400))]
@@ -282,12 +312,25 @@ class Store(unittest.TestCase):
             self.assertEqual(A.main(["revoke-token", "--token-id", rec["id"], "--state-dir", str(state), *common]), 0)
             self.assertEqual(A.main(["revoke-token", "--token-id", rec["id"], *common]), 1)    # already
             self.assertEqual(A.main(["mint-token", "--id", "ann", "--agent", "claude", "--scope", "write",
+                                     "--days", "31", "--roster", str(self.roster), *common]), 1)
+            self.assertEqual(A.main(["mint-token", "--id", "ann", "--agent", "claude", "--scope", "admin",
                                      "--roster", str(self.roster), *common]), 1)
             self.assertEqual(A.main(["mint-token", "--id", "nobody", "--agent", "claude", "--roster",
                                      str(self.roster), *common]), 1)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):                                     # --scope write works (30 days)
+            self.assertEqual(A.main(["mint-token", "--id", "ann", "--agent", "claude", "--scope", "write",
+                                     "--roster", str(self.roster), "--state-dir", str(state), *common]), 0)
+        self.assertIn("read + write", out.getvalue())
+        wtok = TOKEN_SHAPE.findall(out.getvalue())[0]
+        self.assertEqual(A.TokenStore(self.path).check(wtok, A.Roster(self.roster))[1]["scope"], "write")
         lines = [json.loads(x) for x in PA.audit_path(state).read_text(encoding="utf-8").splitlines()]
+        wid = A.TokenStore(self.path).check(wtok, A.Roster(self.roster))[1]["id"]
         self.assertEqual([(x["action"], x["target"]) for x in lines],
-                         [("agent token made", rec["id"]), ("agent token revoked", rec["id"])])
+                         [("agent token made", rec["id"]), ("agent token revoked", rec["id"]),
+                          ("agent token made", wid)])
+        self.assertEqual(lines[-1]["detail"]["scope"], "write")
+        self.assertNotIn(wtok, PA.audit_path(state).read_text(encoding="utf-8"))
         self.assertEqual(lines[0]["detail"]["for"], "ann")
         row = ADM.audit_row(lines[0], own_door="tailnet key")
         self.assertEqual((row["door"], row["unverified"]), (PA.CLI_DOOR, True))      # not the verified API door
@@ -389,7 +432,8 @@ class Gate(Base):
     def test_positive_control_me_json(self):
         st, h, body = self.bget("/cj/me.json", self.tok["adv"])
         self.assertEqual(st, 200, body)
-        self.assertEqual(json.loads(body), {"id": "adv", "role": "advanced", "via": "claude", "auth": "bearer"})
+        self.assertEqual(json.loads(body), {"id": "adv", "role": "advanced", "via": "claude", "auth": "bearer",
+                                            "scope": "read"})
         self.assertEqual(T.hget(h, "x-frame-options"), "DENY")              # security headers as always
         st, _, body = self.bget("/cj/me.json", self.tok["tester"])
         self.assertEqual(json.loads(body)["role"], "advanced")              # an admin's agent is capped
@@ -410,12 +454,13 @@ class Gate(Base):
             "/cj/cryoev_client.py", "/about", "/changes", "/account/", "/admin/", "/admin/api/people",
             "/admin/api/audit", "/data/", "/data/search?q=x", "/data/api/overview/", "/DATA/api/overview",
             "/data/lineage/graph", "/data/thumb/session/x/1.jpg", "/jobs/", "/jobs/api/summary/", "/predict/",
-            "/predict/api/convert/x", "/predict/api/upload/x", "/predict/api/recipe/x", f"/predict/{ps}/",
+            "/predict/api/recipe/x", f"/predict/{ps}/",
             f"/results/{ps}/", f"/results/{ps}/download/x", "/gallery/", "/train/api/runs", "/feedback/",
             "/reviews/", "/history/live/live.json", "/review/", "/review/app/", "/nope")]
         refused += [("HEAD", "/cj/me.json"), ("POST", "/cj/me.json"), ("PUT", "/data/api/overview"),
-                    ("POST", "/jobs/api/cancel"), ("POST", "/predict/api/upload"), ("POST", "/account/tokens/new"),
-                    ("POST", "/admin/people/add"), ("DELETE", "/data/api/session/x")]
+                    ("POST", "/jobs/api/cancel"), ("POST", "/account/tokens/new"), ("POST", "/predict/new/upload/"),
+                    ("POST", f"/predict/{ps}/start"), ("POST", f"/predict/{ps}/review"), ("POST", "/apply/preview"),
+                    ("POST", "/admin/people/add"), ("DELETE", "/data/api/session/x"), ("PUT", "/predict/api/upload")]
         for method, path in refused:
             with self.subTest(method=method, path=path):
                 st, h, body = self.bget(path, self.tok["adv"], T.cookie(self.cookies["tester"]), method=method,
@@ -475,10 +520,10 @@ class Gate(Base):
         planted = "cev_" + "P" * 43
         doc = json.loads(self.env.tokens.read_text(encoding="utf-8"))
         doc["tokens"].append(dict(doc["tokens"][0], id="tk_0000000000ff", sha256=A.sha256_hex(planted),
-                                  scope="write", person="adv", revoked=None))
+                                  scope="admin", person="adv", revoked=None))
         A.write_json_atomic(self.env.tokens, doc)
         for name, tok in (("expired", expired), ("revoked", revoked), ("person revoked", gone),
-                          ("write scope", planted), ("unknown", "cev_" + "Z" * 43), ("malformed", "abc"),
+                          ("unknown scope", planted), ("unknown", "cev_" + "Z" * 43), ("malformed", "abc"),
                           ("empty", "")):
             with self.subTest(name):
                 st, _, body = self.bget("/cj/me.json", tok)
@@ -664,7 +709,7 @@ class Gate(Base):
         mods = {(n.module if isinstance(n, ast.ImportFrom) else a.name).split(".")[0]
                 for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
                 for a in (n.names if isinstance(n, ast.Import) else [n])}
-        self.assertTrue(mods <= {"__future__", "json", "os", "sys", "urllib"}, mods)
+        self.assertTrue(mods <= {"__future__", "json", "os", "re", "sys", "time", "urllib"}, mods)
 
 
 class Account(Base):
@@ -710,6 +755,32 @@ class Account(Base):
         blob = PA.audit_path(self.env.state).read_text(encoding="utf-8")
         self.assertNotIn(tok, blob)
         self.assertNotIn(A.sha256_hex(tok), blob)
+
+    def test_scope_radio_and_a_write_token(self):
+        st, _, body = self.cget("/account/", "adv2")
+        page = body.decode("utf-8")
+        self.assertIn('name="scope" value="read" checked', page)                 # read is the default
+        self.assertIn('name="scope" value="write"', page)
+        self.assertIn("60 writes an hour", page)
+        t = FORM_T.search(page).group(1)
+        st, _, body = self.post("adv2", "/account/tokens/new", {"t": t, "agent": "claude", "days": "30",
+                                                                 "scope": "write"})
+        self.assertEqual(st, 200, body[:300])
+        page = body.decode("utf-8")
+        self.assertIn("read + write", page)
+        tok = TOKEN_SHAPE.findall(page)[0]
+        self.assertEqual(json.loads(self.bget("/cj/me.json", tok)[2])["scope"], "write")
+        st, _, body = self.cget("/account/", "adv2")
+        self.assertIn('data-scope="write"', body.decode("utf-8"))
+        self.assertIn("read+write", body.decode("utf-8"))
+        for fields in ({"days": "90", "scope": "write"}, {"days": "30", "scope": "admin"}):
+            with self.subTest(fields=fields):
+                st, _, body = self.post("adv2", "/account/tokens/new", {"t": t, "agent": "claude", **fields})
+                self.assertEqual(st, 400)
+                self.assertIsNone(TOKEN_SHAPE.search(body.decode("utf-8")))
+        st, _, body = self.post("adv2", "/account/tokens/new", {"t": t, "agent": "claude", "days": "90"})
+        self.assertEqual(st, 200)                                                 # no scope field = read (old form)
+        self.assertIn("read-only", body.decode("utf-8"))
 
     def test_refusals(self):
         t = self.form_t("adv2")
@@ -790,6 +861,618 @@ class AccessDoor(unittest.TestCase):
         st, _, body = self.TA.get(self.p.port, "/account/", jwt_)
         self.assertEqual(st, 200)
         self.assertIn("Tailscale address only", body.decode("utf-8"))
+
+    def test_a_write_token_is_refused_on_the_access_door(self):
+        w = A.create_token(self.env.tokens, "adv", "claude", 30, scope="write", roster=self.env.roster)[0]
+        for method, path in (("GET", "/cj/me.json"), ("POST", "/feedback/"), ("POST", "/predict/api/upload")):
+            with self.subTest(path=path):
+                st, _, body = T.request(self.p.port, method, path,
+                                        {**T.bearer(w), "Content-Type": "application/x-www-form-urlencoded"},
+                                        b"kind=bug&text=x" if method == "POST" else None)
+                self.assertEqual(st, 403)
+                self.assertIn("API is tailnet-only for now", json.loads(body)["error"])
+
+
+# ================================================================ write scope (round 11 #65)
+FORM_TOKEN_MARKS = ("compare_digest(",)          # how every portal form-token check compares the posted "t"
+BINDING_MARKS = ("binding(", "flash_put(", "flash_take(")   # anything keyed by the sign-in binding
+BINDING_REVIEWED = {("POST", "/feedback/")}      # its browser branch flashes a thank-you; the bearer branch returns
+                                                 # before it, and binding() is per person + agent for bearer anyway
+
+
+def endpoint_sources(fn, depth=4, seen=None) -> list:
+    """The source of an endpoint and of every function it closes over (its module-local helpers), recursively."""
+    seen = set() if seen is None else seen
+    f = inspect.unwrap(fn)
+    if id(f) in seen or depth < 0:
+        return []
+    seen.add(id(f))
+    out = []
+    try:
+        out.append(inspect.getsource(f))
+    except (OSError, TypeError):
+        pass
+    for cell in getattr(f, "__closure__", None) or ():
+        try:
+            v = cell.cell_contents
+        except ValueError:
+            continue
+        if inspect.isfunction(v):
+            out += endpoint_sources(v, depth - 1, seen)
+    return out
+
+
+def checks_form_token(routes, method, tpl, marks=FORM_TOKEN_MARKS) -> bool:
+    """Whether the handler of (method, template) checks a form token (one of `marks` in its code or its helpers)."""
+    hits = [r for r in routes if getattr(r, "path", None) == tpl and method in (getattr(r, "methods", None) or ())]
+    if not hits:
+        raise AssertionError(f"no route {method} {tpl}")
+    return any(m in src for r in hits for src in endpoint_sources(r.endpoint) for m in marks)
+
+
+class WriteStatic(unittest.TestCase):
+    """No portal needed: the lists, the form-token trap, the limiter."""
+
+    @classmethod
+    def setUpClass(cls):
+        clean_env()
+        cls.env = T.Env()
+        cls.app = APP.create_app(cls.env.config())
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.env.cleanup()
+
+    def test_the_write_list_is_exact_and_small(self):
+        self.assertEqual(APP.BEARER_WRITE_ROUTES, frozenset({
+            ("POST", "/predict/api/upload"), ("POST", "/predict/api/upload/{uid}/file"),
+            ("POST", "/predict/api/upload/{uid}/create"), ("POST", "/predict/api/upload/{uid}/cancel"),
+            ("GET", "/predict/api/upload/{uid}"), ("GET", "/predict/api/preparing/{tid}"),
+            ("GET", "/predict/new/session/{key}/"), ("POST", "/predict/new/session/{key}/"),
+            ("GET", "/predict/api/convert/{cid}"), ("POST", "/results/{ps}/compute"), ("POST", "/feedback/")}))
+        self.assertEqual(APP.BEARER_WRITE_ROUTES & APP.BEARER_ROUTES, frozenset())
+        have = {(m, getattr(r, "path", None)) for r in self.app.routes for m in (getattr(r, "methods", None) or ())}
+        self.assertEqual(APP.BEARER_WRITE_ROUTES - have, set())                  # every pair is a real route
+        for _, tpl in APP.BEARER_WRITE_ROUTES:                                   # never these areas
+            self.assertFalse(tpl.startswith(("/admin", "/review", "/reviews", "/apply", "/train", "/jobs", "/data",
+                                             "/account", "/history", "/gallery")), tpl)
+        self.assertEqual(set(APP.BEARER_ONCE_PER), {"/predict/api/upload/{uid}/file"})
+
+    def test_no_bearer_route_checks_a_form_token(self):
+        """binding() is "" for every bearer request, so a form token on a bearer route would be ONE shared token.
+        Control first: the checker finds the form token of routes known to check one."""
+        for method, tpl in (("POST", "/account/tokens/new"), ("POST", "/feedback/{rid:int}/status"),
+                            ("POST", "/admin/people/add")):
+            self.assertTrue(checks_form_token(self.app.routes, method, tpl), f"control {tpl}")
+        for method, tpl in sorted(APP.BEARER_ROUTES | APP.BEARER_WRITE_ROUTES):
+            with self.subTest(route=f"{method} {tpl}"):
+                self.assertFalse(checks_form_token(self.app.routes, method, tpl))
+        # binding() / flash use: only the reviewed route(s); control: Account's index uses both
+        self.assertTrue(checks_form_token(self.app.routes, "GET", "/account/", BINDING_MARKS))
+        used = {(m, t) for m, t in APP.BEARER_ROUTES | APP.BEARER_WRITE_ROUTES
+                if checks_form_token(self.app.routes, m, t, BINDING_MARKS)}
+        self.assertEqual(used, BINDING_REVIEWED)
+
+    def test_binding_is_per_person_and_agent_for_bearer(self):
+        from types import SimpleNamespace as NS
+
+        def req(auth, uid, via=None, cookie=""):
+            return NS(scope={"cj_auth": auth, "cj_user": {"id": uid}, "cj_via": via},
+                      cookies={A.COOKIE: cookie} if cookie else {})
+        a, b, c = (ADM.binding(req("bearer", "adv", "claude")), ADM.binding(req("bearer", "adv", "codex")),
+                   ADM.binding(req("bearer", "bas", "claude")))
+        self.assertEqual(a, "bearer:adv:claude")
+        self.assertEqual(len({a, b, c, ""}), 4)                                 # never the shared ""
+        self.assertEqual(ADM.binding(req("key", "adv", cookie="sess1")), "sess1")      # browsers unchanged
+        self.assertEqual(ADM.binding(req("access", "adv")), "access-user:adv")
+
+    def test_kill_switch_words(self):
+        for v in ("off", "OFF", " Off ", "0", "false", "False", "no", " NO"):
+            with self.subTest(v=v):
+                self.assertFalse(APP.api_enabled({"CJ_API": v}))
+                self.assertFalse(APP.api_writes_enabled({"CJ_API_WRITE": v}))
+        for v in ("", "on", "1", "yes", "true", "offline"):                     # controls: still on
+            with self.subTest(v=v):
+                self.assertTrue(APP.api_enabled({"CJ_API": v}))
+                self.assertTrue(APP.api_writes_enabled({"CJ_API_WRITE": v}))
+
+    def test_limiter_counts_per_person_and_an_upload_once(self):
+        now = [1000.0]
+        lim = APP.WriteLimiter(limit=3, window=3600, clock=lambda: now[0])
+        self.assertEqual([lim.take("ann") for _ in range(3)], [0.0, 0.0, 0.0])
+        wait = lim.take("ann")
+        self.assertEqual(wait, 3600.0)
+        self.assertEqual(lim.take("bob"), 0.0)                                   # another person: their own count
+        now[0] += 1800
+        self.assertEqual(lim.take("ann"), 1800.0)                                # rolling: the oldest frees first
+        now[0] += 1800
+        self.assertEqual(lim.take("ann"), 0.0)
+        # chunks: one upload counts once, and its later pieces pass even at the limit
+        lim = APP.WriteLimiter(limit=2, window=3600, clock=lambda: now[0])
+        k = ("/predict/api/upload/{uid}/file", "us_000000000001")
+        self.assertEqual([lim.take("ann", k) for _ in range(5)], [0.0] * 5)
+        self.assertEqual(lim.take("ann"), 0.0)                                   # 2 counted: the upload + this
+        self.assertGreater(lim.take("ann"), 0)
+        self.assertEqual(lim.take("ann", k), 0.0)                                # the counted upload goes on
+        self.assertGreater(lim.take("ann", ("/predict/api/upload/{uid}/file", "us_000000000002")), 0)
+
+
+import test_predict_module as TPM  # noqa: E402  (its Base: temp predict roots, the fake predictor's env)
+
+UPLOAD_X = "us_000000000000"
+
+
+class Writes(TPM.Base):
+    """A real portal with Predict on (test_predict_module's temp world) and read / write tokens."""
+
+    @classmethod
+    def setUpClass(cls):
+        clean_env()
+        super().setUpClass()
+        r, t = cls.env.roster, cls.env.tokens
+
+        def mint(pid, agent="claude", scope="write"):
+            return A.create_token(t, pid, agent, 30, scope=scope, roster=r)[0]
+        cls.wt = {"admin": mint("tester"), "advanced": mint("adv"), "basic": mint("bas"),
+                  "advanced2": mint("adv", "codex"), "basic2": mint("bas", "codex"), "other": mint("bas2")}
+        cls.rt = {"admin": mint("tester", scope="read"), "advanced": mint("adv", scope="read"),
+                  "basic": mint("bas", scope="read")}
+        cls.ps_done = None
+
+    def setUp(self):
+        super().setUp()
+        for k in [k for k in os.environ if k.upper() in ("CRYOEV_VIA", "CRYOEV_FOR", "CJ_API", "CJ_API_WRITE")]:
+            os.environ.pop(k, None)                       # not clean_env(): the Base's CRYOEV_* roots must stay
+        self.p.app.limiter = APP.WriteLimiter()                                  # every test starts uncounted
+
+    # ---- helpers
+    def b(self, method, path, tok, body=None, ctype=None):
+        h = T.bearer(tok)
+        if ctype:
+            h["Content-Type"] = ctype
+        return T.request(self.p.port, method, path, h, body, timeout=60)
+
+    def bjson(self, path, tok, doc):
+        return self.b("POST", path, tok, json.dumps(doc).encode(), "application/json")
+
+    C = None
+
+    def client(self, tok):
+        if Writes.C is None:
+            Writes.C = load_client()
+        return Writes.C.Client(self.p.origin, tok)
+
+    def write_paths(self, ps="ps_20260101_000000"):
+        """One concrete request per write template: (method, path, body, content type)."""
+        form = "application/x-www-form-urlencoded"
+        return {
+            "/predict/api/upload": ("POST", "/predict/api/upload", b"{}", "application/json"),
+            "/predict/api/upload/{uid}/file": ("POST", f"/predict/api/upload/{UPLOAD_X}/file?name=a.png&offset=0",
+                                               b"x", "application/octet-stream"),
+            "/predict/api/upload/{uid}/create": ("POST", f"/predict/api/upload/{UPLOAD_X}/create", b"{}",
+                                                 "application/json"),
+            "/predict/api/upload/{uid}/cancel": ("POST", f"/predict/api/upload/{UPLOAD_X}/cancel", b"{}",
+                                                 "application/json"),
+            "GET /predict/api/upload/{uid}": ("GET", f"/predict/api/upload/{UPLOAD_X}", None, None),
+            "/predict/api/preparing/{tid}": ("GET", f"/predict/api/preparing/{UPLOAD_X}", None, None),
+            "/predict/api/convert/{cid}": ("GET", "/predict/api/convert/20261111_abcdef", None, None),
+            "GET /predict/new/session/{key}/": ("GET", "/predict/new/session/nokey/?json=1", None, None),
+            "/predict/new/session/{key}/": ("POST", "/predict/new/session/nokey/", b"confirm=yes", form),
+            "/results/{ps}/compute": ("POST", f"/results/{ps}/compute", b"", form),
+            "/feedback/": ("POST", "/feedback/", b"kind=bug", form),   # no text: refused by the handler (400)
+        }
+
+    def staged(self, uid) -> Path:
+        return self.root / ".portal" / uid
+
+    def tiles(self, n=3) -> list:
+        d = Path(tempfile.mkdtemp(prefix="cj_wtiles_"))
+        self.addCleanup(shutil.rmtree, d, True)
+        out = []
+        for i in range(1, n + 1):
+            p = d / f"agent tile {i}.png"
+            shutil.copyfile(TPM.GOLDEN / "images" / f"000{i}.png", p)
+            out.append(p)
+        return out
+
+    def start_upload(self, tok=None, cookie_who=None, n=1):
+        """Start a tiles upload (bearer `tok`, or the browser of `cookie_who`) -> (status, upload id or body)."""
+        files = [{"name": f"t{i}.png", "size": (TPM.GOLDEN / "images" / f"000{i}.png").stat().st_size}
+                 for i in range(1, n + 1)]
+        doc = {"kind": "tiles", "files": files,
+               "fields": {"sample_label": "S", "nm_per_px": "1.4724", "confirm": "yes", "model": TPM.MODEL}}
+        if tok:
+            st, h, body = self.bjson("/predict/api/upload", tok, doc)
+        else:
+            st, h, body = self.post("/predict/api/upload", json.dumps(doc).encode(), cookie_who,
+                                    ctype="application/json")
+        return st, h, (json.loads(body)["upload"] if st == 200 else body)
+
+    def drop_all_uploads(self):
+        for p in list((self.root / ".portal").glob("us_*")):
+            P_drop = __import__("portal.predict_parts.uploads", fromlist=["drop_upload"]).drop_upload
+            P_drop(p, p.name)
+
+    # ---- the control: a read token gets 403 on every write route (and a write token reaches the handler)
+    def test_read_token_is_403_on_every_write_route_write_token_reaches_the_handler(self):
+        paths = self.write_paths()
+        self.assertEqual(len(paths), len(APP.BEARER_WRITE_ROUTES))
+        fb_before = len(FS.read_all(FS.feedback_path(self.env.state)))
+        for name, (method, path, body, ctype) in paths.items():
+            for who in ("admin", "advanced", "basic"):
+                with self.subTest(route=name, who=who):
+                    st, h, out = self.b(method, path, self.rt[who], body, ctype)
+                    self.assertEqual(st, 403, out[:200])
+                    self.assertIn("read-only", json.loads(out)["error"])
+                    st, h, out = self.b(method, path, self.wt[who], body, ctype)     # positive control
+                    self.assertNotIn(st, (401, 403, 429), out[:200])
+        self.assertEqual(len(FS.read_all(FS.feedback_path(self.env.state))), fb_before)
+        # the read routes still work for a write token (write implies read)
+        st, _, body = self.b("GET", "/cj/me.json", self.wt["advanced"])
+        self.assertEqual((st, json.loads(body)["scope"]), (200, "write"))
+        self.assertEqual(self.b("GET", "/predict/api/mine", self.wt["basic"])[0], 200)
+        # and nothing else opens: a write token on a route in neither list is 401
+        for method, path in (("POST", "/predict/new/upload/"), ("POST", "/jobs/api/cancel"),
+                             ("POST", "/account/tokens/new"), ("GET", "/predict/"), ("POST", "/train/queue")):
+            with self.subTest(path=path):
+                self.assertEqual(self.b(method, path, self.wt["advanced"], b"")[0], 401)
+
+    def test_kill_switches(self):
+        with mock.patch.dict(os.environ, {"CJ_API_WRITE": " False "}):
+            self.assertEqual(self.b("POST", "/feedback/", self.wt["basic"], b"kind=bug&text=x",
+                                    "application/x-www-form-urlencoded")[0], 403)
+        with mock.patch.dict(os.environ, {"CJ_API_WRITE": "off"}):
+            st, _, body = self.b("POST", "/feedback/", self.wt["basic"], b"kind=bug&text=x",
+                                 "application/x-www-form-urlencoded")
+            self.assertEqual(st, 403)
+            self.assertIn("writes are switched off", json.loads(body)["error"])
+            self.assertEqual(self.b("GET", "/cj/me.json", self.wt["basic"])[0], 200)    # reads go on
+            self.assertEqual(self.get("/predict/api/mine", "basic")[0], 200)             # browsers unaffected
+        with mock.patch.dict(os.environ, {"CJ_API": "off"}):
+            st, _, body = self.b("POST", "/feedback/", self.wt["basic"], b"kind=bug&text=x",
+                                 "application/x-www-form-urlencoded")
+            self.assertEqual(st, 401)
+            self.assertIn("switched off", json.loads(body)["error"])
+        st, _, _ = self.b("GET", f"/predict/api/upload/{UPLOAD_X}", self.wt["basic"])
+        self.assertEqual(st, 404)                                                # control: on again
+
+    def test_rate_limit_is_per_person_across_two_tokens(self):
+        path = f"/predict/api/upload/{UPLOAD_X}/cancel"                          # cheap: the handler answers 404
+        toks = (self.wt["advanced"], self.wt["advanced2"])                       # adv's claude and codex
+        got = [self.b("POST", path, toks[i % 2], b"{}", "application/json")[0] for i in range(APP.WRITE_LIMIT)]
+        self.assertEqual(set(got), {404})
+        for tok in toks:
+            st, h, body = self.b("POST", path, tok, b"{}", "application/json")
+            self.assertEqual(st, 429, body[:200])
+            self.assertIn("Too many agent writes", json.loads(body)["error"])
+            ra = int(T.hget(h, "retry-after"))
+            self.assertTrue(1 <= ra <= 3600, ra)
+        self.assertEqual(self.b("GET", "/cj/me.json", toks[0])[0], 200)                   # reads are not limited
+        self.assertEqual(self.b("GET", f"/predict/api/upload/{UPLOAD_X}", toks[1])[0], 404)   # nor the polled GETs
+        self.assertEqual(self.b("POST", path, self.wt["basic"], b"{}", "application/json")[0], 404)  # another person
+        st, _, _ = self.post(path, b"{}", "advanced", ctype="application/json")
+        self.assertEqual(st, 404)                                                # adv's browser: not limited
+        lines = self.wait_audit(lambda x: x["actor"] == "adv" and (x["detail"] or {}).get("status") == 429)
+        self.assertTrue(lines and lines[0]["detail"].get("via") in ("claude", "codex"), lines)
+
+    def test_an_uploads_pieces_count_once(self):
+        self.p.app.limiter = APP.WriteLimiter(limit=3)
+        tok = self.wt["advanced"]
+        st, _, uid = self.start_upload(tok, n=3)                                 # 1
+        self.assertEqual(st, 200, uid)
+        self.addCleanup(self.drop_all_uploads)
+        for i in range(1, 4):                                                    # 2 (all three files)
+            data = (TPM.GOLDEN / "images" / f"000{i}.png").read_bytes()
+            st, _, body = self.b("POST", f"/predict/api/upload/{uid}/file?name=t{i}.png&offset=0", tok, data,
+                                 "application/octet-stream")
+            self.assertEqual(st, 200, body[:200])
+        st, _, body = self.bjson(f"/predict/api/upload/{uid}/cancel", tok, {})   # 3
+        self.assertEqual(st, 200, body[:200])
+        self.assertEqual(self.bjson(f"/predict/api/upload/{uid}/cancel", tok, {})[0], 429)
+
+    def test_one_open_agent_upload_and_a_browser_upload_survives(self):
+        self.addCleanup(self.drop_all_uploads)
+        st, _, mine = self.start_upload(cookie_who="basic", n=2)                 # the person's browser upload
+        self.assertEqual(st, 200, mine)
+        st, _, a1 = self.start_upload(self.wt["basic"])                          # bas's agent (claude)
+        self.assertEqual(st, 200, a1)
+        self.assertTrue(self.staged(mine).is_dir(), "the agent's upload cancelled the browser's")
+        data = (TPM.GOLDEN / "images" / "0001.png").read_bytes()
+        st, _, body = self.post(f"/predict/api/upload/{mine}/file?name=t1.png&offset=0", data, "basic",
+                                ctype="application/octet-stream")
+        self.assertEqual(st, 200, body[:200])                                    # and it carries on
+        meta = json.loads((self.staged(a1) / "upload.json").read_text(encoding="utf-8"))
+        self.assertEqual((meta["owner"], meta["owner_via"]), ("bas", "claude"))
+        self.assertNotIn("owner_via", json.loads((self.staged(mine) / "upload.json").read_text(encoding="utf-8")))
+        # one open agent upload per person: another agent of bas is refused (429 + Retry-After)
+        st, h, body = self.start_upload(self.wt["basic2"])
+        self.assertEqual(st, 429, body)
+        self.assertIn("upload open", json.loads(body)["error"])
+        self.assertTrue(T.hget(h, "retry-after"))
+        self.assertTrue(self.staged(a1).is_dir())
+        # the same agent again: its own earlier one is given up (the old per-kind rule, now per agent)
+        st, _, a2 = self.start_upload(self.wt["basic"])
+        self.assertEqual(st, 200, a2)
+        self.assertFalse(self.staged(a1).exists())
+        self.assertTrue(self.staged(mine).is_dir())
+        # a new browser upload replaces the browser's, never the agent's
+        st, _, mine2 = self.start_upload(cookie_who="basic")
+        self.assertEqual(st, 200, mine2)
+        self.assertFalse(self.staged(mine).exists())                             # control: the rule still works
+        self.assertTrue(self.staged(a2).is_dir())
+        # another person's agent is not limited by bas's
+        st, _, other = self.start_upload(self.wt["other"])
+        self.assertEqual(st, 200, other)
+
+    def test_the_active_set_cap_applies_to_an_admins_agent(self):
+        sets = [self.fake_set("tester", "queued") for _ in range(P_MAX_ACTIVE())]
+        for ps in sets:
+            self.addCleanup(shutil.rmtree, self.root / ps, True)
+        self.addCleanup(self.drop_all_uploads)
+        st, _, body = self.start_upload(cookie_who="admin")                     # control: the admin's browser
+        self.assertEqual(st, 200, body)
+        st, h, body = self.start_upload(self.wt["admin"])                        # the admin's agent: capped
+        self.assertEqual(st, 429, body)
+        self.assertIn(f"already have {P_MAX_ACTIVE()} analyses", json.loads(body)["error"])
+        self.assertEqual(T.hget(h, "retry-after"), "60")
+        st, _, body = self.b("POST", f"/predict/new/session/{self.key_a}/", self.wt["admin"],
+                             self.session_body(), "application/x-www-form-urlencoded")
+        self.assertEqual(st, 429, body[:300])
+        self.assertIn("already have", body.decode("utf-8"))
+        st, h, _ = self.b("POST", f"/predict/new/session/{self.key_a}/", self.wt["admin"], self.session_body(),
+                          "application/x-www-form-urlencoded")
+        self.assertEqual((st, T.hget(h, "retry-after")), (429, "60"))
+        st, _, body = self.start_upload(self.wt["advanced"])                     # another person's agent: fine
+        self.assertEqual(st, 200, body)
+
+    def session_body(self) -> bytes:
+        from urllib.parse import urlencode
+        form = self.client(self.wt["admin"]).session_form(self.key_a)
+        fields = [("sig", form["sig"]), ("confirm", "yes"), ("model", TPM.MODEL), ("how", "all")]
+        for g in form["groups"]:
+            fields += [("samples", g["gid"]), (f"nm_{g['gid']}", str(g["nm"]))]
+        return urlencode(fields).encode()
+
+    def wait_audit(self, pred, timeout=10.0) -> list:
+        end = time.time() + timeout
+        while True:
+            self.p.app.writer.flush()
+            self.p.app.writer.drain()
+            got = [x for x in audit_lines(self.env) if pred(x)]
+            if got or time.time() > end:
+                return got
+            time.sleep(0.05)
+
+    # ---- the smoke: the client end to end; via on every record; the token never logged
+    def test_client_end_to_end_writes_stamp_via_everywhere(self):
+        rec = logging.getLogger()
+        buf = io.StringIO()
+        hd = logging.StreamHandler(buf)
+        hd.setLevel(logging.DEBUG)
+        old = rec.level
+        rec.addHandler(hd)
+        rec.setLevel(logging.DEBUG)
+        self.addCleanup(rec.setLevel, old)
+        self.addCleanup(rec.removeHandler, hd)
+        tok = A.create_token(self.env.tokens, "adv", "smoketest", 30, scope="write", roster=self.env.roster)[0]
+        c = self.client(tok)
+        before = set(self.sets())
+        with mock.patch.object(TPM.P.PL, "start_detached") as spawn:              # nothing runs, nothing is queued
+            # upload 3 tiles; the session's upload.json carries the agent before create
+            with self.assertRaisesRegex(ValueError, "confirm_nm=True"):         # no silent confirmation
+                c.upload(self.tiles(1), sample_label="Agent S", nm_per_px=1.4724, model=TPM.MODEL)
+            with self.assertRaisesRegex(ValueError, "confirm_nm=True"):
+                c.predict_session(self.key_a, model=TPM.MODEL)
+            self.assertFalse(list((self.root / ".portal").glob("us_*")))         # nothing was sent
+            up = c.upload(self.tiles(3), sample_label="Agent S", nm_per_px=1.4724, model=TPM.MODEL, create=False,
+                          confirm_nm=True)
+            meta = json.loads((self.staged(up["upload"]) / "upload.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta.get("owner_via"), "smoketest")
+            st, _, body = self.bjson(f"/predict/api/upload/{up['upload']}/create", tok, {})
+            self.assertEqual(st, 200, body)
+            self.assertEqual(json.loads(body)["href"], f"/predict/preparing/{up['upload']}/")
+            done = c.wait(up["upload"], timeout=120, every=0.2)
+            self.assertEqual(done["state"], "done", done)
+            ps = done["ps"]
+            self.assertEqual(set(self.sets()) - before, {ps})
+            self.addCleanup(shutil.rmtree, self.root / ps, True)
+            # a session pick through the JSON form (the second write path)
+            got = c.predict_session(self.key_a, model=TPM.MODEL, name="agent pick", confirm_nm=True)
+            self.assertRegex(got["tid"] or "", r"^sc_[0-9a-f]{12}$")
+            done2 = c.wait(got["tid"], timeout=120, every=0.2)
+            self.assertEqual(done2["state"], "done", done2)
+            ps2 = done2["ps"]
+            self.addCleanup(shutil.rmtree, self.root / ps2, True)
+        self.assertEqual(spawn.call_count, 2)
+        for s in (ps, ps2):
+            req = json.loads((self.root / s / "request.json").read_text(encoding="utf-8"))
+            self.assertEqual((req["owner"], req.get("owner_via"), req.get("nm_confirmed_via")),
+                             ("adv", "smoketest", "smoketest"))
+        reg = [json.loads(x) for x in (self.env.registry / "prediction_set.jsonl").read_text("utf-8").splitlines()]
+        line = [x for x in reg if x["id"] == ps][-1]
+        self.assertEqual((line["owner"], line.get("owner_via"), line.get("via"), line.get("nm_confirmed_via")),
+                         ("adv", "smoketest", "smoketest", "smoketest"))
+        # owner_via survives a later status line (written by someone else: no line via of its own)
+        from jobs import predict_set as PSET
+        upd = PSET.update_record(ps, registry_root=self.env.registry, status="running")
+        self.assertEqual((upd.get("owner_via"), upd.get("via"), upd["status"]), ("smoketest", None, "running"))
+        cur = PSET.registry_module().current("prediction_set", self.env.registry)[ps]
+        self.assertEqual(cur.get("owner_via"), "smoketest")
+        from data_utils import actor as ACT
+        self.assertEqual(ACT.label_of(cur, "owner"), "smoketest for adv")       # what Jobs / Data display
+        # its review package's line carries owner_via too (build_review -> register_package)
+        from annotation import prediction_package as PP
+        from portal.predict_parts import sets as SETS_
+        pkg = self.review / f"pred_{ps}"
+        pkg.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, pkg, True)
+        rp = PP.registry_record(pkg, {"id": pkg.name, "prediction_set": ps, "model": TPM.MODEL, "images": [],
+                                      "owner": "adv"}, "2026-11-13T10:00:00")
+        (pkg / "review_package.json").write_text(json.dumps(rp), encoding="utf-8")
+        cfg = __import__("types").SimpleNamespace(registry=self.env.registry, review_root=self.review)
+        line = SETS_.register_package(cfg, pkg, owner_via=req.get("owner_via"))
+        self.assertEqual((line.get("owner"), line.get("owner_via")), ("adv", "smoketest"))
+        self.assertEqual(ACT.label_of(line, "owner"), "smoketest for adv")
+        # compute on a finished fixture set of adv's, then poll its status (a read route)
+        fin = self.fake_set("adv", "done", n_done=3)
+        self.addCleanup(shutil.rmtree, self.root / fin, True)
+        self.assertEqual(c.compute(fin), {"ps": fin, "href": f"/results/{fin}/"})
+        end = time.time() + 120
+        while c.results_status(fin)["state"] in ("queued", "running") and time.time() < end:
+            time.sleep(0.2)
+        self.assertEqual(c.results_status(fin)["state"], "ready")
+        # a set whose predictions aren't finished: 409 JSON with the reason (not the browser's 303)
+        running = self.fake_set("adv", "running")
+        self.addCleanup(shutil.rmtree, self.root / running, True)
+        with self.assertRaises(Writes.C.ApiError) as e:
+            c.compute(running)
+        self.assertEqual(e.exception.status, 409)
+        self.assertIn("not finished (state running)", e.exception.message)
+        st, h, _ = self.post(f"/results/{running}/compute", b"", "advanced")
+        self.assertEqual(st, 303)                                                # the browser: as before
+        # someone else's set: the same 404 as no set (the owner check applies)
+        other = self.fake_set("bas", "done", n_done=3)
+        self.addCleanup(shutil.rmtree, self.root / other, True)
+        with self.assertRaises(Writes.C.ApiError) as e:
+            c.compute(other)
+        self.assertEqual(e.exception.status, 404)
+        # feedback: the id from Location, the store's line carries via
+        fb = c.feedback("The agent says hello.", kind="question")
+        self.assertIsInstance(fb["id"], int)
+        lines = [json.loads(x) for x in FS.feedback_path(self.env.state).read_text("utf-8").splitlines()]
+        made = [x for x in lines if x.get("type") == "create" and x.get("id") == fb["id"]]
+        self.assertEqual((made[0]["who"], made[0].get("via")), ("adv", "smoketest"))
+        # Recent actions: each write is adv's, by smoketest, on the verified API door
+        want = {"upload started", "prediction set created", "results computed", "feedback filed"}
+        got = self.wait_audit(lambda x: x["actor"] == "adv" and (x["detail"] or {}).get("via") == "smoketest"
+                              and x["action"] in want)
+        end = time.time() + 10
+        while {x["action"] for x in got} != want and time.time() < end:
+            got = self.wait_audit(lambda x: x["actor"] == "adv" and (x["detail"] or {}).get("via") == "smoketest"
+                                  and x["action"] in want, 1)
+        self.assertEqual({x["action"] for x in got}, want)
+        row = ADM.audit_row(got[0], own_door="tailnet key")
+        self.assertEqual((row["name"], row["ai"], row["unverified"]), ("smoketest for adv", True, False))
+        # the token never reaches a log or a file
+        self.p.app.writer.flush()
+        self.p.app.writer.drain()
+        self.assertIn("adv via smoketest (bearer)", buf.getvalue())             # control: lines were logged
+        files = "".join(p.read_text(encoding="utf-8", errors="replace") for root in (self.env.state, self.root,
+                                                                                    self.env.registry)
+                        for p in root.rglob("*") if p.is_file() and p.suffix in (".json", ".jsonl", ".log", ".csv"))
+        for secret in (tok, A.sha256_hex(tok)):
+            self.assertNotIn(secret, buf.getvalue())
+            self.assertNotIn(secret, files)
+
+    def test_concurrent_agent_starts_exactly_one_wins(self):
+        self.addCleanup(self.drop_all_uploads)
+        toks = [A.create_token(self.env.tokens, "bas2", f"racer{i}", 30, scope="write", roster=self.env.roster)[0]
+                for i in range(6)]
+        go, out = threading.Barrier(len(toks)), []
+
+        def start(tok):
+            go.wait()
+            out.append(self.start_upload(tok)[0])
+        ts = [threading.Thread(target=start, args=(t,)) for t in toks]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(60)
+        self.assertEqual(sorted(out), [200] + [429] * (len(toks) - 1))
+        left = [p for p in (self.root / ".portal").glob("us_*")
+                if json.loads((p / "upload.json").read_text(encoding="utf-8")).get("owner") == "bas2"]
+        self.assertEqual(len(left), 1)
+
+    def test_an_agent_acts_only_on_its_own_upload(self):
+        self.addCleanup(self.drop_all_uploads)
+        st, _, mine = self.start_upload(cookie_who="basic", n=1)                 # the person's browser upload
+        self.assertEqual(st, 200, mine)
+        st, _, theirs = self.start_upload(self.wt["basic2"])                     # bas's codex
+        self.assertEqual(st, 200, theirs)
+        data = (TPM.GOLDEN / "images" / "0001.png").read_bytes()
+        for uid in (mine, theirs):                                               # bas's claude: neither is its own
+            for method, path, body, ctype in (
+                    ("GET", f"/predict/api/upload/{uid}", None, None),
+                    ("POST", f"/predict/api/upload/{uid}/file?name=t1.png&offset=0", data, "application/octet-stream"),
+                    ("POST", f"/predict/api/upload/{uid}/create", b"{}", "application/json"),
+                    ("POST", f"/predict/api/upload/{uid}/cancel", b"{}", "application/json")):
+                with self.subTest(uid=uid, path=path):
+                    self.assertEqual(self.b(method, path, self.wt["basic"], body, ctype)[0], 404)
+        for uid in (mine, theirs):
+            self.assertTrue(self.staged(uid).is_dir())
+            self.assertFalse((self.staged(uid) / "files" / "t1.png.part").exists())
+        self.assertEqual(self.b("GET", f"/predict/api/upload/{theirs}", self.wt["basic2"])[0], 200)   # controls
+        self.assertEqual(self.get(f"/predict/api/upload/{theirs}", "basic")[0], 200)  # the person's browser: all
+
+    def test_an_agent_polls_its_own_raw_conversion_and_gets_the_key(self):
+        from portal.predict_parts import runner as RUN
+        from portal import predict_sources as PSRC
+        base = RUN.raw_root(self.cfg_full())
+        made = []
+        for via in ("claude", None):
+            d = base / f"20261111_{'abcdef' if via else 'fedcba'}"
+            (d / "tiles").mkdir(parents=True, exist_ok=True)
+            self.addCleanup(shutil.rmtree, d, True)
+            meta = {"schema": "cj_convert/1", "id": d.name, "owner": "adv", "session": "20261111", "recipe": "x",
+                    "gpu": False, "source": {"kind": "upload"}, "inputs": [], "sample_key": None,
+                    "created": "2026-11-13T10:00:00"}
+            if via:
+                meta["made_via"] = via
+            (d / "convert.json").write_text(json.dumps(meta), encoding="utf-8")
+            (d / "status.json").write_text(json.dumps({"state": "done", "n_tiles": 0}), encoding="utf-8")
+            made.append(d)
+        st, _, body = self.b("GET", f"/predict/api/convert/{made[0].name}", self.wt["advanced"])
+        self.assertEqual(st, 200, body[:300])
+        doc = json.loads(body)
+        self.assertEqual((doc["state"], doc["key"]), ("done", PSRC.source_key(made[0] / "tiles")))
+        self.assertEqual(self.b("GET", f"/predict/api/convert/{made[1].name}", self.wt["advanced"])[0], 404)  # browser's
+        self.assertEqual(self.b("GET", f"/predict/api/convert/{made[0].name}", self.wt["advanced2"])[0], 404)  # codex
+        self.assertEqual(self.b("GET", f"/predict/api/convert/{made[0].name}", self.rt["advanced"])[0], 403)
+        self.assertEqual(self.get(f"/predict/api/convert/{made[1].name}", "advanced")[0], 200)     # the browser
+
+    def cfg_full(self):
+        return __import__("types").SimpleNamespace(registry=self.env.registry, review_root=self.review)
+
+    def test_session_form_json_is_the_pages_data(self):
+        form = self.client(self.wt["basic"]).session_form(self.key_a)
+        self.assertEqual(form["schema"], "cj_predict_session_form/1")
+        self.assertEqual(sorted((g["label"], g["n"]) for g in form["groups"]), [("S1", 2), ("S2", 1)])
+        page = self.page(f"/predict/new/session/{self.key_a}/", "basic")
+        self.assertIn(f'name="sig" value="{form["sig"]}"', page)                  # the same sig as the page
+        self.assertIn(TPM.MODEL, form["models"])
+        st, _, body = self.b("GET", "/predict/new/session/nokey/?json=1", self.wt["basic"])
+        self.assertEqual((st, json.loads(body)), (404, {"error": "not found"}))
+        st, h, body = self.b("GET", f"/predict/new/session/{self.key_a}/", self.wt["basic"])   # no json=1
+        self.assertEqual(st, 404)
+        self.assertIn("application/json", T.hget(h, "content-type"))
+        self.assertEqual(self.get(f"/predict/new/session/{self.key_a}/", "basic")[0], 200)  # browser: the page
+
+
+def P_MAX_ACTIVE() -> int:
+    from portal.predict_parts import common as COMMON
+    return COMMON.MAX_ACTIVE_BASIC
+
+
+class RecordsVia(unittest.TestCase):
+    """Data-level via plumbing, no portal: an agent's raw upload -> convert.json made_via -> the session record."""
+
+    def test_conversion_entry_carries_uploaded_via_and_the_schema_takes_it(self):
+        from jobs import predict_set as PSET
+        REG = PSET.registry_module()                                             # schema check only (no write)
+        d = Path(tempfile.mkdtemp(prefix="cj_conv_"))
+        self.addCleanup(shutil.rmtree, d, True)
+        conv = d / "20261111_abcdef"
+        conv.mkdir()
+        e = US.conversion_entry(conv, {"owner": "adv", "made_via": "claude"}, "20261111")
+        self.assertEqual((e["uploaded_by"], e["uploaded_via"]), ("adv", "claude"))
+        e0 = US.conversion_entry(conv, {"owner": "adv"}, "20261111")             # a browser upload: no key
+        self.assertNotIn("uploaded_via", e0)
+        rec = US.merge_session(None, "20261111", e)
+        rec["logged"] = "2026-11-13T10:00:00"
+        self.assertEqual(REG.check_record(rec, REG.schemas()), [])
+        bad = json.loads(json.dumps(rec))
+        bad["conversions"][0]["uploaded_via"] = "Not An Agent"
+        self.assertNotEqual(REG.check_record(bad, REG.schemas()), [])            # control: the pattern bites
 
 
 if __name__ == "__main__":

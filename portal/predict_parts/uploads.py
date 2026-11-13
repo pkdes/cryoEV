@@ -4,6 +4,12 @@ request), declared files and raw pairing, start / piece / create, and the start-
 
 Split out of portal/modules/predict.py (round 7, P7; no behaviour change); predict.py re-exports every name.
 Names the tests patch are used from other parts only as <PART>.<name> (portal/predict_parts/__init__.py).
+
+Agents (round 11 #65): an upload started by a write token's agent carries upload.json "owner_via" (the agent). Open
+uploads are per (person, via, kind): a new one gives up only an earlier one with the same three, so an agent never
+cancels its person's browser upload (or the reverse). A person has at most AGENT_UPLOADS open agent uploads (any
+agent, any kind; 429 otherwise). Everything after the start (create, the background task, a retry) reads the agent
+from upload.json, never from a request.
 """
 from __future__ import annotations
 
@@ -465,17 +471,38 @@ def write_sample_key(files_dir: Path, raw: dict) -> None:
         os.replace(tmp, files_dir / SAMPLE_KEY_NAME)
 
 
-def check_upload_fields(cfg, user, kind, fields, has_files=True) -> dict:
-    """Tiles: the label / nm / tick / model checks of the plain form (+ the basic user's limit). Raw: raw_fields."""
+def check_upload_fields(cfg, user, kind, fields, has_files=True, via=None) -> dict:
+    """Tiles: the label / nm / tick / model checks of the plain form (+ the basic user's and every agent's limit).
+    Raw: raw_fields."""
     if kind == "tiles":
         upload_fields(cfg, user, fields, has_files)
-        CREATE.check_active(cfg, user)
+        CREATE.check_active(cfg, user, via=via)
         return {}
     return raw_fields(cfg, user, fields)
 
 
-def upload_start(cfg, user, body) -> dict:
-    """Open (or resume) an upload session. Every check that can be made before a byte is sent is made here."""
+AGENT_UPLOADS = 1                       # open upload sessions an agent (all of one person's agents together) may have
+_START_LOCK = threading.Lock()           # upload_start's check-then-create (one portal process per door)
+
+
+def open_uploads(cfg) -> list:
+    """[(folder, upload.json)] of every upload session still on disk."""
+    out = []
+    for tmp in tmp_dirs(cfg):
+        try:
+            names = [p for p in tmp.iterdir() if UPLOAD_RE.match(p.name)]
+        except OSError:
+            continue
+        for p in names:
+            m = _read_json(p / UPLOAD_META)
+            if isinstance(m, dict):
+                out.append((p, m))
+    return out
+
+
+def upload_start(cfg, user, body, via=None) -> dict:
+    """Open (or resume) an upload session. Every check that can be made before a byte is sent is made here.
+    via: the agent acting for `user` (from the request; None for a browser): stored as upload.json owner_via."""
     if not isinstance(body, dict):
         raise Refusal("Bad request.", 400)
     kind = body.get("kind")
@@ -489,47 +516,53 @@ def upload_start(cfg, user, body) -> dict:
         raise Refusal("Tick “I confirm the pixel size”: nothing was started.")
     left = []
     decl = declared_files(kind, body.get("files"), left)
-    raw = check_upload_fields(cfg, user, kind, fields)
+    raw = check_upload_fields(cfg, user, kind, fields, via=via)
     if raw:
         check_sample_source(raw, decl)
         check_conv_cap(cfg, user)
         check_gpu(raw)
+    via = via or None
     resume = body.get("resume")
     if isinstance(resume, str):
         d, meta = load_upload(cfg, user, resume)
-        if meta and meta.get("kind") == kind and meta.get("declared") == decl:
+        if meta and meta.get("kind") == kind and meta.get("declared") == decl and \
+                (meta.get("owner_via") or None) == via:
             meta["fields"] = fields
             PS.write_json_atomic(d / UPLOAD_META, meta)
             return upload_state(d, meta)
-    # one open session per person and kind: an earlier one (other files) is given up
-    mine = []
-    for tmp in tmp_dirs(cfg):
+    # one start at a time per portal process: the scan, the drops, the agent-upload check and the new session's
+    # upload.json are one step (concurrent starts by two agents could otherwise both pass the check)
+    with _START_LOCK:
+        # one open session per person, agent (None: the browser) and kind: an earlier one (other files) is given up.
+        # Another agent's, or the browser's, is never touched (round 11 #65: the key was (person, kind) before)
+        mine = [(p, m) for p, m in open_uploads(cfg) if m.get("owner") == user.get("id")]
+        for p, m in mine:
+            if m.get("kind") == kind and (m.get("owner_via") or None) == via and not create_running(p.name):
+                drop_upload(p, p.name)
+        if via:
+            busy = [p for p, m in mine if m.get("owner_via") and p.is_dir()]
+            if len(busy) >= AGENT_UPLOADS:
+                raise Refusal(f"Your agents already have {len(busy)} upload open (at most {AGENT_UPLOADS} at a time). "
+                              f"Finish it (create) or cancel it first.", 429)
+        d = scratch(cfg, "us", raw=(kind == "raw"))
+        uid = d.name
+        res = Reservation(d, sum(decl.values()))
         try:
-            mine += [p for p in tmp.iterdir() if UPLOAD_RE.match(p.name)]
-        except OSError:
-            continue
-    for p in mine:
-        m = _read_json(p / UPLOAD_META)
-        if isinstance(m, dict) and m.get("owner") == user.get("id") and m.get("kind") == kind \
-                and not create_running(p.name):
-            drop_upload(p, p.name)
-    d = scratch(cfg, "us", raw=(kind == "raw"))
-    uid = d.name
-    res = Reservation(d, sum(decl.values()))
-    try:
-        res.check()
-        (d / UPLOAD_FILES).mkdir()
-        # left-out files count as done (an older page sends only what is not done) and are never received
-        meta = {"schema": SCHEMA_UPLOAD, "id": uid, "owner": user["id"], "kind": kind, "fields": fields,
-                "declared": decl, "done": [x["name"] for x in left], "skipped": left, "created": now_iso()}
-        PS.write_json_atomic(d / UPLOAD_META, meta)
-    except BaseException:
-        res.release()
-        shutil.rmtree(d, ignore_errors=True)
-        raise
-    with _UP_RES_LOCK:
-        _UP_RES[uid] = res
-    return upload_state(d, meta)
+            res.check()
+            (d / UPLOAD_FILES).mkdir()
+            # left-out files count as done (an older page sends only what is not done) and are never received
+            meta = {"schema": SCHEMA_UPLOAD, "id": uid, "owner": user["id"], "kind": kind, "fields": fields,
+                    "declared": decl, "done": [x["name"] for x in left], "skipped": left, "created": now_iso()}
+            if via:
+                meta["owner_via"] = via
+            PS.write_json_atomic(d / UPLOAD_META, meta)
+        except BaseException:
+            res.release()
+            shutil.rmtree(d, ignore_errors=True)
+            raise
+        with _UP_RES_LOCK:
+            _UP_RES[uid] = res
+        return upload_state(d, meta)
 
 
 class Resync(Exception):
@@ -623,18 +656,19 @@ def upload_create(cfg, user, d: Path, meta: dict) -> str:
         raise Refusal(f"{len(missing)} file(s) not sent yet ({', '.join(missing[:3])}"
                       f"{', …' if len(missing) > 3 else ''}). Press the button again to send them.", 409)
     fields = meta.get("fields") or {}
+    via = meta.get("owner_via") or None                  # the agent that started the upload (data, not the request)
     if meta["kind"] == "tiles":
         uid = meta["id"]
         if not create_running(uid):                      # the same upload pressed again: the same task, no new check
             label, nm = upload_fields(cfg, user, fields, True)
-            CREATE.check_active(cfg, user, exclude=uid)
+            CREATE.check_active(cfg, user, exclude=uid, via=via)
             name = chosen_name(fields)
 
             def run(progress):
                 # hard links: the staged names are removed after, the set keeps its own; a failure leaves the upload
                 try:
                     ps_dir = create_and_start(cfg, d / UPLOAD_FILES, user, fields["model"], sample_label=label,
-                                              nm=nm, name=name, link=True, progress=progress)
+                                              nm=nm, name=name, link=True, progress=progress, via=via)
                 except BaseException:
                     try:                             # kept for the stated hour from now, not from the first request
                         os.utime(d / UPLOAD_META)
@@ -695,7 +729,7 @@ def upload_create(cfg, user, d: Path, meta: dict) -> str:
     write_sample_key(files, raw)                     # before conversion: labels are baked into tile names
     conv = new_conversion(cfg, user, raw, upload_files=files,
                           source={"kind": "upload", "files": [n for n in meta["declared"] if n in present]},
-                          nbytes=nbytes, skipped=left)
+                          nbytes=nbytes, skipped=left, made_via=via)
     return f"/predict/convert/{conv.name}/"
 
 

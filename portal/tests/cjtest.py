@@ -32,7 +32,7 @@ from cryoev_testkit import free_port  # noqa: E402,F401  (T.free_port, used by m
 # A test that needs them sets them explicitly (mock.patch.dict). Also the agent API's switches (round 10 #60): the
 # kill switch and the shared token store. Tests use Env.tokens (a temp store) and set CJ_API explicitly where they
 # test it.
-TK.strip_environ(drop=("CJ_API", "CJ_AGENT_TOKENS"))
+TK.strip_environ(drop=("CJ_API", "CJ_API_WRITE", "CJ_AGENT_TOKENS"))
 
 import uvicorn  # noqa: E402
 

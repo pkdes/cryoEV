@@ -537,10 +537,15 @@ def link_base(cfg, request_origin) -> str:
 # ---------------------------------------------------------------- what forms and messages are bound to
 def binding(request) -> str:
     """The sign-in the form token and flash messages are bound to. Key mode: the session cookie (as before).
-    Cloudflare access mode (the Gate sets scope["cj_auth"]): the VERIFIED user id; there is no session cookie."""
+    Cloudflare access mode (the Gate sets scope["cj_auth"]): the VERIFIED user id; there is no session cookie.
+    A bearer request (round 11 #65): "bearer:<person>:<agent>", never the "" every bearer request would share."""
     if request.scope.get("cj_auth") == "access":
         uid = (request.scope.get("cj_user") or {}).get("id")
         return f"access-user:{uid}" if uid else ""
+    if request.scope.get("cj_auth") == "bearer":
+        uid = (request.scope.get("cj_user") or {}).get("id")
+        via = request.scope.get("cj_via")
+        return f"bearer:{uid}:{via}" if uid and via else "bearer:-"
     return request.cookies.get(A.COOKIE) or ""
 
 
