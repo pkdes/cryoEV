@@ -46,6 +46,8 @@ OLD_EXPORTS = ("roboflow - 20260529", "roboflow - 20260713 all layer label", "ro
                "roboflow20260604")
 NOTE = ("10 lv image(s) not in the export's split folders, left out (details.not_in_export); export-only: 19 export "
         "image(s) not in the lv, kept with the export's own labels (--export-only export-labels)")
+PRIV_EXP, PRIV_DS, PRIV_SID = "priv export r9", "ds_privexp_r9", "20991231"   # an export only its owner sees
+SECRET = ("20991231_secret_tile_png", "lipo_secret_0001_png")   # its list: one tile, one excluded-session image
 CLASS_MAP = {"EV": "EV", "Low conf EV": "Undetermined", "Incomplete": "EV", "MV": "EV", "inner": "EV",
              "non-EV": "non-EV", "Overlapping": "EV", "items-nfaR": None, "VLDL": "non-EV"}
 ENV_KEYS = ("CRYOEV_VIA", "CRYOEV_FOR", "CRYOEV_REGISTRY", "CRYOEV_CRYOAI_ROOT", "CRYOEV_LAPTOP_ROOT",
@@ -72,16 +74,21 @@ def fixture(root: Path) -> None:
     lists = root / "lists" / "exports"
     lists.mkdir(parents=True, exist_ok=True)
     (lists / "s1.tsv").write_text("".join(f"{s}\ttrain\n" for s in sorted(export_rows)), encoding="utf-8")
+    images.append(rec("image", SECRET[0], session=PRIV_SID, grid=None, rf_id=None))   # the 2nd: no image record
+    (lists / "priv.tsv").write_text("".join(f"{x}\ttrain\n" for x in SECRET), encoding="utf-8")
     ds_rows = sorted(export_rows + [f"g6_extra_{i:02d}_png" for i in range(N_EXTRA)])   # in no image record
     (root / "lists" / "ds.tsv").write_text("".join(f"{s}\ttrain\n" for s in ds_rows), encoding="utf-8")
     rows = {
         "image": images,
         "session": [rec("session", sid, date=f"{sid[:4]}-{sid[4:6]}-{sid[6:]}", date_basis="folder",
-                        status="processed") for sid in SESSIONS],
+                        status="processed") for sid in list(SESSIONS) + [PRIV_SID]],
         "grid": [rec("grid", g, sample="EV prep") for g in ("2602", "2642", "2643")],
         "roboflow_export": [rec("roboflow_export", EXP, path="x", counts={"train": {"images": 103}, "valid":
                                 {"images": 23}, "test": {"images": 34}},
-                                image_list={"file": "lists/exports/s1.tsv", "sha256": None, "n": 160})]
+                                image_list={"file": "lists/exports/s1.tsv", "sha256": None, "n": 160},
+                                classes=["EV", "non-EV"]),
+                            rec("roboflow_export", PRIV_EXP, path="x", owner="otherperson", counts={},
+                                image_list={"file": "lists/exports/priv.tsv", "sha256": None, "n": 2})]
         + [rec("roboflow_export", e, path="x", counts={}) for e in OLD_EXPORTS],
         "review_package": [rec("review_package", PKG, path="r", kind="review", base=EXP, base_kind="export",
                                n_images=43, built="2026-11-10T10:00:00", status="applied", model="m_v5_20261029"),
@@ -99,10 +106,12 @@ def fixture(root: Path) -> None:
                         counts_trained={"train": 114, "valid": 26, "test": 39},
                         image_list={"file": "lists/ds.tsv", "sha256": None, "n": 179}, note=NOTE,
                         inputs=[{"id": LV, "role": "source", "entity": "label_version"},
-                                {"id": EXP, "role": "images", "entity": "roboflow_export"}])],
+                                {"id": EXP, "role": "images", "entity": "roboflow_export"}]),
+                    rec("dataset", PRIV_DS, created="2026-11-11T15:00:00", status="frozen",
+                        inputs=[{"id": PRIV_EXP, "role": "source", "entity": "roboflow_export"}])],
         "model": [rec("model", "m_v5_20261029", run=None, weights="w.pt", imgsz=1440, status="production",
                       inputs=[{"id": EXP, "role": "train_data", "entity": "roboflow_export"}]),
-                  rec("model", MODEL, run=None, weights="w.pt", imgsz=1440, status="candidate",
+                  rec("model", MODEL, run=None, weights="w.pt", imgsz=1440, status="candidate", classes=["EV", "x"],
                       inputs=[{"id": DS, "role": "train_data", "entity": "dataset"}])],
     }
     root.mkdir(parents=True, exist_ok=True)
@@ -257,6 +266,52 @@ class Function(CleanEnv, TG.Roots, unittest.TestCase):
         self.assertNotIn("<i>y</i>", html)
         self.assertIn("&lt;i&gt;y&lt;/i&gt;", html)
 
+    # ---------------------------------------------------------------- QC: hidden export, cache, classes
+    def test_hidden_export_gives_no_session_and_no_image_names(self):
+        adv = D.lab_graph(self.records, TG.ADV, self.reg)
+        text = json.dumps(adv)
+        for s in (PRIV_SID, PRIV_EXP) + SECRET + ("secret", "lipo"):
+            self.assertNotIn(s, text)
+        n = adv["nodes"]
+        unk = next(i for i, x in enumerate(n) if x["title"] == "Session unknown")
+        self.assertEqual([(n[b]["title"], r) for a, b, r in adv["edges"] if a == unk], [(EXP, "58 images")])
+        tree = D.lineage_tree(self.records, TG.ADV, "dataset", PRIV_DS, self.reg)
+        self.assertEqual([p["status"] for p in tree["root"]["parents"]], ["hidden"])
+        self.assertFalse([x for x in walk(tree["root"]) if x["type"] == "session"])
+        self.assertTrue(all(s not in json.dumps(tree) for s in (PRIV_SID, PRIV_EXP) + SECRET))
+        item = D.item_graph(D.lab_graph(self.records, TG.ADV, self.reg, "dataset|" + PRIV_DS))
+        self.assertFalse([x for x in item["nodes"] if x["kind"] == "session"])
+        # control: the admin sees the export, its session and its unknown image (counts, never the names)
+        a = D.lab_graph(self.records, TG.ADMIN, self.reg)
+        t = [x["title"] for x in a["nodes"]]
+        self.assertIn((PRIV_SID, PRIV_EXP, "1 image"), {(t[x], t[y], r) for x, y, r in a["edges"]})
+        self.assertIn(("Session unknown", PRIV_EXP, "1 image"), {(t[x], t[y], r) for x, y, r in a["edges"]})
+        self.assertNotIn(SECRET[1], json.dumps(a))
+
+    def test_editing_an_export_list_rebuilds_the_graph(self):
+        reg = self.tmp / "registry_cache"
+        fixture(reg)
+        records, _ = D.read_registry(reg)
+
+        def count(sid):
+            g = D.lab_graph(records, TG.ADMIN, reg)
+            t = [x["title"] for x in g["nodes"]]
+            return next(r for a, b, r in g["edges"] if t[a] == sid and t[b] == EXP)
+        self.assertEqual(count("20250730"), "44 images")
+        f = reg / "lists" / "exports" / "s1.tsv"
+        rows = f.read_text(encoding="utf-8").splitlines()
+        f.write_text("".join(r + "\n" for r in rows if not r.startswith("20250730_tile00")), encoding="utf-8")
+        self.assertEqual(count("20250730"), "34 images")            # tile000-tile009 gone; no jsonl changed
+
+    def test_classes_are_a_list_everywhere(self):
+        for kind, eid, want in (("model", MODEL, ["EV", "x"]), ("dataset", DS, ["EV", "non-EV", "Undetermined"])):
+            d = D.detail(self.records, kind, eid, TG.ADMIN)
+            self.assertEqual({f[0]: f[1] for f in d["fields"]}["Classes"], want)
+        exp = self.tree("images", EXP)["root"]
+        self.assertEqual({f[0]: f[1] for f in exp["fields"]}["Classes"], ["EV", "non-EV"])
+        model = self.tree("model", MODEL)["root"]
+        self.assertEqual({f[0]: f[1] for f in model["fields"]}["Classes"], ["EV", "x"])
+
     # ---------------------------------------------------------------- attribution
     def test_who_label(self):
         self.assertEqual(D.who_label("pujan", "claude"), "claude for pujan")
@@ -286,6 +341,10 @@ class Served(CleanEnv, TG.Base):
         page = body.decode()
         self.assertIn("Session unknown", page)
         self.assertIn("44 images", page)
+        for path in ("/data/lineage/dataset/" + PRIV_DS + "/", "/data/api/lineage/graph"):   # QC: hidden export
+            body = self.get(path, "advanced")[2].decode()
+            for leak in (PRIV_SID, PRIV_EXP) + SECRET:
+                self.assertNotIn(leak, body)
         st, _, body = self.get("/data/api/lineage/graph?scope=item&focus=" + quote("dataset|" + DS, safe=""),
                                "advanced")
         g = json.loads(body)

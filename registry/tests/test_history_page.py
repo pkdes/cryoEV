@@ -479,7 +479,12 @@ class R9LanesAndAttribution(unittest.TestCase):
                               {"schema": "label_version/1", "id": "lv_20261111_1500", "status": "created",
                                "who": "pujan", "via": "claude", "base": R9_EXP},
                               {"schema": "label_version/1", "id": "lv_20261111_1500", "status": "qc_passed",
-                               "who": "pujan", "status_by": "person-b", "base": R9_EXP}],   # a person's line
+                               "who": "pujan", "status_by": "person-b", "base": R9_EXP},    # a person's line
+                              {"schema": "label_version/1", "id": "lv_20261111_1600", "status": "created",
+                               "who": "person-b", "base": R9_EXP},                              # a person made it
+                              {"schema": "label_version/1", "id": "lv_20261111_1600", "status": "qc_passed",
+                               "who": "person-b", "status_by": "pujan", "status_via": "claude",  # agent set-status
+                               "base": R9_EXP}],
             "dataset": [{"schema": "dataset/1", "id": "ds_cell", "status": "frozen",
                          "inputs": [{"id": R9_LV, "role": "source", "entity": "label_version"},
                                     {"id": R9_EXP, "role": "images", "entity": "roboflow_export"}]},
@@ -546,6 +551,17 @@ class R9LanesAndAttribution(unittest.TestCase):
         job = self.m["recs"]["job|" + R9_JOB]["job"]
         self.assertEqual((job["who"], job["ai"]), ("claude for pujan", True))
         self.assertEqual(hp.who_fields({"who": "pujan"}, None), ({"who": "pujan"}, []))     # control: a person
+
+    def test_status_via_credits_the_status_only(self):
+        """An agent's set-status line carries status_via (no via): its status row and status_by read "claude for
+        pujan" + AI; the record's maker (who) stays the person's."""
+        r = self.m["recs"]["label_version|lv_20261111_1600"]
+        self.assertEqual([(h["status"], h["by"], h["ai"]) for h in r["hist"]],
+                         [("created", None, False), ("qc_passed", "claude for pujan", True)])
+        self.assertEqual((r["who"]["who"], r["who"]["status_by"], r["aiw"]), ("person-b", "claude for pujan",
+                                                                             ["status_by"]))
+        self.assertIsNone(hp.line_via({"status_via": "claude"}))                  # not for a non-status field
+        self.assertEqual(hp.line_via({"status_via": "claude"}, status=True), "claude")
 
     @unittest.skipIf(sync_playwright is None, "playwright not installed")
     def test_browser_ai_tag_lanes_and_arrows(self):

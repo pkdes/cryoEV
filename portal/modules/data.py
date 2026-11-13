@@ -1107,7 +1107,7 @@ def detail_model(records, record) -> dict:
         field("Status", status_word(record["status"]) if _text(record.get("status")) else None),
         field("Trained on", dataset, entity_href("dataset", dataset) if dataset in records["dataset"] else None),
         field("Started from", init, entity_href("model", init) if init in records["model"] else None),
-        field("Classes", ", ".join(map(str, _list(record.get("classes"))))),
+        field("Classes", class_names(record)),
         field("Image size", f"{record['imgsz']} px" if record.get("imgsz") else None),
         field("Detection threshold", format_number(record.get("conf")) if _number(record.get("conf")) is not None
               else None),
@@ -1146,7 +1146,7 @@ def detail_images(records, entity, record, viewer, page) -> dict:
         field("Edits recorded", str(record["n_edit_records"]) if record.get("n_edit_records") is not None else None),
         field("Starts from", hide_private(records, viewer, _text(record.get("base"))
                                           or _text(record.get("derived_from")), record.get("base_kind"))),
-        field("Splits", split_counts(record)), field("Classes", ", ".join(map(str, _list(record.get("classes"))))),
+        field("Splits", split_counts(record)), field("Classes", class_names(record)),
         field("Review package", package_shown,
               entity_href("images", package_shown) if package_shown in records["review_package"] else None))
     open_review = None
@@ -1692,7 +1692,7 @@ class Lineage:
         production = rec.get("status") == "production"
         fields = present(
             field("Status", status_word(rec["status"]) if _text(rec.get("status")) else None),
-            field("Classes", ", ".join(map(str, _list(rec.get("classes"))))),
+            field("Classes", class_names(rec)),
             field("Image size", f"{rec['imgsz']} px" if rec.get("imgsz") else None),
             field("Started from", _text(rec.get("init_from")), self.link("model", _text(rec.get("init_from")))),
             field("Registered", short_date(rec.get("logged"))),
@@ -1830,7 +1830,7 @@ class Lineage:
                                       "Image list not recorded"))
         if not specs:
             specs = [unknown_spec("source", "The registry does not record which images went into this export.")]
-        fields = present(field("Classes", ", ".join(map(str, _list(rec.get("classes"))))),
+        fields = present(field("Classes", class_names(rec)),
                          field("Images per split", split_counts(rec)),
                          field("Image list", plural(listed, "image") if listed is not None else "not recorded"),
                          field("Made from export", hide_private(self.records, self.viewer, parent, "roboflow_export")
@@ -2031,11 +2031,24 @@ def history_registry(root) -> tuple:
     except Exception as exc:                           # an unreadable registry must not take the page down
         return None, f"registry not readable ({type(exc).__name__})"
     owners = sorted({str(r["owner"]).partition("#")[0] for k, r in current.items()
-                     if k.split("|", 1)[0] in ("label_version", "inference_check") and _text(r.get("owner"))})
+                     if k.split("|", 1)[0] in ("label_version", "inference_check") and _text(r.get("owner"))}
+                    | export_list_files(current, root))
     owner_sig = files_signature(owners)
     base = (sig + owner_sig, current, history, stats)
     _remember(("read", str(root)), (sig, owners, owner_sig, base))
     return base, None
+
+
+def export_list_files(current, root) -> set:
+    """The export image lists the lab graph reads (#15: session nodes and counts), as History resolves them (a
+    relative file under the registry folder, or an absolute one): part of the cached graph's signature, so editing a
+    list builds the graph again."""
+    out = set()
+    for k, r in current.items():
+        f = _text(_dict(r.get("image_list")).get("file")) if k.startswith("roboflow_export|") else None
+        if f:
+            out.add(str(Path(f) if Path(f).is_absolute() else Path(root) / f))
+    return out
 
 
 def _strings_in(value):

@@ -327,12 +327,12 @@ def build_model(current: dict, history: dict, stats: dict, sources, changes=None
             links.append([f"child {c.split('|', 1)[0]}", c])
         hist = []
         for line in history[key]:
-            via = line_via(line)
+            via = line_via(line, status=True)
             hist.append({"logged": line.get("logged"), "status": line.get("status"),
                          "by": (actor.label(line.get("status_by") or line.get("who") or line.get("created_by"), via)
                                 if via else line.get("recorded_by") or line.get("tool")),
                          "ai": bool(via), "fields": len(line)})
-        who, ai_who = who_fields(rec, line_via(history[key][-1]) if history.get(key) else None)
+        who, ai_who = who_fields(rec, history[key][-1] if history.get(key) else None)
         recs[key] = {
             "e": ent, "id": rec["id"], "s": rec.get("status"), "lane": lane_of(ent, rec.get("status")),
             "who": who, "aiw": ai_who,
@@ -756,21 +756,26 @@ def next_action(rec: dict) -> str:
     return f"Status {st!r}"
 
 
-def line_via(line) -> str | None:
-    """The agent that wrote this line (`via`, or version.json's `created_via`), else None."""
-    v = line.get("via") or line.get("created_via") if isinstance(line, dict) else None
+def line_via(line, status=False) -> str | None:
+    """The agent that wrote this line (`via`, or version.json's `created_via`), else None. status=True (a status
+    row, or the status_by field): an agent's set-status line's `status_via` counts too."""
+    if not isinstance(line, dict):
+        return None
+    v = line.get("via") or line.get("created_via") or (line.get("status_via") if status else None)
     return str(v) if v else None
 
 
-def who_fields(rec, via) -> tuple:
-    """-> ({field: shown value}, [fields that name an agent's work]). The person fields read "claude for pujan" when
-    the record's LAST line was written by an agent (`via`): History merges lines, so an earlier agent line must not
-    credit a later person's line. The AI tag itself is drawn by the page from the field list (textContent only)."""
+def who_fields(rec, last=None) -> tuple:
+    """-> ({field: shown value}, [fields that name an agent's work]). A person field reads "claude for pujan" when the
+    record's LAST line says an agent wrote it (`via` / `created_via`; for status_by also `status_via`, which
+    set-status writes and later lines carry forward with status_by): History merges lines, so an earlier agent line
+    must not credit a later person's line. The AI tag itself is drawn by the page from the field list (textContent)."""
     shown, ai = {}, []
     for f in WHO_FIELDS:
         v = rec.get(f)
         if v in (None, [], ""):
             continue
+        via = line_via(last, status=f == "status_by")
         if via and f in PERSON_FIELDS and isinstance(v, str):
             shown[f] = actor.label(v, via)
             ai.append(f)
