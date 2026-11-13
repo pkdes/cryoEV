@@ -68,11 +68,7 @@ BASE_WRITE = TG.write_registry        # the Lab graph test's own writer, capture
 
 
 def write_registry(root: Path):
-    BASE_WRITE(root)
-    for ent, recs in chain_rows().items():
-        with (root / f"{ent}.jsonl").open("a", encoding="utf-8") as f:
-            for r in recs:
-                f.write(json.dumps(r) + "\n")
+    BASE_WRITE(root, more=[r for recs in chain_rows().values() for r in recs])
     TG.clear_caches()
 
 

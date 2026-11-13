@@ -10,10 +10,12 @@ no_actor_env()  context manager that removes them from os.environ for its body (
 process_lock()  a cross-process lock on a name (a lock directory in the temp dir; stale-safe), for machine-wide
                 resources such as `subst` drive letters.
 wait_until()    poll a condition instead of sleeping a fixed time.
+write_registry(root, records)   a fixture registry folder: registry/samples/*.jsonl plus `records` (round 11).
 """
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import socket
 import tempfile
@@ -21,6 +23,7 @@ import time
 from pathlib import Path
 
 ACTOR_VARS = ("CRYOEV_VIA", "CRYOEV_FOR")
+SAMPLES = Path(__file__).resolve().parent.parent / "registry" / "samples"
 
 
 def free_port() -> int:
@@ -137,3 +140,22 @@ def process_lock(name: str, timeout: float = 120.0, stale_s: float = 300.0):
                 f.unlink()
         with contextlib.suppress(OSError):
             d.rmdir()
+
+
+def write_registry(root, records, samples: bool = True) -> Path:
+    """A fixture registry folder at `root`: every registry/samples/<entity>.jsonl (unless samples=False) with
+    `records` appended, one JSON line each, to <entity>.jsonl (the entity from the record's schema: "model/1" ->
+    model.jsonl); an entity with no sample file gets a file of its own. Lines keep their order. -> root."""
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    extra = {}
+    for rec in records:
+        extra.setdefault(str(rec["schema"]).split("/", 1)[0], []).append(rec)
+    for f in sorted(SAMPLES.glob("*.jsonl")) if samples else []:
+        lines = f.read_text(encoding="utf-8").splitlines()
+        lines += [json.dumps(r) for r in extra.get(f.stem, [])]
+        (root / f.name).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    for ent, recs in extra.items():
+        if not (root / f"{ent}.jsonl").exists():
+            (root / f"{ent}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
+    return root
