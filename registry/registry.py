@@ -384,10 +384,10 @@ def _set_status(id, status, who, note=None, root=None, reason=None, via=None):
 
 
 # ---------------------------------------------------------------- jobs (contract v2 addendum)
-JOB_TYPES = ("annotate", "revise", "train", "check", "predict")
+JOB_TYPES = ("annotate", "revise", "train", "check", "predict", "eval")
 JOB_WHERE = ("app", "roboflow", "desktop", "laptop")
 JOB_UNITS = {"annotate": "images labeled", "revise": "images reviewed", "train": "images", "check": "images checked",
-             "predict": "images predicted"}
+             "predict": "images predicted", "eval": "images scored"}
 LISTS = "lists"
 
 

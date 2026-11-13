@@ -223,6 +223,33 @@ python jobs/sync.py pull --share \\<desktop>\cj
   - `hung` means no new file for max(10 × the time per image, 10 min).
   - Every `jobs[]` entry has `ready_at` (READY's time; `retry` refreshes it).
 
+## Eval jobs
+One registry model scored on a labelled dataset's **test** split on the GPU queue: Ultralytics `val` at imgsz 1440 with `overlap_mask=False` (the settled scoring, `models/models.yaml` `test_mask_map50_95`). There is no re-predict (conf 0.001 detection curves are a later step). Off unless `CRYOEV_EVAL_JOBS=1` on both machines.
+```powershell
+# 1. A bundle: the dataset's labelled pack (the same ds_<sha12>.zip as its training bundle: reused) + a thin zip
+#    <dataset>__eval_<time>.zip. --dataset: a registry dataset id (its dataset_dir, else <CryoAI>\training outputs\<id>) or a folder
+python training/make_job_bundle.py --eval --weights models\v5_evnonev_y8m_20261029\best.pt --dataset <dataset id> [--model NAME]
+# 2. Queue it (job_<today>_eval_<model> in the registry, made after the push), then pull as usual
+python jobs/sync.py push-eval --bundle <the zip> --share \\<desktop>\cj      # or --weights <pt> --dataset <id>: bundles first
+python jobs/sync.py pull --share \\<desktop>\cj
+```
+- **Bundle.** `JOB.json` has `job_type: eval`, `model`, `weights`, `weights_in`, `weights_md5`, `split: test`, `imgsz`, `batch` (8), `overlap_mask: false`, `n_images` (the test images) and the pack reference.
+  - Weights tracked in the repo (`models\<id>\best.pt`) are not packed (`weights_in: repo`): the desktop uses its own copy at the bundle's commit. Any other `.pt` is packed as `<dataset>\weights\<file>` (`weights_in: bundle`). Either way the runner checks the md5 before scoring.
+  - `--model` names the result (`metrics.json` `model`, `testmap_<model>.json`). Default: `models\<id>\` → `<id>`; `runs\<run>\weights\best.pt` → `<run>`.
+  - Refused: uncommitted code, no `test:` split in `dataset.yaml`, no `images\test\` images, weights missing or not `.pt`. Before `--`, `--weights` / `--dataset` / `--model` / `--imgsz` are eval-only: a training bundle refuses them, so they are never silently dropped.
+- **push-eval** holds `<CryoAI-laptop>\jobs\eval.lock`. The share gets the pack once (`ds\<sha>\`, as for training) and `q\<job>\` with `job.json` `type: eval`; the default `--max-hours` is 1. The registry job (`--type eval --where desktop`; its list is the test images) is made only after the push succeeded. If that registry write fails, `q\<job>\CANCEL` is written (nothing is deleted).
+- **Runner.** `run_job.py` dispatches three ways on `job.json` `type` and `JOB.json` `job_type`: train (no `job_type`), predict, eval. The two must agree; any other type is **blocked** ("unknown job type", nothing run), never treated as training.
+  - Eval keeps the md5, pack, commit, Ultralytics, path, disk and GPU-busy checks (no training size or worker rules), and also checks for the `test:` split and the weights.
+  - It runs `run_job.py --eval-child work\<job>\eval_request.json` as the child (same cancel and time-cap handling as a trainer). Only that child imports `train_yolo` and Ultralytics. The runner and the watcher never do, so a missing or broken Ultralytics can't make the self-updating watcher restart-loop (`jobs/tests/test_eval_job.py` ImportGate).
+  - The child calls `validate_yolo_model(..., split="test", imgsz=1440, overlap_mask=False)`. `overlap_mask` is passed explicitly: otherwise the checkpoint's `train_args` or Ultralytics' default (True) decides. It writes `work\<job>\e\metrics.json` (+ `e\val\`, Ultralytics' plots).
+  - Done only with exit 0 and a `metrics.json` that has mask and box mAP50-95 and `overlap_mask: false`. `d\<job>\` gets `e\`, `eval.log`, `status.json`, and `DONE.json`, which adds `job_type`, `model`, `split`, `imgsz`, `n_images` and `metrics` (`mask_map50_95`, `mask_map50`, `box_map50_95`, `box_map50`).
+- **metrics.json** (`eval_metrics/1`) is in the `testmap_<model>.json` shape `analysis/compare_eval_runs.py` reads: `mask_map50_95`, `box_map50_95` and `per_class_mask_map50_95`, plus `mask_map50`, `box_map50`, `per_class_box_map50_95`, `model`, `dataset`, `split`, `imgsz`, `overlap_mask`, `n_images`, `weights_md5`, `ultralytics`, `machine`, `val_s`.
+- **Pull** copies a done eval job's `e\` and `eval.log` into `<CryoAI-laptop>\eval\<job>\` (staged in `eval\.pull_tmp_<job>`; an existing folder is never overwritten). It adds `testmap_<model>.json`, a copy of `metrics.json`, to pass as `--eval-dir`, and sets the registry job done (the note has the mask mAP50-95) or blocked/cancelled.
+  - It never copies run folders or touches `training outputs`, and an eval job never triggers the registry importer: that runs only when a train job is pulled.
+  - A blocked or cancelled eval copies nothing. A done job of a type this checkout doesn't know isn't pulled at all ("update this checkout").
+- **Flag, Live tab, portal.** With `CRYOEV_EVAL_JOBS` unset, `push-eval` refuses and the runner leaves eval jobs queued, untouched; `watch.json` has `eval_jobs`. A running eval job shows as `{"kind": "eval", "model", "n_total", "elapsed_s", "hung"}`: there is no progress counter, and `hung` means still running after 1 h. A finished one carries `kind: eval` and DONE.json's metrics. The portal's Jobs page labels it "evaluation" / "evaluating" in the training column.
+- **A real val** is only in `test_eval_job.ChildTests.test_real_val`, behind `CRYOEV_REAL_EVAL_TEST=1` (+ `CRYOEV_REAL_EVAL_WEIGHTS`, `CRYOEV_REAL_EVAL_DATA`), never in the gate. Don't run it beside a training run.
+
 ## Raw montages to tiles: `jobs/convert_raw.py`
 Turns raw montages into the model-ready tiles (the lab's `3d. Tiles no scalebar - 14.7 A-px PNG`). The output folder is a Predict source as it is.
 ```powershell
@@ -330,7 +357,8 @@ C:\cj\ds\.incoming\<sha>\  dataset pack upload in progress                      
 C:\cj\ds\<sha>\            ds_<sha12>.zip, ds_<sha12>.zip.md5, READY             laptop writes; READY last; shared by jobs
 C:\cj\work\<job>\          unzipped bundle + training output                     runner; deleted when done
 C:\cj\d\.tmp_<job>\        results being written                                 runner
-C:\cj\d\<job>\             run.json, runs\<run>\, status.json, train.log, DONE.json (last)
+C:\cj\d\<job>\             run.json, runs\<run>\, status.json, train.log, DONE.json (last); predict: p\, predict.log;
+                           eval: e\metrics.json, e\val\, eval.log
 C:\cj\d\.retired\          earlier attempts moved aside by `sync.py retry`
 C:\cj\runner.lock          OS lock (msvcrt) held for the whole job; runner.lock.info says who
 C:\cj\watch.lock           OS lock held by the one watcher

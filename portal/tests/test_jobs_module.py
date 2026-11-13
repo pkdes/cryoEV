@@ -492,6 +492,21 @@ class Snapshots(Base):
         self.assertIn("40 of 120 done", frag)
         self.assertNotIn("predict_theirs", frag)
 
+    def test_eval_job_running(self):
+        """An eval job (jobs/monitor.py kind eval) shows as evaluating, with no progress counter and no val mAP; the
+        predict test above is the control for the other kinds."""
+        q = queues_fixture()[:1]
+        q[0]["running"] = {"job": "job_20261112_eval_m1", "kind": "eval", "model": "m1", "n_done": None,
+                           "n_total": 39, "elapsed_s": 60, "eta_s": None, "hung": False}
+        self.swap_live(T.live_doc(queues=q))
+        r = self.api()["running"][0]
+        self.assertEqual((r["kind"], r["phase"], r["done"], r["total"], r["unit"], r["pct"], r["map50_95"]),
+                         ("eval", "evaluating", None, 39, "images", None, None))
+        self.assertEqual(J.TYPE_WORD["eval"], "evaluation")
+        self.assertEqual(J.href_for("job", "job_20261112_eval_m1", "eval"), "/train/")
+        self.assertEqual(J.hint({"status": "ready", "type": "eval", "where": "desktop"})[1],
+                         "jobs/sync.py push-eval --bundle <zip> --share <queue>")
+
     def test_watcher_stale_and_paused(self):
         q = queues_fixture()[:1]
         q[0]["watcher"].update(display="stale", age_s=900, stale=True)

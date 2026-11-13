@@ -6,7 +6,8 @@ Queue folder (on the desktop, shared to the laptop over Tailscale/SMB):
     <queue>/q/<job>/             bundle zip + .md5 + job.json, READY   written by the laptop (READY last)
     <queue>/work/<job>/          unzipped bundle + training output     the runner's only scratch (deleted on done)
     <queue>/d/.tmp_<job>/        results being written                 runner
-    <queue>/d/<job>/             run.json, runs/<run>/, status.json, train.log, DONE.json (DONE.json last)
+    <queue>/d/<job>/             run.json, runs/<run>/, status.json, train.log, DONE.json (DONE.json last);
+                                 a predict job: p/, predict.log; an eval job: e/metrics.json, e/val/, eval.log
     <queue>/d/.retired/          earlier attempts moved aside by `sync.py retry` (never deleted)
     <queue>/runner.lock          OS lock held by the one running runner
     <queue>/ds/<sha>/            dataset pack shared by thin bundles, READY last (laptop; dataset_cache.py)
@@ -33,6 +34,9 @@ ROBOCOPY_FLAGS = ["/E", "/Z", "/R:2", "/W:5", "/NP", "/NFL", "/NDL"]
 FORBIDDEN_FLAGS = ("/MIR", "/PURGE", "/MOV")     # /MOV and /MOVE delete the source
 PREDICT_ENV = "CRYOEV_PREDICT_JOBS"   # "1" turns on the desktop path for predict jobs (push-predict; run_job picks them)
 PS_PRED, PREDICT_LOG = "p", "predict.log"   # <prediction set>/p/<model>/predictions/<nnnn>.txt; the predictor's log
+EVAL_ENV = "CRYOEV_EVAL_JOBS"     # "1" turns on eval jobs (push-eval; run_job picks them); off by default
+EVAL_OUT, EVAL_LOG, METRICS = "e", "eval.log", "metrics.json"   # work/<job>/e/metrics.json (+ e/val/ plots); its log
+JOB_TYPES = ("train", "predict", "eval")   # what the runner knows; anything else is refused (blocked)
 
 
 def now():
@@ -42,6 +46,18 @@ def now():
 def predict_enabled() -> bool:
     """Predict jobs on the queue (docs/JOBS.md, "Predict jobs") are off unless $CRYOEV_PREDICT_JOBS is "1"."""
     return os.environ.get(PREDICT_ENV) == "1"
+
+
+def eval_enabled() -> bool:
+    """Eval jobs on the queue (docs/JOBS.md, "Eval jobs") are off unless $CRYOEV_EVAL_JOBS is "1"."""
+    return os.environ.get(EVAL_ENV) == "1"
+
+
+def job_kind(job: dict) -> str:
+    """A bundle's JOB.json -> train / predict / eval (or the unknown job_type as written). Train bundles carry no
+    job_type; predict and eval bundles say theirs."""
+    t = (job or {}).get("job_type")
+    return "train" if t in (None, "", "train") else str(t)
 
 
 def count_predictions(pred_dir) -> int:
