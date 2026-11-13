@@ -211,7 +211,9 @@ class MonitorTests(T.TempRoots, unittest.TestCase):
         self.assertIsInstance(r[0]["ms"], int)
         t0 = time.monotonic()                                          # the total bound holds whatever the timeout
         self.assertFalse(M.probe_servers([("mute", hang)], timeout=5, total=0.5)[0]["up"])
-        self.assertLess(time.monotonic() - t0, 3.0)                    # failure mode: the 5 s per-probe timeout
+        # failure mode: the total bound is ignored and the call waits out the 5 s per-probe timeout; 3.0 is well under
+        # that and well over the 0.5 s bound, so load slack cannot trip it
+        self.assertLess(time.monotonic() - t0, 3.0)
         # through the CLI: the snapshot has servers; the default list is the laptop's three
         snap = self.once(self.share, servers=f"review={live},sandbox={dead}")
         self.assertEqual(snap.returncode, 0, snap.stderr)

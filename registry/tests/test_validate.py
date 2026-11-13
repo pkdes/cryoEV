@@ -216,9 +216,14 @@ class TestRealArtifacts(unittest.TestCase):
         # Root cause of an old flake: this used to mtime the WHOLE live tree, and jobs/monitor.py (running on this
         # machine) rewrites registry/live/live.json every ~30 s and appends to logs/. The scan reads neither, so
         # they are out of the snapshot; every file the scan can read is still checked for being left untouched.
-        scan_never_reads = {"live", "logs"}
+        # Anchored: only <laptop>/registry/live, <laptop>/jobs/live and the same for logs (not any path component).
+        # registry/validate.py's Scan reads the registry *.jsonl, tracking, exports, bundles, packages, label versions,
+        # inference checks and the model list; it never opens a live/ or logs/ dir (grep it before changing this).
+        def writer_dir(p):
+            parts = p.relative_to(lap).parts
+            return len(parts) > 2 and parts[0] in ("registry", "jobs") and parts[1] in ("live", "logs")
         watch = [p for p in lap.rglob("*") if p.is_file() and p.suffix in (".json", ".jsonl", ".csv", ".js")
-                 and not scan_never_reads & set(p.relative_to(lap).parts[:-1])]
+                 and not writer_dir(p)]
         before = {p: p.stat().st_mtime_ns for p in watch}
         rep = validate.Scan(lap, validate.find_sibling("CryoAI"), validate.config.processing_root()).run().summary()
         self.assertEqual(before, {p: p.stat().st_mtime_ns for p in watch})

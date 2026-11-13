@@ -34,11 +34,13 @@ import ast
 import json
 import os
 import re
+import shutil
 import statistics
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,6 +62,7 @@ AFFECTS = [
     ("registry/", {"registry", "portal", "jobs", "data_utils", "cryoev", "annotation", "tools"}),
     ("data_utils/", set(SUITES)),            # oslock etc. are used everywhere
     ("tools/", {"tools", "cryoev", "portal"}),
+    ("client/", {"portal"}),                 # client/cryoev_client.py is served by the portal
     ("cryoev/", {"cryoev"}),                 # the agent CLI (docs/AGENTS.md)
     ("tests/", {"tests"}),
     ("inference/", {"jobs", "portal", "annotation", "results"}),
@@ -109,6 +112,8 @@ def affected_suites(files: list[str]) -> tuple[set[str], list[str]]:
 
 def is_browser_file(path: Path) -> bool:
     """True if the file imports playwright or a browser helper module (any import, even inside a function).
+
+    Static imports only: a module loaded with importlib / __import__ / a string is not seen (none of the tests do that).
 
     Read from the imports, not the text: four browser files only import test_review_tool_browser and never name
     playwright, and a comment that says "playwright" must not make a file a browser file.
@@ -196,11 +201,22 @@ class GateLock:
                 continue
         return 0.0
 
-    def is_stale(self) -> bool:
-        pid = self.owner().get("pid")
+    def _stale_dir(self, d: Path) -> bool:
+        try:
+            pid = json.loads((d / "owner.json").read_text(encoding="utf-8")).get("pid")
+        except (OSError, ValueError):
+            pid = None
         if isinstance(pid, int) and not _pid_alive(pid):
             return True
-        return self._heartbeat_age() > self.stale_s
+        for f in (d / "heartbeat", d):
+            try:
+                return time.time() - f.stat().st_mtime > self.stale_s
+            except OSError:
+                continue
+        return False
+
+    def is_stale(self) -> bool:
+        return self._stale_dir(self.path)
 
     def try_acquire(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -209,13 +225,22 @@ class GateLock:
         except FileExistsError:
             if not self.is_stale():
                 return False
-            for f in self.path.glob("*"):        # take over; if another waiter wins the race, mkdir decides
+            # Atomic takeover: rename the stale dir to a unique name first; only the waiter whose rename succeeds goes
+            # on (a second waiter's rename finds no dir and fails). The renamed dir is re-checked, so a waiter that
+            # raced a fresh lock into place puts it back instead of deleting a live gate's lock.
+            grave = self.path.with_name(f"{self.path.name}.stale.{os.getpid()}.{uuid.uuid4().hex[:8]}")
+            try:
+                os.rename(self.path, grave)
+            except OSError:
+                return False
+            if not self._stale_dir(grave):
                 try:
-                    f.unlink()
+                    os.rename(grave, self.path)
                 except OSError:
                     pass
+                return False
+            shutil.rmtree(grave, ignore_errors=True)
             try:
-                self.path.rmdir()
                 self.path.mkdir()
             except OSError:
                 return False

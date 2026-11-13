@@ -32,6 +32,7 @@ class Affected(unittest.TestCase):
         self.assertEqual(G.affected_suites(["inference/predict_models.py"])[0],
                          {"tests", "jobs", "portal", "annotation", "results"})
         self.assertEqual(G.affected_suites(["tools/services.py"])[0], {"tests", "tools", "cryoev", "portal"})
+        self.assertEqual(G.affected_suites(["client/cryoev_client.py"])[0], {"tests", "portal"})
 
     def test_shared_code_and_unknown_files_run_everything(self):
         self.assertEqual(G.affected_suites(["data_utils/oslock.py"])[0], set(G.SUITES))
@@ -119,6 +120,25 @@ class Lock(unittest.TestCase):
         b = G.GateLock(self.path, wait_min=1, poll_s=0.05)
         self.assertTrue(b.acquire(log=lambda m: None))
         b.release()
+
+    def test_two_concurrent_takeovers_of_a_stale_lock_have_one_winner(self):
+        for _ in range(10):
+            self.path.mkdir()
+            (self.path / "owner.json").write_text(json.dumps({"pid": 2 ** 22 + 12345}), encoding="utf-8")
+            locks = [G.GateLock(self.path, wait_min=0.01) for _ in range(2)]
+            barrier, got = threading.Barrier(2), []
+
+            def go(lk):
+                barrier.wait()
+                got.append(lk.try_acquire())
+            ts = [threading.Thread(target=go, args=(lk,)) for lk in locks]
+            [t.start() for t in ts]
+            [t.join() for t in ts]
+            self.assertEqual(sorted(got), [False, True], got)
+            owner = locks[got.index(True)]
+            self.assertEqual(owner.owner()["pid"], os.getpid())
+            owner.release()
+            self.assertEqual([p.name for p in self.path.parent.iterdir()], [])     # no stale.* leftovers
 
     def test_a_dead_owner_is_stale(self):
         self.path.mkdir()

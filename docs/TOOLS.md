@@ -117,7 +117,7 @@ The review server, review sandbox, history server and job monitor (and later the
 - **Default (`--affected`):** runs only the suites the changed files touch (vs `origin/main`, uncommitted edits included), plus the quick repo-wide `tests` suite.
   - Edges follow who imports whom: `registry/` also runs annotation and tools; `results/` also jobs; `training/` and `inference/` also annotation and results; `portal/` also annotation; `tools/` also portal.
   - Shared code (`data_utils/`), an unrecognized code file, `CHANGELOG.md` and `requirements*.txt` run everything (those last two are not doc-only: tests parse the changelog and the pins set the environment).
-- **`--full`:** every suite. Use it for go-lives.
+- **`--full`:** every suite. Run `--full --agent-env` as well before every go-live (the default run has the actor env stripped; this one proves nothing depends on that).
 - **`--suites a,b`:** named suites.
 - **One gate at a time:** a lock directory `~/.cryoev/gate/lock/` is shared by every worktree. A second gate waits up to `--lock-wait` minutes (default 45), then fails `gate busy`. A lock whose owner process is gone, or whose heartbeat (touched every 30 s) is older than 10 minutes, is stale and is taken over.
 - **Environment:** children run with `CRYOEV_VIA` and `CRYOEV_FOR` removed, because the registry and jobs writers default their actor fields from them. `--agent-env` runs with `CRYOEV_VIA=claude CRYOEV_FOR=pujan` on purpose; a suite that passes only under one of the two has a hidden env dependency.
