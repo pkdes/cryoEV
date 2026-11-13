@@ -263,7 +263,11 @@ class TwoServersOneLock(unittest.TestCase):
 
     def test_main_strips_agent_env(self):
         m = self.multi(env=clean_env(CRYOEV_VIA="claude", CRYOEV_FOR="pujan"))
-        self.assertIn("[OK] Removed CRYOEV_VIA, CRYOEV_FOR from this server's environment", m.log())
+        # both names, in whatever order the child's environment lists them; the values are never printed
+        line = next((x for x in m.log().splitlines() if x.startswith("[OK] Removed ")), "")
+        self.assertRegex(line, r"^\[OK\] Removed (CRYOEV_VIA, CRYOEV_FOR|CRYOEV_FOR, CRYOEV_VIA) from this server's environment")
+        self.assertNotIn("claude", m.log())
+        self.assertNotIn("pujan", m.log().replace(str(Path.home()), ""))
         m2 = self.multi()
         self.assertNotIn("Removed", m2.log())
 
