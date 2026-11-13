@@ -57,6 +57,10 @@ OTHERS = "ps_20261105_eee555"                    # someone else's set, with resu
 MISSING = "ps_20261105_000000"
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def golden_reviewed(ps_id: str, edited_0001=False) -> dict:
     doc = json.loads((GOLDEN / "reviewed.json").read_text(encoding="utf-8"))
     doc["prediction_set"] = ps_id
@@ -685,6 +689,7 @@ def launch(p):
     return None
 
 
+@browser
 class Browser(Base):
     @classmethod
     def setUpClass(cls):

@@ -11,10 +11,10 @@ import unittest
 from pathlib import Path
 
 REG = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REG))
-import importers  # noqa: E402
-import registry  # noqa: E402
-import validate  # noqa: E402
+sys.path.insert(0, str(REG.parent))                   # the repo root: `from registry import ...`
+from registry import importers  # noqa: E402
+from registry import store as registry  # noqa: E402
+from registry import validate  # noqa: E402
 
 PS_OK, PS_MISSING = "ps_20991231_abc123", "ps_20991231_def456"
 PULL = "roboflow_pull_20990101_0000"

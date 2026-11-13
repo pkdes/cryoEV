@@ -223,9 +223,10 @@ def move_tree(src: Path, dst: Path):
 
 def new_conversion(cfg, user, fields: dict, *, source: dict, inputs=None, upload_files: Path | None = None,
                    sample_key=None, nbytes=None, skipped=None, params=None, derived_from=None, owner=None,
-                   made_by=None) -> Path:
+                   made_by=None, made_via=None) -> Path:
     """Make <root>/raw_tiles/<session>_<6 hex>/ with convert.json + status queued (uploaded files moved into
-    input/), then start it when nothing else runs. -> the folder."""
+    input/), then start it when nothing else runs. -> the folder. made_via: the agent that uploaded it for the owner
+    (round 11 #65; the watcher's registration reads it from convert.json as the conversion's uploaded_via)."""
     root = raw_root(cfg)
     root.mkdir(parents=True, exist_ok=True)
     for _ in range(50):
@@ -261,6 +262,8 @@ def new_conversion(cfg, user, fields: dict, *, source: dict, inputs=None, upload
             if made_by and made_by != meta["owner"]:
                 meta["made_by"] = str(made_by)
         meta["input_bytes"] = int(nbytes) if nbytes is not None else input_bytes(meta)
+        if made_via:                                     # an agent's upload (upload.json owner_via)
+            meta["made_via"] = str(made_via)
         if skipped:                                      # upload files left out: [{name, why}] (the page lists them)
             meta["skipped"] = [{"name": str(x.get("name"))[:200], "why": str(x.get("why"))[:300]} for x in skipped]
         PS.write_json_atomic(d / CONVERT_JSON, meta)

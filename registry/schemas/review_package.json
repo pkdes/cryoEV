@@ -150,6 +150,14 @@
    "pattern": "^[a-z][a-z0-9_-]{0,31}$",
    "description": "portal person id that owns a prediction package"
   },
+  "owner_via": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+   "description": "the agent that made the package's prediction set for its owner (copied from the set's request.json, round 11 #65)"
+  },
   "prediction_set": {
    "type": [
     "string",

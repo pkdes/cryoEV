@@ -614,23 +614,32 @@ def train_yolo_segmentation(data_yaml: str, model_size: str = 'n', epochs: int =
 
 def validate_yolo_model(model_path: str, data_yaml: str, imgsz: int = 1024, batch_size: int = 16,
                        device: str = '0', split: str = 'val', project: str = None,
-                       name: str = 'val'):
-    """Validate YOLO model"""
+                       name: str = 'val', overlap_mask: bool = None):
+    """Validate YOLO model. overlap_mask None = as the checkpoint was trained (its train_args), else this value
+    (the desktop eval job passes False: jobs/run_job.py eval_child)."""
     from ultralytics import YOLO
-    
+
     model = YOLO(model_path)
     val_kwargs = dict(data=data_yaml, split=split, imgsz=imgsz, batch=batch_size,
                       device=device, verbose=False)
     # Validate the way the model was trained. Ultralytics' default overlap_mask=True paints all GT into one map,
     # carving nested membrane layers into rings: v5 F5 test EV mask mAP50-95 0.476 instead of 0.708 (models.yaml).
     trained = ((getattr(model, "ckpt", None) or {}).get("train_args") or {}).get("overlap_mask")
-    if trained is not None:
+    if overlap_mask is not None:
+        val_kwargs['overlap_mask'] = bool(overlap_mask)
+    elif trained is not None:
         val_kwargs['overlap_mask'] = trained
     if project is not None:
         val_kwargs['project'] = project
         val_kwargs['name'] = name
+    used = {}                                           # the overlap_mask the validator actually ran with
+    model.add_callback("on_val_end", lambda v: used.__setitem__("overlap_mask", getattr(v.args, "overlap_mask", None)))
     results = model.val(**val_kwargs)
-    
+    try:
+        results.overlap_mask_used = used.get("overlap_mask")   # read by jobs/run_job.py metrics_from_val
+    except AttributeError:
+        pass
+
     if results.seg:
         print(f"[OK] Validation Metrics:")
         print(f"  Box mAP@0.5: {results.box.map50:.4f}")

@@ -5,6 +5,12 @@ records and rename.
 
 Split out of portal/modules/predict.py (round 7, P7; no behaviour change); predict.py re-exports every name.
 Names the tests patch are used from other parts only as <PART>.<name> (portal/predict_parts/__init__.py).
+
+Agents (round 11 #65): `via` = the agent acting for the person (a write token's agent; None for a browser). It is read
+from the request once (portal.audit.request_via) and then travels as data: the session plan's "via", the upload's
+upload.json "owner_via", convert.json "made_via". Background tasks never look at a request. It ends up in the
+prediction set's request.json / registry record ("owner_via", jobs/predict_set.py create) and on the audit lines.
+check_active's cap applies to every agent, whatever the person's role.
 """
 from __future__ import annotations
 
@@ -223,15 +229,16 @@ def check_create_disk(root: Path, d_from: Path, names, link: bool):
 
 
 def create_and_start(cfg, d_from, user, model, *, names=None, manifest=None, sample_label=None, nm=None,
-                     session=None, name=None, link=False, progress=None) -> Path:
+                     session=None, name=None, link=False, progress=None, via=None) -> Path:
     """create() then start_detached(). Runs in a worker thread. Raises Refusal (plain) on a refusal.
     link=True (uploads): the tiles are hard-linked into the set when they are on the set's drive, else copied.
-    progress(done, total, phase): for the progress page."""
+    progress(done, total, phase): for the progress page. via: the agent acting for `user` (None: the person), stored
+    as the set's owner_via."""
     root, reg = COMMON.predict_root(cfg), registry_root(cfg)
     root.mkdir(parents=True, exist_ok=True)
     check_create_disk(root, Path(d_from), names, link)
     kw = dict(model=model, owner=user["id"], nm_confirmed_by=user["id"], registry_root=reg, root=root,
-              session=session or None, name=name, link=link, progress=progress)
+              session=session or None, name=name, link=link, progress=progress, via=via or None)
     if manifest is not None:
         kw.update(manifest=manifest, sample_label_column="manifest:sample_label", nm_from_manifest=True, names=names)
     else:
@@ -263,10 +270,12 @@ def active_sets(cfg, user) -> int:
                if st.get("state") in ("queued", "running"))
 
 
-def check_active(cfg, user, exclude=None):
-    """Basic users may have at most MAX_ACTIVE_BASIC sets queued or running (failed and done sets don't count;
-    sets still being prepared do, except the task `exclude` itself)."""
-    if user.get("role") == "basic" and active_sets(cfg, user) + running_creates(user, exclude) >= MAX_ACTIVE_BASIC:
+def check_active(cfg, user, exclude=None, via=None):
+    """Basic users, and every agent whatever its person's role (via set: round 11 #65), may have at most
+    MAX_ACTIVE_BASIC sets queued or running (failed and done sets don't count; sets still being prepared do, except
+    the task `exclude` itself). The count is the person's own sets, however they were made."""
+    if (user.get("role") == "basic" or via) and \
+            active_sets(cfg, user) + running_creates(user, exclude) >= MAX_ACTIVE_BASIC:
         raise Refusal(f"You already have {MAX_ACTIVE_BASIC} analyses waiting or running. Start a new one when one "
                       f"of them is done.", 429)
 
@@ -323,8 +332,9 @@ def kept_scope(cfg, src: dict, q, t: dict) -> dict:
     return {**t, "groups": groups, "n": n, "sig": sig, "kept": k}
 
 
-def session_plan(cfg, user, src: dict, form: dict) -> dict:
-    """Every check of a session form, no work: -> what session_run needs (+ `tid`, the task key). Raises Refusal."""
+def session_plan(cfg, user, src: dict, form: dict, via=None) -> dict:
+    """Every check of a session form, no work: -> what session_run needs (+ `tid`, the task key; `via`, the agent
+    acting for the person, from the request). Raises Refusal."""
     if form.get("confirm") != "yes":
         raise Refusal("Tick “I confirm the pixel size”: nothing was started.")
     t = kept_scope(cfg, src, form, read_tiles(src))
@@ -394,9 +404,9 @@ def session_plan(cfg, user, src: dict, form: dict) -> dict:
                  for g in chosen if g["nm_in"] is not None and (g["nm_range"] or (g["nm_missing"] and g["nm_values"]))]
     tid = selection_key(user, src["session"], form["model"], [(n, label_of[n], repr(float(nm_of[n]))) for n in names])
     if not create_running(tid) and not recently_done(tid):
-        check_active(cfg, user, exclude=tid)
+        check_active(cfg, user, exclude=tid, via=via)
     return {"tid": tid, "names": names, "label_of": label_of, "nm_of": nm_of, "overrides": overrides,
-            "model": form["model"], "name": chosen_name(form)}
+            "model": form["model"], "name": chosen_name(form), "via": via or None}
 
 
 def session_run(cfg, user, src: dict, plan: dict, progress=None) -> Path:
@@ -411,11 +421,11 @@ def session_run(cfg, user, src: dict, plan: dict, progress=None) -> Path:
             for n in names:
                 w.writerow([n, label_of[n], repr(float(nm_of[n]))])
         ps_dir = create_and_start(cfg, src["dir"], user, plan["model"], names=names, manifest=man,
-                                  session=src["session"], name=plan["name"], progress=progress)
+                                  session=src["session"], name=plan["name"], progress=progress, via=plan.get("via"))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for o in plan["overrides"]:
-        record_nm_override(cfg, user, ps_dir.name, o)
+        record_nm_override(cfg, user, ps_dir.name, o, via=plan.get("via"))
     return ps_dir
 
 
@@ -430,27 +440,31 @@ _AUDIT_FAILED: dict = {}                 # ps id -> why its nm/px override recor
 _AUDIT_LOCK = threading.Lock()
 
 
-def record_nm_override(cfg, user, ps_id: str, detail: dict) -> bool:
+def _event(cfg, user, action: str, ps_id: str, detail: dict, via=None) -> bool:
+    """One line through portal.audit.event (round 11 #3): the actor is `user`, an agent rides along as detail.via.
+    Background tasks have no request, so the agent comes as data (`via`). Never raises; -> written."""
+    from portal import audit as PA
+    if via:
+        detail = {**(detail or {}), "via": via}
+    return PA.event(getattr(cfg, "state_dir", None), None, action, ps_id, detail, actor=user.get("id"))
+
+
+def record_nm_override(cfg, user, ps_id: str, detail: dict, via=None) -> bool:
     """A person typed one nm/px for a sample whose tiles had other manifest values (a range, or some tiles with none):
     every tile of it got the typed value in images.csv. Recorded in the portal audit log
-    (<state dir>/audit/portal.jsonl) as predict.nm_override. -> written. A failure does not undo the analysis (it
-    already exists): it is logged to the console and shown to the admin on the set's page (audit_problem)."""
-    state = getattr(cfg, "state_dir", None)
-    try:
-        if not state:
-            raise OSError("the portal has no state folder configured")
-        from portal import audit as PA
-        PA.audit(state, user.get("id"), "predict.nm_override", ps_id, detail)
+    (<state dir>/audit/portal.jsonl) as predict.nm_override (+ detail.via when an agent did it). -> written. A
+    failure does not undo the analysis (it already exists): it is logged to the console and shown to the admin on the
+    set's page (audit_problem)."""
+    if _event(cfg, user, "predict.nm_override", ps_id, detail, via):
         return True
-    except OSError as e:
-        why = (f"nm/px override not written to the audit log: {type(e).__name__}: {e}; "
-               f"{json.dumps(detail, ensure_ascii=False)}")
-        print(f"[predict] {ps_id}: {why}", file=sys.stderr, flush=True)
-        with _AUDIT_LOCK:
-            _AUDIT_FAILED[ps_id] = why
-            for k in list(_AUDIT_FAILED)[:max(0, len(_AUDIT_FAILED) - COMMON.CACHE_MAX)]:
-                _AUDIT_FAILED.pop(k, None)
-        return False
+    why = (f"nm/px override not written to the audit log (see the portal log); "
+           f"{json.dumps(detail, ensure_ascii=False)}")
+    print(f"[predict] {ps_id}: {why}", file=sys.stderr, flush=True)
+    with _AUDIT_LOCK:
+        _AUDIT_FAILED[ps_id] = why
+        for k in list(_AUDIT_FAILED)[:max(0, len(_AUDIT_FAILED) - COMMON.CACHE_MAX)]:
+            _AUDIT_FAILED.pop(k, None)
+    return False
 
 
 def audit_problem(ps_id: str) -> str | None:
@@ -458,19 +472,14 @@ def audit_problem(ps_id: str) -> str | None:
         return _AUDIT_FAILED.get(ps_id)
 
 
-def audit_event(cfg, user, action: str, ps_id: str, detail: dict) -> bool:
-    """One line in the portal audit log; a failure is logged to the console and never undoes the action."""
-    try:
-        state = getattr(cfg, "state_dir", None)
-        if not state:
-            raise OSError("the portal has no state folder configured")
-        from portal import audit as PA
-        PA.audit(state, user.get("id"), action, ps_id, detail)
+def audit_event(cfg, user, action: str, ps_id: str, detail: dict, via=None) -> bool:
+    """One line in the portal audit log (a thin adapter over portal.audit.event; tests patch this name); a failure
+    is logged and never undoes the action."""
+    if _event(cfg, user, action, ps_id, detail, via):
         return True
-    except OSError as e:
-        print(f"[predict] {ps_id}: {action} not written to the audit log: {type(e).__name__}: {e}",
-              file=sys.stderr, flush=True)
-        return False
+    print(f"[predict] {ps_id}: {action} not written to the audit log (see the portal log)", file=sys.stderr,
+          flush=True)
+    return False
 
 
 _RENAME_LOCKS: dict = {}

@@ -40,6 +40,10 @@ MDA = "MDA-MB-231_RM_square237_hole31"
 W, H = 1000, 800
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def have(*paths):
     return all(p is not None and p.exists() for p in paths)
 
@@ -789,6 +793,7 @@ except Exception:  # noqa: BLE001  (the harness could not be imported)
     HARNESS = False
 
 
+@browser
 @unittest.skipUnless(HARNESS and have(REAL_V2), "Playwright harness or real packages not found")
 class JsParityTests(unittest.TestCase):
     """effGt() in review_tool/index.html == review_server.effective_labels() on every real record (v2 seeds and the

@@ -11,8 +11,10 @@ import unittest
 from pathlib import Path
 
 REG = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REG))
-import history_page as hp  # noqa: E402
+sys.path.insert(0, str(REG.parent))                   # the repo root: `from registry import ...`
+sys.path.append(str(REG.parent / "tests"))
+import cryoev_testkit as TK  # noqa: E402  (shared helpers)
+from registry import history_page as hp  # noqa: E402
 
 try:
     from playwright.sync_api import sync_playwright
@@ -22,6 +24,10 @@ except ImportError:
 SAMPLES = REG / "samples"
 EVIL = "pkg_<script>alert(1)</script>&x"
 SHOTS = os.environ.get("HISTORY_TEST_SHOTS")
+
+
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
 
 
 def synthetic_lines():
@@ -262,8 +268,7 @@ class GraphLookup(unittest.TestCase):
                       {"schema": "image/1", "id": "img_b_png", "session": "20990101", "grid": None},
                       {"schema": "image/1", "id": "img_c_png", "session": "20990102", "grid": None}],
         }
-        for ent, lines in recs.items():
-            (reg / f"{ent}.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines), encoding="utf-8")
+        TK.write_registry(reg, recs, samples=False)
         cls.m = hp.build([reg], t / "out" / "history.html")
 
     @classmethod
@@ -389,6 +394,7 @@ class ReviewScopeChips(unittest.TestCase):
         self.assertNotIn("innerHTML", self.html)
         self.assertIsNone(re.search(r"(?i)https?://", self.html))
 
+    @browser
     @unittest.skipIf(sync_playwright is None, "playwright not installed")
     def test_browser(self):
         with sync_playwright() as pw:
@@ -448,7 +454,7 @@ class R9LanesAndAttribution(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.saved = {k: os.environ.pop(k) for k in list(os.environ) if k.startswith("CRYOEV_")}
+        cls.saved = TK.strip_environ(strip_all=True)                 # CRYOEV_*-wide; restored in tearDownClass
         cls.tmp = tempfile.TemporaryDirectory()
         reg = Path(cls.tmp.name) / "registry"
         (reg / "lists").mkdir(parents=True)
@@ -498,8 +504,7 @@ class R9LanesAndAttribution(unittest.TestCase):
                      "via": "claude", "package": "pkg_audit", "outputs": [],
                      "inputs": [{"id": R9_EXP, "role": "base"}]}],
         }
-        for ent, recs in lines.items():
-            (reg / f"{ent}.jsonl").write_text("".join(json.dumps(x) + "\n" for x in recs), encoding="utf-8")
+        TK.write_registry(reg, lines, samples=False)
         cls.out = Path(cls.tmp.name) / "out" / "history.html"
         cls.m = hp.build([reg], cls.out)
         cls.nodes, cls.edges = graph_index(cls.m)
@@ -563,6 +568,7 @@ class R9LanesAndAttribution(unittest.TestCase):
         self.assertIsNone(hp.line_via({"status_via": "claude"}))                  # not for a non-status field
         self.assertEqual(hp.line_via({"status_via": "claude"}, status=True), "claude")
 
+    @browser
     @unittest.skipIf(sync_playwright is None, "playwright not installed")
     def test_browser_ai_tag_lanes_and_arrows(self):
         with sync_playwright() as pw:
@@ -682,6 +688,7 @@ def launch(p):
     return None
 
 
+@browser
 class Browser(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -798,7 +805,7 @@ class Browser(unittest.TestCase):
             note = page.inner_text("#lbody")
             self.assertIn("python jobs/monitor.py --share \\\\gpu-desktop\\cj", note)
             self.assertIn("served by the history server", note)
-            page.wait_for_timeout(500)
+            page.wait_for_load_state("networkidle")      # a request, if the page made one, has been issued by now
             self.assertEqual(errors, [])
             self.assertTrue(requests and all(u.startswith("file:") for u in requests), requests)
             self.assertFalse(any("live.json" in u for u in requests))
@@ -806,6 +813,7 @@ class Browser(unittest.TestCase):
             ctx.close()
 
 
+@browser
 class LiveServed(unittest.TestCase):
     """The Live tab served over a localhost http.server, with live/live.json written by jobs/monitor.py --once from
     temp queues built in code (jobs/tests/jobtest.py): queue A has a job at epoch 4 of 300 with batch 8 of 16
@@ -848,10 +856,11 @@ class LiveServed(unittest.TestCase):
             threading.Thread(target=srv.serve_forever, daemon=True).start()
             cls.servers.append(srv)
         import socket
-        s = socket.socket()
-        s.bind(("127.0.0.1", 0))
-        dead = s.getsockname()[1]
-        s.close()
+        # "down" fixture: a port that is bound but never listens, and stays bound until teardown. (It used to be
+        # bound-then-closed, so another process could take the port and make "sandbox" read as up.)
+        cls.dead_sock = socket.socket()
+        cls.dead_sock.bind(("127.0.0.1", 0))
+        dead = cls.dead_sock.getsockname()[1]
         # the Servers bar's fixture: review and history = the two test servers (up), sandbox = a closed port (down)
         cls.ports = {"review": cls.servers[0].server_address[1], "sandbox": dead,
                      "history": cls.servers[1].server_address[1]}
@@ -881,6 +890,7 @@ class LiveServed(unittest.TestCase):
         for s in cls.servers:
             s.shutdown()
             s.server_close()
+        cls.dead_sock.close()
         cls.tmp.cleanup()
 
     def open(self, srv, width):

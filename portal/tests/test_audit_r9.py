@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timezone
@@ -27,12 +28,8 @@ UNSAFE = ("POST", "PUT", "DELETE", "PATCH")
 
 
 def clean_env(test):
-    """CRYOEV_* cleared for the test (restored after)."""
-    p = mock.patch.dict(os.environ)
-    p.start()
-    test.addCleanup(p.stop)
-    for k in [k for k in os.environ if k.startswith("CRYOEV_")]:
-        os.environ.pop(k)
+    """CRYOEV_* cleared for the test (restored after): the data roots must not leak in."""
+    test.enterContext(T.TK.env_patch(strip_all=True))
 
 
 def lines(state) -> list:
@@ -53,10 +50,8 @@ def concrete(path_tpl: str) -> str:
 class Base(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls._env_patch = mock.patch.dict(os.environ)
+        cls._env_patch = T.TK.env_patch(strip_all=True)          # CRYOEV_*-wide, restored in tearDownClass
         cls._env_patch.start()
-        for k in [k for k in os.environ if k.startswith("CRYOEV_")]:
-            os.environ.pop(k)
         cls.env = T.Env()
         cls.bas = A.add_key(cls.env.roster, "bas", "basic")
         cls.p = T.Portal(cls.env.config())
@@ -175,7 +170,8 @@ class RefusedAndSafe(Base):
 class NeverBreaks(Base):
     def test_failing_or_slow_write_does_not_touch_the_request(self):
         st0, b0 = self.send("POST", "/feedback/9/reply")
-        failed0 = self.w.failed
+        self.w.drain()           # the first line is written off the request: settle it before the baseline, or a
+        failed0 = self.w.failed  # late write lands inside the failing-writer window below and counts twice (2 != 1)
 
         def boom(*a, **k):
             raise OSError("the audit log is locked by another process")
@@ -185,15 +181,25 @@ class NeverBreaks(Base):
         self.assertEqual(st1, st0)
         self.assertEqual(self.w.failed, failed0 + 1)
 
+        # Failure mode: the request waits for the audit write. Structural, not a stopwatch (a 1.0 s bound on a 1.5 s
+        # write flaked under load): the write blocks on an Event, so the request can only return if it does not wait
+        # for it; the 30 s expiry would make it fail instead of hang.
+        entered, release, expired = threading.Event(), threading.Event(), []
+
         def slow(*a, **k):
-            time.sleep(1.5)
+            entered.set()
+            if not release.wait(30):
+                expired.append(True)
         with mock.patch.object(self.w, "_write_fn", slow):
-            t0 = time.monotonic()
-            st2, _ = self.send("POST", "/feedback/9/reply")
-            took = time.monotonic() - t0
+            try:
+                st2, _ = self.send("POST", "/feedback/9/reply")
+                self.assertFalse(release.is_set())
+                self.assertEqual(expired, [])                              # the write ran off the event loop
+            finally:
+                release.set()
             self.w.drain()
+        self.assertTrue(entered.wait(5))                                   # control: the slow write really ran
         self.assertEqual(st2, st0)
-        self.assertLess(took, 1.0)                                         # the write ran off the event loop
 
     def test_catch_all_exception_is_swallowed(self):
         with mock.patch.object(self.w, "event", side_effect=RuntimeError("bug")):

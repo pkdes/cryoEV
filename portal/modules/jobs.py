@@ -174,28 +174,20 @@ _reg_mod = None
 
 
 def _registry_module():
-    """registry/registry.py, loaded once by path (as portal/app.py does; registry/ is not a package)."""
+    """registry.store (the one registry module object of the process)."""
     global _reg_mod
     if _reg_mod is None:
-        spec = importlib.util.spec_from_file_location("cj_jobs_registry", REPO / "registry" / "registry.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _reg_mod = mod
+        from registry import store
+        _reg_mod = store
     return _reg_mod
 
 
-_actor_mod = None
 
 
 def _actor():
-    """registry/actor.py (label()), loaded once by path like registry.py."""
-    global _actor_mod
-    if _actor_mod is None:
-        spec = importlib.util.spec_from_file_location("cj_jobs_actor", REPO / "registry" / "actor.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _actor_mod = mod
-    return _actor_mod
+    """data_utils/actor.py (label())."""
+    from data_utils import actor
+    return actor
 
 
 def who_label(who, via=None) -> str:
@@ -221,7 +213,7 @@ def href_for(kind, id_, rec_type=None):
     if kind == "review_package":
         return f"/review/{q}/app/" if id_.startswith("pred_") else "/reviews/"
     if kind == "job":
-        return {"train": "/train/", "predict": "/predict/"}.get(rec_type, "/reviews/")
+        return {"train": "/train/", "predict": "/predict/", "eval": "/train/"}.get(rec_type, "/reviews/")
     return None
 
 
@@ -288,7 +280,8 @@ DESK_STATE = {"running": ("running", "run"), "queued": ("waiting", "wait"), "hel
 REG_STATE = {"in_progress": ("in progress", "run"), "ready": ("not started", "wait"), "blocked": ("blocked", "warn"),
              "done": ("done", "ok"), "cancelled": ("cancelled", "off")}
 TYPE_WORD = {"revise": "review", "annotate": "labeling", "check": "check", "train": "training",
-             "predict": "prediction"}
+             "predict": "prediction", "eval": "evaluation"}
+GPU_TYPES = ("train", "predict", "eval")          # registry job types that run on the GPU queue (the training column)
 WATCH_WORD = {"alive": "working normally", "paused": "paused", "waiting for GPU": "waiting for the GPU to be free",
               "waiting": "waiting to start a job", "stale": "status updates have stopped",
               "no watcher": "not set up to run jobs", "stopped": "stopped", "unknown": "status unknown"}
@@ -301,8 +294,10 @@ def hint(rec: dict) -> tuple:
     if st == "blocked":
         return _s(rec.get("blocked_reason")) or "Blocked; no reason was written down.", "registry status: blocked"
     if st == "ready":
-        if typ in ("train", "predict") and where == "desktop":
-            return "Not sent to the GPU computer yet.", "jobs/sync.py push <job> --bundle <zip> --share <queue>"
+        if typ in GPU_TYPES and where == "desktop":
+            return "Not sent to the GPU computer yet.", ("jobs/sync.py push-eval --bundle <zip> --share <queue>"
+                                                         if typ == "eval" else
+                                                         "jobs/sync.py push <job> --bundle <zip> --share <queue>")
         return "Ready to start.", "registry status: ready"
     if st == "in_progress":
         if where == "app":
@@ -310,8 +305,10 @@ def hint(rec: dict) -> tuple:
                     f"review app port {rec.get('port') or 8766}")
         plain = {"annotate": f"Being labeled in {where}.", "revise": f"Being reviewed in {where}.",
                  "train": f"Training on {where}.", "predict": f"Predicting on {where}.",
+                 "eval": f"Scoring a model on {where}.",
                  "check": f"Waiting to be scored on {where}."}.get(typ, f"In progress in {where}.")
-        return plain, ("the run is imported by jobs/sync.py pull" if typ == "train" else "registry status: in_progress")
+        return plain, ("the run is imported by jobs/sync.py pull" if typ == "train" else
+                       "the metrics are pulled by jobs/sync.py pull" if typ == "eval" else "registry status: in_progress")
     if st == "done":
         return "Done.", None
     if st == "cancelled":
@@ -424,12 +421,14 @@ def summary(cfg, user: dict, can_see, now=None) -> dict:
                               "reason": f"{len(waiting)} waiting job(s) will not start until it is resumed.",
                               "tech": (wdet or "STOP is set") + "; jobs/sync.py start resumes it", "stale": stale})
         if _s(r.get("job")):
-            kind = "predict" if r.get("kind") == "predict" else "train"
+            kind = r.get("kind") if r.get("kind") in ("predict", "eval") else "train"
             if kind == "predict":
                 done, total, unit = _i(r.get("n_done")), _i(r.get("n_total")), "images"
+            elif kind == "eval":                        # one Ultralytics val: no progress counter
+                done, total, unit = None, _i(r.get("n_total")), "images"
             else:
                 done, total, unit = _i(r.get("epoch")), _i(r.get("epochs")), "epochs"
-            phase = _s(r.get("phase")) or ("predicting" if kind == "predict" else "training")
+            phase = _s(r.get("phase")) or {"predict": "predicting", "eval": "evaluating"}.get(kind, "training")
             hung = bool(r.get("hung"))
             hung_text = hung_tech = None
             if hung and kind == "train":
@@ -719,7 +718,7 @@ def build_flow(cfg, user, admin, can_see, live, queues, running, queue, review, 
         rev.append(_item("review_package", pid, title,
                          (_s(rec.get("model")), rec.get("n_images") and f"{rec['n_images']} images"),
                          link="Open review", who=_s(rec.get("owner")),
-                         via=_s(rec.get("via") or rec.get("created_via")),
+                         via=_s(_actor().via_of(rec, "owner")),
                          chip_="in review" if busy else "ready to review", tone="run" if busy else "wait"))
     for r in pkgs or []:
         if r["status"] == "applied":
@@ -732,7 +731,7 @@ def build_flow(cfg, user, admin, can_see, live, queues, running, queue, review, 
                          link="Open review", who=r.get("who"), via=r.get("via"),
                          prog=(r["decided"], r["cards"]), chip_=label, tone=tone))
     for x in review:
-        if x["type"] in ("train", "predict"):
+        if x["type"] in GPU_TYPES:
             continue
         if x["private"]:
             rev.append(_item("job", None, x["name"], note="Details hidden.", chip_=x["label"], tone=x["tone"],
@@ -790,7 +789,7 @@ def build_flow(cfg, user, admin, can_see, live, queues, running, queue, review, 
                         chip_=x["label"], tone=x["tone"], note=x["note"], act=x, desk=True,
                         pos=x["position"] or "bullet", tech_=x.get("tech")))
     for x in review:
-        if x["type"] in ("train", "predict") and not x["private"]:
+        if x["type"] in GPU_TYPES and not x["private"]:
             tr.append(_item("job", x["id"], x["name"], (x["type_label"],), who=x["who"], via=x["via"],
                             rec_type=x["type"], chip_=x["label"], tone=x["tone"], note=x["hint"]))
     for c in COLUMNS:
@@ -1214,10 +1213,8 @@ def valid_job_id(job) -> bool:
     """registry/ids.py is_id("job", ...): job_<yyyymmdd>_<name>, so no slash, dot or '..'."""
     global _ids_mod
     if _ids_mod is None:
-        spec = importlib.util.spec_from_file_location("cj_jobs_ids", REPO / "registry" / "ids.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _ids_mod = mod
+        from registry import ids
+        _ids_mod = ids
     return isinstance(job, str) and len(job) <= MAX_JOB_ID and _ids_mod.is_id("job", job)
 
 
@@ -1231,11 +1228,15 @@ def audit_path(cfg) -> Path:
     return PA.audit_path(cfg.state_dir)
 
 
-def audit(cfg, actor, action, job, reason, result):
-    """One line through portal/audit.py. Raises OSError if it can't be written. A request writes "requested" BEFORE
-    the share is touched (write-ahead: no line, nothing done), then a second line with the outcome."""
-    PA.audit(cfg.state_dir, actor, action, job,
-             {"reason": reason, "result": result, "phase": "requested" if result == "requested" else "result"})
+def audit(cfg, actor, action, job, reason, result, request=None):
+    """One line through portal/audit.py: a thin adapter (round 11 #3), PA.event with the request (a bearer request's
+    agent rides along as detail.via), else PA.audit. Raises OSError if it can't be written. A request writes
+    "requested" BEFORE the share is touched (write-ahead: no line, nothing done), then a second line with the outcome."""
+    detail = {"reason": reason, "result": result, "phase": "requested" if result == "requested" else "result"}
+    if request is None:
+        PA.audit(cfg.state_dir, actor, action, job, detail)
+    elif not PA.event(cfg.state_dir, request, action, job, detail, actor=actor):
+        raise OSError("the audit line was not written")
 
 
 def job_lock(job) -> threading.Lock:

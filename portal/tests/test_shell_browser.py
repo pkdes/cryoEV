@@ -19,8 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cjtest as T  # noqa: E402
 from portal import auth as A  # noqa: E402
 
-sys.path.insert(0, str(T.REPO / "registry"))
-import history_page as hp  # noqa: E402
+from registry import history_page as hp  # noqa: E402
 
 try:
     from playwright.sync_api import sync_playwright
@@ -32,6 +31,10 @@ PAGES = (("home", "/"), ("history", "/history/history.html"), ("review", "/revie
 CONTENT = {"home": "main.cj-main", "history": "body > header"}      # the first thing under the bar
 _MODS = __import__("json").loads((__import__("pathlib").Path(__file__).resolve().parents[1] / "modules.json")
                                  .read_text(encoding="utf-8"))["modules"]
+
+
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
 
 
 def _on(role):
@@ -57,6 +60,7 @@ def launch(p):
     return None
 
 
+@browser
 class Shell(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -18,10 +18,10 @@ from collections import Counter
 from pathlib import Path
 
 REG = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REG))
-import ids  # noqa: E402
-import importers  # noqa: E402
-import registry  # noqa: E402
+sys.path.insert(0, str(REG.parent))                   # the repo root: `from registry import ...`
+from registry import ids  # noqa: E402
+from registry import importers  # noqa: E402
+from registry import store as registry  # noqa: E402
 
 V5, V5S1, V4 = "roboflow - 20261028 cryoai v5", "roboflow - 20261028 cryoai v5 S1", "roboflow - 20260924 cryoai v4"
 V5DS = "roboflow_20261028_cryoai_v5_S1_evnonev"

@@ -15,10 +15,14 @@ detail.
 `Writer` is the Gate's catch-all (portal/app.py, round 9 #17): one line per portal write, written by one worker
 thread so a slow or locked log never blocks the event loop and a failed write never fails the request (logged).
 Frequent routes (upload chunks, review saves and claims, gallery marks) are grouped per actor x action x target
-(x status) in WINDOW_S windows: the first event is written at once, then one counter line with detail {from, to, n} (n = every
-event in the window, the first included; only when n > 1) when the window closes, on the next sweep, or at shutdown.
-A crash loses only the count, never the fact. Sign-ins: the first per person per day per door (in memory: a
-restart may log one more).
+(x status x via) in WINDOW_S windows: the first event is written at once, then one counter line with detail {from, to, n}
+(n = every event in the window, the first included; only when n > 1; plus status and via) when the window closes, on
+the next sweep, or at shutdown. A crash loses only the count, never the fact. Sign-ins: the first per person per day
+per door per agent (in memory: a restart may log one more).
+
+Agent tokens (round 10 #60): a request the Gate verified by bearer token carries detail.via = the token's agent on
+its lines (the window key and the counter line too) and signs in on API_DOOR, so Admin shows "<agent> for
+<person>" with the AI tag and never "unverified" (the portal checked the token).
 """
 from __future__ import annotations
 
@@ -45,24 +49,21 @@ TAIL_BYTES = 2 * 1024 * 1024
 WINDOW_S = 600                   # frequent routes: one counter line per actor x action x target per 10 min
 MAX_PENDING = 2000               # queued writes beyond this are dropped (logged): a stuck lock never eats memory
 MAX_WINDOWS = 5000               # open counting windows; beyond this, new keys fold into OVERFLOW_KEY (still counted)
-OVERFLOW_KEY = ("-", "other frequent actions (window table full)", None, None)
+OVERFLOW_KEY = ("-", "other frequent actions (window table full)", None, None, None)
 CLI_FILE = "agent_actions.jsonl"     # the laptop CLI's own log (self-declared identity), read via CJ_AUDIT_EXTRA
 CLI_DOOR = "laptop CLI (unverified)"
+CLI_ACTOR = "cli"                    # the actor of portal.auth CLI lines (a reserved person id: never a person)
 DOOR_NAMES = {"key": "tailnet key", "access": "access"}   # this portal's door, by its --auth mode
+API_DOOR = "API (verified)"                               # bearer-token requests (portal/app.py Gate)
 _lock = threading.Lock()
 log = logging.getLogger("cj.audit")
 
 
 def actor_module():
-    """registry/actor.py (who / via, label, strip_env), loaded by its file path: the name `registry` may already be
-    registry/registry.py in a process that put registry/ on sys.path."""
-    m = sys.modules.get("cj_registry_actor")
-    if m is None:
-        spec = importlib.util.spec_from_file_location("cj_registry_actor", REPO / "registry" / "actor.py")
-        m = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(m)
-        sys.modules["cj_registry_actor"] = m
-    return m
+    """The attribution helpers (data_utils/actor.py: who / via, label, strip_env). A normal package import since
+    round 10; before, registry/actor.py was loaded by file path because `registry` could be registry/registry.py."""
+    from data_utils import actor
+    return actor
 
 
 def audit_path(state_dir) -> Path:
@@ -101,6 +102,46 @@ def audit(state_dir, actor, action, target, detail=None) -> dict:
         finally:
             lk.close()
     return rec
+
+
+def scope_of(request_or_scope) -> dict:
+    """A Starlette Request, an ASGI scope dict, or None -> the scope dict ({} for None)."""
+    if request_or_scope is None:
+        return {}
+    if isinstance(request_or_scope, dict):
+        return request_or_scope
+    return getattr(request_or_scope, "scope", None) or {}
+
+
+def request_via(request_or_scope) -> str | None:
+    """The agent acting for the signed-in person: the bearer token's agent the Gate verified (scope cj_via), only
+    on a bearer request. None for a browser (and for anything without a scope)."""
+    scope = scope_of(request_or_scope)
+    return scope.get("cj_via") if scope.get("cj_auth") == "bearer" else None
+
+
+def event(state_dir, request_or_scope, action, target, detail=None, *, actor=None, log_to=None) -> bool:
+    """The one audit helper for modules (round 11 #3): the actor is the signed-in person (scope cj_user) unless
+    `actor` is given; a bearer request's agent rides along as detail.via (so Admin shows "<agent> for <person>").
+    Never raises: a missing state folder or an unwritable log is logged (to `log_to`, a logging.Logger, else this
+    module's) and returns False; the caller's action is never undone. -> True when the line was written.
+    A route whose handler logs itself through this must be in portal/app.py SELF_LOGGED, or each write is logged
+    twice (the Gate's catch-all writes one too)."""
+    lg = log_to or log
+    try:
+        scope = scope_of(request_or_scope)
+        who = actor if actor is not None else ((scope.get("cj_user") or {}).get("id") or "-")
+        via = request_via(scope)
+        if via:
+            detail = {**(detail if isinstance(detail, dict) else
+                         ({} if detail is None else {"detail": detail})), "via": via}
+        if not state_dir:
+            raise OSError("the portal has no state folder configured")
+        audit(state_dir, who, action, target, detail)
+        return True
+    except OSError as e:
+        lg.error("audit: %s on %s not written (%s: %s)", action, target, type(e).__name__, e)
+        return False
 
 
 def normalise(rec: dict) -> dict:
@@ -233,8 +274,8 @@ class Writer:
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cj-audit")
         self._mu = threading.Lock()
         self._pending = 0
-        self._windows = {}           # (actor, action, target, status) -> {"start", "last", "n"}
-        self._signins = {}           # (actor, door) -> "YYYY-MM-DD" (UTC) of the last sign-in line
+        self._windows = {}           # (actor, action, target, status, via) -> {"start", "last", "n"}
+        self._signins = {}           # (actor, door, via) -> "YYYY-MM-DD" (UTC) of the last sign-in line
         self.failed = 0
         self.dropped = 0
         self.closed = False
@@ -284,7 +325,8 @@ class Writer:
             return
         now = self.clock()
         status = detail.get("status") if isinstance(detail, dict) else None
-        key = (actor, action, target, status)          # done and refused are counted apart
+        via = detail.get("via") if isinstance(detail, dict) else None
+        key = (actor, action, target, status, via)     # done and refused (and each agent) are counted apart
         closed = None
         with self._mu:
             if key not in self._windows and len(self._windows) >= self.max_windows:
@@ -304,10 +346,12 @@ class Writer:
 
     def _count(self, key, w) -> None:
         if w["n"] > 1:
-            actor, action, target, status = key
+            actor, action, target, status, via = key
             d = {"from": _iso(w["start"]), "to": _iso(w["last"]), "n": w["n"]}
             if status is not None:
                 d["status"] = status
+            if via is not None:
+                d["via"] = via
             self.submit(actor, action, target, d)
 
     def sweep(self, now=None) -> int:
@@ -330,18 +374,21 @@ class Writer:
             self._count(k, w)
         return len(due)
 
-    def signin(self, actor, door, how=None) -> bool:
-        """The first sign-in per person per (UTC) day per door. -> True when a line was queued."""
+    def signin(self, actor, door, how=None, via=None) -> bool:
+        """The first sign-in per person per (UTC) day per door per agent (via: the bearer token's agent). -> True
+        when a line was queued."""
         if not actor:
             return False
         day = _iso(self.clock())[:10]
         with self._mu:
-            if self._signins.get((actor, door)) == day:
+            if self._signins.get((actor, door, via)) == day:
                 return False
-            self._signins[(actor, door)] = day
+            self._signins[(actor, door, via)] = day
         detail = {"door": door}
         if how:
             detail["how"] = how
+        if via:
+            detail["via"] = via
         return self.submit(actor, "signed in", None, detail)
 
     # -- life

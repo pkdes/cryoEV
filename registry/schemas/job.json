@@ -20,7 +20,8 @@
     "revise",
     "train",
     "check",
-    "predict"
+    "predict",
+    "eval"
    ]
   },
   "where": {

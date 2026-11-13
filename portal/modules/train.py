@@ -181,13 +181,11 @@ def is_admin(user) -> bool:
 
 # ---------------------------------------------------------------- registry (read; the one write is new_job)
 def registry_module():
-    """registry/registry.py, loaded once by path (registry/ is not a package; it puts its own folder on sys.path)."""
+    """registry.store (the one registry module object of the process)."""
     global _reg_mod
     if _reg_mod is None:
-        spec = importlib.util.spec_from_file_location("cj_train_registry", REPO / "registry" / "registry.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _reg_mod = mod
+        from registry import store
+        _reg_mod = store
     return _reg_mod
 
 
@@ -586,11 +584,16 @@ def next_steps(cfg, p: dict) -> list:
 
 
 # ---------------------------------------------------------------- queue (the one write)
-def audit(cfg, uid, job, p: dict, phase: str, result=None, send=None):
-    PA.audit(cfg.state_dir, uid, "train_queue", job,
-             {"dataset": p["dataset"], "base": p["base"], "preset": p["preset"], "where": p["where"],
+def audit(cfg, uid, job, p: dict, phase: str, result=None, send=None, request=None):
+    """One train_queue line: a thin adapter over portal/audit.py (round 11 #3), PA.event with the request (a bearer
+    request's agent rides along as detail.via), else PA.audit. Raises OSError if it can't be written (write-ahead)."""
+    detail = {"dataset": p["dataset"], "base": p["base"], "preset": p["preset"], "where": p["where"],
               "epochs": p["epochs"], "imgsz": p["imgsz"], "seed": p["seed"], "max_hours": p["max_hours"],
-              "phase": phase, "result": result, "send": send})
+              "phase": phase, "result": result, "send": send}
+    if request is None:
+        PA.audit(cfg.state_dir, uid, "train_queue", job, detail)
+    elif not PA.event(cfg.state_dir, request, "train_queue", job, detail, actor=uid):
+        raise OSError("the audit line was not written")
 
 
 def sync_module():

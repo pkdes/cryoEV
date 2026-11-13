@@ -1,5 +1,7 @@
 """predict new <args>: a new prediction set through `jobs/predict_set.py create <args>` (the args go there unchanged;
-`python -m jobs.predict_set create --help` lists them).
+`python -m jobs.predict_set create --help` lists them). A set made in an unusual way (tiling, resampling, a subset)
+also takes --note TEXT and --provenance FILE.json (jobs/predict_set.py's module doc); with --manifest the set keeps a
+byte-identical source_manifest.csv.
 
 Dry run (default): predict_set's own --dry-run: every check create makes (images by content, nm/px, sample labels,
 the model, the registry record), then the plan; nothing is written. --do: create for real (the set folder under
@@ -10,7 +12,10 @@ from __future__ import annotations
 
 from cryoev import common as CM
 
-READ_SOURCES = ("--from-dir", "--manifest", "--only")   # read only: Box refused; Cryo-image-processing allowed
+READ_SOURCES = ("--from-dir", "--manifest", "--only", "--provenance")   # read only: Box refused;
+                                                    # Cryo-image-processing allowed
+TEXT_VALUES = ("--note",)                           # free text, never a path: Box refused (as every value), but
+                                                    # not the write-path check (a note may name a processing folder)
 OWN = {"--do": 0, "--who": 1}                       # this CLI's flags (number of values) taken out of the args
 
 
@@ -43,8 +48,9 @@ def check_args(args) -> list:
     """The user's args for `predict_set create`, normalised and checked: every option must be an EXACT create option
     (predict_set's own parser; abbreviations such as --from or --man are refused, since argparse would expand them);
     `--dry-run` is dropped (only this CLI adds it); every value is refused under Box, and the values of the flags
-    that write (--root, --registry, and anything that is not a read source) under any protected root
-    (data_utils/path_guard.py). -> the args to forward. Raises Refused (Box) or CliError."""
+    that write (--root, --registry, and anything that is not a read source or free text) under any protected root
+    (data_utils/path_guard.py). Read sources: --from-dir, --manifest, --only, --provenance. -> the args to forward.
+    Raises Refused (Box) or CliError."""
     from jobs import predict_set as PS
     opts = PS.create_options()
     out, i = [], 0
@@ -76,7 +82,7 @@ def check_args(args) -> list:
         problem = CM.box_problem(value)
         if problem:
             raise CM.Refused(f"refused: {key} {problem}. Nothing under Box is read or written by agents ({CM.GUIDE}).")
-        if key not in READ_SOURCES:
+        if key not in READ_SOURCES and key not in TEXT_VALUES:
             problem = CM.path_guard.protected_problem(value)
             if problem:
                 raise CM.CliError(f"refused: {key} {problem}")

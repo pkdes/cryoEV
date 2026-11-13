@@ -321,22 +321,27 @@ def build_review(cfg, d: Path):
     root.mkdir(parents=True, exist_ok=True)
     pkg = PP.build(d, root)
     PP.spot_check(pkg, n=SPOT_N, seed=0, write=True, mode="representative")
-    register_package(cfg, pkg)
+    req = _read_json(d / PS.REQUEST) or {}
+    register_package(cfg, pkg, owner_via=req.get("owner_via") if isinstance(req, dict) else None)
     return pkg
 
 
 REVIEW_PACKAGE_LOCK = ".review_package.lock"     # in the registry folder: read + append, as predict_set's lock
 
 
-def register_package(cfg, pkg: Path):
+def register_package(cfg, pkg: Path, owner_via=None):
     """Append the package's registry line (its own review_package.json, prediction_package.registry_record) unless
-    the registry already has that id, under a registry-folder lock (check + append as one step)."""
+    the registry already has that id, under a registry-folder lock (check + append as one step). owner_via: the
+    agent that made the set for its owner (request.json, round 11 #65), copied onto the line so the Jobs board shows
+    "<agent> for <owner>" on the package too."""
     reg = registry_root(cfg)
     if reg is None:
         return None
     rec = _read_json(pkg / "review_package.json")
     if not isinstance(rec, dict) or not rec.get("id"):
         raise ValueError(f"{pkg.name}: review_package.json missing or unreadable")
+    if isinstance(owner_via, str) and owner_via:
+        rec["owner_via"] = owner_via
     regm = PS.registry_module()
     with PS.locked(Path(reg) / REVIEW_PACKAGE_LOCK):
         if rec["id"] in regm.current("review_package", reg):

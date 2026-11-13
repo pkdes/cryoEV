@@ -220,6 +220,49 @@ class Round9QC(F.Platform):
         self.assertEqual(out.count("--dry-run"), 1)
         self.assertEqual(self.snapshot(), before)
 
+    def test_predict_note_and_provenance(self):
+        """Round 11b: --note and --provenance are exact create options; --provenance and --manifest are read sources
+        (Box refused, a protected processing folder allowed for reading); --note is text (Box refused, no write-path
+        check); abbreviations refused. The dry run writes nothing; --do stores both."""
+        from cryoev import common as CM
+        from cryoev.commands import predict as P
+        prov = self.tmp / "provenance.json"
+        prov.write_text(json.dumps({"steps": ["cut 1440 px tiles at native resolution"],
+                                    "tiling": {"tile_px": 1440, "overlap_frac": 0.2, "nm_per_px": 0.368,
+                                               "downsample": 1}}), encoding="utf-8")
+        extra = ["--note", "native tiles, no downsampling", "--provenance", str(prov)]
+        self.assertEqual(P.check_args(self.predict_args + extra), self.predict_args + extra)
+        processing = path_guard.PROTECTED_ROOTS[0] / "x" / "provenance.json"      # a read source: allowed
+        self.assertEqual(P.check_args(["--provenance", str(processing)]), ["--provenance", str(processing)])
+        note = f"tiles from {path_guard.PROTECTED_ROOTS[0] / 'x'}"                   # text: no write-path check
+        self.assertEqual(P.check_args(["--note", note]), ["--note", note])
+        with self.assertRaises(CM.CliError):                                          # control: a write flag is
+            P.check_args(["--root", str(processing)])                                 # still checked
+        for key in ("--provenance", "--manifest", "--note"):
+            with self.subTest(key=key), self.assertRaises(CM.Refused):
+                P.check_args([key, str(self.box() / "provenance.json")])
+        for abbrev in ("--prov", "--not"):
+            with self.subTest(abbrev=abbrev), self.assertRaises(CM.CliError):
+                P.check_args([abbrev, "x"])
+        before = self.snapshot()
+        rc, out, err = self.cli("predict", "new", *self.predict_args, *extra)
+        self.assertEqual(rc, 0, err)
+        self.assertIn('"note": "native tiles, no downsampling"', out)
+        self.assertEqual(self.snapshot(), before)
+        bad = self.tmp / "bad.json"
+        bad.write_text('{"colour": "blue"}', encoding="utf-8")
+        rc, out, err = self.cli("predict", "new", *self.predict_args, "--provenance", str(bad))
+        self.assertEqual(rc, 2, err)
+        self.assertIn("unknown key 'colour'", err)
+        with self.as_agent():
+            rc, out, err = self.cli("predict", "new", *self.predict_args, *extra, "--do")
+        self.assertEqual(rc, 0, err)
+        rec = [json.loads(ln) for ln in (self.reg / "prediction_set.jsonl").read_text(encoding="utf-8").splitlines()][-1]
+        self.assertEqual(rec["note"], "native tiles, no downsampling")
+        self.assertEqual(rec["provenance"]["tiling"]["tile_px"], 1440)
+        ps_dir = self.lap / "predict" / rec["id"]
+        self.assertEqual((ps_dir / "source_manifest.csv").read_bytes(), (self.src / "MANIFEST.csv").read_bytes())
+
     def test_pull_source_under_box_refused(self):
         lv_dir = self.home / "Box" / "labels" / "lv_20261112_0000"         # this test's home: Path.home()/Box
         lv_dir.mkdir(parents=True)

@@ -59,15 +59,19 @@ import json
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-REPO = HERE.parent
-sys.path.insert(0, str(REPO))
-if str(HERE) not in sys.path:
-    sys.path.insert(1, str(HERE))
+if __name__ == "__main__":     # run by path: registry/ off sys.path (it would shadow the package), the repo on it
+    import os as _os
+    _here = _os.path.dirname(_os.path.abspath(__file__))
+    sys.path[:] = [p for p in sys.path if _os.path.normcase(_os.path.abspath(p or ".")) != _os.path.normcase(_here)]
+    sys.path.insert(0, _os.path.dirname(_here))
+
+from data_utils import actor  # noqa: E402  (pure helper: the "claude for pujan" display form)
 from data_utils import config  # noqa: E402
 from data_utils.path_guard import protected_problem  # noqa: E402
-from ids import image_key  # noqa: E402  (pure helper, no I/O)
-import actor  # noqa: E402  (pure helper: the "claude for pujan" display form)
+from registry.ids import image_key  # noqa: E402  (pure helper, no I/O)
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent
 
 # Default registry: config.registry_root() (one <entity>.jsonl per entity; every *.jsonl in it is read),
 # resolved in main() so importing this module never needs the data folders. Default page: <registry>/history.html
@@ -106,7 +110,7 @@ EXCLUDED_LABEL = {"20261012": "20261012 lipo"}                  # sessions left 
 
 
 # ---------------------------------------------------------------- reading
-# Own small reader with the same semantics as registry/registry.py (piece 4): last line per id wins, plus
+# Own small reader with the same semantics as registry.store (piece 4): last line per id wins, plus
 # the history list. It can switch to registry.current() / registry.history(id) once that module lands.
 
 def entity_of(rec: dict) -> str | None:

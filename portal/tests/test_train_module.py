@@ -58,11 +58,8 @@ PRED_JOB = "job_20261105_pred_other"
 UNKNOWN_JOB = "job_20261105_not_in_registry"
 
 
-def jl(path: Path, recs):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8", newline="\n") as f:
-        for r in recs:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
 
 
 def build_registry(root: Path):
@@ -71,7 +68,7 @@ def build_registry(root: Path):
     (root / "lists").mkdir(parents=True, exist_ok=True)
     (root / "lists" / "ds_test_v1.tsv").write_text(lst, encoding="utf-8", newline="\n")
     sha = hashlib.sha256(lst.encode()).hexdigest()
-    jl(root / "dataset.jsonl", [
+    T.TK.write_registry(root, {"dataset": [
         {"schema": "dataset/1", "id": "ds_test_v1", "created": "2026-10-28T00:00:00", "logged": "2026-10-30T09:00:00",
          "source": {"kind": "roboflow_export", "id": EVIL_EXPORT}, "export": EVIL_EXPORT,
          "split": {"method": "split file"}, "counts": {"train": {"images": 6}, "valid": {"images": 2}},
@@ -91,8 +88,8 @@ def build_registry(root: Path):
          "image_list": {"file": "lists/ds_test_v1.tsv", "sha256": sha, "n": 11}},
         {"schema": "dataset/1", "id": "ds_escape", "created": "2026-08-01T00:00:00", "logged": "2026-08-01T09:00:00",
          "source": {"kind": "roboflow_export", "id": "y"}, "split": {}, "counts": {}, "classes": [],
-         "images_sha256": None, "status": "trained", "image_list": {"file": "../outside.tsv", "n": 1}}])
-    jl(root / "run.jsonl", [
+         "images_sha256": None, "status": "trained", "image_list": {"file": "../outside.tsv", "n": 1}}]}, samples=False)
+    T.TK.write_registry(root, {"run": [
         {"schema": "run/1", "id": "run_prod", "dataset": "ds_test_v1", "status": "finished",
          "started": "2026-10-29T05:48:10", "config": {"arch": "yolov8m-seg", "imgsz": 1440, "batch": 8,
                                                      "epochs": 300, "patience": 300, "rect": False},
@@ -108,15 +105,15 @@ def build_registry(root: Path):
          "config": {"arch": "yolov8n-seg", "imgsz": 640, "batch": 4, "epochs": 3},
          "metrics": {"mask_map50": 0.5, "mask_map50_95": 0.3}, "logged": "2026-10-30T09:00:00"},
         {"schema": "run/1", "id": "run_nodate", "dataset": "ds_test_v1", "status": "finished",
-         "config": {"arch": "yolov8n-seg", "imgsz": 640}, "logged": "2026-06-30T09:00:00"}])
-    jl(root / "model.jsonl", [
+         "config": {"arch": "yolov8n-seg", "imgsz": 640}, "logged": "2026-06-30T09:00:00"}]}, samples=False)
+    T.TK.write_registry(root, {"model": [
         {"schema": "model/1", "id": SMALL, "run": "run_small", "dataset": "ds_test_v1",
          "weights": f"models/{SMALL}/best.pt", "status": "registered", "logged": "2026-10-30T09:00:00"},
         {"schema": "model/1", "id": PROD, "run": "run_prod", "dataset": "ds_test_v1",
          "weights": f"models/{PROD}/best.pt", "status": "production", "logged": "2026-10-30T09:00:01"},
         {"schema": "model/1", "id": EVIL_MODEL, "run": None, "weights": "models/none/best.pt",
-         "status": "registered", "logged": "2026-10-30T09:00:02"}])
-    jl(root / "job.jsonl", [
+         "status": "registered", "logged": "2026-10-30T09:00:02"}]}, samples=False)
+    T.TK.write_registry(root, {"job": [
         {"schema": "job/1", "id": "job_20261104_demo_seed1", "logged": "2026-11-05T10:58:35", "name": "demo_seed1",
          "type": "train", "where": "desktop", "status": "done", "n_images": 10, "who": None, "inputs": [],
          "outputs": [], "note": "run run_seed1 (gpu-desktop)"},
@@ -131,7 +128,7 @@ def build_registry(root: Path):
          "inputs": [], "outputs": []},
         {"schema": "job/1", "id": f"job_{TODAY}_taken", "logged": "2026-11-05T10:00:00", "name": "taken",
          "type": "train", "where": "desktop", "status": "ready", "n_images": 10, "who": None, "inputs": [],
-         "outputs": []}])
+         "outputs": []}]}, samples=False)
 
 
 def snap(*dirs) -> dict:
@@ -861,6 +858,7 @@ def launch(p):
     return None
 
 
+@browser
 class Browser(Base):
     @classmethod
     def setUpClass(cls):

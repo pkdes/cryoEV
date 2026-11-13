@@ -11,7 +11,7 @@ from pathlib import Path
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 ANNOTATIONS = {"$schema", "$id", "title", "description"}
 SUPPORTED = ANNOTATIONS | {"type", "properties", "required", "additionalProperties", "items", "enum", "const",
-                           "pattern", "minimum", "uniqueItems"}
+                           "pattern", "minimum", "uniqueItems", "maxLength", "maxItems", "minProperties"}
 TYPES = {"string": str, "integer": int, "number": (int, float), "boolean": bool, "object": dict,
          "array": list, "null": type(None)}
 
@@ -47,6 +47,12 @@ def errors(value, schema, path="$"):
     if isinstance(value, (int, float)) and not isinstance(value, bool) and "minimum" in schema \
             and value < schema["minimum"]:
         out.append(f"{path}: {value} < minimum {schema['minimum']}")
+    if isinstance(value, str) and "maxLength" in schema and len(value) > schema["maxLength"]:
+        out.append(f"{path}: {len(value)} characters > maxLength {schema['maxLength']}")
+    if isinstance(value, list) and "maxItems" in schema and len(value) > schema["maxItems"]:
+        out.append(f"{path}: {len(value)} items > maxItems {schema['maxItems']}")
+    if isinstance(value, dict) and "minProperties" in schema and len(value) < schema["minProperties"]:
+        out.append(f"{path}: {len(value)} properties < minProperties {schema['minProperties']}")
     if isinstance(value, dict):
         props = schema.get("properties", {})
         for k in schema.get("required", []):

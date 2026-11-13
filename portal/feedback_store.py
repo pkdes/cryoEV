@@ -41,7 +41,7 @@ STATUSES = ("New", "Planned", "In progress", "Done", "Won't do")
 TEXT_MAX, STEPS_MAX, REPLY_MAX, PAGE_MAX = 4000, 4000, 2000, 200
 DAILY_MAX = 20
 LOCK_WAIT_S = 5.0
-VIA_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")    # = registry/actor.py VIA_RE (an agent id, e.g. "claude")
+VIA_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}\Z")    # = registry/actor.py VIA_RE (an agent id, e.g. "claude")
 _lock = threading.Lock()
 
 

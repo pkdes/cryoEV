@@ -456,7 +456,7 @@ class Followups(Base):
         self.assertEqual(once, solo)                                      # the re-conversion adds nothing
         self.assertTrue(once and once[0] > 0)
         # the schema accepts the key
-        from registry import registry as REG
+        from registry import store as REG
         probe = {"schema": "session/1", "id": "20261101", "logged": "2026-11-09T00:00:00", "status": "processed",
                  "conversions": [e1, e2]}
         self.assertEqual(REG.check_record(probe, REG.schemas()), [])

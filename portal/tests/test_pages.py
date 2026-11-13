@@ -19,13 +19,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cjtest as T  # noqa: E402
 
-sys.path.insert(0, str(T.REPO / "registry"))
-import history_page as hp  # noqa: E402
+from registry import history_page as hp  # noqa: E402
 
 try:
     from playwright.sync_api import sync_playwright
 except ImportError:  # pragma: no cover
     sync_playwright = None
+
+
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
 
 
 def launch(p):
@@ -45,6 +48,7 @@ NAV_LINKS = [m["name"] for m in _MODS if m.get("nav") and m["status"] == "on" an
 NAV_ALL = ["Home", "Data", "Jobs", "Gallery", "Predict", "Label review", "Results", "My reviews", "Train", "Admin", "Sandbox"]   # + greyed "coming"
 
 
+@browser
 class Pages(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

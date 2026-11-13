@@ -8,6 +8,8 @@ Never touches the real registry or CryoAI-laptop (CRYOEV_LAPTOP_ROOT points at a
 shared by test_predict_local.py and test_predict_desktop.py.
 """
 import csv
+import contextlib
+import io
 import os
 import shutil
 import subprocess
@@ -20,9 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import jobtest as T  # noqa: E402
 from jobtest import C  # noqa: E402
 
-sys.path.insert(0, str(T.REPO / "registry"))
 import predict_set as PS  # noqa: E402
-import registry  # noqa: E402
+from registry import store as registry  # noqa: E402
 
 GOLDEN = T.REPO / "tests" / "fixtures" / "cj_golden" / "predict" / "ps_20261105_abc123"
 MODEL = "v5_evnonev_y8m_20261029"
@@ -30,6 +31,7 @@ GOLDEN_PRED = GOLDEN / "p" / MODEL / "predictions"
 FAKE_PRED = [sys.executable, str(T.TESTS / "fake_predictor.py")]
 STATUS_KEYS = set(PS.STATUS_KEYS)              # the contract keys + pid, waiting
 REQUEST_KEYS = {"ps", "owner", "model", "conf", "max_det", "imgsz", "source", "created"}
+OPTIONAL_REQUEST_KEYS = {"name", "owner_via", "nm_confirmed_via", "note", "provenance", "source_manifest"}
 
 
 def png(path, size=(64, 48), mode="L", value=128):
@@ -41,6 +43,11 @@ def png(path, size=(64, 48), mode="L", value=128):
 def assert_contract_layout(tc, ps_dir: Path, model=MODEL, done=True):
     """The prediction_set folder exactly as BUILD_CONTRACTS.md section 2 (+ predict.log, the predictor's log)."""
     allowed = {"images", "images.csv", "request.json", "status.json", C.PREDICT_LOG} | ({C.PS_PRED} if done else set())
+    req = C.read_json(ps_dir / "request.json")
+    if "source_manifest" in req:                       # round 11b: a byte-identical copy of --manifest
+        allowed.add(PS.SOURCE_MANIFEST)
+        tc.assertEqual(req["source_manifest"], PS.SOURCE_MANIFEST)
+        tc.assertTrue((ps_dir / PS.SOURCE_MANIFEST).is_file())
     names = {p.name for p in ps_dir.iterdir()}
     tc.assertTrue(names <= allowed, f"unexpected entries {names - allowed}")
     tc.assertTrue({"images", "images.csv", "request.json", "status.json"} <= names)
@@ -50,7 +57,7 @@ def assert_contract_layout(tc, ps_dir: Path, model=MODEL, done=True):
         rows = list(csv.DictReader(f))
     tc.assertEqual(list(rows[0]), PS.CSV_COLUMNS)
     tc.assertEqual([r["file"] for r in rows], [f"images/{n}" for n in imgs])
-    tc.assertEqual(set(C.read_json(ps_dir / "request.json")), REQUEST_KEYS)
+    tc.assertTrue(REQUEST_KEYS <= set(req) <= REQUEST_KEYS | OPTIONAL_REQUEST_KEYS, set(req))
     st = C.read_json(ps_dir / "status.json")
     tc.assertEqual(set(st), STATUS_KEYS)
     if done:
@@ -96,6 +103,49 @@ class PredictRoots(T.TempRoots):
         self.assertFalse(self.root.exists() and any(p.name.startswith("ps_") for p in self.root.iterdir()))
         self.assertFalse((self.root / PS.INCOMING).exists() and any((self.root / PS.INCOMING).iterdir()))
         self.assertFalse((self.reg / "prediction_set.jsonl").exists())
+
+
+class CliVia(PredictRoots, unittest.TestCase):
+    """TODO #70: `predict_set create` from an agent session (CRYOEV_VIA set) stamps owner_via / nm_confirmed_via, as
+    the portal's write tokens do, and it survives a later status line; without the env nothing is stamped."""
+
+    def argv(self):
+        return ["create", "--from-dir", str(self.src), "--manifest", str(self.manifest), "--model", MODEL,
+                "--owner", "pujan", "--sample-label-from", "manifest:sample_label", "--nm-from-manifest",
+                "--nm-confirmed-by", "pujan", "--registry", str(self.reg), "--root", str(self.root)]
+
+    def made(self):
+        return sorted(p for p in self.root.iterdir() if p.name.startswith("ps_"))
+
+    def test_agent_env_stamps_owner_via(self):
+        with mock.patch.dict(os.environ, {"CRYOEV_VIA": "claude"}), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(PS.main(self.argv()), 0)
+        (ps,) = self.made()
+        req = C.read_json(ps / "request.json")
+        self.assertEqual((req["owner_via"], req["nm_confirmed_via"]), ("claude", "claude"))
+        rec = registry.current("prediction_set", self.reg)[ps.name]
+        self.assertEqual((rec["owner_via"], rec.get("via")), ("claude", "claude"))
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CRYOEV_VIA", None)
+            PS.update_record(ps.name, status="running", registry_root=self.reg)
+        rec = registry.current("prediction_set", self.reg)[ps.name]
+        self.assertEqual((rec["status"], rec["owner_via"]), ("running", "claude"))   # carried to the later line
+        from data_utils import actor
+        self.assertEqual(actor.label_of(rec, "owner"), "claude for pujan")
+
+    def test_no_env_no_stamp(self):
+        with mock.patch.dict(os.environ, {}), contextlib.redirect_stdout(io.StringIO()):
+            os.environ.pop("CRYOEV_VIA", None)
+            self.assertEqual(PS.main(self.argv()), 0)
+        (ps,) = self.made()
+        self.assertNotIn("owner_via", C.read_json(ps / "request.json"))
+        self.assertNotIn("owner_via", registry.current("prediction_set", self.reg)[ps.name])
+
+    def test_bad_env_refused_before_writing(self):
+        with mock.patch.dict(os.environ, {"CRYOEV_VIA": "Not An Id"}),                 contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(PS.main(self.argv()), 2)
+        self.assertIn("CRYOEV_VIA", err.getvalue())
+        self.assert_nothing_written()
 
 
 class CreateTests(PredictRoots, unittest.TestCase):

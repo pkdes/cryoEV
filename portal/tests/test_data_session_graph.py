@@ -66,6 +66,10 @@ PRIVATE = (P, P2, PKG2, P3, Q, QPKG, PT, HP, HPKG, JOBH, CID, CID2, "aaaa0", "cc
 OF_T = (T_SID, GT, DT, PT)
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def rec(entity, rid, **kw):
     return {"schema": entity + "/1", "id": rid, "logged": "2099-12-01T09:00:00", **kw}
 
@@ -605,6 +609,7 @@ def launch(p):
     return None
 
 
+@browser
 class Browser(Served):
     @classmethod
     def setUpClass(cls):

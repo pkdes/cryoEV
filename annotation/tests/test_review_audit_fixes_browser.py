@@ -37,6 +37,10 @@ PRED_TAIL = "Your decisions update this analysis' results."
 REVIEWED_TIP = "Marks this image as done. It does not apply anything to a label set by itself."
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def with_fields(**kw):
     """data.js as served, plus these fields (as a builder would write them)."""
     def setup(context, page):
@@ -49,6 +53,7 @@ def area(r):
     return abs(sum(r[i] * r[(i + 3) % len(r)] - r[(i + 2) % len(r)] * r[i + 1] for i in range(0, len(r), 2))) / 2
 
 
+@browser
 class Base(trb.Base):
     @classmethod
     def make_server(cls):

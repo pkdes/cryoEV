@@ -25,10 +25,8 @@ import services as S  # noqa: E402
 PY = sys.executable
 
 
-def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+sys.path.insert(0, str(REPO / "tests"))
+from cryoev_testkit import free_ports  # noqa: E402  (shared helpers, round 10)
 
 
 def http_argv(port):
@@ -55,11 +53,16 @@ class ServicesTests(unittest.TestCase):
         warnings.simplefilter("ignore", ResourceWarning)  # started services outlive their Popen on purpose
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         root = Path(self.tmp.name)
-        self.p = {k: free_port() for k in ("web1", "web2", "off", "busy", "crash", "tree")}
-        # a server this tool did not start, on a configured port
-        self.foreign = subprocess.Popen(http_argv(self.p["busy"]), stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL)
-        self.assertTrue(wait_for(lambda: S.listening("127.0.0.1", self.p["busy"])), "foreign server did not start")
+        # a server this tool did not start, on a configured port. The six ports are distinct (held together), but
+        # the OS can still give one away between picking and binding, so the foreign server is retried on new ports.
+        for _ in range(5):
+            self.p = dict(zip(("web1", "web2", "off", "busy", "crash", "tree"), free_ports(6)))
+            self.foreign = subprocess.Popen(http_argv(self.p["busy"]), stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL)
+            if wait_for(lambda: S.listening("127.0.0.1", self.p["busy"])):
+                break
+            self.foreign.kill()
+        self.assertTrue(S.listening("127.0.0.1", self.p["busy"]), "foreign server did not start")
         child = f"import subprocess,sys,time; subprocess.Popen({http_argv(self.p['tree'])!r}); time.sleep(600)"
         cfg = {"run_dir": str(root / "run"), "services": [
             {"name": "web1", "port": self.p["web1"], "cwd": str(root), "argv": http_argv(self.p["web1"]),
@@ -266,7 +269,9 @@ class HealthTests(unittest.TestCase):
             self.assertEqual(S.health("127.0.0.1", self.serve(status, b"x")), f"http {status}")
 
     def test_dead_port_down(self):
-        self.assertEqual(S.health("127.0.0.1", free_port(), path="/healthz"), "down")
+        with socket.socket() as held:                 # bound, never listening, and held: nobody else can take it
+            held.bind(("127.0.0.1", 0))
+            self.assertEqual(S.health("127.0.0.1", held.getsockname()[1], path="/healthz"), "down")
 
     def test_config_health_validated(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:

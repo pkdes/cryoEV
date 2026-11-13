@@ -22,11 +22,11 @@ from collections import Counter
 from pathlib import Path
 
 REG = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REG))
-import history_page as hp  # noqa: E402
-import ids  # noqa: E402
-import importers  # noqa: E402
-import registry  # noqa: E402
+sys.path.insert(0, str(REG.parent))                   # the repo root: `from registry import ...`
+from registry import history_page as hp  # noqa: E402
+from registry import ids  # noqa: E402
+from registry import importers  # noqa: E402
+from registry import store as registry  # noqa: E402
 
 try:
     from playwright.sync_api import sync_playwright
@@ -42,6 +42,10 @@ REAL_CSV = CACHE / "training images" / V5S1 / "split_assignment.csv" if CACHE el
 REAL_REG = LAPTOP / "registry" if LAPTOP else None
 SHOTS = os.environ.get("JOBS_TEST_SHOTS")
 PULL = "roboflow_pull_20990101_0000"
+
+
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
 
 
 def lines_by_file(root):
@@ -403,6 +407,7 @@ class RealRegistryCopy(unittest.TestCase):
         for stem in hidden:                                   # excluded-session image names are not embedded
             self.assertNotIn(stem, html)
 
+    @browser
     def test_browser(self):
         if sync_playwright is None:
             self.skipTest("playwright not installed")

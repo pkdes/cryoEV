@@ -19,8 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import jobtest as T  # noqa: E402
 from jobtest import C  # noqa: E402
 
-sys.path.insert(0, str(T.REPO / "registry"))
-import registry  # noqa: E402
+from registry import store as registry  # noqa: E402
 import sync  # noqa: E402
 
 JOB = "job_20261105_w1"

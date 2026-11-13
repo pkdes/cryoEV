@@ -29,10 +29,6 @@ DS, LV = "ds_20261101_aaaa", "lv_20261101_1000"
 HREF = re.compile(r'class="cj-jobs-open" href="([^"]*)"')
 
 
-def jl(root: Path, entity: str, recs):
-    (root / f"{entity}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
-
-
 def wjson(p: Path, doc):
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(doc), encoding="utf-8")
@@ -53,31 +49,31 @@ def make_roots(tmp: Path):
 
 
 def registry(root: Path):
-    jl(root, "review_package", [
-        {"schema": "review_package/1", "id": PKG, "kind": "prediction", "prediction_set": PS, "status": "in_review",
-         "owner": "tester", "model": "v5", "n_images": 30, "via": "claude", "logged": "2026-11-11T10:05:00"},
-        {"schema": "review_package/1", "id": PKG_OTHER, "kind": "prediction", "status": "built",
-         "owner": "otherperson", "via": "claude", "logged": "2026-11-11T10:06:00"}])
-    jl(root, "label_version", [{"schema": "label_version/1", "id": LV, "status": "created",
-                                "logged": "2026-11-01T10:00:00", "created": "2026-11-01T10:00:00"}])
-    jl(root, "dataset", [{"schema": "dataset/1", "id": DS, "label_version": LV, "status": "frozen",
-                          "logged": "2026-11-01T11:00:00"},
-                         {"schema": "dataset/1", "id": "ds_20261031_old", "label_version": LV, "status": "retired",
-                          "logged": "2026-10-31T11:00:00"}])
-    jl(root, "run", [{"schema": "run/1", "id": f"r{i}", "dataset": DS, "status": "finished"} for i in (1, 2)])
-
     def job(id_, name, typ, where, status, **kw):
         return {"schema": "job/1", "id": id_, "logged": "2026-11-11T08:00:00", "name": name, "type": typ,
                 "where": where, "status": status, **kw}
-    jl(root, "job", [
-        job("job_20261111_revise_mine", "Review my tiles", "revise", "app", "in_progress", who="tester", via="claude"),
-        job("job_20261111_predict_theirs", "Predict client-x", "predict", "desktop", "ready", who="otherperson",
-            via="claude"),
-        job("job_20261111_c1_a", "C1 merged", "train", "desktop", "ready", who="tester"),
-        job("job_20261111_c1_b", "C1 separate", "train", "desktop", "in_progress", who="tester"),
-        job("job_20261111_c1_ok", "C1 recorded", "train", "desktop", "done", who="tester"),
-        job("job_20261111_train_np", "Train not pushed", "train", "desktop", "ready", who="tester")])
-
+    T.TK.write_registry(root, {
+        "review_package": [
+            {"schema": "review_package/1", "id": PKG, "kind": "prediction", "prediction_set": PS, "status": "in_review",
+             "owner": "tester", "model": "v5", "n_images": 30, "via": "claude", "logged": "2026-11-11T10:05:00"},
+            {"schema": "review_package/1", "id": PKG_OTHER, "kind": "prediction", "status": "built",
+             "owner": "otherperson", "via": "claude", "logged": "2026-11-11T10:06:00"}],
+        "label_version": [{"schema": "label_version/1", "id": LV, "status": "created",
+                           "logged": "2026-11-01T10:00:00", "created": "2026-11-01T10:00:00"}],
+        "dataset": [{"schema": "dataset/1", "id": DS, "label_version": LV, "status": "frozen",
+                     "logged": "2026-11-01T11:00:00"},
+                    {"schema": "dataset/1", "id": "ds_20261031_old", "label_version": LV, "status": "retired",
+                     "logged": "2026-10-31T11:00:00"}],
+        "run": [{"schema": "run/1", "id": f"r{i}", "dataset": DS, "status": "finished"} for i in (1, 2)],
+        "job": [
+            job("job_20261111_revise_mine", "Review my tiles", "revise", "app", "in_progress", who="tester",
+                via="claude"),
+            job("job_20261111_predict_theirs", "Predict client-x", "predict", "desktop", "ready", who="otherperson",
+                via="claude"),
+            job("job_20261111_c1_a", "C1 merged", "train", "desktop", "ready", who="tester"),
+            job("job_20261111_c1_b", "C1 separate", "train", "desktop", "in_progress", who="tester"),
+            job("job_20261111_c1_ok", "C1 recorded", "train", "desktop", "done", who="tester"),
+            job("job_20261111_train_np", "Train not pushed", "train", "desktop", "ready", who="tester")]}, samples=False)
 
 def live_c1():
     """A desktop queue whose three C1 jobs finished (two pulled) while the registry still says ready / running."""
@@ -108,9 +104,7 @@ class Board(unittest.TestCase):
         cls.env.cleanup()
 
     def setUp(self):
-        keep = {k: v for k, v in os.environ.items() if not k.startswith("CRYOEV_")}
-        patch = mock.patch.dict(os.environ, {**keep, "CJ_RAW_ROOT": str(self.raw), "CJ_PREDICT_ROOT": str(self.pred)},
-                                clear=True)
+        patch = T.TK.env_patch(strip_all=True, CJ_RAW_ROOT=str(self.raw), CJ_PREDICT_ROOT=str(self.pred))
         patch.start()
         self.addCleanup(patch.stop)
         J._reg_cache.clear()
@@ -266,9 +260,8 @@ class Empty(unittest.TestCase):
         cls.env.cleanup()
 
     def setUp(self):
-        keep = {k: v for k, v in os.environ.items() if not k.startswith("CRYOEV_")}
-        patch = mock.patch.dict(os.environ, {**keep, "CJ_RAW_ROOT": str(self.env.tmp / "raw"),
-                                             "CJ_PREDICT_ROOT": str(self.env.tmp / "predict")}, clear=True)
+        patch = T.TK.env_patch(strip_all=True, CJ_RAW_ROOT=str(self.env.tmp / "raw"),
+                               CJ_PREDICT_ROOT=str(self.env.tmp / "predict"))
         patch.start()
         self.addCleanup(patch.stop)
         J._reg_cache.clear()

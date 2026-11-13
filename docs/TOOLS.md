@@ -115,15 +115,28 @@ The review server, review sandbox, history server and job monitor (and later the
 
 ## Test gate (`tools/test_gate.py`)
 - **Default (`--affected`):** runs only the suites the changed files touch (vs `origin/main`, uncommitted edits included), plus the quick repo-wide `tests` suite.
-  - Shared code (`data_utils/`) or an unrecognized code file runs everything.
-- **`--full`:** every suite. Use it for go-lives.
+  - Edges follow who imports whom: `registry/` also runs annotation and tools; `results/` also jobs; `training/` and `inference/` also annotation and results; `portal/` also annotation; `tools/` also portal.
+  - Shared code (`data_utils/`), an unrecognized code file, `CHANGELOG.md` and `requirements*.txt` run everything (those last two are not doc-only: tests parse the changelog and the pins set the environment).
+  - **Browser skip (round 11):** in `--affected`, when every changed file is non-UI (`registry/` except `history_page.py`, `jobs/`, `training/`, `inference/`, `data_utils/`, `docs/`, `tools/` except the gate and its test, `cryoev/`) and none is unrecognized, the children run with `CJ_GATE_SKIP_BROWSER=1`: the test classes (or single test methods) marked `@browser` (from `tests/cryoev_testkit.py`) skip, and every other class in the same file still runs. No file is dropped; a changed test file runs in full. The gate prints "N browser classes skipped (no UI change)". Any other change (`portal/`, `annotation/`, `results/`, root files) runs everything. **A new class that drives a browser gets `@browser`** (decorate the class when its `setUpClass`/`setUp` starts the browser); `tools/tests/test_test_gate.py` checks every browser file has at least one.
+- **`--plan [--files a,b] [--timings F]`:** prints what a gate would run (suites, files, browser classes skipped) and an estimated wall time from the past medians (skip-mode runs are timed separately, `skip_browser` in the timings file); runs nothing and takes no lock. `--files` replaces the git diff, to try a change set.
+- **`--full`:** every suite, never skips. Run `--full --agent-env` as well before every go-live (the default run has the actor env stripped; this one proves nothing depends on that).
 - **`--suites a,b`:** named suites.
+- **One gate at a time:** a lock directory `~/.cryoev/gate/lock/` is shared by every worktree. A second gate waits up to `--lock-wait` minutes (default 45), then fails `gate busy`. A lock whose owner process is gone, or whose heartbeat (touched every 30 s) is older than 10 minutes, is stale and is taken over.
+- **Environment:** children run with `CRYOEV_VIA` and `CRYOEV_FOR` removed, because the registry and jobs writers default their actor fields from them. `--agent-env` runs with `CRYOEV_VIA=claude CRYOEV_FOR=pujan` on purpose; a suite that passes only under one of the two has a hidden env dependency.
 - **How it runs:**
-  - Each test file is one unit. Units run in parallel (`--jobs`, default CPU/2), slowest first.
-  - Browser (Playwright) files share a lane of 2.
+  - Each test file is one unit. Units run in parallel (`--jobs`, default CPU/2), slowest first (median of past passing runs).
+  - Browser files share a lane of 2. A file is a browser file if it imports `playwright` or a browser helper module (`test_review_tool_browser`); a comment that says "playwright" does not count.
   - A file that fails is re-run alone once. If it then passes it is reported as **FLAKY**, never as a plain pass.
   - The pre-push scan runs at the end.
-- **Timings:** each file's time is appended to `~/.cryoev/gate/timings.jsonl`. `--times` lists the slowest files.
+- **Timings:** `~/.cryoev/gate/timings.jsonl` gets one line per file per run: wall seconds, test count, ok, flaky, retries, retry seconds, `agent_env`, and the last 600 characters of a failure (also for a flaky first attempt). `--times` lists the slowest files (median).
+- **Shared test helpers:** `tests/cryoev_testkit.py` (append `<repo>/tests` to `sys.path`; portal tests get it as `cjtest.TK`, and `cjtest.free_port` is the testkit's). Use these instead of writing a local copy (round 11 #4):
+  - ports: `free_port()`, `free_ports(n)` (distinct), `bind_retry`;
+  - environment: `clean_env(base=None, strip_all=False, drop=(), **extra)` returns a copy without `CRYOEV_VIA`/`CRYOEV_FOR` (`strip_all=True`: every `CRYOEV_*`; `drop`: more names or `"CJ_*"` prefixes); `env_patch(...)` applies the same to `os.environ` and restores it (`with`, `self.enterContext`); `strip_environ(...)` removes them for the rest of the process; `no_actor_env()`;
+  - `write_registry(root, records, samples=..., skip=())`: a fixture registry folder; `records` is `{entity: [records]}` or a list (entity from `schema`); `samples` is a required keyword (`True` starts from `registry/samples/*.jsonl`); LF line ends, `ensure_ascii=False`;
+  - `@browser`: marks a browser-driving test class or method (skipped under `CJ_GATE_SKIP_BROWSER=1`);
+  - `wait_until`, `process_lock(name)` (cross-process mutex, e.g. for `subst` drive letters).
+- **Importing the registry in tests:** `from registry import store` (or `importers`, `validate`, ...) with the repo root on `sys.path`; never `registry/` itself (see [`ARCHITECTURE.md`](ARCHITECTURE.md)). `tests/test_registry_package.py` enforces it.
+- **Writing timing-proof tests:** never assert a wall-clock bound on something load can slow. Block the slow part on an `Event` the test controls and assert the caller returned while it was still blocked; poll with a generous ceiling instead of a fixed `sleep`.
 
 ## Agent CLI: `python -m cryoev` (package `cryoev/`, not under `tools/`)
 - **What:** one entry point for agents (and people) to read the platform and make the few writes agents may make: `status`, `find` / `show` / `lineage`, `review progress` (counts only), `feedback list|status|reply`, `pull labels|predictions|results|dataset`, `register`, `predict new`. Thin wrappers over the registry, `jobs/predict_set.py`, `portal/feedback_store.py`, `tools/services.py` and the portal's read helpers.

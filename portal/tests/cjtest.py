@@ -21,14 +21,18 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
+if str(REPO / "tests") not in sys.path:
+    sys.path.append(str(REPO / "tests"))             # appended: never shadows a portal test module
 
-import os  # noqa: E402
+import cryoev_testkit as TK  # noqa: E402  (shared helpers: free_port, env, fixture registry)
+from cryoev_testkit import free_port  # noqa: E402,F401  (T.free_port, used by many portal tests)
 
 # The portal runs with CRYOEV_VIA / CRYOEV_FOR stripped (portal.app main(), services.child_env). Tests start the
 # app without main(), so drop them here too: results must not depend on whether the test run is an agent session.
-# A test that needs them sets them explicitly (mock.patch.dict).
-for _k in [k for k in os.environ if k.upper() in ("CRYOEV_VIA", "CRYOEV_FOR")]:
-    os.environ.pop(_k, None)
+# A test that needs them sets them explicitly (mock.patch.dict). Also the agent API's switches (round 10 #60): the
+# kill switch and the shared token store. Tests use Env.tokens (a temp store) and set CJ_API explicitly where they
+# test it.
+TK.strip_environ(drop=("CJ_API", "CJ_API_WRITE", "CJ_AGENT_TOKENS"))
 
 import uvicorn  # noqa: E402
 
@@ -37,14 +41,6 @@ from portal import auth as A  # noqa: E402
 
 UPKEY = "upstream-review-key-for-tests"
 USER = "tester"
-
-
-def free_port() -> int:
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
 
 
 def md5(b: bytes) -> str:
@@ -67,19 +63,20 @@ def live_doc(servers=(("review", True), ("sandbox", False), ("history", True)), 
 
 
 class Env:
-    """Temp roster (one admin, USER), state dir and registry folder."""
+    """Temp roster (one admin, USER), state dir, registry folder and agent token store."""
 
     def __init__(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="cj_portal_"))
         self.roster = self.tmp / "roster.json"
         self.state = self.tmp / "state"
         self.registry = self.tmp / "registry"
+        self.tokens = self.tmp / "agent_tokens.json"
         (self.registry / "live").mkdir(parents=True)
         self.key = A.add_key(self.roster, USER, "admin")
 
     def config(self, **kw) -> APP.Config:
         base = dict(registry=self.registry, roster=self.roster, state_dir=self.state,
-                    review_upstream=f"http://127.0.0.1:{free_port()}", review_key=UPKEY)
+                    review_upstream=f"http://127.0.0.1:{free_port()}", review_key=UPKEY, tokens=self.tokens)
         base.update(kw)
         return APP.Config(**base)
 
@@ -171,7 +168,7 @@ def login(port, key) -> str:
     return sc.split(";", 1)[0].split("=", 1)[1]
 
 
-GATE_DETAIL_KEYS = {"status", "from", "to", "n"}
+GATE_DETAIL_KEYS = {"status", "from", "to", "n", "via"}      # via: a bearer request's agent (round 10 #60)
 
 
 def remove_file(path, wait_s=5.0) -> None:
@@ -215,6 +212,11 @@ def module_lines(path) -> list:
 
 def cookie(token) -> dict:
     return {"Cookie": f"{A.COOKIE}={token}"}
+
+
+def bearer(token) -> dict:
+    """The agent API's header (portal/app.py BEARER_ROUTES)."""
+    return {"Authorization": f"Bearer {token}"}
 
 
 class Upstream:

@@ -30,6 +30,11 @@ YELLOW = """() => { const c = document.getElementById('cv'), d = c.getContext('2
   for (let i = 0; i < d.length; i += 4) if (d[i] > 220 && d[i+1] > 180 && d[i+2] < 90) n++; return n; }"""
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
+@browser
 class BackTests(trb.CardBase):
     def test_back_returns_to_the_previous_card_and_keeps_other_decisions(self):
         page = self.open("&who=back&mode=classes", setup=with_fields(kind="prediction", cand_conf=0.3, label_conf=0.5), **DESK)
@@ -78,6 +83,7 @@ class BackTests(trb.CardBase):
         self.assertEqual(page.inner_text("#adjRedraw"), "✏️ Redraw outline")
 
 
+@browser
 class ZoomTests(trb.CardBase):
     def test_closest_step_and_wheel(self):
         page = self.open("&who=zoom&mode=cards", **DESK)
@@ -105,6 +111,7 @@ class ZoomTests(trb.CardBase):
         self.assertEqual(s()["wk"], 1)
 
 
+@browser
 class RedrawEditorTests(trb.Base):
     def select(self, page, oid=302, f="fixC_old.png"):
         self.go(page, f)
@@ -173,6 +180,7 @@ class RedrawEditorTests(trb.Base):
         self.assertAlmostEqual(page.evaluate(YELLOW), a, delta=15)
 
 
+@browser
 class RecordsUnchangedControl(unittest.TestCase):
     """A standard accept + reshape + class flow writes the same decisions (v, p, who) as the page at main."""
 

@@ -21,7 +21,7 @@ from jobtest import C  # noqa: E402
 from test_predict_set import FAKE_PRED, GOLDEN_PRED, MODEL, PredictRoots, assert_contract_layout  # noqa: E402
 
 import predict_local as PL  # noqa: E402
-import registry  # noqa: E402
+from registry import store as registry  # noqa: E402
 from data_utils.oslock import acquire_lock  # noqa: E402
 
 BUSY_GPU = {"total_mb": 4096, "apps": [[4242, "C:\\Python\\python.exe", 900]]}

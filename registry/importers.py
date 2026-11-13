@@ -68,11 +68,11 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
-import ids
-import registry
-from validate import (EXCLUDED_SESSIONS, REPO, Scan, find_sibling, lv_provenance, read_csv, read_datajs, read_json,
-                      read_jsonl, sha256_file)
-from validate import config  # data_utils.config (validate puts the repo on sys.path)
+from registry import ids
+from registry import store as registry
+from registry.validate import (EXCLUDED_SESSIONS, REPO, Scan, find_sibling, lv_provenance, read_csv, read_datajs,
+                               read_json, read_jsonl, sha256_file)
+from registry.validate import config  # data_utils.config
 
 PROCESSING = config.processing_root()   # optional: None when not found
 GENERIC = re.compile(r"^(blind|label|labeling)_\d+_[A-Za-z0-9]+$")
@@ -984,11 +984,12 @@ class Importer:
         tmp.replace(c.path)
         return True
 
-    def write(self, dry_run=False):
+    def write(self, dry_run=False, production=True):
         """_write() holding UPLOAD_LOCK (not on a dry run): the portal's upload-session lines are read and carried
-        forward with nothing appended in between."""
+        forward with nothing appended in between. production=False skips the PRODUCTION restatement (round 11:
+        import_label_versions records label versions and nothing else)."""
         if dry_run:
-            return self._write(dry_run)
+            return self._write(dry_run, production)
         registry._guard(self.root)
         self.root.mkdir(parents=True, exist_ok=True)
         lock = registry.acquire_lock(self.root / UPLOAD_LOCK, UPLOAD_LOCK_WAIT)
@@ -996,11 +997,11 @@ class Importer:
             raise registry.RegistryError(f"registry busy: {self.root / UPLOAD_LOCK} held for {UPLOAD_LOCK_WAIT:.0f} s "
                                          "(the portal is registering an upload session)")
         try:
-            return self._write(dry_run)
+            return self._write(dry_run, production)
         finally:
             lock.close()
 
-    def _write(self, dry_run=False):
+    def _write(self, dry_run=False, production=True):
         """Append new / changed records. A record's image list is written with its line under the registry lock
         (nothing for a refused line); a list whose record is unchanged is repaired afterwards if missing or changed."""
         lists_written, repair = 0, set()
@@ -1062,13 +1063,26 @@ class Importer:
             appended["(image list files)"] += lists_written
         prod_id, who = PRODUCTION
         cur = registry.current(root=self.root)
-        if not dry_run and prod_id in cur and cur[prod_id].get("status") != "production":
+        if production and not dry_run and self._restate_production(prod_id, who, cur):
             # the user's recorded decision, restated: never via (an agent never promotes; registry._check)
             registry.set_status(prod_id, "production", who, note="user decision 2026-10-30", root=self.root,
                                 via=None)
             appended["model (set-status production)"] += 1
         return appended
 
+
+    def _restate_production(self, prod_id, who, cur) -> bool:
+        """PRODUCTION is a seed for an empty or rebuilt registry, never an override (round 10, TODO #62): restate it
+        only when the model exists, isn't production now, NO line in its history is a decision by PRODUCTION_WHO in
+        person (status_by == who, no status_via: e.g. a later demotion), and no other model is production."""
+        rec = cur.get(prod_id)
+        if rec is None or rec.get("status") == "production":
+            return False
+        if any(r.get("status_by") == who and not r.get("status_via")
+               for r in registry.history(prod_id, root=self.root)):
+            return False                       # the user decided something about this model: follow that
+        return not any(m.get("status") == "production" for k, m in cur.items()
+                       if k != prod_id and registry.entity_of(m) == "model")
 
 REQUIRED_NULL = {"image": ("session", "grid"), "model": ("run",),
                  "dataset": ("images_sha256", "image_list", "counts_trained", "counts_listed"),
@@ -1083,6 +1097,20 @@ def run(root, dry_run=False, **kw):
     by = Counter((v["schema"].split("/")[0], v.get("status") or "-") for v in cur.values())
     return {"appended": appended, "refused": imp.refused, "examples": dict(imp.examples),
             "excluded": imp.excluded, "current": by, "dry_run": dry_run}
+
+
+def import_label_versions(root, via=None, laptop=None, only=None):
+    """Round 11 (#67, the portal's Apply button): record label versions and nothing else pending. Importer ->
+    label_versions() -> write(production=False): no tile scan, no other entity, no PRODUCTION restatement. `laptop`:
+    the folder holding labels/ (default: config). `only`: the label-version ids to record (None = every lv_* folder),
+    so other unregistered work stays for the next full import. -> {appended, refused, examples}."""
+    imp = Importer(root, laptop=laptop, processing=None, via=via)
+    imp.label_versions()
+    if only is not None:
+        keep = set(only)
+        imp.out = [(e, r) for e, r in imp.out if r["id"] in keep]
+    appended = imp.write(production=False)
+    return {"appended": appended, "refused": imp.refused, "examples": dict(imp.examples)}
 
 
 def print_result(res):

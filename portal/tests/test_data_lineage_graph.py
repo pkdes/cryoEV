@@ -44,6 +44,10 @@ M_MID, M_SIB, M_OTHER = "m_20261107_mid", "m_20261107_sibling", "m_20261107_othe
 LS_OTHER = "lv_20261107_other"
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def row(entity, rid, status, inputs=(), **kw):
     r = {"schema": entity + "/1", "id": rid, "logged": "2026-11-07T09:00:00", "status": status}
     if inputs:
@@ -68,11 +72,7 @@ BASE_WRITE = TG.write_registry        # the Lab graph test's own writer, capture
 
 
 def write_registry(root: Path):
-    BASE_WRITE(root)
-    for ent, recs in chain_rows().items():
-        with (root / f"{ent}.jsonl").open("a", encoding="utf-8") as f:
-            for r in recs:
-                f.write(json.dumps(r) + "\n")
+    BASE_WRITE(root, more=[r for recs in chain_rows().values() for r in recs])
     TG.clear_caches()
 
 
@@ -409,6 +409,7 @@ def launch(p):
     return None
 
 
+@browser
 class Browser(Served):
     @classmethod
     def setUpClass(cls):

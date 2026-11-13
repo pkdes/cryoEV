@@ -185,6 +185,10 @@ DATASET = None
 '''
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def mrc_bytes(n=4096) -> bytes:
     """Enough of an MRC2014 file for the content check: nx ny nz > 0 and 'MAP ' at byte 208."""
     import struct
@@ -1774,6 +1778,7 @@ def launch(p):
     return None
 
 
+@browser
 class Browser(unittest.TestCase):
     """The real portal (uvicorn in a thread) and Edge: the pages at 390 and 1280 px, and the JS upload for real."""
 

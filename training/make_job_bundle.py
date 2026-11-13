@@ -10,6 +10,9 @@ Writes, in <out>:
 JOB.json carries `bundle_id` (= the zip stem) and the pack reference (`dataset_sha256`, `dataset_pack`,
 `dataset_pack_md5`); jobs/sync.py push uploads a pack only once per queue (docs/JOBS.md, "Dataset cache").
 --single-zip writes the old single zip instead (images and labels inside <dataset>/, no pack).
+--eval --weights <pt> --dataset <registry dataset id | folder> [--model NAME]: an eval job instead (Ultralytics val on
+the test split, imgsz 1440, overlap_mask=False; docs/JOBS.md, "Eval jobs"): the same dataset pack, and a thin zip
+<dataset>__eval_<timestamp>.zip with dataset.yaml, JOB.json (job_type eval) and the weights unless tracked in the repo.
 
     python training/make_job_bundle.py --dataset-dir <folder with dataset.yaml, images/, labels/> \
         [--out <dir>] [--dataset-name NAME] [--single-zip] -- --single-run --model-size m --batch 8 --rect 0 ...
@@ -326,10 +329,142 @@ def make_bundle(dataset_dir: Path, exp_args: list, out: Path | None, dataset_nam
             "changes": changes, "n_files": len(files)}
 
 
+# ---------------------------------------------------------------- eval bundles (docs/JOBS.md, "Eval jobs")
+EVAL_SPLIT, EVAL_IMGSZ, EVAL_BATCH = "test", 1440, 8   # the settled scoring (models.yaml test_mask_map50_95)
+MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
+
+
+def resolve_dataset(ref, registry_root=None) -> tuple:
+    """--dataset: a folder holding dataset.yaml, or a registry dataset id (its dataset_dir, else
+    <CryoAI>/training outputs/<id>). -> (folder, name: the id, else the folder's name). Raises SystemExit."""
+    p = Path(str(ref))
+    if (p / "dataset.yaml").is_file():
+        return p.resolve(), p.resolve().name
+    rec = {}
+    try:
+        from registry import store as registry
+        rec = registry.current("dataset", Path(registry_root) if registry_root else config.registry_root()).get(
+            str(ref)) or {}
+    except Exception as e:                              # no registry here: the CryoAI folder below still works
+        print(f"[bundle] registry not read ({type(e).__name__}: {e})", file=sys.stderr)
+    ddir = rec.get("dataset_dir")
+    if not ddir:
+        try:
+            ddir = config.cryoai_root() / "training outputs" / str(ref)
+        except config.ConfigError as e:
+            raise SystemExit(f"dataset {ref!r}: not a folder with dataset.yaml, and {e}")
+    if not (Path(ddir) / "dataset.yaml").is_file():
+        raise SystemExit(f"dataset {ref!r}: {ddir} has no dataset.yaml")
+    return Path(ddir).resolve(), str(ref)
+
+
+def default_model_name(weights: Path) -> str:
+    """models/<id>/best.pt -> <id>; runs/<run>/weights/best.pt -> <run>; else the file's stem."""
+    w = Path(weights)
+    if w.parent.name == "weights" and w.parent.parent.name:
+        return w.parent.parent.name
+    if w.parent.parent.name == "models":
+        return w.parent.name
+    return w.stem
+
+
+def make_eval_bundle(dataset_dir: Path, weights: Path, out: Path | None, dataset_name: str | None = None,
+                     model: str | None = None, imgsz: int = EVAL_IMGSZ, batch: int = EVAL_BATCH,
+                     allow_dirty: bool = False) -> dict:
+    """An eval job (jobs/run_job.py: validate_yolo_model on the test split, imgsz 1440, overlap_mask=False): the
+    same labelled dataset pack as a training bundle of this folder (same content hash: reused, here and on the
+    share), and a thin zip <dataset>/dataset.yaml (rewritten as for training), JOB.json (job_type eval, model,
+    weights, weights_in, weights_md5, split, imgsz, batch, n_images), README.md, and weights/<file> unless the
+    weights are tracked in this repo (then the desktop's own copy at the same commit is used, md5-checked).
+    Refusals raise SystemExit: uncommitted code, no dataset.yaml / images / labels, no test split or no test
+    images, weights missing or not a .pt file, a bad model name.
+    -> as make_bundle, plus model, test_images (file names of images/test)."""
+    dirty = [] if allow_dirty else uncommitted_code()
+    if dirty:
+        raise SystemExit(f"uncommitted changes in {', '.join(dirty[:5])}: commit (and push, for the desktop) first, "
+                         f"so the bundle's commit is the code that runs")
+    if out is None:
+        try:
+            out = config.laptop_root() / "job_bundles"
+        except config.ConfigError as e:
+            raise SystemExit(f"{e} (or pass --out)")
+    out = Path(out)
+    root = Path(dataset_dir).resolve()
+    for need in ("dataset.yaml", "images", "labels"):
+        if not (root / need).exists():
+            raise SystemExit(f"{root} has no {need}")
+    name = dataset_name or root.name
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$", name):
+        raise SystemExit(f"dataset name {name!r}: letters, digits, _ . - only")
+    w = Path(weights)
+    w_abs = (w if w.is_absolute() else Path.cwd() / w).resolve()
+    if not w_abs.is_file() or w_abs.suffix.lower() != ".pt":
+        raise SystemExit(f"--weights {w}: not a .pt file")
+    model = model or default_model_name(w_abs)
+    if not MODEL_NAME.match(model):
+        raise SystemExit(f"--model {model!r}: letters, digits, _ . - only (it names testmap_<model>.json)")
+    text, changes = rewrite_dataset_yaml((root / "dataset.yaml").read_text(encoding="utf-8"), root)
+    if not (yaml.safe_load(text) or {}).get(EVAL_SPLIT):
+        raise SystemExit(f"{root / 'dataset.yaml'} has no {EVAL_SPLIT}: split (eval jobs score the test split)")
+    tests = sorted(p.name for p in (root / "images" / EVAL_SPLIT).iterdir() if p.is_file()) \
+        if (root / "images" / EVAL_SPLIT).is_dir() else []
+    if not tests:
+        raise SystemExit(f"{root} has no images/{EVAL_SPLIT}/ images")
+
+    created = time.strftime("%Y-%m-%d %H:%M")
+    out.mkdir(parents=True, exist_ok=True)
+    zip_path = out / f"{name}__eval_{time.strftime('%Y%m%d-%H%M%S')}.zip"
+    files = sorted(p for d in ("images", "labels") for p in (root / d).rglob("*") if p.is_file())
+    pack, sha, pack_md5, md5, reused = dataset_cache.write_pack(out, root, files)   # = the training bundle's pack
+    pack_ref = {"dataset_sha256": sha, "dataset_pack": pack.name, "dataset_pack_md5": pack_md5,
+                "dataset_pack_bytes": pack.stat().st_size}
+    w_md5 = md5_file(w_abs)
+    if tracked(w_abs):                                  # in the repo: the desktop's copy at this commit
+        w_rel, w_in, packed = w_abs.relative_to(REPO).as_posix(), "repo", None
+    else:
+        w_rel, w_in, packed = f"weights/{w_abs.name}", "bundle", w_abs
+    commit, ultra, counts = git_commit(), ultralytics_version(), split_counts(root)
+    job = {"bundle_id": zip_path.stem, "job_type": "eval", "dataset_name": name, "source_dir": str(root),
+           "created": created, "cryoEV_commit": commit, "model": model, "weights": w_rel, "weights_in": w_in,
+           "weights_md5": w_md5, "weights_source": str(w_abs), "split": EVAL_SPLIT, "imgsz": int(imgsz),
+           "batch": int(batch), "overlap_mask": False, "n_images": len(tests), "run_experiments_args": [],
+           "dataset_yaml_changes": changes, "ultralytics_bundled_on": ultra, "splits": counts, "md5": md5,
+           **pack_ref}
+    body = (f"# Eval job: `{model}` on `{name}` ({EVAL_SPLIT}, {len(tests)} images)\n\n"
+            f"Built {created} from cryoEV commit `{commit}` by `training/make_job_bundle.py --eval`.\n"
+            f"Run by `jobs/run_job.py` on the queue (docs/JOBS.md, \"Eval jobs\"): Ultralytics val, split "
+            f"{EVAL_SPLIT}, imgsz {imgsz}, overlap_mask=False, into `metrics.json`.\n\n"
+            f"Weights: `{w_rel}` ({'packed in this zip' if packed else 'the repo copy at this commit'}; md5 "
+            f"`{w_md5}`). Images and labels: the dataset pack `{pack.name}` (the same pack as a training bundle of "
+            f"this dataset).\n")
+    with zipfile.ZipFile(zip_path, "w") as z:
+        z.writestr(f"{name}/dataset.yaml", text, compress_type=zipfile.ZIP_DEFLATED)
+        if packed:
+            z.write(packed, f"{name}/{w_rel}", compress_type=zipfile.ZIP_STORED)
+        z.writestr(f"{name}/JOB.json", json.dumps(job, indent=1), compress_type=zipfile.ZIP_DEFLATED)
+        z.writestr(f"{name}/README.md", body, compress_type=zipfile.ZIP_DEFLATED)
+    readme_path = zip_path.with_name(zip_path.stem + "_README.md")
+    readme_path.write_text(body, encoding="utf-8")
+    zip_md5 = md5_file(zip_path)
+    md5_path = zip_path.with_name(zip_path.name + ".md5")
+    md5_path.write_text(f"{zip_md5}  {zip_path.name}\n", encoding="utf-8")
+    return {"zip": zip_path, "md5": zip_md5, "md5_path": md5_path, "readme": readme_path, "pack": pack,
+            "pack_reused": reused, "pack_bytes": pack_ref["dataset_pack_bytes"], "dataset_sha256": sha,
+            "job_json": job, "name": name, "exp": [], "changes": changes, "n_files": len(files), "model": model,
+            "test_images": tests}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dataset-dir", required=True, type=Path,
+    ap.add_argument("--dataset-dir", type=Path,
                     help="prepared YOLO dataset: dataset.yaml, images/<split>/, labels/<split>/")
+    ap.add_argument("--eval", action="store_true", help="an eval job instead (needs --weights and --dataset): "
+                    "Ultralytics val on the test split, imgsz 1440, overlap_mask=False (docs/JOBS.md, Eval jobs)")
+    ap.add_argument("--weights", type=Path, help="--eval: the model's .pt file")
+    ap.add_argument("--dataset", help="--eval: a registry dataset id or a dataset folder (or use --dataset-dir)")
+    ap.add_argument("--model", help="--eval: the model name in metrics.json (default: models/<id>/ or the run "
+                    "folder's name)")
+    ap.add_argument("--imgsz", type=int, help=f"--eval: default {EVAL_IMGSZ}")
     ap.add_argument("--dataset-name", help="folder name on the desktop (default: --dataset-dir's name)")
     ap.add_argument("--out", type=Path, help="default <CryoAI-laptop>/job_bundles")
     ap.add_argument("--single-zip", action="store_true",
@@ -339,6 +474,27 @@ def main():
     ap.add_argument("exp_args", nargs=argparse.REMAINDER,
                     help="after --: arguments for training/run_experiments.py")
     a = ap.parse_args()
+    if a.eval:
+        if not a.weights or not (a.dataset or a.dataset_dir):
+            ap.error("--eval needs --weights and --dataset (or --dataset-dir)")
+        if a.exp_args[1:] if a.exp_args[:1] == ["--"] else a.exp_args:
+            ap.error("--eval takes no run_experiments arguments after --")
+        ddir, dname = (a.dataset_dir.resolve(), a.dataset_name) if a.dataset_dir else resolve_dataset(a.dataset)
+        b = make_eval_bundle(ddir, a.weights, a.out, a.dataset_name or dname, a.model, a.imgsz or EVAL_IMGSZ,
+                             allow_dirty=a.allow_dirty)
+        print(f"{b['pack']}  ({b['pack_bytes'] / 1e6:.1f} MB, {b['n_files']} files, "
+              f"{'reused: same content hash' if b['pack_reused'] else 'new'}; dataset_sha256 {b['dataset_sha256'][:12]})")
+        print(f"{b['zip']}  (eval: {b['model']} on {b['name']} test, {len(b['test_images'])} images; weights "
+              f"{b['job_json']['weights_in']})")
+        print(f"{b['md5_path']}  (md5 {b['md5']})")
+        print("  queue it: python jobs/sync.py push-eval --bundle <the zip> --share <queue> "
+              "(needs CRYOEV_EVAL_JOBS=1 here and on the desktop)")
+        return
+    if not a.dataset_dir:
+        ap.error("--dataset-dir is required (or --eval with --weights and --dataset)")
+    if a.weights or a.dataset or a.model or a.imgsz:   # never silently dropped from a training bundle
+        ap.error("--weights / --dataset / --model / --imgsz before -- are --eval options; for training put "
+                 "run_experiments arguments after --")
     b = make_bundle(a.dataset_dir, a.exp_args[1:] if a.exp_args[:1] == ["--"] else a.exp_args, a.out,
                     a.dataset_name, a.single_zip, a.allow_dirty)
     pack, zip_path, name, exp = b["pack"], b["zip"], b["name"], b["exp"]

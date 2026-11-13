@@ -35,6 +35,10 @@ CLASS_ORDER = ["EV", "Low conf EV", "MV", "inner", "Incomplete", "Overlapping", 
 SHOTS = os.environ.get("REVIEW_TEST_SHOTS")  # a folder: keep phone screenshots for a look by eye
 
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tests"))
+from cryoev_testkit import browser  # noqa: E402  (the gate skips these when no UI file changed)
+
+
 def launch(p):
     for kw in ({"channel": "msedge"}, {"channel": "chrome"}, {}):
         try:
@@ -55,6 +59,7 @@ def norm(labels):
                   for g in labels)
 
 
+@browser
 class Base(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -102,6 +107,12 @@ class Base(unittest.TestCase):
     def synced(self, page):
         page.wait_for_function("__review.state().dirty === 0 && document.getElementById('sync').textContent.includes('saved')",
                                timeout=15000)
+
+    def settled(self, page):
+        """No pending or in-flight save, after two animation frames (replaces fixed sleeps that waited for "nothing
+        happened": a save, if one had been queued, sets dirty at once, so synced() would wait for it)."""
+        page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+        self.synced(page)
 
     def check_js_equals_python(self, page):
         """The page's labels for every image equal review_server.effective_labels() on the server's saved record."""
@@ -380,7 +391,7 @@ class AcceptKeyTests(Base):
         n = len(self.saved_dec(f))
         self.click_obj(page, self.image(f)["gt"][0]["p"][0])  # 201
         page.keyboard.press("a"); page.keyboard.press("x")
-        time.sleep(0.4)
+        self.settled(page)
         self.assertNotIn("g201", self.saved_dec(f))
         self.assertEqual(len(self.saved_dec(f)), n)
         # Z after Del brings the label back (Editor undo restores this tab's polygon list too)
@@ -548,7 +559,7 @@ class OldRecordTests(Base):
             self.click_obj(page, self.image(f)["pr"][i]["p"][0])
             self.assertIn(txt, page.inner_text("#selBox"), f)
             self.assertEqual(page.locator("#selBox .tip").count(), 0 if txt.startswith("Accepted") else 1, f)
-        time.sleep(1.0)
+        self.settled(page)
         self.assertEqual(self.state(page)["dirty"], 0)
         self.assertEqual({p.name: p.read_bytes() for p in edits.glob("*.json")}, before)  # byte-identical
         self.check_js_equals_python(page)
