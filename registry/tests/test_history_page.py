@@ -272,13 +272,14 @@ class GraphLookup(unittest.TestCase):
 
     def test_graph(self):
         nodes, edges = graph_index(self.m)
-        self.assertEqual(self.m["graph"]["cols"][0], "Roboflow labels")
+        self.assertEqual(self.m["graph"]["cols"], ["Imaging sessions", "Labels: automatic", "Labels: human",
+                                                  "Labels: revised", "Datasets", "Models"])
         for e in (("roboflow_export|roboflow - 20990101 x", "dataset|ds_1", "source"),
                   ("dataset|ds_1", "model|v9_m_20990101", "train_data"),
                   ("model|v9_m_20990101", "review_package|pkg_new", "predictions"),
-                  ("review_package|pkg_new", "label_version|lv_20990102_0900", "edits"),        # back-edge
+                  ("review_package|pkg_new", "label_version|lv_20990102_0900", "edits"),        # same lane
                   ("model|v9_m_20990101", "job|job_20990102_revise_new", "predictions"),
-                  ("job|job_20990102_revise_new", "label_version|lv_20990102_0900", "output"),  # back-edge
+                  ("job|job_20990102_revise_new", "label_version|lv_20990102_0900", "output"),  # same lane
                   ("pull|roboflow_pull_20990101_0000", "label_version|lv_20990102_0900", "base")):
             self.assertIn(e, edges)
         self.assertFalse(any(p == "pull|roboflow_pull_20990101_0000" and c.startswith("job|") for p, c, _ in edges))
@@ -435,6 +436,150 @@ class ReviewScopeChips(unittest.TestCase):
                 browser.close()
 
 
+R9_SESSIONS = {"20250730": 44, "20260126": 7, "20260420": 9, "20260506": 20, "20260512": 22}
+R9_EXP, R9_OLD, R9_LV, R9_JOB = "roboflow - 20261028 cryoai v5 S1", "roboflow - 20260529", "lv_20261111_1409", \
+    "job_20261111_revise_cell"
+
+
+class R9LanesAndAttribution(unittest.TestCase):
+    """Round 9 (#15, #16, attribution) on a folder registry with the live known answer's structure: the export's
+    image list has 160 rows -> sessions 44 / 7 / 9 / 20 / 22 and 58 with no session ("Session unknown"); an older
+    export with no list; a label version and a job written by an agent (via), one later re-stamped by a person."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.saved = {k: os.environ.pop(k) for k in list(os.environ) if k.startswith("CRYOEV_")}
+        cls.tmp = tempfile.TemporaryDirectory()
+        reg = Path(cls.tmp.name) / "registry"
+        (reg / "lists").mkdir(parents=True)
+        images, stems = [], []
+        for sid, n in R9_SESSIONS.items():
+            for i in range(n):
+                images.append({"schema": "image/1", "id": f"{sid}_t{i}_png", "session": sid,
+                               "grid": "2642" if sid == "20260512" and i < 16 else None})
+                stems.append(f"{sid}_t{i}_png")
+        for i in range(58):
+            images.append({"schema": "image/1", "id": f"{i:04d}_Jul30_jpg", "session": None, "grid": None})
+            stems.append(f"{i:04d}_Jul30_jpg")
+        (reg / "lists" / "s1.tsv").write_text("".join(f"{x}\ttrain\n" for x in stems), encoding="utf-8")
+        lines = {
+            "image": images,
+            "session": [{"schema": "session/1", "id": sid, "date": f"{sid[:4]}-{sid[4:6]}-{sid[6:]}",
+                         "status": "processed"} for sid in list(R9_SESSIONS) + ["20261111"]],   # last: in no list
+            "roboflow_export": [{"schema": "roboflow_export/1", "id": R9_EXP, "counts": {"train": {"images": 160}},
+                                 "image_list": {"file": "lists/s1.tsv", "sha256": None}},
+                                {"schema": "roboflow_export/1", "id": R9_OLD, "counts": {},
+                                 "note": "local placeholder: no COCO in the cache"}],
+            "review_package": [{"schema": "review_package/1", "id": "pkg_cell", "base": R9_EXP, "base_kind": "export",
+                                "status": "applied", "model": "m_v5"},
+                               {"schema": "review_package/1", "id": "pkg_audit", "base": R9_EXP,
+                                "base_kind": "export", "status": "in_review", "model": "m_v5"}],
+            "label_version": [{"schema": "label_version/1", "id": R9_LV, "status": "created", "pkg": "pkg_cell",
+                               "who": "pujan", "via": "claude", "base": R9_EXP},
+                              {"schema": "label_version/1", "id": "lv_20261111_1500", "status": "created",
+                               "who": "pujan", "via": "claude", "base": R9_EXP},
+                              {"schema": "label_version/1", "id": "lv_20261111_1500", "status": "qc_passed",
+                               "who": "pujan", "status_by": "person-b", "base": R9_EXP}],   # a person's line
+            "dataset": [{"schema": "dataset/1", "id": "ds_cell", "status": "frozen",
+                         "inputs": [{"id": R9_LV, "role": "source", "entity": "label_version"},
+                                    {"id": R9_EXP, "role": "images", "entity": "roboflow_export"}]},
+                        {"schema": "dataset/1", "id": "ds_old", "status": "frozen",
+                         "inputs": [{"id": R9_OLD, "role": "source", "entity": "roboflow_export"}]}],
+            "model": [{"schema": "model/1", "id": "m_v5", "status": "production",
+                       "inputs": [{"id": R9_EXP, "role": "train_data", "entity": "roboflow_export"}]},
+                      {"schema": "model/1", "id": "m_c1", "status": "candidate",
+                       "inputs": [{"id": "ds_cell", "role": "train_data", "entity": "dataset"}]}],
+            "job": [{"schema": "job/1", "id": R9_JOB, "type": "revise", "status": "in_progress", "who": "pujan",
+                     "via": "claude", "package": "pkg_audit", "outputs": [],
+                     "inputs": [{"id": R9_EXP, "role": "base"}]}],
+        }
+        for ent, recs in lines.items():
+            (reg / f"{ent}.jsonl").write_text("".join(json.dumps(x) + "\n" for x in recs), encoding="utf-8")
+        cls.out = Path(cls.tmp.name) / "out" / "history.html"
+        cls.m = hp.build([reg], cls.out)
+        cls.nodes, cls.edges = graph_index(cls.m)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+        os.environ.update(cls.saved)
+
+    def test_lanes(self):
+        self.assertEqual(self.m["graph"]["cols"], ["Imaging sessions", "Labels: automatic", "Labels: human",
+                                                  "Labels: revised", "Datasets", "Models"])
+        col = {k: n[1] for k, n in self.nodes.items()}
+        exp = "roboflow_export|" + R9_EXP
+        self.assertEqual((col[exp], self.nodes[exp][5]), (2, "export · via Roboflow"))   # no Roboflow lane
+        self.assertEqual((col["label_version|" + R9_LV], self.nodes["label_version|" + R9_LV][5]),
+                         (3, "labels · revised"))
+        self.assertEqual(col["label_version|lv_20261111_1500"], 2)                       # no review: human
+        self.assertEqual((col["review_package|pkg_cell"], col["review_package|pkg_audit"]), (3, 3))
+        self.assertEqual(col["job|" + R9_JOB], 3)
+        self.assertEqual((col["dataset|ds_cell"], col["model|m_c1"]), (4, 5))
+        self.assertIn("→ " + R9_LV, self.nodes["review_package|pkg_cell"][4])           # applied: names its lv
+        self.assertIn((exp, "review_package|pkg_cell", "base"), self.edges)              # export -> review -> lv
+        self.assertFalse([e for e in self.edges if e[1] == "job|" + R9_JOB and e[2] == "base"])
+
+    def test_export_reaches_sessions_with_counts(self):
+        exp = "roboflow_export|" + R9_EXP
+        got = {p.split("|", 1)[1]: role for p, c, role in self.edges if c == exp and p.startswith("session|")}
+        self.assertEqual({k: v.split(" · ")[0] for k, v in got.items()},
+                         {**{s: f"{n} images" for s, n in R9_SESSIONS.items()}, "?": "58 images"})
+        self.assertEqual(got["20260512"], "22 images · grid 2642: 16")
+        self.assertEqual(sum(int(v.split()[0]) for v in got.values()), 160)
+        self.assertEqual(self.nodes[hp.UNKNOWN_SESSION][1:5], [0, 0, -1, "not in the image records"])
+        self.assertNotIn("session|20261111", self.nodes)                               # in no export list: not drawn
+        self.assertNotIn(hp.UNKNOWN_SESSION, self.m["recs"])                            # a node, never a record
+        old = "roboflow_export|" + R9_OLD
+        self.assertEqual(self.nodes[old][4], "image list not recorded · local placeholder: no COCO in the cache")
+        self.assertFalse([e for e in self.edges if e[1] == old and e[0].startswith("session|")])
+
+    def test_agent_attribution(self):
+        r = self.m["recs"]["label_version|" + R9_LV]
+        self.assertEqual((r["who"]["who"], r["aiw"]), ("claude for pujan", ["who"]))
+        self.assertEqual([(h["by"], h["ai"]) for h in r["hist"]], [("claude for pujan", True)])
+        later = self.m["recs"]["label_version|lv_20261111_1500"]     # last line by a person: no agent credit
+        self.assertEqual((later["who"]["who"], later["who"]["status_by"], later["aiw"]),
+                         ("pujan", "person-b", []))
+        self.assertEqual([h["ai"] for h in later["hist"]], [True, False])
+        self.assertEqual(later["hist"][1]["by"], None)                # no recorded_by / tool on that line
+        job = self.m["recs"]["job|" + R9_JOB]["job"]
+        self.assertEqual((job["who"], job["ai"]), ("claude for pujan", True))
+        self.assertEqual(hp.who_fields({"who": "pujan"}, None), ({"who": "pujan"}, []))     # control: a person
+
+    @unittest.skipIf(sync_playwright is None, "playwright not installed")
+    def test_browser_ai_tag_lanes_and_arrows(self):
+        with sync_playwright() as pw:
+            browser = launch(pw)
+            if browser is None:
+                self.skipTest("no Edge / Chrome for Playwright")
+            try:
+                page = browser.new_page(viewport={"width": 1280, "height": 900})
+                errors = []
+                page.on("pageerror", lambda e: errors.append(str(e)))
+                page.goto(self.out.as_uri())
+                page.wait_for_selector("#tree .rec")
+                page.click(f"#tree .rec[data-k='label_version|{R9_LV}']")
+                self.assertEqual(page.inner_text("#detail dd .ai"), "AI")
+                self.assertIn("claude for pujan", page.inner_text("#detail"))
+                page.click("#t-graph")
+                page.check("#ghist")
+                heads = page.locator(".ghead").all_text_contents()
+                self.assertEqual(heads[0], "Imaging sessions")
+                self.assertNotIn("Roboflow labels", heads)
+                n = page.locator("#gsvg g").count()
+                self.assertGreater(n, 8)
+                self.assertEqual(page.locator("#gsvg path.ga").count(), n)           # one arrow per edge
+                self.assertIn("44 images", page.locator("#gsvg text.gcount").all_text_contents())
+                self.assertEqual(page.eval_on_selector(".gnode.btw", "e => getComputedStyle(e).borderTopStyle"),
+                                 "dashed")
+                self.assertIn("in progress", page.inner_text(".gnode[data-k='review_package|pkg_audit']"))
+                self.assertEqual(page.inner_text(".gnode.unk .gid"), "Session unknown")
+                self.assertEqual(errors, [])
+            finally:
+                browser.close()
+
+
 REAL = hp.config.registry_root(required=False)
 
 
@@ -484,7 +629,8 @@ class RealRegistryKnownAnswers(unittest.TestCase):
                   (self.V5, self.JOB2, "predictions"), (self.JOB2, self.LV, "output")):
             self.assertIn(e, self.edges)
         col = {k: n[1] for k, n in self.nodes.items()}
-        self.assertGreater(col[self.PKG2], col[self.LV])           # drawn right to left: a back-edge
+        self.assertEqual(col[self.PKG2], col[self.LV])             # the review sits in the lane it produces
+        self.assertGreater(col[self.V5], col[self.PKG2])           # model -> review: drawn right to left
 
     def test_history_adds_superseded_v1_packages(self):
         hidden = {k for k, n in self.nodes.items() if n[2] and k.startswith("review_package|")}

@@ -228,7 +228,8 @@ class Function(TG.Roots, unittest.TestCase):
                 self.assertTrue(titles(g).isdisjoint(OF_T + (U, V, DV, Q, QPKG, "29999")))
                 self.assertEqual(g["scope"], "item")
                 self.assertFalse(g["more"])
-                self.assertEqual(g["cols"][:len(D.SOURCE_COLS)], list(D.SOURCE_COLS))
+                self.assertEqual(g["cols"][0], "Imaging sessions")           # the lab's own first lane
+                self.assertEqual(g["cols"][D.SOURCE_AT:D.SOURCE_AT + len(D.SOURCE_COLS)], list(D.SOURCE_COLS))
 
     def test_edges_are_the_recorded_links(self):
         e = pairs_of(self.graph(self.A, "session|" + S))
@@ -380,7 +381,8 @@ class Function(TG.Roots, unittest.TestCase):
                 self.assertEqual(set(up), want)
                 if CID in up:
                     self.assertEqual(up[CID], {"title": CID, "kind": "upload", "col": 1, "hist": 0, "part": -1,
-                                               "sub": "9 tiles", "status": None, "url": f"/predict/convert/{CID}/"})
+                                               "sub": "9 tiles", "status": None, "url": f"/predict/convert/{CID}/",
+                                               "maker": "upload"})
         no_cfg = D.Viewer(Ctx.can_see, {"id": "tester", "role": "admin"})       # no portal cfg: no conversions
         self.assertNotIn(CID, titles(self.graph(no_cfg, "session|" + S)))
 
@@ -397,10 +399,12 @@ class Function(TG.Roots, unittest.TestCase):
                     self.assertNotIn(s, text)
         node = {n["title"]: n for n in self.graph(self.A, "session|" + S)["nodes"]}
         self.assertEqual(node[S], {"title": S, "kind": "session", "col": 0, "hist": 0, "part": -1,
-                                   "sub": "2099-12-01", "status": "processed", "url": f"/data/lineage/session/{S}/"})
+                                   "sub": "2099-12-01", "status": "processed", "url": f"/data/lineage/session/{S}/",
+                                   "maker": "session"})
         self.assertEqual(node[G1], {"title": G1, "kind": "grid", "col": 1, "hist": 0, "part": -1,
-                                    "sub": "EV prep one", "status": None, "url": f"/data/lineage/grid/{G1}/"})
-        self.assertEqual(node[LV]["col"], 1 + len(D.SOURCE_COLS))           # lab columns moved right
+                                    "sub": "EV prep one", "status": None, "url": f"/data/lineage/grid/{G1}/",
+                                    "maker": "grid"})
+        self.assertGreaterEqual(node[LV]["col"], D.SOURCE_AT + len(D.SOURCE_COLS))   # lab lanes moved right
 
     def test_box_text_quoting_a_hidden_id_is_blanked(self):
         # N4: GT's sample label quotes HP's id: blank for A and B (they can't see HP), shown to the admin
@@ -544,10 +548,15 @@ class Http(Served):
         st, _, body = self.api("session|" + S, "bas")
         self.assertEqual(st, 403)
         self.assertNotIn(S.encode(), body)
-        # without scope=item a session key is not a lab graph node: the whole lab graph, nothing focused
+        # without scope=item: the whole lab graph. #15: a session an export lists is a lab node (its lane is
+        # "Imaging sessions"), so it is the one focused; a session no export lists focuses nothing
         whole = json.loads(self.get("/data/api/lineage/graph?focus=" + quote("session|" + S, safe=""), "userb")[2])
-        self.assertIsNone(whole["focus"])
+        self.assertEqual((whole["nodes"][whole["focus"]]["kind"], whole["nodes"][whole["focus"]]["title"]),
+                         ("session", S))
         self.assertNotIn("scope", whole)
+        other = json.loads(self.get("/data/api/lineage/graph?focus=" + quote("session|" + T_SID, safe=""),
+                                    "userb")[2])
+        self.assertIsNone(other["focus"])
 
     def test_api_equals_the_function(self):
         st, _, body = self.api("grid|" + G1, "userb")

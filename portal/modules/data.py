@@ -21,8 +21,9 @@ sets, label versions, datasets, models) and the processed images on disk.
                                         (schema cj_data/1; other modules reuse it)
     GET /data/api/lineage/<kind>/<id>   the lineage as a JSON tree (schema cj_data/1)
     GET /data/lineage/graph/[?focus=<entity>|<id>]
-                                        the Lab graph: History's lineage graph (label sets -> datasets -> models ->
-                                        review / revise) for the whole lab, drawn by /data/data.js
+                                        the Lab graph: History's lineage graph (imaging sessions -> label sets
+                                        by maker, reviews between them -> datasets -> models) for the whole lab,
+                                        drawn by /data/data.js
     GET /data/api/lineage/graph[?focus=<entity>|<id>]   its data as JSON (schema cj_data/1)
     GET /data/data.js                   the Lab graph's script (portal/static/data.js; no inline script)
     POST /data/session/<id>/details     the Session details form of an uploaded session (its uploader or the admin;
@@ -54,9 +55,15 @@ Rules:
     nothing below it is followed. A parent the registry does not record is "unknown", never guessed. The walk is
     capped (depth and number of steps) and stops at a step it is already inside, so bad registry data cannot loop.
     Folder paths are shown to admins only. A Roboflow export with an image list (registry `lists/`, written by the
-    importer) leads to its images' grids and sessions; a re-split shows them under the export it was made from only
-    when the viewer may see that one and its list leads to exactly the same grids and sessions. The summary counts
-    listed images (datasets and exports shown) that trace to no session, as a number only.
+    importer) leads to its images' imaging sessions, each with its image count and its grids where known, plus one
+    "Session unknown" step for listed images no image record places in a session (#15); an export with no list says
+    "Image list not recorded". A re-split shows its sessions under the export it was made from only when the viewer
+    may see that one and its list gives exactly the same sessions, counts, grids and unknowns. A dataset that took its
+    images from such an export shows its sessions there and compares the two lists in its note (counts only). The
+    summary counts listed images (datasets and exports shown) that trace to no session, as a number only.
+  - Lanes (#16, the graphs): Imaging sessions | Labels: automatic | Labels: human (Roboflow exports and pulls "via
+    Roboflow") | Labels: revised (with the review packages and jobs, dashed, between lanes) | Datasets | Models.
+  - Attribution: a "by" an agent wrote reads "claude for pujan" (registry/actor.py label; who_label here).
   - Lab graph: History's own reader and builders (registry/history_page.py read_registry, build_model ->
     graph_model, imported, never changed), run on a FILTERED registry: every prediction set, review package and
     Roboflow export the viewer may not see (set_is_visible on Data's own record, the rule above; one Data does not
@@ -222,6 +229,7 @@ _files_cache: dict = {}
 _package_cache: dict = {}
 _owner_cache: dict = {}
 _registry_module_cache = None
+_actor_module_cache = None
 _decoders = threading.BoundedSemaphore(THUMB_DECODERS)
 
 
@@ -234,6 +242,23 @@ def _registry_module():
         spec.loader.exec_module(mod)
         _registry_module_cache = mod
     return _registry_module_cache
+
+
+def _actor_module():
+    """registry/actor.py, loaded once by path: label() is the one "claude for pujan" display form."""
+    global _actor_module_cache
+    if _actor_module_cache is None:
+        spec = importlib.util.spec_from_file_location("cj_data_actor", REPO / "registry" / "actor.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _actor_module_cache = mod
+    return _actor_module_cache
+
+
+def who_label(who, via=None) -> str:
+    """"claude for pujan" when an agent acted (via), else the person; "" when neither is known. Callers mask a
+    hidden owner BEFORE calling and escape the result."""
+    return _actor_module().label(_text(who), _text(via))
 
 
 def cached(store: dict, key, compute, ttl=FILES_TTL_S):
@@ -722,11 +747,40 @@ def label_rows(records, viewer) -> list:
     return rows
 
 
+def class_names(record) -> list:
+    return [str(c) for c in _list(record.get("classes")) if c not in (None, "")]
+
+
+def classes_text(record):
+    """'3 classes: EV, non-EV, Undetermined' (a one-line row subtitle), or None."""
+    names = class_names(record)
+    if not names:
+        return None
+    return f"{len(names)} {'class' if len(names) == 1 else 'classes'}: {', '.join(names)}"
+
+
+def class_mapping(record) -> dict | None:
+    """A dataset's class_map (source label class -> training class, None = dropped) as one line per training class,
+    in the dataset's class order: {"lines": [[training class, [source classes]]], "dropped": [source classes]}."""
+    cmap = _dict(record.get("class_map"))
+    if not cmap:
+        return None
+    order = class_names(record)
+    sources: dict = {}
+    dropped = []
+    for src, dst in cmap.items():
+        if dst in (None, ""):
+            dropped.append(str(src))
+        else:
+            sources.setdefault(str(dst), []).append(str(src))
+    targets = [c for c in order if c in sources] + [c for c in sources if c not in order]
+    return {"lines": [[t, sources[t]] for t in targets], "dropped": dropped}
+
+
 def dataset_rows(records) -> list:
     rows = []
     for record in sorted(records["dataset"].values(), key=lambda r: (_when(r), r["id"]), reverse=True):
-        sub = join_bits(split_counts(record), ", ".join(map(str, _list(record.get("classes")))),
-                        short_date(_when(record)))
+        sub = join_bits(split_counts(record), classes_text(record), short_date(_when(record)))
         rows.append(make_row("dataset", record["id"], record["id"], sub, status_tags(record)))
     return rows
 
@@ -965,7 +1019,9 @@ def detail_session(records, record, page=None, viewer=None) -> dict:
                                    "derived_from": c.get("derived_from")}
                                   for c in convs],
                   "details": {"grid_ids": _dict(det.get("grid_ids")), "sample_display": _dict(det.get("sample_display")),
-                              "prep_notes": _text(det.get("prep_notes")), "by": _text(det.get("by")),
+                              "prep_notes": _text(det.get("prep_notes")),
+                              "by": who_label(det.get("by"), det.get("via")) or None,
+                              "by_ai": bool(_text(det.get("via")) and _text(det.get("by"))),
                               "at": _text(det.get("at"))},
                   "can_edit": bool(viewer is not None and US.enabled(viewer.cfg) and US.may_edit(viewer.user, record))}
     detail = make_detail(
@@ -1165,7 +1221,6 @@ def detail_dataset(records, record, viewer, page) -> dict:
     files = dataset_images(records, record, viewer)
     source, label = _dict(record.get("source")), _text(record.get("label_version"))
     models = sorted(m["id"] for m in records["model"].values() if m.get("dataset") == dataset_id)
-    class_map = _dict(record.get("class_map"))
     split = _dict(record.get("split"))
     source_id = _text(source.get("id"))
     source_is_set = bool(source_id) and visible_set(records, source_id, viewer)[1] is not None
@@ -1173,8 +1228,7 @@ def detail_dataset(records, record, viewer, page) -> dict:
     fields = present(
         field("Status", status_word(record["status"]) if _text(record.get("status")) else None),
         field("Created", short_date(_when(record))), field("Splits (images)", split_counts(record)),
-        field("Classes", ", ".join(map(str, _list(record.get("classes"))))),
-        field("Merged classes", ", ".join(f"{k} as {v}" for k, v in class_map.items())),
+        field("Classes", class_names(record)),
         field("Label version", label, entity_href("labels", label) if label in records["label_version"] else None),
         field("Source", ("Not visible to you" if source_hidden else source_id or _text(source.get("kind")))
               if source else None,
@@ -1182,7 +1236,8 @@ def detail_dataset(records, record, viewer, page) -> dict:
         field("Split rule", f"{split['method']}, seed {split.get('seed')}" if split.get("method") else None),
         field("Note", _text(record.get("note"))))
     detail = make_detail("dataset", dataset_id, dataset_id, status_tags(record), fields,
-                         models=[{"id": m, "url": entity_href("model", m)} for m in models])
+                         models=[{"id": m, "url": entity_href("model", m)} for m in models],
+                         class_map=class_mapping(record))
     if not files:
         detail["note"] = "No example images are linked to this dataset."
     detail.update(thumbnails("dataset", dataset_id, files, page))
@@ -1282,6 +1337,7 @@ LINEAGE_MAX_DEPTH = 10      # steps from the item you asked about
 LINEAGE_MAX_NODES = 80      # steps in one lineage, however the registry links them
 LINEAGE_FANOUT = 8          # grids / sessions listed under one step before "and N more"
 LINEAGE_THUMBS = 4
+REVIEW_OPEN = ("built", "in_review", "reviewed")     # a review package not applied yet: "in progress"
 KIND_TO_NODE = {"session": "session", "grid": "grid", "images": "images", "labels": "label", "dataset": "dataset",
                 "model": "model"}
 STEP_NAMES = {"model": "Model", "run": "Training run", "dataset": "Dataset", "label": "Label version",
@@ -1351,8 +1407,8 @@ def ref_spec(records, viewer, ref_id, hint=None):
             "It is recorded here but is not in the registry.", ref_id)
 
 
-def unknown_spec(ntype, why):
-    return ("unknown", ntype, why, None)
+def unknown_spec(ntype, why, title=None):
+    return ("unknown", ntype, why, None, title)
 
 
 def input_specs(records, viewer, record, seen) -> list:
@@ -1368,35 +1424,35 @@ def input_specs(records, viewer, record, seen) -> list:
 
 
 def image_sources(records, match) -> dict:
-    """Grids and sessions of the registry's image records that `match` picks (those naming a session):
-    {"grids": {grid: n}, "sessions": {session: n} for images with no grid, "all_sessions": set, "n": traced}."""
-    grids: dict = {}
+    """Imaging sessions of the registry's image records that `match` picks (those naming a session), with the grids
+    where known: {"sessions": {session: {"n": images, "grids": {grid: images}}}, "all_sessions": set, "n": traced}.
+    A grid is the image's own, else its session's session_grids slot."""
     sessions: dict = {}
-    seen_sessions = set()
     n = 0
     for image in records["image"].values():
         if not match(image) or not _text(image.get("session")):
             continue
         n += 1
         sid, slot = image["session"], image.get("session_grid")
-        seen_sessions.add(sid)
         grid = _text(image.get("grid")) or _dict(_dict(records["session"].get(sid)).get("session_grids")).get(
             str(slot) if slot is not None else "")
+        entry = sessions.setdefault(sid, {"n": 0, "grids": {}})
+        entry["n"] += 1
         if grid:
-            grids[grid] = grids.get(grid, 0) + 1
-        else:
-            sessions[sid] = sessions.get(sid, 0) + 1
-    return {"grids": grids, "sessions": sessions, "all_sessions": seen_sessions, "n": n}
+            entry["grids"][str(grid)] = entry["grids"].get(str(grid), 0) + 1
+    return {"sessions": sessions, "all_sessions": set(sessions), "n": n}
 
 
 def pull_sources(records, pull_id) -> tuple:
-    """Grids and sessions of a download's images, from the registry only: the Roboflow image records first seen in
-    this download, matched by image name to the image records that name a session. -> (grid counts, session counts
-    for images with no grid)."""
+    """Sessions of a download's images, from the registry only: the Roboflow image records first seen in this
+    download, matched by image name to the image records that name a session. -> (image_sources result, number of
+    those names with no session)."""
     names = {r.get("name") for r in records["roboflow_image"].values() if r.get("first_seen_pull") == pull_id}
     names.discard(None)
     found = image_sources(records, lambda image: image.get("rf_name") in names)
-    return found["grids"], found["sessions"]
+    traced = {im.get("rf_name") for im in records["image"].values()
+              if im.get("rf_name") in names and _text(im.get("session"))}
+    return found, len(names - traced)
 
 
 def read_image_list(root, record):
@@ -1434,6 +1490,30 @@ def traced_note(wanted, found) -> str:
     shown = ", ".join(sessions[:6]) + (f" and {len(sessions) - 6} more" if len(sessions) > 6 else "")
     return (f"{found['n']} of {len(wanted)} images traced to sessions {shown}." if sessions else
             f"0 of {len(wanted)} images traced to a session.")
+
+
+def grids_text(entry):
+    """'Grid 2642 (16), Grid 2602 (9); 19 with no grid recorded' for one session's share of a list, or None."""
+    grids = sorted(entry["grids"].items(), key=lambda kv: (-kv[1], grid_sort_key(kv[0])))
+    if not grids:
+        return None
+    rest = entry["n"] - sum(n for _, n in grids)
+    return (", ".join(f"Grid {g} ({n})" for g, n in grids[:LINEAGE_FANOUT])
+            + (f" and {len(grids) - LINEAGE_FANOUT} more" if len(grids) > LINEAGE_FANOUT else "")
+            + (f"; {rest} with no grid recorded" if rest else ""))
+
+
+def list_compare_note(own, other, other_id, records) -> str:
+    """A dataset's image list against the export it took its images from (counts only, never names)."""
+    both, mine, theirs = own & other, own - other, other - own
+    in_reg = sum(1 for s in mine if s in records["image"])
+    text = f"{len(own)} images in this dataset: {len(both)} are in the image list of export {other_id}"
+    if mine:
+        text += (f", {len(mine)} are not" + (" (none of them is in the registry's image records)" if not in_reg else
+                                             f" ({in_reg} of them in the registry's image records)"))
+    if theirs:
+        text += f"; {len(theirs)} of the export's listed images are not in this dataset"
+    return text + ". Its imaging sessions are traced through that export."
 
 
 def capped(specs: list, make, label: str) -> list:
@@ -1477,7 +1557,21 @@ class Lineage:
         self.count += 1                                     # every step shown counts toward the cap
         return node
 
-    def walk(self, ntype, nid, path, depth) -> dict:
+    def walk(self, ntype, nid, path, depth, ctx=None) -> dict:
+        node = self._walk(ntype, nid, path, depth)
+        if ctx and node["type"] == "session" and node["status"] in ("ok", "cut"):
+            self.with_count(node, ctx)
+        return node
+
+    @staticmethod
+    def with_count(node, ctx):
+        """A session reached from an image list: how many of the list's images it gave, and their grids."""
+        node["images"] = ctx["n"]
+        node["chips"] = [(plural(ctx["n"], "image"), "acc")] + list(node["chips"])
+        node["fields"] = present(field("Images in this list", str(ctx["n"])),
+                                 field("Grids", grids_text(ctx))) + list(node["fields"])
+
+    def _walk(self, ntype, nid, path, depth) -> dict:
         found = self.lookup(ntype, nid)
         if found is None:
             if ref_hidden(self.records, self.viewer, nid):
@@ -1518,11 +1612,21 @@ class Lineage:
         if spec[0] == "hidden":
             return self.hidden_node()
         if spec[0] == "node":
-            return self.walk(spec[1], spec[2], path, depth)
+            return self.walk(spec[1], spec[2], path, depth, spec[3] if len(spec) > 3 else None)
         if spec[0] == "more":
             return self.node("source", None, "more", f"and {spec[1]} more {spec[2]}", note=None)
-        _, ntype, why, recorded = spec
-        return self.node(ntype, None, "unknown", note=why, chips=[("Unknown", "warn")], recorded=recorded)
+        if spec[0] == "untraced":                           # listed images no image record places in a session
+            n = spec[1]
+            return self.node("session", None, "unknown", "Session unknown", images=n,
+                             chips=[(plural(n, "image"), "warn")],
+                             note=f"{plural(n, 'listed image')} {'is' if n == 1 else 'are'} not matched to an imaging "
+                                  "session in the registry's image records.")
+        _, ntype, why, recorded, *rest = spec
+        node = self.node(ntype, None, "unknown", rest[0] if rest else None, note=why, chips=[("Unknown", "warn")],
+                         recorded=recorded)
+        if len(rest) > 1 and rest[1]:
+            self.with_count(node, rest[1])
+        return node
 
     # ---- addresses
     @staticmethod
@@ -1617,7 +1721,8 @@ class Lineage:
         label, source = _text(rec.get("label_version")), _dict(rec.get("source"))
         seen = {nid}
         specs = []
-        for ref_id, hint in ((label, "label_version"), (_text(source.get("id")), source.get("kind"))):
+        for ref_id, hint in ((label, "label_version"), (_text(source.get("id")), source.get("kind")),
+                             (_text(rec.get("export")), "roboflow_export")):
             if ref_id and ref_id not in seen:
                 seen.add(ref_id)
                 specs.append(ref_spec(self.records, self.viewer, ref_id, hint))
@@ -1627,27 +1732,48 @@ class Lineage:
         if trace and trace[0]:
             wanted, found, untraced = trace
             self.untraced |= untraced
-            note = traced_note(wanted, found)
-            specs += self.source_specs(found["grids"], found["sessions"])
+            via = self.listed_export(rec)
+            if via:                     # its sessions show under the export it took its images from (#15)
+                note = list_compare_note(wanted, via[1], via[0], self.records)
+            else:
+                note = traced_note(wanted, found)
+                specs += self.source_specs(found, len(untraced))
         if not specs:
             specs = [unknown_spec("source", "The registry does not say what this dataset was built from.")]
         fields = present(
             field("Status", status_word(rec["status"]) if _text(rec.get("status")) else None),
             field("Images per split", split_counts(rec)),
-            field("Classes", ", ".join(map(str, _list(rec.get("classes"))))),
-            field("Created", short_date(_when(rec))))
+            field("Classes", class_names(rec)),
+            field("Created", short_date(_when(rec))),
+            field("Note", _text(rec.get("note"))))
         return nid, status_tags(rec), fields, specs, note
 
-    def source_specs(self, grids, sessions) -> list:
-        """Grid and session parents for traced images: grids by image count, then sessions with no recorded grid."""
-        ordered = sorted(grids.items(), key=lambda kv: (-kv[1], grid_sort_key(kv[0])))
-        specs = capped(ordered, lambda kv: ("node", "grid", kv[0]) if kv[0] in self.records["grid"] else
-                       ("unknown", "grid", "The grid is recorded on its images but is not in the registry.", kv[0]),
-                       "grids")
-        by_count = sorted(sessions.items(), key=lambda kv: (-kv[1], kv[0]))
-        return specs + capped(by_count, lambda kv: ("node", "session", kv[0]) if kv[0] in self.records["session"] else
-                              ("unknown", "session", "The session is recorded on its images but is not in the "
-                               "registry.", kv[0]), "sessions without a recorded grid")
+    def listed_export(self, rec):
+        """(id, listed stems) of the first Roboflow export this dataset links to (export / source / inputs) that the
+        viewer may see and that has a readable image list, else None."""
+        source = _dict(rec.get("source"))
+        ids = [_text(rec.get("export"))] + ([_text(source.get("id"))] if source.get("kind") == "roboflow_export"
+                                            else [])
+        ids += [_text(_dict(i).get("id")) for i in _list(rec.get("inputs"))
+                if _dict(i).get("entity") == "roboflow_export"]
+        for eid in ids:
+            got = self.lookup("export", eid) if eid else None
+            if got and got[0] == "export":
+                stems = read_image_list(self.root, got[1])
+                if stems:
+                    return eid, set(stems)
+        return None
+
+    def source_specs(self, found, n_untraced=0) -> list:
+        """Session parents for listed images, by image count (each with its count and grids), then one "Session
+        unknown" step for the images no image record places in a session."""
+        ordered = sorted(found["sessions"].items(), key=lambda kv: (-kv[1]["n"], kv[0]))
+        specs = capped(ordered, lambda kv: ("node", "session", kv[0], kv[1]) if kv[0] in self.records["session"] else
+                       ("unknown", "session", "The session is recorded on its images but is not in the registry.",
+                        kv[0], None, kv[1]), "sessions")
+        if n_untraced:
+            specs.append(("untraced", n_untraced))
+        return specs
 
     def describe_label(self, nid, rec):
         seen = {nid}
@@ -1669,7 +1795,9 @@ class Lineage:
             field("Images changed", str(rec["n_images_applied"]) if rec.get("n_images_applied") is not None else None),
             field("Replaces", replaces, self.link("label", replaces)),
             field("Created", short_date(_when(rec))))
-        return nid, [(note, tone)] + status_tags(rec), fields, specs, None
+        maker = "Labels: revised" if _text(rec.get("pkg")) or any(
+            _dict(i).get("role") == "edits" for i in _list(rec.get("inputs"))) else "Labels: human"
+        return nid, [(note, tone), (maker, "")] + status_tags(rec), fields, specs, None
 
     def describe_export(self, nid, rec, entity=None):
         parent, label = _text(rec.get("derived_from")), _text(rec.get("label_version"))
@@ -1680,43 +1808,48 @@ class Lineage:
                 seen.add(ref_id)
                 specs.append(ref_spec(self.records, self.viewer, ref_id, hint))
         specs += input_specs(self.records, self.viewer, rec, seen)
-        note = None
+        note, listed = None, None
         trace = list_trace(self.records, self.root, rec)
         if trace is not None:
             wanted, found, untraced = trace
+            listed = len(wanted)
             self.untraced |= untraced
             note = traced_note(wanted, found)
             if str(_dict(rec.get("image_list")).get("method", "")).startswith("tracking"):
                 note += " The image list comes from the image tracker, which lists only the images it tracks."
-            # a re-split shows its grids / sessions under the export it was made from only when that one is visible,
-            # lists its images and they lead to exactly the same grids and sessions; otherwise it shows its own
-            if not (parent and self.same_sources_as_parent(parent, found)):
-                specs += self.source_specs(found["grids"], found["sessions"])
+            # a re-split shows its sessions under the export it was made from only when that one is visible, lists
+            # its images and they give exactly the same sessions, counts and grids; otherwise it shows its own
+            if not (parent and self.same_sources_as_parent(parent, found, len(untraced))):
+                specs += self.source_specs(found, len(untraced))
             if not specs:
                 specs = [unknown_spec("session", "No image in this export is matched to an imaging session in the "
                                                  "registry.")]
+        elif not parent:
+            specs.append(unknown_spec("session", "The registry has no list of the images in this export, so the "
+                                                 "imaging sessions they came from are not known.",
+                                      "Image list not recorded"))
         if not specs:
             specs = [unknown_spec("source", "The registry does not record which images went into this export.")]
         fields = present(field("Classes", ", ".join(map(str, _list(rec.get("classes"))))),
                          field("Images per split", split_counts(rec)),
+                         field("Image list", plural(listed, "image") if listed is not None else "not recorded"),
                          field("Made from export", hide_private(self.records, self.viewer, parent, "roboflow_export")
                                if parent else None, self.link("images", parent) if parent else None))
-        return nid, [("Roboflow export", "acc")], fields, specs, note
+        return nid, [("Roboflow export", "acc"), ("Labels: human, via Roboflow", "")], fields, specs, note
 
-    def same_sources_as_parent(self, parent, found) -> bool:
-        """True when the parent export is visible to this viewer, has a readable image list, and its images lead to
-        the same grids and the same sessions (those with no recorded grid) as this export's."""
+    def same_sources_as_parent(self, parent, found, n_untraced) -> bool:
+        """True when the parent export is visible to this viewer, has a readable image list, and its images give the
+        same sessions with the same counts and grids, and as many untraced images, as this export's."""
         got = self.lookup("export", parent)
         if not got or got[0] != "export":
             return False
         trace = list_trace(self.records, self.root, got[1])
-        return trace is not None and (set(trace[1]["grids"]), set(trace[1]["sessions"])) == \
-            (set(found["grids"]), set(found["sessions"]))
+        return trace is not None and trace[1]["sessions"] == found["sessions"] and len(trace[2]) == n_untraced
 
     def describe_pull(self, nid, rec):
-        grids, sessions = pull_sources(self.records, nid)
-        specs = self.source_specs(grids, sessions)
-        note = ("Grids and sessions come from the registry's image records, matched by image name to the images "
+        found, n_untraced = pull_sources(self.records, nid)
+        specs = self.source_specs(found, n_untraced) if found["n"] else []
+        note = ("Sessions and grids come from the registry's image records, matched by image name to the images "
                 "first seen in this download.")
         if not specs:
             specs = [unknown_spec("session", "No image in this download is matched to an imaging session in the "
@@ -1758,7 +1891,17 @@ class Lineage:
             field("Created", short_date(_when(rec))),
             field("Model", model, self.link("model", model) if model else None),
             field("Folder", _text(rec.get("path")) if self.admin and entity == "review_package" else None))
-        return nid, [(SET_KIND_NAMES[entity], "acc")], fields, specs, note
+        chips = [(SET_KIND_NAMES[entity], "acc")]
+        if entity == "prediction_set":
+            chips.append(("Labels: automatic", ""))
+        elif entity == "review_package":            # #16: a review sits between label sets until it is applied
+            applied = sorted(lid for lid, lv in self.records["label_version"].items() if lv.get("pkg") == nid)
+            if applied:
+                fields.append(("Applied as", applied[0], self.link("label", applied[0])))
+                chips.append(("Applied", ""))
+            elif rec.get("status") in REVIEW_OPEN:
+                chips.append(("In progress", "warn"))
+        return nid, chips, fields, specs, note
 
     def describe_grid(self, nid, rec):
         sessions = sorted({sid for sid, s in self.records["session"].items()
@@ -1813,10 +1956,12 @@ def lineage_tree(records, viewer, kind, entity_id, root=None):
 
 # ---------------------------------------------------------------- Lab graph (History's lineage graph, filtered)
 GRAPH_PAGE_KIND = {"roboflow_export": "images", "prediction_set": "images", "review_package": "images",
-                   "label_version": "labels", "dataset": "dataset", "model": "model"}   # pulls and jobs: no page
+                   "label_version": "labels", "dataset": "dataset", "model": "model",
+                   "session": "session"}                        # pulls and jobs: no page
 GRAPH_SHORT = {"roboflow_export": "export", "review_package": "package", "label_version": "label version",
                "prediction_set": "predictions"}                 # the box's tag, as History's drawGraph SHORT
-GRAPH_NODE_KEYS = ("title", "kind", "col", "hist", "part", "sub", "status", "url")   # everything a node sends
+GRAPH_NODE_KEYS = ("title", "kind", "col", "hist", "part", "sub", "status", "url", "maker")   # all a node sends
+GRAPH_UNKNOWN_SESSION = "session|?"     # History's "Session unknown" node (listed images with no session): no record
 SCRIPT = HERE.parent / "static" / "data.js"                    # served as /data/data.js (app.py serves only /cj/*)
 GRAPH_CACHE_N = 32                  # registry reads and built graphs kept (one graph per registry state per group)
 GRAPH_SHORT_ID = 6                  # a hidden id shorter than this is matched as a whole word, never as a substring
@@ -1984,19 +2129,22 @@ def lab_graph(records, viewer: Viewer, root, focus=None, extra=None) -> dict:
     if graph is None:
         kept = {k: r for k, r in current.items() if k not in drop}
         # sources and changes only feed History's image lookup and model pages, never the graph
-        graph = _history_module().build_model(kept, {k: history[k] for k in kept}, stats, [], [])["graph"]
+        graph = _history_module().build_model(kept, {k: history[k] for k in kept}, stats, [], [],
+                                              graph_sources=[Path(root)])["graph"]
         _remember(key, graph)
     quotes = hidden_matcher(hidden_ids)
     walker = Lineage(records, viewer, root)
     nodes, focus_index = [], None
-    for i, (k, col, hist, part, sub) in enumerate(graph["nodes"]):
+    for i, (k, col, hist, part, sub, maker) in enumerate(graph["nodes"]):
         entity, rid = k.split("|", 1)
-        status = current[k].get("status")
+        status = current.get(k, {}).get("status")
         status = None if status is None else str(status)
-        nodes.append({"title": rid, "kind": GRAPH_SHORT.get(entity, entity), "col": col, "hist": hist, "part": part,
+        unknown = k == GRAPH_UNKNOWN_SESSION
+        nodes.append({"title": "Session unknown" if unknown else rid, "kind": GRAPH_SHORT.get(entity, entity),
+                      "col": col, "hist": hist, "part": part,
                       "sub": "" if quotes(sub) else sub,        # an export's note may quote a hidden id
                       "status": "" if status is not None and quotes(status) else status,
-                      "url": graph_url(walker, entity, rid)})
+                      "url": None if unknown else graph_url(walker, entity, rid), "maker": maker})
         if k == focus:
             focus_index = i
     edges = [[a, b, "input" if quotes(role) else role] for a, b, role in graph["edges"]]
@@ -2088,7 +2236,8 @@ def lab_graph_href(focus=None) -> str:
 
 
 # ---------------------------------------------------------------- Session / grid graph (lab graph + its sources)
-SOURCE_COLS = ("Imaging sessions", "Grids and uploads")    # drawn left of the lab graph's columns
+SOURCE_COLS = ("Grids and uploads",)       # inserted after the lab graph's own first lane, "Imaging sessions"
+SOURCE_AT = 1                               # the lane index the source columns are inserted at
 SOURCE_ENTITIES = ("session", "grid")
 SOURCE_ROLES = {"grid": "grid", "images": "used its images", "upload": "upload", "analysed": "analysed"}
 
@@ -2212,8 +2361,8 @@ def source_links(root, base, drop) -> dict:
 
 def source_node(entity, rid, col, **kw) -> dict:
     """A session / grid / upload box: exactly GRAPH_NODE_KEYS, never a path or a person."""
-    node = {"title": rid, "kind": entity, "col": SOURCE_COLS.index(col), "hist": 0, "part": -1, "sub": "",
-            "status": None, "url": None}
+    node = {"title": rid, "kind": entity, "col": 0 if col == "Imaging sessions" else SOURCE_AT + SOURCE_COLS.index(col),
+            "hist": 0, "part": -1, "sub": "", "status": None, "url": None, "maker": entity}
     node.update(kw)
     return node
 
@@ -2264,7 +2413,8 @@ def source_graph(records, viewer: Viewer, root, focus) -> dict:
     the analyses of its one-grid sessions). They (and their parts and what follows) appear only when reached
     another way, e.g. a package listing this session's images.
     Built from the viewer's FILTERED lab graph: an item the viewer may not see is not a node there, so it is never
-    linked, counted or reached. Session / grid / upload boxes are added left of the lab columns (SOURCE_COLS); their
+    linked, counted or reached. Grid / upload boxes go in a lane after the lab's "Imaging sessions" (SOURCE_COLS); a
+    session the lab graph already has (an export lists its images) keeps its lab box, else one is added. Their
     subtitles and statuses go through the same hidden-id blanking as lab nodes.
     An unknown session / grid (or any other key) gives the empty graph with focus None and no echo."""
     extra: dict = {}
@@ -2278,15 +2428,25 @@ def source_graph(records, viewer: Viewer, root, focus) -> dict:
     idx = {k: i for i, k in enumerate(keys)}
     nodes = g["nodes"]                                      # fresh dicts per call: shifting the columns is safe
     for n in nodes:
-        n["col"] += len(SOURCE_COLS)
+        if n["col"] >= SOURCE_AT:
+            n["col"] += len(SOURCE_COLS)
     added: dict = {}
+    lab_edges = {(a, b) for a, b, _ in g["edges"]}
 
     def box(node) -> int:
         nodes.append(node)
         return len(nodes) - 1
 
+    def session_at(sid) -> int:
+        """The lab graph's own box for a session an export lists, else a new one in the sessions lane."""
+        i = idx.get("session|" + sid)
+        if i is None:
+            return box(session_box(records, sid, quotes))
+        nodes[i]["hist"] = 0                    # a source of this graph is never faded, whatever the lab says
+        return i
+
     def link(a, b, role):
-        if a is not None and b is not None and a != b:
+        if a is not None and b is not None and a != b and (a, b) not in lab_edges:
             added.setdefault((a, b), SOURCE_ROLES[role])
 
     def analysed(src, set_ids):
@@ -2296,7 +2456,7 @@ def source_graph(records, viewer: Viewer, root, focus) -> dict:
                 link(src, idx.get(pk), "analysed")
 
     if entity == "session":
-        focus_i = box(session_box(records, rid, quotes))
+        focus_i = session_at(rid)
         own = {k.split("|", 1)[1] for k in sl["ps"].get(rid, [])}
         conv_ids = {c["id"] for c in US.conversions_of(records["session"][rid])}
         for gid in sl["grids"].get(rid, []):
@@ -2323,7 +2483,7 @@ def source_graph(records, viewer: Viewer, root, focus) -> dict:
         focus_i = box(grid_box(records, rid, quotes))
         own = set()
         for sid in sl["sessions"].get(rid, []):
-            link(box(session_box(records, sid, quotes)), focus_i, "grid")
+            link(session_at(sid), focus_i, "grid")
             if sl["grids"].get(sid) == [rid]:               # the session imaged only this grid: its analyses too
                 own |= {k.split("|", 1)[1] for k in sl["ps"].get(sid, [])}
         for (sid, gid), ks in sl["links"].items():
@@ -2340,7 +2500,8 @@ def source_graph(records, viewer: Viewer, root, focus) -> dict:
             analysed(convs.get(analysis_conversion(set_id), focus_i), [set_id])
     else:
         analysed(focus_i, own)
-    full = {"schema": g["schema"], "cols": list(SOURCE_COLS) + g["cols"], "nodes": nodes,
+    full = {"schema": g["schema"], "cols": g["cols"][:SOURCE_AT] + list(SOURCE_COLS) + g["cols"][SOURCE_AT:],
+            "nodes": nodes,
             "edges": g["edges"] + [[a, b, role] for (a, b), role in added.items()], "focus": focus_i,
             "error": g["error"]}
     return item_graph(full, frozenset(skip))
@@ -2426,11 +2587,15 @@ def render_list(title, rows, error) -> str:
 
 
 def render_fields(fields) -> str:
+    """A list value is a bulleted list (one item per value); anything else is one escaped line."""
     if not fields:
         return ""
     items = []
     for label, value, href in fields:
-        shown = f'<a href="{esc(href)}">{esc(value)}</a>' if href else esc(value)
+        if isinstance(value, (list, tuple)):
+            shown = '<ul class="cj-data-vlist">' + "".join(f"<li>{esc(str(v))}</li>" for v in value) + "</ul>"
+        else:
+            shown = f'<a href="{esc(href)}">{esc(value)}</a>' if href else esc(value)
         items.append(f"<div><dt>{esc(label)}</dt><dd>{shown}</dd></div>")
     return '<dl class="cj-data-kv">' + "".join(items) + "</dl>"
 
@@ -2583,6 +2748,8 @@ def render_detail(d, error, extra="") -> str:
     else:
         if kind == "grid" and d["sessions"]:
             out.append(link_list("Imaged in", [{"id": f"Session {s['id']}", "url": s["url"]} for s in d["sessions"]]))
+        if kind == "dataset" and d.get("class_map"):
+            out.append(render_class_map(d["class_map"]))
         if kind == "dataset" and d["models"]:
             out.append(link_list("Models trained on it", d["models"]))
         if kind == "labels":
@@ -2590,6 +2757,15 @@ def render_detail(d, error, extra="") -> str:
         heading = "Example images" if kind == "dataset" else "Images"
         out.append(f'<h2 class="cj-sec">{heading} ({d["n_images"]})</h2>' + render_thumbs(d))
     return "".join(out)
+
+
+def render_class_map(cm) -> str:
+    """#14: the remap from the source labels, collapsed: one line per training class, dropped classes last."""
+    items = "".join(f"<li><b>{esc(t)}</b> ← {esc(', '.join(srcs))}</li>" for t, srcs in cm["lines"])
+    if cm["dropped"]:
+        items += f'<li class="cj-mut">dropped: {esc(", ".join(cm["dropped"]))}</li>'
+    return ('<details class="cj-card cj-data-cmap"><summary>Class mapping (from the source labels)</summary>'
+            f"<ul>{items}</ul></details>")
 
 
 def render_lineage_node(node) -> str:
@@ -2685,10 +2861,11 @@ def graph_frame(endpoint: str, item: bool = False, lab_href: str = "", note=None
     data.js shows when the focus comes back null (default: "This item is not in the lab graph.")."""
     attrs = (f'data-endpoint="{esc(endpoint)}"' + (' data-scope="item"' if item else ' data-focus-from-url="1"')
              + (f' data-empty="{esc(empty)}"' if empty else ""))
-    note = note or ("Arrows: parent \u2192 child (inputs). Dashed: model predictions \u2192 review / revise \u2192 "
-                    "label version. \u2605 = production." if not item else
+    note = note or ("Arrows: parent \u2192 child (inputs); the number on a session's arrow is its images in that "
+                    "export. Dashed boxes: reviews between lanes. Dashed arrows: model predictions \u2192 review. "
+                    "\u2605 = production." if not item else
                     "This item, what it was built from, and what was built from it. Arrows: parent \u2192 child "
-                    "(inputs).")
+                    "(inputs); the number on a session's arrow is its images in that export.")
     return ('<div class="cj-data-graph-bar">'
             '<label><input type="checkbox" id="cj-data-graph-hist"> <span id="cj-data-graph-histl">Show history'
             '</span></label>'
@@ -2708,8 +2885,9 @@ def render_lab_graph(error) -> str:
     """The Lab graph page: a frame only. /data/data.js reads /data/api/lineage/graph (with this page's ?focus) and
     draws it, so no record text is in this HTML."""
     return (breadcrumb(("Data", PREFIX + "/")) + '<h1>Lab graph</h1>'
-            '<p class="cj-mut cj-data-sub">How label sets, datasets, models and reviews connect, read from the '
-            'registry. Open a box for its lineage.</p>' + banner(error)
+            '<p class="cj-mut cj-data-sub">How imaging sessions, label sets (made by a model, by people or by a '
+            'review), datasets and models connect, read from the registry. Open a box for its lineage.'
+            '</p>' + banner(error)
             + graph_frame(PREFIX + "/api/lineage/graph")
             + '<noscript><p class="cj-mut">The Lab graph needs JavaScript.</p></noscript>'
             + f'<script src="{PREFIX}/data.js" defer></script>')

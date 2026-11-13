@@ -4,7 +4,10 @@
    scope come from data-* attributes on #cj-data-graph-root (a session's or grid's page uses the same item endpoint:
    its grids, uploads and what was made from their images). Draws History's lineage graph: the same layout as
    registry/history_page.py drawGraph (columns, boxes over an SVG edge layer, bezier edges, same-column lanes on the
-   left, back-edges routed over the top). Record text only ever goes in through textContent. */
+   left, back-edges routed over the top). Lanes (#16): Imaging sessions | Labels: automatic | human | revised |
+   Datasets | Models; review packages and jobs are dashed boxes between lanes; a session's arrow carries its image
+   count (#15). Below 640 px the lanes stack and every arrow runs in a left gutter. Record text only ever goes in
+   through textContent. */
 (function () {
   'use strict';
   var root = document.getElementById('cj-data-graph-root');
@@ -37,18 +40,31 @@
   }
   function isProd(n) { return n.kind === 'model' && n.status === 'production'; }
 
+  // a review package or a revise / annotate job sits BETWEEN lanes: dashed, "in progress" until it is applied
+  var OPEN_ST = {built: 'in progress', in_review: 'in progress', reviewed: 'in progress', ready: 'in progress',
+    in_progress: 'in progress'};
+  function between(n) { return n.kind === 'package' || n.kind === 'job'; }
+  function unknownSession(n) { return n.kind === 'session' && !n.url && n.title === 'Session unknown'; }
+  function statusText(n) {
+    var st = String(n.status);
+    return between(n) && OPEN_ST[st] ? OPEN_ST[st] : st.replaceAll('_', ' ');
+  }
+
   function box(i, p) {
     var n = G.nodes[i];
     var cls = 'cj-data-graph-node' + (n.part >= 0 ? ' cj-data-graph-part' : '') + (isProd(n) ? ' cj-data-graph-prod' : '')
-      + (n.hist ? ' cj-data-graph-dim' : '') + (i === G.focus ? ' cj-data-graph-focus' : '');
+      + (n.hist ? ' cj-data-graph-dim' : '') + (i === G.focus ? ' cj-data-graph-focus' : '')
+      + (between(n) ? ' cj-data-graph-between' : '');
     var b;
     if (n.url) { b = el('a', cls); b.href = n.url; } else { b = el('div', cls + ' cj-data-graph-nolink'); }
     b.title = n.kind + ': ' + n.title + (n.url ? '' : ' (no Data page)');
     b.style.left = p.x + 'px'; b.style.top = p.y + 'px'; b.style.width = p.w + 'px'; b.style.height = BH + 'px';
+    if (between(n)) { b.style.borderStyle = 'dashed'; b.style.borderColor = 'var(--acc)'; }
+    if (unknownSession(n)) { b.style.borderColor = 'var(--warn)'; }
     var l1 = el('span', 'cj-data-graph-l1');
-    l1.appendChild(el('span', 'cj-data-graph-tag', n.kind));
+    l1.appendChild(el('span', 'cj-data-graph-tag', n.maker || n.kind));
     if (isProd(n)) l1.appendChild(el('span', 'cj-data-graph-st cj-data-graph-stprod', '★ production'));
-    else if (n.status != null) l1.appendChild(el('span', 'cj-data-graph-st', String(n.status).replaceAll('_', ' ')));
+    else if (n.status != null) l1.appendChild(el('span', 'cj-data-graph-st', statusText(n)));
     b.appendChild(l1);
     b.appendChild(el('span', 'cj-data-graph-id', n.title));
     if (n.sub) {
@@ -59,8 +75,24 @@
     return b;
   }
 
+  // phones: the lanes stack (one lane under the other, boxes full width); every arrow runs in a gutter on the left
+  var STACK_W = 640, GUT = 44;
+  function stacked() {
+    var wrap = document.getElementById('cj-data-graph-wrap');
+    return (wrap ? wrap.clientWidth : window.innerWidth) < STACK_W;
+  }
+  function countLabel(g, x, y, text, anchor) {     // the images a session gave to an export, on its arrow
+    var t = svgEl('text', 'cj-data-graph-count');
+    t.setAttribute('x', x); t.setAttribute('y', y);
+    if (anchor) t.setAttribute('text-anchor', anchor);
+    t.style.fontSize = '10px'; t.style.fill = 'var(--mut)';
+    t.style.paintOrder = 'stroke'; t.style.stroke = 'var(--card)'; t.style.strokeWidth = '3px';
+    t.textContent = text;
+    g.appendChild(t);
+  }
+
   function draw() {
-    var hist = histBox.checked, an = anBox.checked, ncol = G.cols.length;
+    var hist = histBox.checked, an = anBox.checked, ncol = G.cols.length, stack = stacked();
     drawn.forEach(function (b) { b.remove(); }); drawn = [];
     while (svg.firstChild) svg.removeChild(svg.firstChild);
     var vis = G.nodes.map(function (n) { return (hist || !n.hist) && (an || !isAnalysis(n)); });
@@ -72,7 +104,7 @@
       cols[n.col].push(i);
     });
     G.edges.forEach(function (e) { (parents[e[1]] = parents[e[1]] || []).push(e[0]); });
-    var back = G.edges.filter(function (e) { return vis[e[0]] && vis[e[1]] && G.nodes[e[0]].col > G.nodes[e[1]].col; });
+    var back = stack ? [] : G.edges.filter(function (e) { return vis[e[0]] && vis[e[1]] && G.nodes[e[0]].col > G.nodes[e[1]].col; });
     var top = HEAD + back.length * LANE + (back.length ? 10 : 0);
     var ch = {};
     G.edges.forEach(function (e) { (ch[e[0]] = ch[e[0]] || []).push(e[1]); });
@@ -94,25 +126,55 @@
     // 2nd pass: sources near their children
     place(0, function (i) { return mean((ch[i] || []).filter(function (k) { return pos[k] && pos[k].c > 0; })); });
     for (var c2 = 1; c2 < ncol; c2++) place(c2, byParents(c2));
-    cols.forEach(function (list) {
-      maxr = Math.max(maxr, list.length + list.reduce(function (a, i) { return a + (kids[i] || []).length; }, 0));
-    });
-    var W = 2 * PAD + ncol * BW + (ncol - 1) * GAP + back.length * LANE + 10, H = top + maxr * (BH + VG) + PAD;
+    var W, H, heads = [];
+    if (stack) {
+      // same order inside each lane; lanes one under the other, each with its heading
+      var wrapW = document.getElementById('cj-data-graph-wrap').clientWidth, y = 8;
+      var bx = PAD / 2 + GUT, bw = Math.max(140, Math.min(360, wrapW - bx - PAD / 2));
+      cols.forEach(function (list, c) {
+        var ids = Object.keys(pos).map(Number).filter(function (i) { return pos[i].c === c; });
+        if (!ids.length) return;
+        ids.sort(function (a, b) { return pos[a].r - pos[b].r; });
+        heads.push([G.cols[c], bx, y]); y += 22;
+        ids.forEach(function (i) {
+          var part = pos[i].x > PAD + c * (BW + GAP);
+          pos[i] = {c: c, r: pos[i].r, x: part ? bx + 18 : bx, w: part ? bw - 18 : bw, y: y};
+          y += BH + VG;
+        });
+        y += 8;
+      });
+      W = wrapW; H = y + PAD / 2;
+    } else {
+      cols.forEach(function (list) {
+        maxr = Math.max(maxr, list.length + list.reduce(function (a, i) { return a + (kids[i] || []).length; }, 0));
+      });
+      W = 2 * PAD + ncol * BW + (ncol - 1) * GAP + back.length * LANE + 10; H = top + maxr * (BH + VG) + PAD;
+      G.cols.forEach(function (t, c) { heads.push([t, PAD + c * (BW + GAP), null]); });
+    }
     canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
     svg.setAttribute('width', W); svg.setAttribute('height', H);
-    G.cols.forEach(function (t, c) {
-      var h = el('div', 'cj-data-graph-head', t);
-      h.style.left = (PAD + c * (BW + GAP)) + 'px';
+    heads.forEach(function (t) {
+      var h = el('div', 'cj-data-graph-head', t[0]);
+      h.style.left = t[1] + 'px';
+      if (t[2] != null) h.style.top = t[2] + 'px';
       canvas.appendChild(h); drawn.push(h);
     });
-    var same = {}, bl = 0;
+    var same = {}, bl = 0, gl = 0, nGut = Math.max(1, Math.floor((GUT - 10) / LANE));
     G.edges.forEach(function (e) {
       var a = pos[e[0]], b = pos[e[1]];
       if (!a || !b) return;
-      var ay = a.y + BH / 2, by = b.y + BH / 2, d, dir, ex, cls = 'cj-data-graph-e';
-      if (a.c < b.c) {
+      var ay = a.y + BH / 2, by = b.y + BH / 2, d, dir, ex, cls = 'cj-data-graph-e', fromSession = G.nodes[e[0]].kind === 'session';
+      var label = fromSession ? String(e[2]).split(' · ')[0] : null, lx0, ly0, anchor = null;
+      if (stack) {                                   // into the gutter, down / up, back into the child
+        var gx = Math.min(a.x, b.x) - 6 - (gl++ % nGut) * LANE;
+        d = 'M' + a.x + ',' + ay + 'H' + gx + 'V' + by + 'H' + b.x; dir = 1; ex = b.x;
+        if (G.nodes[e[0]].col > G.nodes[e[1]].col) cls += ' cj-data-graph-back';
+        lx0 = a.x - 3; ly0 = ay - 4; anchor = 'end';      // at the session's own edge: the number only
+        if (label) label = label.split(' ')[0];
+      } else if (a.c < b.c) {
         var x1 = a.x + a.w, x2 = b.x, m = (x1 + x2) / 2;
         d = 'M' + x1 + ',' + ay + 'C' + m + ',' + ay + ' ' + m + ',' + by + ' ' + x2 + ',' + by; dir = 1; ex = x2;
+        lx0 = x1 + 4; ly0 = ay - 4;
       } else if (a.c === b.c) {
         var n = same[a.c] = (same[a.c] || 0) + 1, lx = PAD + a.c * (BW + GAP) - 8 - n * LANE;
         d = 'M' + a.x + ',' + ay + 'H' + lx + 'V' + by + 'H' + b.x; dir = 1; ex = b.x;
@@ -128,11 +190,14 @@
       g.appendChild(t);
       var p = svgEl('path', cls); p.setAttribute('d', d); g.appendChild(p);
       var h = svgEl('path', cls.replace('cj-data-graph-e', 'cj-data-graph-a')); h.setAttribute('d', arrow(ex, by, dir));
-      g.appendChild(h); svg.appendChild(g);
+      g.appendChild(h);
+      if (label && lx0 != null) countLabel(g, lx0, ly0, label, anchor);
+      svg.appendChild(g);
     });
     G.nodes.forEach(function (n, i) {
       if (pos[i]) { var b = box(i, pos[i]); canvas.appendChild(b); drawn.push(b); }
     });
+    G.stack = stack;
   }
 
   function labels() {
@@ -199,6 +264,11 @@
     focusBox();
     histBox.addEventListener('change', draw);
     anBox.addEventListener('change', draw);
+    var resized = null;                   // crossing the phone width switches between lanes side by side and stacked
+    window.addEventListener('resize', function () {
+      clearTimeout(resized);
+      resized = setTimeout(function () { if (G && stacked() !== G.stack) draw(); }, 150);
+    });
   }
 
   var loaded = false;
