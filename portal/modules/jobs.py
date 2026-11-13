@@ -1232,11 +1232,15 @@ def audit_path(cfg) -> Path:
     return PA.audit_path(cfg.state_dir)
 
 
-def audit(cfg, actor, action, job, reason, result):
-    """One line through portal/audit.py. Raises OSError if it can't be written. A request writes "requested" BEFORE
-    the share is touched (write-ahead: no line, nothing done), then a second line with the outcome."""
-    PA.audit(cfg.state_dir, actor, action, job,
-             {"reason": reason, "result": result, "phase": "requested" if result == "requested" else "result"})
+def audit(cfg, actor, action, job, reason, result, request=None):
+    """One line through portal/audit.py: a thin adapter (round 11 #3), PA.event with the request (a bearer request's
+    agent rides along as detail.via), else PA.audit. Raises OSError if it can't be written. A request writes
+    "requested" BEFORE the share is touched (write-ahead: no line, nothing done), then a second line with the outcome."""
+    detail = {"reason": reason, "result": result, "phase": "requested" if result == "requested" else "result"}
+    if request is None:
+        PA.audit(cfg.state_dir, actor, action, job, detail)
+    elif not PA.event(cfg.state_dir, request, action, job, detail, actor=actor):
+        raise OSError("the audit line was not written")
 
 
 def job_lock(job) -> threading.Lock:
