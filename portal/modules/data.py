@@ -1168,8 +1168,11 @@ def waiting_on(records, label_id, viewer) -> list:
         if not set_is_visible(viewer, "review_package", {**p["meta"], "id": p["id"]}):
             continue
         known = p["id"] in records["review_package"]
+        admin = _dict(getattr(viewer, "user", None)).get("role") == "admin"
+        preview = (f"/apply/#p-{quote(p['id'], safe='')}" if admin and p.get("kind") != "compare"
+                   and not str(p["id"]).startswith("pred_") else None)     # V4 (round 10): admin-only apply preview
         out.append({"id": p["id"], "title": p["title"], "n": p["waiting"],
-                    "url": entity_href("images", p["id"]) if known else None})
+                    "url": entity_href("images", p["id"]) if known else None, "preview": preview})
     return sorted(out, key=lambda x: x["id"])
 
 
@@ -2732,7 +2735,8 @@ def render_used_by(d) -> str:
             '<li class="cj-data-row">' + (f'<a href="{esc(w["url"])}">{esc(w["title"])}</a>' if w.get("url")
                                           else f'<span>{esc(w["title"])}</span>')
             + f'<span class="cj-mut cj-vis-id">{esc(w["id"])}</span>'
-            f'<span class="cj-mut">{esc(plural(w["n"], "decision") + " not applied yet")}</span></li>'
+            f'<span class="cj-mut">{esc(plural(w["n"], "decision") + " not applied yet")}</span>'
+            + (f'<a href="{esc(w["preview"])}">Preview apply</a>' if w.get("preview") else "") + '</li>'
             for w in d["waiting"])
         out.append(f'<h2 class="cj-sec">Waiting on it</h2><div class="cj-card"><ul class="cj-data-rows cj-vis-wait">'
                    f'{items}</ul></div>')

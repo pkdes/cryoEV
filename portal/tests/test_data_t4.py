@@ -21,3 +21,15 @@ class ReplacedBy(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PreviewLink(unittest.TestCase):
+    """V4 (round 10): the label-set page's "Waiting on it" rows link to the admin-only apply preview."""
+
+    def test_link_rendered_only_when_set(self):
+        row = {"id": "lab_x", "title": "Lab X", "n": 3, "url": None}
+        html = D.render_used_by({"datasets": [], "waiting": [dict(row, preview="/apply/#p-lab_x")]})
+        self.assertIn('href="/apply/#p-lab_x"', html)
+        self.assertIn("Preview apply", html)
+        html = D.render_used_by({"datasets": [], "waiting": [dict(row, preview=None)]})   # non-admin / compare / pred_
+        self.assertNotIn("Preview apply", html)
