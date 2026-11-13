@@ -515,9 +515,10 @@ class P1(TM.Base):
         ps1 = self.wait_task(self.raw_submit(name=default, name_default=default)[1].rstrip("/").split("/")[-1])
         self.assertNotIn("name", json.loads((self.root / ps1["href"].strip("/").split("/")[-1] / "request.json")
                                              .read_text("utf-8")))
-        st, loc, _ = self.raw_submit(name=default + " v2", name_default=default, count="2", how="count")
+        changed = default[:77] + " v2"   # stays within the 80-char cap whatever the date/time makes the default
+        st, loc, _ = self.raw_submit(name=changed, name_default=default, count="2", how="count")
         ps2 = self.wait_task(loc.rstrip("/").split("/")[-1])["href"].strip("/").split("/")[-1]
-        self.assertEqual(json.loads((self.root / ps2 / "request.json").read_text("utf-8"))["name"], default + " v2")
+        self.assertEqual(json.loads((self.root / ps2 / "request.json").read_text("utf-8"))["name"], changed)
         for ps in (ps1["href"].strip("/").split("/")[-1], ps2):
             self.wait_state(ps)
 
