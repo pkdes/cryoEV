@@ -28,12 +28,8 @@ UNSAFE = ("POST", "PUT", "DELETE", "PATCH")
 
 
 def clean_env(test):
-    """CRYOEV_* cleared for the test (restored after)."""
-    p = mock.patch.dict(os.environ)
-    p.start()
-    test.addCleanup(p.stop)
-    for k in [k for k in os.environ if k.startswith("CRYOEV_")]:
-        os.environ.pop(k)
+    """CRYOEV_* cleared for the test (restored after): the data roots must not leak in."""
+    test.enterContext(T.TK.env_patch(strip_all=True))
 
 
 def lines(state) -> list:
@@ -54,10 +50,8 @@ def concrete(path_tpl: str) -> str:
 class Base(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls._env_patch = mock.patch.dict(os.environ)
+        cls._env_patch = T.TK.env_patch(strip_all=True)          # CRYOEV_*-wide, restored in tearDownClass
         cls._env_patch.start()
-        for k in [k for k in os.environ if k.startswith("CRYOEV_")]:
-            os.environ.pop(k)
         cls.env = T.Env()
         cls.bas = A.add_key(cls.env.roster, "bas", "basic")
         cls.p = T.Portal(cls.env.config())

@@ -9,6 +9,8 @@ from unittest import mock
 
 REG = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REG.parent))                   # the repo root: `from registry import ...`
+sys.path.append(str(REG.parent / "tests"))
+import cryoev_testkit as TK  # noqa: E402  (shared helpers)
 from registry import importers  # noqa: E402
 from registry import store as registry  # noqa: E402
 
@@ -20,10 +22,7 @@ def sample(entity):
 class TestRegistry(unittest.TestCase):
     def setUp(self):
         # writers default `via` to $CRYOEV_VIA (round 9): these tests are a person's writes whatever session runs them
-        env = mock.patch.dict(os.environ, {k: v for k, v in os.environ.items()
-                                           if k not in ("CRYOEV_VIA", "CRYOEV_FOR")}, clear=True)
-        env.start()
-        self.addCleanup(env.stop)
+        self.enterContext(TK.env_patch())
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name) / "registry"
 

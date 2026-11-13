@@ -132,7 +132,7 @@ def registry_fixture() -> list:
 
 
 def write_registry(root: Path, recs):
-    (root / "job.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
+    T.TK.write_registry(root, {"job": recs})
     J._reg_cache.clear()                                # the module caches registry reads for 10 s
 
 

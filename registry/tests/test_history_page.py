@@ -12,6 +12,8 @@ from pathlib import Path
 
 REG = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REG.parent))                   # the repo root: `from registry import ...`
+sys.path.append(str(REG.parent / "tests"))
+import cryoev_testkit as TK  # noqa: E402  (shared helpers)
 from registry import history_page as hp  # noqa: E402
 
 try:
@@ -262,8 +264,7 @@ class GraphLookup(unittest.TestCase):
                       {"schema": "image/1", "id": "img_b_png", "session": "20990101", "grid": None},
                       {"schema": "image/1", "id": "img_c_png", "session": "20990102", "grid": None}],
         }
-        for ent, lines in recs.items():
-            (reg / f"{ent}.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines), encoding="utf-8")
+        TK.write_registry(reg, recs)
         cls.m = hp.build([reg], t / "out" / "history.html")
 
     @classmethod
@@ -448,7 +449,7 @@ class R9LanesAndAttribution(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.saved = {k: os.environ.pop(k) for k in list(os.environ) if k.startswith("CRYOEV_")}
+        cls.saved = TK.strip_environ(strip_all=True)                 # CRYOEV_*-wide; restored in tearDownClass
         cls.tmp = tempfile.TemporaryDirectory()
         reg = Path(cls.tmp.name) / "registry"
         (reg / "lists").mkdir(parents=True)
@@ -498,8 +499,7 @@ class R9LanesAndAttribution(unittest.TestCase):
                      "via": "claude", "package": "pkg_audit", "outputs": [],
                      "inputs": [{"id": R9_EXP, "role": "base"}]}],
         }
-        for ent, recs in lines.items():
-            (reg / f"{ent}.jsonl").write_text("".join(json.dumps(x) + "\n" for x in recs), encoding="utf-8")
+        TK.write_registry(reg, lines)
         cls.out = Path(cls.tmp.name) / "out" / "history.html"
         cls.m = hp.build([reg], cls.out)
         cls.nodes, cls.edges = graph_index(cls.m)

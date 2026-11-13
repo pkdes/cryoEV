@@ -46,8 +46,7 @@ SETS = {"tester": "ps_20261112_a00001", "adv": "ps_20261112_a00002", "bas": "ps_
 
 def clean_env():
     """No agent / API env from the outside (CRYOEV_*, CJ_API, CJ_AGENT_TOKENS) leaks into a test."""
-    for k in [k for k in os.environ if k.upper().startswith("CRYOEV_") or k.upper() in ("CJ_API", "CJ_AGENT_TOKENS")]:
-        os.environ.pop(k, None)
+    T.TK.strip_environ(strip_all=True, drop=("CJ_API", "CJ_AGENT_TOKENS"))
 
 
 def load_client():

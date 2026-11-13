@@ -24,6 +24,8 @@ sys.path.insert(0, str(REPO / "annotation"))
 import review_server as rs  # noqa: E402
 sys.path.insert(0, str(HERE))
 import make_fixture  # noqa: E402
+sys.path.append(str(REPO / "tests"))
+from cryoev_testkit import free_port  # noqa: E402  (shared helpers)
 
 KEY = "test-key-123"
 REAL_REL = Path("annotation review") / "cryoai_v4_review"
@@ -40,11 +42,6 @@ def real_package():
 
 def load_data(pkg: Path) -> dict:
     return json.loads((pkg / "data.js").read_text(encoding="utf-8").split("=", 1)[1].strip().rstrip(";"))
-
-
-def free_port() -> int:
-    s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
-    return port
 
 
 class LiveServer:

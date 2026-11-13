@@ -21,18 +21,18 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
+if str(REPO / "tests") not in sys.path:
+    sys.path.append(str(REPO / "tests"))             # appended: never shadows a portal test module
 
-import os  # noqa: E402
+import cryoev_testkit as TK  # noqa: E402  (shared helpers: free_port, env, fixture registry)
+from cryoev_testkit import free_port  # noqa: E402,F401  (T.free_port, used by many portal tests)
 
 # The portal runs with CRYOEV_VIA / CRYOEV_FOR stripped (portal.app main(), services.child_env). Tests start the
 # app without main(), so drop them here too: results must not depend on whether the test run is an agent session.
-# A test that needs them sets them explicitly (mock.patch.dict).
-for _k in [k for k in os.environ if k.upper() in ("CRYOEV_VIA", "CRYOEV_FOR")]:
-    os.environ.pop(_k, None)
-# The agent API's switches (round 10 #60): the kill switch and the shared token store. Tests use Env.tokens (a temp
-# store) and set CJ_API explicitly where they test it.
-for _k in [k for k in os.environ if k.upper() in ("CJ_API", "CJ_AGENT_TOKENS")]:
-    os.environ.pop(_k, None)
+# A test that needs them sets them explicitly (mock.patch.dict). Also the agent API's switches (round 10 #60): the
+# kill switch and the shared token store. Tests use Env.tokens (a temp store) and set CJ_API explicitly where they
+# test it.
+TK.strip_environ(drop=("CJ_API", "CJ_AGENT_TOKENS"))
 
 import uvicorn  # noqa: E402
 
@@ -41,14 +41,6 @@ from portal import auth as A  # noqa: E402
 
 UPKEY = "upstream-review-key-for-tests"
 USER = "tester"
-
-
-def free_port() -> int:
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
 
 
 def md5(b: bytes) -> str:

@@ -233,9 +233,8 @@ class ReviewPackageDefault(unittest.TestCase):
                     {"id": "job_20261101_done", "type": "revise", "port": 8766, "status": "done", "package": "old"},
                     {"id": "job_20261102_sbx", "type": "revise", "port": 8765, "status": "ready", "package": "old"}]
             pkgs = [{"id": "old", "path": str(pk_old)}, {"id": "new", "path": str(pk_new)}]
-            for ent, rows in (("job", jobs), ("review_package", pkgs)):
-                (reg / f"{ent}.jsonl").write_text("".join(json.dumps({"schema": f"{ent}/1", **r}) + "\n"
-                                                          for r in rows), encoding="utf-8")
+            T.TK.write_registry(reg, {ent: [{"schema": f"{ent}/1", **r} for r in rows]
+                                      for ent, rows in (("job", jobs), ("review_package", pkgs))})
             pkg = APP.registry_review_package(reg)
             self.assertEqual(pkg, pk_new)
             self.assertEqual(APP.read_review_key(pkg), "new-key")

@@ -38,6 +38,8 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "portal" / "tests"))
 import test_predict_patch_guard as PG  # noqa: E402  (lookups / Member / problems: the same rules)
+sys.path.append(str(REPO / "tests"))
+import cryoev_testkit as TK  # noqa: E402  (shared helpers)
 
 SKIP_DIRS = {".git", ".r10wt", ".r11wt", "__pycache__", "node_modules", ".venv", "venv"}
 ME = Path(__file__).resolve()
@@ -105,9 +107,7 @@ def main_scripts() -> list:
 
 
 def child_env() -> dict:
-    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("CRYOEV_")}
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
-    return env
+    return TK.clean_env(strip_all=True, PYTHONDONTWRITEBYTECODE="1")
 
 
 class StaticGuard(unittest.TestCase):

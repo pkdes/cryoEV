@@ -19,12 +19,13 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from data_utils import config  # noqa: E402
+sys.path.append(str(REPO / "tests"))
+import cryoev_testkit as TK  # noqa: E402  (shared helpers)
 
 
 def clean_env(**extra):
-    env = {k: v for k, v in os.environ.items() if not k.startswith("CRYOEV_")}
-    env.update(extra)
-    return env
+    """CRYOEV_*-wide: this file tests the data-root variables themselves."""
+    return TK.clean_env(strip_all=True, **extra)
 
 
 class ConfigTests(unittest.TestCase):

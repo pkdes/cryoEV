@@ -22,6 +22,8 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from cryoev import __main__ as CLI  # noqa: E402
+sys.path.append(str(REPO / "tests"))
+import cryoev_testkit as TK  # noqa: E402  (shared helpers)
 
 GOLDEN = REPO / "tests" / "fixtures" / "cj_golden" / "predict" / "ps_20261105_abc123"
 PS_ID = "ps_20261105_abc123"                     # = registry/samples/prediction_set.jsonl
@@ -39,15 +41,13 @@ class Platform(unittest.TestCase):
         for d in (self.reg, self.lap / "logs", self.lap / "predict", self.lap / "review", self.cai / "training outputs",
                   self.cai / "training images", t / "noproc", self.home, self.share / "q"):
             d.mkdir(parents=True, exist_ok=True)
-        for f in (REPO / "registry" / "samples").glob("*.jsonl"):   # label_change rows have no id: not a registry file
-            if f.name != "label_change.jsonl":
-                shutil.copyfile(f, self.reg / f.name)
+        TK.write_registry(self.reg, samples=True)                # the samples, label_change.jsonl left out
         shutil.copytree(GOLDEN, self.lap / "predict" / PS_ID)
         self.feedback = self.lap / "logs" / "portal_feedback.jsonl"
         self.services = t / "services.json"
         self.services.write_text(json.dumps({"run_dir": str(t / "run"), "services": [
             {"name": "demo", "enabled": False, "port": None, "argv": ["python", "-c", "pass"]}]}), encoding="utf-8")
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("CRYOEV_", "CJ_"))}
+        env = TK.clean_env(strip_all=True, drop=("CJ_*",))   # CRYOEV_* and CJ_* wide: the CLI reads both
         env.update(CRYOEV_LAPTOP_ROOT=str(self.lap), CRYOEV_REGISTRY=str(self.reg), CRYOEV_CRYOAI_ROOT=str(self.cai),
                    CRYOEV_PROCESSING_ROOT=str(t / "noproc"), CRYOEV_SERVICES_CONFIG=str(self.services),
                    CJ_FEEDBACK_FILE=str(self.feedback), USERPROFILE=str(self.home), HOME=str(self.home))

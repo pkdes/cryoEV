@@ -21,7 +21,6 @@ import http.client
 import json
 import math
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -37,6 +36,8 @@ sys.path.insert(0, str(REPO))
 from annotation import multi_review_server as mrs  # noqa: E402
 from annotation import prediction_package as pp  # noqa: E402
 from registry.schema_check import check_record, load_schemas  # noqa: E402
+sys.path.append(str(REPO / "tests"))
+from cryoev_testkit import free_port  # noqa: E402  (shared helpers)
 
 GOLDEN = REPO / "tests" / "fixtures" / "cj_golden"
 PS_ID = "ps_20261105_abc123"
@@ -502,14 +503,6 @@ class MultiServerTests(ServerCase):
         self.assertEqual(self.req("GET", f"/{part.name}/data.js", key=key)[0], 403)
         self.assertEqual(self.req("GET", f"/{part.name}/data.js", key="")[0], 403)
         self.assertFalse((part / ".review_key").exists())
-
-
-def free_port() -> int:
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
 
 
 class CliTests(Tmp):

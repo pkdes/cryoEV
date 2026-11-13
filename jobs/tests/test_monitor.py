@@ -20,6 +20,8 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import jobtest as T  # noqa: E402
 from jobtest import C  # noqa: E402
+sys.path.append(str(T.REPO / "tests"))
+import cryoev_testkit as TK  # noqa: E402  (shared helpers)
 
 import monitor as M  # noqa: E402
 
@@ -192,10 +194,7 @@ class MonitorTests(T.TempRoots, unittest.TestCase):
             self.addCleanup(srv.shutdown)
             servers.append(srv)
         live, live404 = (s.server_address[1] for s in servers)
-        s = socket.socket()
-        s.bind(("127.0.0.1", 0))
-        dead = s.getsockname()[1]
-        s.close()                                                      # nothing listens on `dead` any more
+        dead = TK.free_port()                                          # nothing listens on `dead` any more
         mute = socket.socket()                                         # listens, never accepts or answers
         mute.bind(("127.0.0.1", 0))
         mute.listen(1)

@@ -29,6 +29,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import test_apply_review_edits as tar  # noqa: E402  (module import: its TestCases are not collected twice)
 import apply_review_edits as ar  # noqa: E402  (path set up by test_apply_review_edits)
+sys.path.append(str(HERE.parent.parent / "tests"))
+import cryoev_testkit as TK  # noqa: E402  (shared helpers)
 
 STAMP = "20990101_0000"
 PEOPLE = {"people": [{"id": "pujan", "name": "Pujan", "aliases": ["Puj", "September review"]},
@@ -57,10 +59,7 @@ class _FrozenDT(_dt):
 def _patches(stack):
     stack.enter_context(mock.patch.object(ar, "git_sha", lambda: "abc1234"))
     stack.enter_context(mock.patch.object(ar, "datetime", _FrozenDT))
-    stack.enter_context(mock.patch.dict("os.environ", {}, clear=False))
-    import os
-    for k in ("CRYOEV_VIA", "CRYOEV_FOR"):
-        os.environ.pop(k, None)
+    stack.enter_context(TK.env_patch())                   # the actor variables removed, restored after
 
 
 class World:
