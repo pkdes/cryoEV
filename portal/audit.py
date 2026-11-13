@@ -15,10 +15,14 @@ detail.
 `Writer` is the Gate's catch-all (portal/app.py, round 9 #17): one line per portal write, written by one worker
 thread so a slow or locked log never blocks the event loop and a failed write never fails the request (logged).
 Frequent routes (upload chunks, review saves and claims, gallery marks) are grouped per actor x action x target
-(x status) in WINDOW_S windows: the first event is written at once, then one counter line with detail {from, to, n} (n = every
-event in the window, the first included; only when n > 1) when the window closes, on the next sweep, or at shutdown.
-A crash loses only the count, never the fact. Sign-ins: the first per person per day per door (in memory: a
-restart may log one more).
+(x status x via) in WINDOW_S windows: the first event is written at once, then one counter line with detail {from, to, n}
+(n = every event in the window, the first included; only when n > 1; plus status and via) when the window closes, on
+the next sweep, or at shutdown. A crash loses only the count, never the fact. Sign-ins: the first per person per day
+per door per agent (in memory: a restart may log one more).
+
+Agent tokens (round 10 #60): a request the Gate verified by bearer token carries detail.via = the token's agent on
+its lines (the window key and the counter line too) and signs in on API_DOOR, so Admin shows "<agent> for
+<person>" with the AI tag and never "unverified" (the portal checked the token).
 """
 from __future__ import annotations
 
@@ -45,10 +49,12 @@ TAIL_BYTES = 2 * 1024 * 1024
 WINDOW_S = 600                   # frequent routes: one counter line per actor x action x target per 10 min
 MAX_PENDING = 2000               # queued writes beyond this are dropped (logged): a stuck lock never eats memory
 MAX_WINDOWS = 5000               # open counting windows; beyond this, new keys fold into OVERFLOW_KEY (still counted)
-OVERFLOW_KEY = ("-", "other frequent actions (window table full)", None, None)
+OVERFLOW_KEY = ("-", "other frequent actions (window table full)", None, None, None)
 CLI_FILE = "agent_actions.jsonl"     # the laptop CLI's own log (self-declared identity), read via CJ_AUDIT_EXTRA
 CLI_DOOR = "laptop CLI (unverified)"
+CLI_ACTOR = "cli"                    # the actor of portal.auth CLI lines (a reserved person id: never a person)
 DOOR_NAMES = {"key": "tailnet key", "access": "access"}   # this portal's door, by its --auth mode
+API_DOOR = "API (verified)"                               # bearer-token requests (portal/app.py Gate)
 _lock = threading.Lock()
 log = logging.getLogger("cj.audit")
 
@@ -228,8 +234,8 @@ class Writer:
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cj-audit")
         self._mu = threading.Lock()
         self._pending = 0
-        self._windows = {}           # (actor, action, target, status) -> {"start", "last", "n"}
-        self._signins = {}           # (actor, door) -> "YYYY-MM-DD" (UTC) of the last sign-in line
+        self._windows = {}           # (actor, action, target, status, via) -> {"start", "last", "n"}
+        self._signins = {}           # (actor, door, via) -> "YYYY-MM-DD" (UTC) of the last sign-in line
         self.failed = 0
         self.dropped = 0
         self.closed = False
@@ -279,7 +285,8 @@ class Writer:
             return
         now = self.clock()
         status = detail.get("status") if isinstance(detail, dict) else None
-        key = (actor, action, target, status)          # done and refused are counted apart
+        via = detail.get("via") if isinstance(detail, dict) else None
+        key = (actor, action, target, status, via)     # done and refused (and each agent) are counted apart
         closed = None
         with self._mu:
             if key not in self._windows and len(self._windows) >= self.max_windows:
@@ -299,10 +306,12 @@ class Writer:
 
     def _count(self, key, w) -> None:
         if w["n"] > 1:
-            actor, action, target, status = key
+            actor, action, target, status, via = key
             d = {"from": _iso(w["start"]), "to": _iso(w["last"]), "n": w["n"]}
             if status is not None:
                 d["status"] = status
+            if via is not None:
+                d["via"] = via
             self.submit(actor, action, target, d)
 
     def sweep(self, now=None) -> int:
@@ -325,18 +334,21 @@ class Writer:
             self._count(k, w)
         return len(due)
 
-    def signin(self, actor, door, how=None) -> bool:
-        """The first sign-in per person per (UTC) day per door. -> True when a line was queued."""
+    def signin(self, actor, door, how=None, via=None) -> bool:
+        """The first sign-in per person per (UTC) day per door per agent (via: the bearer token's agent). -> True
+        when a line was queued."""
         if not actor:
             return False
         day = _iso(self.clock())[:10]
         with self._mu:
-            if self._signins.get((actor, door)) == day:
+            if self._signins.get((actor, door, via)) == day:
                 return False
-            self._signins[(actor, door)] = day
+            self._signins[(actor, door, via)] = day
         detail = {"door": door}
         if how:
             detail["how"] = how
+        if via:
+            detail["via"] = via
         return self.submit(actor, "signed in", None, detail)
 
     # -- life

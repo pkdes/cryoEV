@@ -11,7 +11,10 @@ Admin module (CryoEV portal, admin only): people and their key links, health at 
     POST /admin/people/email     id + email -> set, change or ('') remove an active person's sign-in email (Cloudflare
                                  access mode; lower-cased, unique among active people). The add form takes one too
     GET  /admin/people/revoke    ?id= -> the confirmation page (a form; no script, no confirm())
-    POST /admin/people/revoke    id + confirm=yes -> revoked: that person's sessions end at once
+    POST /admin/people/revoke    id + confirm=yes -> revoked: that person's sessions end at once, and their agent
+                                 tokens are revoked (portal/auth.py revoke_person_tokens)
+    POST /admin/people/token-revoke   id (tk_...) -> that agent token revoked (each person's card lists their live
+                                 tokens: agent, expiry, last used; never the token or its hash)
     GET  /admin/predict          Predict sessions: the sessions Predict offers (found by the scan of processed
                                  data, plus CJ_PREDICT_SOURCES), each with tiles, samples, usable yes / no + why,
                                  the name people see (editable) and shown / hidden (portal/predict_sources.py)
@@ -42,7 +45,9 @@ Rules:
     detail)` here is a thin wrapper. The Recent actions page shows the last AUDIT_SHOW lines of every door: every
     portal write (the Gate's catch-all, portal/app.py), the first sign-in per person per day, the modules' own lines,
     and the laptop CLI's file (named in CJ_AUDIT_EXTRA; door "laptop CLI (unverified)"). Counter lines (detail
-    {from, to, n}) show a time range and "n x action"; agent lines (detail.via) show actor.label + an AI tag.
+    {from, to, n}) show a time range and "n x action"; agent lines (detail.via) show actor.label + an AI tag. A
+    portal line with detail.via came from a bearer token the Gate verified: its door shows as audit.API_DOOR
+    ("API (verified)"), never "unverified" (only the laptop CLI's self-declared lines are).
     Person / Action filters run in the browser over those lines only (admin.js).
   - Predict sessions: overrides in <state dir>/predict_sources.json (predict_sources.set_override: its own thread +
     OS lock, atomic write); one audit line per change (predict_source_renamed / _hidden / _shown, target = the
@@ -111,7 +116,8 @@ ROLE_DESC = {"admin": "everything, including people and health",
 ACTION_WORD = {"person_added": "added", "role_changed": "changed the role of", "person_revoked": "revoked",
                "email_changed": "changed the sign-in email of", "key_made": "made a key link for",
                "cancel": "cancel", "release": "release", "predict_source_renamed": "renamed the Predict session",
-               "predict_source_hidden": "hid the Predict session", "predict_source_shown": "showed the Predict session"}
+               "predict_source_hidden": "hid the Predict session", "predict_source_shown": "showed the Predict session",
+               "agent token made": "made an agent token", "agent token revoked": "revoked the agent token"}
 
 esc = html.escape
 log = logging.getLogger("cj.admin")
@@ -309,7 +315,7 @@ BAD_ID = "An id is 1 to 40 lower-case letters, digits, '_', '.' or '-', starting
 
 
 def _check_id(pid) -> None:
-    if not isinstance(pid, str) or not A.ID_RE.fullmatch(pid):
+    if not A.id_ok(pid):                                 # ID_RE, and never a reserved audit actor ("cli", "-")
         raise Refused(BAD_ID, 400)
 
 
@@ -837,7 +843,32 @@ def hidden_token(tok) -> str:
     return f'<input type="hidden" name="t" value="{esc(tok)}">'
 
 
-def render_people(rows, me, tok, msg_html="", keys_ok=True) -> str:
+def render_tokens(pid, toks, tok) -> str:
+    """A person's agent tokens on their card: live ones with Revoke; a count of the expired / revoked rest."""
+    toks = toks or []
+    live = [t for t in toks if t.get("state") == "active"]
+    if not toks:
+        return ""
+    items = []
+    for t in live:
+        exp = parse_time(_s(t.get("expires")))
+        used = parse_time(_s(t.get("last_used")))
+        items.append(f'<li class="cj-admin-tok" data-token-id="{esc(str(t.get("id")))}"><span><b>'
+                     f'{esc(ACTOR.label(pid, t.get("agent")))}</b> <span class="cj-mut">{esc(str(t.get("id")))} · '
+                     f'{esc(str(t.get("scope")))} · expires {esc(_clock(exp, False))} · last used '
+                     f'{esc(_clock(used, False) if used else "never")}</span></span>'
+                     f'<form method="post" action="{PREFIX}/people/token-revoke">{hidden_token(tok)}'
+                     f'<input type="hidden" name="id" value="{esc(str(t.get("id")))}">'
+                     f'<button class="cj-admin-btn cj-admin-dangerbtn" type="submit">Revoke token</button></form></li>')
+    rest = len(toks) - len(live)
+    more = f'<p class="cj-mut cj-admin-meta">{rest} expired or revoked.</p>' if rest else ""
+    return (f'<div class="cj-admin-toks"><p class="cj-admin-lbl">Agent tokens ({len(live)} live)</p>'
+            f'<ul class="cj-admin-toklist">{"".join(items)}</ul>{more}</div>')
+
+
+def render_people(rows, me, tok, msg_html="", keys_ok=True, tokens=None) -> str:
+    """tokens: {person id: [public token records]} (auth.list_tokens), shown on each active person's card."""
+    tokens = tokens or {}
     active = [r for r in rows if r["state"] != "revoked"]
     gone = [r for r in rows if r["state"] == "revoked"]
     n_admin = sum(1 for r in active if r["role"] == "admin" and r["state"] == "active")
@@ -887,7 +918,8 @@ def render_people(rows, me, tok, msg_html="", keys_ok=True) -> str:
                 f'{chip(ROLE_WORD.get(role, role), tone)}</div>'
                 f'<p class="cj-mut cj-admin-meta">{meta}.</p>{mail}{bad}{lastnote}'
                 + ("" if last else f'<div class="cj-admin-acts">{role_form}{rev}</div>')
-                + f'<div class="cj-admin-acts">{mail_form}{key_form if keys_ok else ""}</div></li>')
+                + f'<div class="cj-admin-acts">{mail_form}{key_form if keys_ok else ""}</div>'
+                + render_tokens(r["id"], tokens.get(r["id"]), tok) + '</li>')
 
     roles = "".join(f"<li><b>{ROLE_WORD[r]}</b>: {esc(ROLE_DESC[r])}</li>" for r in A.ROLES)
     add = (f'<section class="cj-card cj-admin-add" aria-labelledby="cj-admin-h-add">'
@@ -1208,7 +1240,8 @@ AUD_KINDS = (("feedback", "feedback"), ("review", "review saves"), ("predict", "
              ("sign-in", "sign-ins"), ("admin", "admin"), ("jobs", "jobs and training"), ("refused", "refused"),
              ("other", "other"))
 _ADMIN_ACTS = {"person_added", "role_changed", "person_revoked", "email_changed", "key_made", "person added",
-               "role changed", "person revoked", "sign-in email changed", "key link made"}
+               "role changed", "person revoked", "sign-in email changed", "key link made", "agent token made",
+               "agent token revoked"}
 _JOB_ACTS = {"cancel", "release", "job cancel", "job release", "train_queue", "training queued", "training checked"}
 REFUSED = {401: "refused", 403: "refused", 409: "refused"}
 
@@ -1277,7 +1310,11 @@ def audit_row(e0, own_door="this door") -> dict:
     door = str(e0.get("door") or "this door")
     door = own_door if door == "this door" else door
     name = ACTOR.label(e.get("actor") or "-", via) or "-"
+    if e.get("actor") == PA.CLI_ACTOR:                         # the token CLI: whoever ran it, a declared via
+        door = PA.CLI_DOOR
     unv = door == PA.CLI_DOOR or "unverified" in door          # a self-declared identity (the laptop CLI)
+    if via and not unv and (act != "signed in" or d.get("door") == PA.API_DOOR):
+        door = PA.API_DOOR                                      # a bearer token the portal verified
     return {"when": when, "name": name, "who": f"{name} (unverified)" if unv else name, "ai": bool(via),
             "what": word, "target": "" if e.get("target") is None else str(e.get("target")),
             "detail": ", ".join(parts), "door": door, "unverified": unv, "kind": aud_kind(act, status)}
@@ -1429,8 +1466,14 @@ def routes(ctx) -> list:
         except ValueError as e:
             return show(request, "People", "people", "<h1>People</h1>" + note(
                 f"The roster can't be read ({e}). Nothing was changed.", "warn"), 500)
+        toks: dict = {}
+        try:
+            for t in A.list_tokens(A.tokens_path(ctx.cfg)):
+                toks.setdefault(t["person"], []).append(t)
+        except A.TokenError as e:
+            msg_html += note(f"Agent tokens can't be listed: {e}.", "warn")
         return show(request, "People", "people", render_people(rows, me(request), token(request), msg_html,
-                                                       keys_ok=not access_mode()), status)
+                                                       keys_ok=not access_mode(), tokens=toks), status)
 
     def try_audit(actor, action, target, detail) -> str:
         try:
@@ -1503,7 +1546,16 @@ def routes(ctx) -> list:
         if err:
             return err
         key, had = res
-        warn = await run_in_threadpool(try_audit, actor, "key_made", pid, {"rotated": had})
+        detail = {"rotated": had}
+        if had:                                          # a re-key: the person's agent tokens go too
+            try:
+                n_tok = await run_in_threadpool(A.revoke_person_tokens, A.tokens_path(ctx.cfg), pid, actor)
+                if n_tok:
+                    detail["tokens_revoked"] = n_tok
+            except (OSError, A.TokenError) as e:
+                log.error("admin: %s's agent tokens not revoked on re-key (%s)", pid, type(e).__name__)
+                detail["tokens_revoked"] = "failed"
+        warn = await run_in_threadpool(try_audit, actor, "key_made", pid, detail)
         base = await run_in_threadpool(link_base, ctx.cfg, request.headers.get("origin"))
         link = f"{base}/login?k={key}"
         del key
@@ -1564,12 +1616,44 @@ def routes(ctx) -> list:
         old, err = await change(request, revoke_person, pid)
         if err:
             return err
-        warn = await run_in_threadpool(try_audit, actor, "person_revoked", pid, {"role": old})
+        try:                                             # their agent tokens die with them (the Gate also
+            n_tok = await run_in_threadpool(A.revoke_person_tokens,      # refuses a revoked person's tokens)
+                                            A.tokens_path(ctx.cfg), pid, actor)
+        except (OSError, A.TokenError) as e:
+            log.error("admin: %s's agent tokens not marked revoked (%s)", pid, type(e).__name__)
+            n_tok = None
+        detail = {"role": old}
+        if n_tok:
+            detail["tokens_revoked"] = n_tok
+        warn = await run_in_threadpool(try_audit, actor, "person_revoked", pid, detail)
+        if n_tok is None:
+            warn += note(f"{pid} is revoked, but their agent tokens could not be marked revoked (they stop working "
+                         f"anyway while {pid} is revoked). Revoke them below.", "warn")
         if warn:
             return await run_in_threadpool(people_page, request, warn)
         if pid == actor:
             return ctx.no_store(RedirectResponse("/", status_code=303))
         return done(request, f"{pid} is revoked and signed out.")
+
+    async def token_revoke(request: Request):
+        f, err = await form(request)
+        if err:
+            return err
+        actor = me(request)
+        try:
+            rec = await run_in_threadpool(A.revoke_token, A.tokens_path(ctx.cfg), f.get("id", ""), actor)
+        except A.TokenError as e:
+            return await run_in_threadpool(people_page, request, note(f"Nothing was revoked: {e}", "warn"), 404)
+        except OSError as e:
+            log.error("admin: token store not written (%s)", type(e).__name__)
+            return await run_in_threadpool(people_page, request, note(
+                "Nothing was revoked: the token store is busy or can't be written. Try again.", "warn"), 503)
+        warn = await run_in_threadpool(try_audit, actor, "agent token revoked", rec["id"],
+                                       {"for": rec["person"], "agent": rec["agent"], "scope": rec["scope"],
+                                        "expires": rec["expires"]})
+        if warn:
+            return await run_in_threadpool(people_page, request, warn)
+        return done(request, f"Token {rec['id']} ({ACTOR.label(rec['person'], rec['agent'])}) is revoked.")
 
     async def health_page(request: Request):
         h = await asyncio.to_thread(health, ctx.cfg)
@@ -1693,6 +1777,7 @@ def routes(ctx) -> list:
             Route(PREFIX + "/people/key", makekey, methods=["POST"]),
             Route(PREFIX + "/people/revoke", revoke_page, methods=["GET"]),
             Route(PREFIX + "/people/revoke", revoke, methods=["POST"]),
+            Route(PREFIX + "/people/token-revoke", token_revoke, methods=["POST"]),
             Route(PREFIX + "/predict", predict_page, methods=["GET"]),
             Route(PREFIX + "/predict/label", predict_label, methods=["POST"]),
             Route(PREFIX + "/predict/show", predict_show, methods=["POST"]),

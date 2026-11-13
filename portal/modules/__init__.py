@@ -25,7 +25,8 @@ from starlette.routing import Route
 HERE = Path(__file__).resolve().parent
 TEMPLATES = HERE.parent / "templates"
 PREFIX_RE = re.compile(r"^/[a-z][a-z0-9-]*$")
-RESERVED = {"/", "/login", "/healthz", "/cj", "/history", "/review"}
+# /api stays free: the agent API (round 10) opens existing routes (portal/app.py BEARER_ROUTES), no module owns /api
+RESERVED = {"/", "/login", "/healthz", "/cj", "/history", "/review", "/api"}
 
 
 def no_store(r: Response) -> Response:

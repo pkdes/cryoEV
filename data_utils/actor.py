@@ -26,7 +26,7 @@ import re
 from pathlib import Path
 
 ENV_VIA, ENV_FOR = "CRYOEV_VIA", "CRYOEV_FOR"
-VIA_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+VIA_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}\Z")   # \Z, not $: "claude\n" is refused
 PEOPLE = Path(__file__).resolve().parent.parent / "annotation" / "people.json"
 
 

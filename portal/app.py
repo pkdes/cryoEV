@@ -22,6 +22,7 @@ Routes (everything except OPEN needs a session; see Gate):
   /login?k=<key>         key link -> session cookie -> relative redirect to /
   /healthz               {"ok": true}
   /cj/cj.css, brand.json, header.js, live.js, review.js, modules.json, me.json     the shell's own files
+  /cj/cryoev_client.py   the one-file agent API client (client/cryoev_client.py; signed-in download, docs/API.md)
   /cj/version.json       {"version": the portal's stamp, "review_page": {"version", "updated"} of the real review
                          package's index.html, "review_tool": the same for the repo's review tool (prediction
                          packages)}: PAGE_VERSION parsed from the page ("unknown" without it) + the file's mtime
@@ -40,6 +41,14 @@ and a valid modules.json entry may replace one (manifest_rules; fail closed). Th
 unreadable modules.json stops the portal; a role change needs a restart). The Gate answers 403 to any other role.
 A top-level document GET of /review/app/ (a copied tool link) answers 302 /review/?<query minus k>.
 
+Agent API (round 10 #60, docs/API.md): `Authorization: Bearer cev_...` (portal/auth.py TokenStore, one shared store)
+opens ONLY the exact (GET, route template) pairs in BEARER_ROUTES, existing JSON read routes; everything else answers
+401 with no cookie fallback, and cookies (and the Authorization header) are dropped from the request before the app
+sees it. The person's role is capped at advanced (BEARER_ROLE_CAP), then the normal module rules and the handlers'
+owner checks apply as for a browser. No Origin check (GET only). scope cj_auth = "bearer", cj_via = the token's
+agent. CJ_API=off refuses every bearer request (the kill switch). The Cloudflare (access) door refuses bearer:
+the API is tailnet-only for now (a Cloudflare service token comes next round); access_user is unchanged.
+
 Defaults: --registry = data_utils.config.registry_root(); --review-package = the newest open revise job on port
 8766 in that registry (its review_package path); roster and state dir under %USERPROFILE%\\.cryoev (portal/auth.py).
 uvicorn runs with its access log OFF and proxy headers OFF; the app writes its own access log with `k` redacted.
@@ -49,6 +58,7 @@ Audit (Admin > Recent actions): after every POST/PUT/DELETE/PATCH, done or refus
 action from AUDIT_LABELS (keyed by the matched route template), a safe id target, {"status"}. Upload chunks, review
 saves / claims and gallery marks: the first per person x action x target per 10 min, then a counter line. Plus the
 first sign-in per person per day on this door. main() removes CRYOEV_VIA / CRYOEV_FOR (registry/actor.strip_env).
+Bearer requests: door portal.audit.API_DOOR, detail.via = the token's agent (sign-ins de-duplicated per agent).
 """
 from __future__ import annotations
 
@@ -89,6 +99,21 @@ from annotation import multi_review_server as MRS  # noqa: E402
 
 OPEN = frozenset({"/login", "/cj/cj.css", "/cj/brand.json", "/healthz"})   # the ONLY routes without a session
 UNSAFE = frozenset({"POST", "PUT", "DELETE", "PATCH"})                      # need Origin == this portal
+# ---- the agent API (round 10 #60, docs/API.md): the ONLY (method, route template) pairs a bearer token opens. Exact
+# templates of existing JSON read routes (the router's own match, never a path prefix); read-only tonight.
+BEARER_ROUTES = frozenset({
+    ("GET", "/cj/me.json"),
+    ("GET", "/data/api/overview"), ("GET", "/data/api/search"), ("GET", "/data/api/list/{kind}"),
+    ("GET", "/data/api/{kind}/{eid}"), ("GET", "/data/api/lineage/{kind}/{eid}"), ("GET", "/data/api/lineage/graph"),
+    ("GET", "/predict/api/mine"), ("GET", "/predict/api/set/{ps}"),
+    ("GET", "/results/{ps}/api/status"),
+    ("GET", "/jobs/api/summary"),
+})
+BEARER_ROLE_CAP = {"admin": "advanced"}       # an agent never acts as an admin
+API_ENV = "CJ_API"                            # "off": every bearer request refused (the kill switch)
+API_DOCS = "See docs/API.md."
+API_TAILNET_ONLY = ("API is tailnet-only for now: use the portal's Tailscale address. Agent tokens are not accepted "
+                    "through the Cloudflare sign-in yet.")
 SECURITY_HEADERS = ((b"x-content-type-options", b"nosniff"), (b"x-frame-options", b"DENY"),
                     (b"referrer-policy", b"same-origin"))
 INCLUDES = b'<link rel="stylesheet" href="/cj/cj.css">\n<script src="/cj/header.js" defer></script>\n'
@@ -169,6 +194,9 @@ AUDIT_LABELS = {      # route template -> (action, frequent: first per 10 min wr
     "/admin/people/email": ("sign-in email changed", False),
     "/admin/people/key": ("key link made", False),
     "/admin/people/revoke": ("person revoked", False),
+    "/admin/people/token-revoke": ("agent token revoked", False),
+    "/account/tokens/new": ("agent token made", False),
+    "/account/tokens/revoke": ("agent token revoked", False),
     "/admin/predict/label": ("Predict session renamed", False),
     "/admin/predict/show": ("Predict session shown / hidden", False),
     "/review/{rest:path}": ("review write (no such page)", False),
@@ -178,7 +206,8 @@ REVIEW_TOOL_ACTIONS = {"api/edits": ("review save", True), "api/claim": ("review
 # routes whose handler writes its own, richer line on success: the catch-all logs them only when refused / failed
 SELF_LOGGED = frozenset({"/admin/people/add", "/admin/people/role", "/admin/people/email", "/admin/people/key",
                          "/admin/people/revoke", "/admin/predict/label", "/admin/predict/show", "/jobs/api/cancel",
-                         "/jobs/api/release", "/train/queue"})
+                         "/jobs/api/release", "/train/queue", "/admin/people/token-revoke", "/account/tokens/new",
+                         "/account/tokens/revoke"})
 AUDIT_IDS = ("ps", "pkg_id", "cid", "rid", "eid", "uid", "tid")      # the only path parameters a line may carry
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}\Z")
 SWEEP_S = 60.0                                                       # close due 10-min windows this often
@@ -187,6 +216,7 @@ ABOUT_KEYS = (("platform", "The platform"), ("credit", "Who builds it"), ("suppo
               ("cite", "How to cite"))
 ABOUT_UNSET = "[not set yet]"
 CHANGELOG_ENV = "CJ_CHANGELOG_FILE"                                  # /changes' source (default: REPO/CHANGELOG.md)
+CLIENT_FILE = REPO / "client" / "cryoev_client.py"                 # served at /cj/cryoev_client.py (signed in)
 PAGE_VERSION_RE = re.compile(r'\bPAGE_VERSION\s*=\s*"([0-9A-Za-z][0-9A-Za-z._-]{0,39})"')
 log = logging.getLogger("cj")
 access_log = logging.getLogger("cj.access")
@@ -209,6 +239,8 @@ class Config:
     auth: str = "key"                            # AUTH_MODES
     access: object = None                        # portal.access.AccessConfig (access mode only)
     access_admin: bool | None = None             # admins via Cloudflare; None = env CJ_ACCESS_ADMIN ("on" only)
+    tokens: Path | None = None                   # the agent token store (None = auth.default_tokens(): $CJ_AGENT_TOKENS
+                                                 # or ~/.cryoev/agent_tokens.json, shared by every door)
 
 
 # ---------------------------------------------------------------- helpers
@@ -238,6 +270,33 @@ def origin_ok(scope, extra=()) -> bool:
     if u.scheme == "http" and (u.hostname or "") not in ("127.0.0.1", "localhost", "::1"):
         return False
     return u.netloc.lower() == host
+
+
+def bearer_of(scope) -> str | None:
+    """The token of the request's `Authorization: Bearer <token>`; None when no Authorization header says Bearer
+    (any other scheme is ignored, as before); "" for a bearer header that is empty or not the only Authorization
+    header (refused, never guessed)."""
+    vals = [v.decode("latin-1").strip() for k, v in scope.get("headers", []) if k.lower() == b"authorization"]
+    parts = [v.split(None, 1) for v in vals]            # the scheme ends at any whitespace (a tab too)
+    bearers = [p for p in parts if p and p[0].lower() == "bearer"]
+    if not bearers:
+        return None
+    if len(vals) != 1 or len(bearers[0]) != 2:
+        return ""
+    return bearers[0][1].strip()
+
+
+def api_error(status: int, text: str) -> Response:
+    """The bearer branch's refusals: JSON for an agent ({"error": text}), never the HTML page."""
+    r = JSONResponse({"error": text}, status_code=status)
+    r.headers["Cache-Control"] = "no-store"
+    if status == 401:
+        r.headers["WWW-Authenticate"] = 'Bearer realm="cryoev"'
+    return r
+
+
+def api_enabled(env=None) -> bool:
+    return str((os.environ if env is None else env).get(API_ENV) or "").strip().lower() != "off"
 
 
 def read_json(path: Path):
@@ -365,6 +424,8 @@ def render_about(doc, version: str) -> str:
     return (f'<div class="cj-about"><h1>About CryoEV</h1>{"".join(secs)}'
             f'<p class="cj-mut cj-about-ver">Portal version: {html.escape(version)} · '
             '<a href="/changes">What changed (changelog)</a></p>'
+            '<p class="cj-mut cj-about-ver"><a href="/account/">My account</a>: tokens for your own AI agent '
+            '(read-only API).</p>'
             '<p class="cj-mut cj-about-ver">Only signed-in people see this page.</p></div>')
 
 
@@ -460,9 +521,10 @@ class Gate:
     Origin check on unsafe methods, and the access log with `k` redacted (never cookies or keys)."""
 
     def __init__(self, app: Starlette, auth: A.Auth, origins=(), rules=(), mode: str = "key", verifier=None,
-                 access_admin: bool = False, writer=None, review_target=None):
+                 access_admin: bool = False, writer=None, review_target=None, tokens=None):
         if mode not in AUTH_MODES or (mode == "access") != (verifier is not None):
             raise ValueError(f"auth mode {mode!r} needs {'a' if mode == 'access' else 'no'} JWT verifier")
+        self.tokens = tokens if tokens is not None else A.TokenStore(A.default_tokens())   # agent tokens (bearer)
         self.app = app
         self.auth = auth
         self.origins = tuple(origins)
@@ -503,11 +565,14 @@ class Gate:
         if w is None:
             return
         try:
-            door = PA.DOOR_NAMES.get(self.mode, self.mode)
+            bearer = scope.get("cj_auth") == "bearer"          # a token the Gate verified (even on a refused route)
+            via = scope.get("cj_via") if bearer else None
+            door = PA.API_DOOR if bearer else PA.DOOR_NAMES.get(self.mode, self.mode)
             if scope.get("cj_login") and status == 303:
                 w.signin(scope["cj_login"], door, "key link")
             elif user and user.get("id"):
-                w.signin(user["id"], door, "session" if self.mode == "key" else "cloudflare")
+                w.signin(user["id"], door, "bearer" if bearer else "session" if self.mode == "key" else "cloudflare",
+                         via=via)
             method = scope.get("method")
             if method not in UNSAFE:
                 return
@@ -520,7 +585,8 @@ class Gate:
             if target is None and tpl == REVIEW_BASE + "/app/{path:path}":
                 target = self.review_target
             actor = (user or {}).get("id") or "-"
-            w.event(actor, action, target, {"status": st}, frequent=frequent or actor == "-")
+            detail = {"status": st, "via": via} if via else {"status": st}
+            w.event(actor, action, target, detail, frequent=frequent or actor == "-")
         except Exception as e:                          # noqa: BLE001  the audit never breaks a request
             log.error("audit catch-all failed (%s)", type(e).__name__)
 
@@ -552,6 +618,31 @@ class Gate:
                                                                             "Open the portal over Tailscale.")
         return person, None
 
+    def bearer_user(self, scope, token) -> tuple:
+        """The bearer branch: -> (user, deny, credited). user = the token's person with the role capped
+        (BEARER_ROLE_CAP) when the token is valid AND the request is an allowlisted (GET, template); deny = the JSON
+        refusal otherwise; credited = who the audit line names (a valid token on a route it doesn't open is still
+        that person's agent). Sets scope cj_auth = "bearer" and cj_via for every valid token. Refusals are logged
+        with a reason, never the token."""
+        if self.mode == "access":                       # tailnet-only for now; access_user is never asked
+            log.warning("bearer refused: the access door does not take agent tokens yet")
+            return None, api_error(403, API_TAILNET_ONLY), None
+        if not api_enabled():
+            log.warning("bearer refused: %s=off", API_ENV)
+            return None, api_error(401, f"The agent API is switched off on this portal. {API_DOCS}"), None
+        person, rec = self.tokens.check(token, self.auth.roster)
+        if person is None:
+            log.warning("bearer refused: token %s", rec)
+            return None, api_error(401, f"This token is unknown, expired or revoked. {API_DOCS}"), None
+        self.tokens.used(rec["id"])
+        user = dict(person)
+        user["role"] = BEARER_ROLE_CAP.get(user.get("role"), user.get("role"))
+        scope["cj_auth"], scope["cj_via"] = "bearer", rec["agent"]
+        tpl, _ = self.route_of(scope)
+        if (scope.get("method"), tpl) not in BEARER_ROUTES:
+            return None, api_error(401, f"Agent tokens open only the API's read routes. {API_DOCS}"), user
+        return user, None, user
+
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
             return await self.app(scope, receive, send)
@@ -571,11 +662,17 @@ class Gate:
                 box["status"] = msg["status"]
             await send(msg)
 
-        user = None
+        user = credited = None
         try:
             path, method = scope["path"], scope["method"]
             deny = None
-            if path not in OPEN and self.mode == "access":
+            token = bearer_of(scope)
+            if token is not None:                       # the agent API: allowlist only, never a cookie fallback
+                user, deny, credited = self.bearer_user(scope, token)
+                if deny is None:                        # the app never sees the cookie or the token
+                    scope["headers"] = [(k, v) for k, v in scope.get("headers", [])
+                                        if k.lower() not in (b"cookie", b"authorization")]
+            elif path not in OPEN and self.mode == "access":
                 user, deny = await self.access_user(scope)
             elif path not in OPEN:
                 cookies = cookie_parser(header(scope, b"cookie") or "")
@@ -588,13 +685,15 @@ class Gate:
                                                       "key link.")
             if (deny is None and user is not None and not owner_checked(path)     # pred packages: owner check
                     and not M.allowed(self.rules, path, user.get("role"))):
-                deny = page(403, "Not allowed", "Your role can't open this part of the portal.")
-            if deny is None and method in UNSAFE and not self.origin_allowed(scope):
+                deny = (api_error(403, "Your role can't open this part of the portal.") if token is not None else
+                        page(403, "Not allowed", "Your role can't open this part of the portal."))
+            # bearer requests are GET only (BEARER_ROUTES): the Origin check is for browsers' writes
+            if deny is None and token is None and method in UNSAFE and not self.origin_allowed(scope):
                 deny = page(403, "Refused", "Cross-origin request refused.")
             if deny is not None:
                 return await deny(scope, receive, send_secure)
             scope["cj_user"] = user
-            scope["cj_auth"] = self.mode
+            scope["cj_auth"] = "bearer" if token is not None else self.mode
             await self.app(scope, receive, send_secure)
         finally:
             qs = redact_query(scope.get("query_string", b"").decode("latin-1"))
@@ -602,10 +701,12 @@ class Gate:
             if self.mode == "access":
                 from portal import access as AX
                 client = f"{client} cf={AX.client_ip(header(scope, b'cf-connecting-ip'))}"
-            who = (user or {}).get("id") or scope.get("cj_login") or "-"
+            who = (user or credited or {}).get("id") or scope.get("cj_login") or "-"
+            if scope.get("cj_auth") == "bearer":
+                who = f"{who} via {scope.get('cj_via')} (bearer)"
             access_log.info('%s "%s %s%s" %s %s', client, scope.get("method"), scope.get("path"),
                             f"?{qs}" if qs else "", box["status"], who)
-            self.record(scope, user, box["status"])
+            self.record(scope, user or credited, box["status"])
 
     def origin_allowed(self, scope) -> bool:
         """Key mode: origin_ok (this portal's own scheme://Host, or an --origin). Access mode: ONLY the configured
@@ -1032,9 +1133,18 @@ def create_app(cfg: Config) -> Gate:
     async def me(request: Request):
         u = request.scope["cj_user"]
         out = {"id": u["id"], "role": u["role"]}
+        if request.scope.get("cj_auth") == "bearer":                  # an agent: its name, and that it's capped
+            out["via"] = request.scope.get("cj_via")
+            out["auth"] = "bearer"
         if access:
             out["signout"] = "/cdn-cgi/access/logout"                 # Cloudflare's own sign-out (header.js)
         return no_store(JSONResponse(out))
+
+    async def client_py(request: Request):          # the one-file agent client (docs/API.md), for signed-in people
+        r = Response(CLIENT_FILE.read_bytes(), media_type="text/x-python; charset=utf-8")
+        r.headers["Cache-Control"] = "no-cache"
+        r.headers["Content-Disposition"] = 'attachment; filename="cryoev_client.py"'
+        return r
 
     def registry_file(rel) -> Path | None:
         return (cfg.registry / rel) if cfg.registry else None
@@ -1093,6 +1203,7 @@ def create_app(cfg: Config) -> Gate:
         Route("/cj/modules.json", modules, methods=["GET"]),
         Route("/cj/me.json", me, methods=["GET"]),
         Route("/cj/version.json", version_json, methods=["GET"]),
+        Route("/cj/cryoev_client.py", client_py, methods=["GET"]),
         Route("/history", redirect("/history/"), methods=["GET"]),
         Route("/history/", redirect("history.html"), methods=["GET"]),
         Route("/history/history.html", history_html, methods=["GET"]),
@@ -1113,6 +1224,10 @@ def create_app(cfg: Config) -> Gate:
     rules_box[:] = rules
 
     writer = PA.Writer(cfg.state_dir)               # the Gate's audit catch-all (one worker thread)
+    tokens = A.TokenStore(A.tokens_path(cfg))       # agent tokens: read on the first bearer request, never before
+    missing = sorted(t for m, t in BEARER_ROUTES if not any(getattr(r, "path", None) == t for r in routes))
+    if missing:                                     # a renamed route: that API call answers 401 until fixed
+        log.warning("agent API: allowlisted routes that don't exist: %s", ", ".join(missing))
 
     async def sweeper():
         while True:
@@ -1121,6 +1236,10 @@ def create_app(cfg: Config) -> Gate:
                 writer.sweep()                       # memory only: due windows -> queued counter lines
             except Exception as e:                  # noqa: BLE001
                 log.error("audit sweep failed (%s)", type(e).__name__)
+            try:
+                await asyncio.to_thread(tokens.flush)   # last_used, at most every LAST_USED_FLUSH_S (a merge)
+            except Exception as e:                  # noqa: BLE001
+                log.error("token last_used flush failed (%s)", type(e).__name__)
 
     @contextlib.asynccontextmanager
     async def lifespan(app):
@@ -1134,12 +1253,14 @@ def create_app(cfg: Config) -> Gate:
             await proxy.close()
             await pred_proxy.close()
             await asyncio.get_running_loop().run_in_executor(None, writer.close)   # open windows -> counter lines
+            await asyncio.get_running_loop().run_in_executor(None, lambda: tokens.flush(force=True))
 
     star = Starlette(routes=routes, lifespan=lifespan)
     star.router.redirect_slashes = False
     pkg_name = cfg.review_package.name if cfg.review_package else None
     gate = Gate(star, auth, origins, rules, mode=cfg.auth, verifier=verifier, access_admin=access_admin,
-                writer=writer, review_target=pkg_name if pkg_name and SAFE_ID_RE.match(pkg_name) else None)
+                writer=writer, review_target=pkg_name if pkg_name and SAFE_ID_RE.match(pkg_name) else None,
+                tokens=tokens)
     gate.proxy = proxy
     gate.pred_proxy = pred_proxy
     gate.auth = auth
@@ -1221,6 +1342,10 @@ def startup_lines(cfg: Config, host: str, port: int) -> list:
         f"[cj] audit: {PA.audit_path(cfg.state_dir)}: every {'/'.join(sorted(UNSAFE))} (done or refused; route "
         f"name + safe ids only), frequent saves counted per {PA.WINDOW_S // 60:g} min, the first sign-in per person "
         "per day; written off the event loop",
+        ("[cj] agent API: OFF (CJ_API=off): every bearer request refused" if not api_enabled() else
+         "[cj] agent API: refused on this door (tailnet-only for now)" if access else
+         f"[cj] agent API: bearer tokens from {A.tokens_path(cfg)}; read-only allowlist of {len(BEARER_ROUTES)} "
+         "routes, role capped at advanced, no cookie fallback (docs/API.md)"),
         f"[cj] about: /about (signed in) from {about_path()}"
         + ("" if about_path().is_file() else " (missing: placeholders shown)"),
         f"[cj] changes: /changes (signed in) from {changelog_path()}"

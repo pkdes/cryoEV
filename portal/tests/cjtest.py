@@ -29,6 +29,10 @@ import os  # noqa: E402
 # A test that needs them sets them explicitly (mock.patch.dict).
 for _k in [k for k in os.environ if k.upper() in ("CRYOEV_VIA", "CRYOEV_FOR")]:
     os.environ.pop(_k, None)
+# The agent API's switches (round 10 #60): the kill switch and the shared token store. Tests use Env.tokens (a temp
+# store) and set CJ_API explicitly where they test it.
+for _k in [k for k in os.environ if k.upper() in ("CJ_API", "CJ_AGENT_TOKENS")]:
+    os.environ.pop(_k, None)
 
 import uvicorn  # noqa: E402
 
@@ -67,19 +71,20 @@ def live_doc(servers=(("review", True), ("sandbox", False), ("history", True)), 
 
 
 class Env:
-    """Temp roster (one admin, USER), state dir and registry folder."""
+    """Temp roster (one admin, USER), state dir, registry folder and agent token store."""
 
     def __init__(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="cj_portal_"))
         self.roster = self.tmp / "roster.json"
         self.state = self.tmp / "state"
         self.registry = self.tmp / "registry"
+        self.tokens = self.tmp / "agent_tokens.json"
         (self.registry / "live").mkdir(parents=True)
         self.key = A.add_key(self.roster, USER, "admin")
 
     def config(self, **kw) -> APP.Config:
         base = dict(registry=self.registry, roster=self.roster, state_dir=self.state,
-                    review_upstream=f"http://127.0.0.1:{free_port()}", review_key=UPKEY)
+                    review_upstream=f"http://127.0.0.1:{free_port()}", review_key=UPKEY, tokens=self.tokens)
         base.update(kw)
         return APP.Config(**base)
 
@@ -171,7 +176,7 @@ def login(port, key) -> str:
     return sc.split(";", 1)[0].split("=", 1)[1]
 
 
-GATE_DETAIL_KEYS = {"status", "from", "to", "n"}
+GATE_DETAIL_KEYS = {"status", "from", "to", "n", "via"}      # via: a bearer request's agent (round 10 #60)
 
 
 def remove_file(path, wait_s=5.0) -> None:
@@ -215,6 +220,11 @@ def module_lines(path) -> list:
 
 def cookie(token) -> dict:
     return {"Cookie": f"{A.COOKIE}={token}"}
+
+
+def bearer(token) -> dict:
+    """The agent API's header (portal/app.py BEARER_ROUTES)."""
+    return {"Authorization": f"Bearer {token}"}
 
 
 class Upstream:
