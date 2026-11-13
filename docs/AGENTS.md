@@ -115,6 +115,21 @@ Each recipe says what is recorded and where it shows. Details live in the linked
    ```
    Recorded: `<CryoAI-laptop>/predict/<ps id>/`, a `prediction_set` registry line (status queued), two action-log
    lines. Shows: the owner's Predict / Results pages, Data page (image sets), Admin Recent actions.
+
+   **Images made in an unusual way** (tiling, resampling, a subset): also give `--note "<text, at most 500
+   characters>"` and `--provenance provenance.json`. Both go into `request.json` and the registry record (and stay on
+   every later status line); the Data page shows Note, How the images were made, and Derived from. Only the keys
+   below are allowed; anything else is refused before anything is written (limits: `jobs/predict_set.py` module
+   doc). With `--manifest`, the set keeps a byte-identical `source_manifest.csv`, so per-tile columns (parent image,
+   x/y offset) stay with the set.
+   ```json
+   {"derived_from": [{"kind": "dataset", "id": "<dataset id>"}, {"kind": "model", "id": "v5_evnonev_y8m_20261029"}],
+    "source_images": "44 Jul30 full-resolution training images",
+    "steps": ["cut 1440 px tiles at native resolution, 20% overlap", "8-bit PNG, no contrast change"],
+    "tiling": {"tile_px": 1440, "overlap_px": 288, "overlap_frac": 0.2, "nm_per_px": 0.368, "downsample": 1},
+    "script": "<script that cut the tiles>", "git": "<commit>"}
+   ```
+   `derived_from` kinds: dataset, label_version, session, prediction_set, model, other.
 3. Predict on home-laptop: `python -m jobs.predict_local --ps <ps id>` ([JOBS.md](JOBS.md), "Predict jobs").
    Updates `status.json` and the registry line (stamped through the registry's env default). gpu-desktop instead
    (`sync.py push-predict`): the user's call.

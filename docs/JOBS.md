@@ -189,6 +189,7 @@ python jobs/sync.py push-predict --ps ps_20261105_abc123 --share \\<desktop>\cj
 python jobs/sync.py pull --share \\<desktop>\cj
 ```
 - **Set folder:** `images\<nnnn>.png|.jpg` (never the client's file name; `images.csv` keeps it as `orig_name`), `images.csv`, `request.json`, `status.json` (`state` queued / running / done / failed, `n_done`, `n_total`, `where`, `job`, `error`, `updated`, `pid`, `waiting`), `p\<model>\predictions\<nnnn>.txt` + `p\<model>\summary.csv`, and `predict.log`.
+  - With `--manifest`, also `source_manifest.csv` (a byte-identical copy; `request.json` `source_manifest`). `--note` / `--provenance` (how the images were made, what they derive from) go into `request.json` and the registry record: [AGENTS.md](AGENTS.md), "Put data in".
   - `p\` appears only when the set is complete: the laptop writes into `.p_tmp\` and renames it; pull stages in `.pull_tmp_p\`.
   - Tiles are copied, and `images.csv` records each one's `md5`. `--link` hard-links instead (same drive only, never from a protected folder such as Cryo-image-processing or Box).
   - `images.csv` holds raw values (it is machine-read). A sample label or original file name starting with `= + - @` is refused at create, because a spreadsheet would run it as a formula.
