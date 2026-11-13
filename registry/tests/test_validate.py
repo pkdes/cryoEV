@@ -213,7 +213,12 @@ class TestReportRefusal(unittest.TestCase):
 class TestRealArtifacts(unittest.TestCase):
     def test_real_scan_is_read_only_and_finds_core_artifacts(self):
         lap = validate.find_sibling("CryoAI-laptop")
-        watch = [p for p in lap.rglob("*") if p.is_file() and p.suffix in (".json", ".jsonl", ".csv", ".js")]
+        # Root cause of an old flake: this used to mtime the WHOLE live tree, and jobs/monitor.py (running on this
+        # machine) rewrites registry/live/live.json every ~30 s and appends to logs/. The scan reads neither, so
+        # they are out of the snapshot; every file the scan can read is still checked for being left untouched.
+        scan_never_reads = {"live", "logs"}
+        watch = [p for p in lap.rglob("*") if p.is_file() and p.suffix in (".json", ".jsonl", ".csv", ".js")
+                 and not scan_never_reads & set(p.relative_to(lap).parts[:-1])]
         before = {p: p.stat().st_mtime_ns for p in watch}
         rep = validate.Scan(lap, validate.find_sibling("CryoAI"), validate.config.processing_root()).run().summary()
         self.assertEqual(before, {p: p.stat().st_mtime_ns for p in watch})

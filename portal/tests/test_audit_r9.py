@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timezone
@@ -185,15 +186,25 @@ class NeverBreaks(Base):
         self.assertEqual(st1, st0)
         self.assertEqual(self.w.failed, failed0 + 1)
 
+        # Failure mode: the request waits for the audit write. Structural, not a stopwatch (a 1.0 s bound on a 1.5 s
+        # write flaked under load): the write blocks on an Event, so the request can only return if it does not wait
+        # for it; the 30 s expiry would make it fail instead of hang.
+        entered, release, expired = threading.Event(), threading.Event(), []
+
         def slow(*a, **k):
-            time.sleep(1.5)
+            entered.set()
+            if not release.wait(30):
+                expired.append(True)
         with mock.patch.object(self.w, "_write_fn", slow):
-            t0 = time.monotonic()
-            st2, _ = self.send("POST", "/feedback/9/reply")
-            took = time.monotonic() - t0
+            try:
+                st2, _ = self.send("POST", "/feedback/9/reply")
+                self.assertFalse(release.is_set())
+                self.assertEqual(expired, [])                              # the write ran off the event loop
+            finally:
+                release.set()
             self.w.drain()
+        self.assertTrue(entered.wait(5))                                   # control: the slow write really ran
         self.assertEqual(st2, st0)
-        self.assertLess(took, 1.0)                                         # the write ran off the event loop
 
     def test_catch_all_exception_is_swallowed(self):
         with mock.patch.object(self.w, "event", side_effect=RuntimeError("bug")):

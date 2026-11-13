@@ -115,15 +115,20 @@ The review server, review sandbox, history server and job monitor (and later the
 
 ## Test gate (`tools/test_gate.py`)
 - **Default (`--affected`):** runs only the suites the changed files touch (vs `origin/main`, uncommitted edits included), plus the quick repo-wide `tests` suite.
-  - Shared code (`data_utils/`) or an unrecognized code file runs everything.
+  - Edges follow who imports whom: `registry/` also runs annotation and tools; `results/` also jobs; `training/` and `inference/` also annotation and results; `portal/` also annotation; `tools/` also portal.
+  - Shared code (`data_utils/`), an unrecognized code file, `CHANGELOG.md` and `requirements*.txt` run everything (those last two are not doc-only: tests parse the changelog and the pins set the environment).
 - **`--full`:** every suite. Use it for go-lives.
 - **`--suites a,b`:** named suites.
+- **One gate at a time:** a lock directory `~/.cryoev/gate/lock/` is shared by every worktree. A second gate waits up to `--lock-wait` minutes (default 45), then fails `gate busy`. A lock whose owner process is gone, or whose heartbeat (touched every 30 s) is older than 10 minutes, is stale and is taken over.
+- **Environment:** children run with `CRYOEV_VIA` and `CRYOEV_FOR` removed, because the registry and jobs writers default their actor fields from them. `--agent-env` runs with `CRYOEV_VIA=claude CRYOEV_FOR=pujan` on purpose; a suite that passes only under one of the two has a hidden env dependency.
 - **How it runs:**
-  - Each test file is one unit. Units run in parallel (`--jobs`, default CPU/2), slowest first.
-  - Browser (Playwright) files share a lane of 2.
+  - Each test file is one unit. Units run in parallel (`--jobs`, default CPU/2), slowest first (median of past passing runs).
+  - Browser files share a lane of 2. A file is a browser file if it imports `playwright` or a browser helper module (`test_review_tool_browser`); a comment that says "playwright" does not count.
   - A file that fails is re-run alone once. If it then passes it is reported as **FLAKY**, never as a plain pass.
   - The pre-push scan runs at the end.
-- **Timings:** each file's time is appended to `~/.cryoev/gate/timings.jsonl`. `--times` lists the slowest files.
+- **Timings:** `~/.cryoev/gate/timings.jsonl` gets one line per file per run: wall seconds, test count, ok, flaky, retries, retry seconds, `agent_env`, and the last 600 characters of a failure (also for a flaky first attempt). `--times` lists the slowest files (median).
+- **Shared test helpers:** `tests/cryoev_testkit.py` (add `<repo>/tests` to `sys.path`): `free_ports(n)` (distinct ports), `bind_retry`, `wait_until`, `clean_env` / `no_actor_env`, `process_lock(name)` (cross-process mutex, e.g. for `subst` drive letters).
+- **Writing timing-proof tests:** never assert a wall-clock bound on something load can slow. Block the slow part on an `Event` the test controls and assert the caller returned while it was still blocked; poll with a generous ceiling instead of a fixed `sleep`.
 
 ## Agent CLI: `python -m cryoev` (package `cryoev/`, not under `tools/`)
 - **What:** one entry point for agents (and people) to read the platform and make the few writes agents may make: `status`, `find` / `show` / `lineage`, `review progress` (counts only), `feedback list|status|reply`, `pull labels|predictions|results|dataset`, `register`, `predict new`. Thin wrappers over the registry, `jobs/predict_set.py`, `portal/feedback_store.py`, `tools/services.py` and the portal's read helpers.

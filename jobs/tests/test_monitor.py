@@ -127,7 +127,9 @@ class MonitorTests(T.TempRoots, unittest.TestCase):
             self.assertIn("no answer", rd.read(self.share)["detail"])
             self.assertIn("previous read", rd.read(self.share)["detail"])   # never two reads stuck on one share
             gate.set()
-            time.sleep(0.3)
+            end = time.time() + 15                                     # poll for the stuck read to finish (no fixed sleep)
+            while time.time() < end and rd.read(self.share)["reach"] != "ok":
+                time.sleep(0.05)
             self.assertEqual(rd.read(self.share)["reach"], "ok")
 
     def test_cancelled_in_recent_finished(self):
@@ -201,14 +203,15 @@ class MonitorTests(T.TempRoots, unittest.TestCase):
         hang = mute.getsockname()[1]
         t0 = time.monotonic()
         r = M.probe_servers([("review", live), ("history", live404), ("sandbox", dead), ("mute", hang)])
-        self.assertLess(time.monotonic() - t0, M.PROBE_TOTAL_S + 0.5)
+        # the failure mode is waiting on the mute server for ever; the bound is PROBE_TOTAL_S, plus load slack
+        self.assertLess(time.monotonic() - t0, M.PROBE_TOTAL_S + 2.0)
         self.assertEqual([(x["name"], x["port"], x["up"]) for x in r],
                          [("review", live, True), ("history", live404, True), ("sandbox", dead, False),
                           ("mute", hang, False)])
         self.assertIsInstance(r[0]["ms"], int)
         t0 = time.monotonic()                                          # the total bound holds whatever the timeout
         self.assertFalse(M.probe_servers([("mute", hang)], timeout=5, total=0.5)[0]["up"])
-        self.assertLess(time.monotonic() - t0, 1.5)
+        self.assertLess(time.monotonic() - t0, 3.0)                    # failure mode: the 5 s per-probe timeout
         # through the CLI: the snapshot has servers; the default list is the laptop's three
         snap = self.once(self.share, servers=f"review={live},sandbox={dead}")
         self.assertEqual(snap.returncode, 0, snap.stderr)

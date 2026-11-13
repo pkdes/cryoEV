@@ -1,5 +1,6 @@
 """Shared helpers for the test suites (round 10). Add `<repo>/tests` to sys.path to import this.
 
+free_ports(n)   n distinct free ports.
 free_port()     a port the OS just handed out. Still racy if you close it and rebind later: prefer binding port 0 in
                 the server itself, or use bind_retry().
 bind_retry(f)   call f(port) with a fresh free port until it does not raise OSError (the free-port-then-bind race).
@@ -26,6 +27,18 @@ def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def free_ports(n: int) -> list[int]:
+    """n DISTINCT free ports (all n sockets are held open together, so the OS cannot hand one out twice)."""
+    socks = [socket.socket() for _ in range(n)]
+    try:
+        for s in socks:
+            s.bind(("127.0.0.1", 0))
+        return [s.getsockname()[1] for s in socks]
+    finally:
+        for s in socks:
+            s.close()
 
 
 def bind_retry(start, attempts: int = 8):
