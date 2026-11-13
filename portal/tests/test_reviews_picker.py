@@ -29,6 +29,7 @@ from portal.modules import reviews as REV  # noqa: E402
 
 PRED = "pred_ps_20261112_abc123"
 LAB = "lab_compare_fixture_20261112"
+PRED_ONLY_RE = re.compile(r"^pred_ps_\d{8}_[0-9a-f]{6}\Z")                                     # app.py at main
 LAB_RE = re.compile(r"^(?:pred_ps_\d{8}_[0-9a-f]{6}|lab_[A-Za-z0-9][A-Za-z0-9_.-]{0,100})\Z")  # the app.py change (report)
 
 
@@ -102,7 +103,7 @@ class PickerTests(unittest.TestCase):
         self.assertFalse(REV.may_open(user("bas"), {"owner": "x", "reviewers": "bas"}, Ctx.can_see))  # not a list
 
     def test_lab_listed_only_once_the_route_takes_it(self):
-        self.assertEqual(set(self.rows(user("bas"), regex=APP.PRED_ID_RE)), {PRED})  # today's portal route: pred_ only
+        self.assertEqual(set(self.rows(user("bas"), regex=PRED_ONLY_RE)), {PRED})  # main's portal route: pred_ only
 
     def test_excluded_package_never_listed(self):
         os.environ[MRS.EXCLUDE_ENV] = LAB
