@@ -20,6 +20,11 @@ keeps the md5 / pack / commit / Ultralytics / path / disk / GPU-busy checks, ski
 runs inference/predict_models.py over the pack's images into work/<job>/p/, and is done only with exit 0, a
 prediction file per image and summary.csv (moved to p/<model>/summary.csv); d/<job>/ gets p/ and predict.log, and
 DONE.json adds job_type, ps, model, n_done, n_total.
+An eval job (JOB.json job_type eval, from make_job_bundle.py --eval / sync.py push-eval; picked only when
+$CRYOEV_EVAL_JOBS is 1) keeps the same checks (no training size or worker rules), runs this file as a child
+(--eval-child: imports train_yolo / Ultralytics only there) for validate_yolo_model(split test, imgsz 1440,
+overlap_mask=False) into work/<job>/e/, and is done only with exit 0 and e/metrics.json; d/<job>/ gets e/ and
+eval.log, and DONE.json adds job_type, model, split, imgsz, n_images, metrics. Any other job_type is blocked.
 A failed check or run ends `blocked` with a reason. One ntfy push at the end ($CRYOEV_NTFY_TOPIC).
 Holds an OS lock on <queue>/runner.lock for the whole job (released if the process dies). Never writes the
 registry, and never deletes anything outside <queue>/work/<job>/. Keeps the machine awake while a job runs.
@@ -298,14 +303,31 @@ def check_job(qdir: Path, work: Path, st: dict, allow_big=False) -> tuple:
         raise Blocked(f"bad zip: {e}")
     st.update(bundle_id=job.get("bundle_id") or spec.get("bundle_id"), dataset=job.get("dataset_name"),
               cryoEV_commit=job.get("cryoEV_commit"), runner_commit=runner_commit())
-    predict = is_predict(job)
-    if predict or spec.get("type") == "predict":       # a train job (no job_type, type train) never enters here
-        if not (predict and spec.get("type") == "predict"):
-            raise Blocked(f"job type mismatch: job.json type {spec.get('type')}, JOB.json job_type "
-                          f"{job.get('job_type')}")
+    kind, qtype = C.job_kind(job), spec.get("type") or "train"   # train: no job_type, job.json type train (or none)
+    if kind not in C.JOB_TYPES or qtype not in C.JOB_TYPES:
+        raise Blocked(f"unknown job type: job.json type {qtype!r}, JOB.json job_type {job.get('job_type')!r} "
+                      f"(this runner knows {', '.join(C.JOB_TYPES)}); nothing was run")
+    if kind != qtype:
+        raise Blocked(f"job type mismatch: job.json type {spec.get('type')}, JOB.json job_type "
+                      f"{job.get('job_type')}")
+    predict = kind == "predict"
+    if predict:
         st.update(job_type="predict", ps=job.get("ps"), model=job.get("model"))
+    elif kind == "eval":
+        st.update(job_type="eval", model=job.get("model"), split=job.get("split"), imgsz=job.get("imgsz"),
+                  n_images=job.get("n_images"))
     if any(re.search(r"^\s*download\s*:", y, re.M) for y in yamls):
         raise Blocked("dataset.yaml has a download: key (Ultralytics would run it); remove it and rebundle")
+    if kind == "eval":                                 # what the scoring needs, before anything is unzipped
+        split = job.get("split") or EVAL_SPLIT
+        if not any(re.search(rf"^\s*{re.escape(split)}\s*:\s*\S", y, re.M) for y in yamls):
+            raise Blocked(f"eval job: dataset.yaml has no {split}: split")
+        w = eval_weights(job, work)
+        if job.get("weights_in") == "bundle" and f"{job.get('dataset_name')}/{job['weights']}" not in names:
+            raise Blocked(f"eval job: weights {job['weights']} are not in the bundle")
+        if job.get("weights_in") == "repo" and not w.is_file():
+            raise Blocked(f"eval job: weights {job['weights']} are not in the runner's repo (commit them, or "
+                          f"rebundle with the file packed)")
     pack = None
     if dataset_cache.is_thin(job):                     # a thin bundle: its dataset is in <queue>/ds/<sha>/
         st["dataset_sha256"] = job.get("dataset_sha256")
@@ -331,9 +353,9 @@ def check_job(qdir: Path, work: Path, st: dict, allow_big=False) -> tuple:
         raise Blocked("only --single-run jobs are run here")
     gpu = gpu_state()
     st["gpu_used_mb_at_start"] = gpu.get("used_mb")
-    if not predict:                                    # training size / worker / memory rules; not for predict
+    if kind == "train":                                # training size / worker / memory rules; not for predict / eval
         size, imgsz = size_and_imgsz(args)
-    if not predict and gpu["total_mb"] < LAPTOP_GPU_MB:
+    if kind == "train" and gpu["total_mb"] < LAPTOP_GPU_MB:
         if size in BIG_SIZES or imgsz > MAX_LAPTOP_IMGSZ:
             if not allow_big:
                 raise Blocked(f"desktop only: y8{size} at imgsz {imgsz} on a {gpu['total_mb'] / 1024:.0f} GB GPU "
@@ -428,24 +450,157 @@ def finish_predict(work: Path, job: dict, st: dict, rc: int, max_hours, log: Pat
     (out / "summary.csv").replace(out / model / "summary.csv")
 
 
-# ---------------------------------------------------------------- one job
-def queued_predict(qdir: Path) -> bool:
-    """q/<job>/job.json says type predict (an unreadable job.json counts as a train job, as before)."""
+# ---------------------------------------------------------------- eval jobs (docs/JOBS.md, "Eval jobs")
+EVAL_SPLIT, EVAL_IMGSZ, EVAL_BATCH = "test", 1440, 8   # the settled scoring (models.yaml test_mask_map50_95)
+EVAL_KEYS = ("mask_map50_95", "mask_map50", "box_map50_95", "box_map50")   # DONE.json metrics
+EVAL_REQUEST = "eval_request.json"                  # work/<job>/: what the --eval-child reads
+
+
+def eval_weights(job: dict, work: Path) -> Path:
+    """An eval job's weights: packed in the bundle (weights_in bundle: <dataset>/<weights> under work/) or the
+    runner's own tracked repo copy (weights_in repo, e.g. models/<id>/best.pt). Raises Blocked."""
+    rel = str(job.get("weights") or "")
+    if not rel.endswith(".pt") or Path(rel).is_absolute() or ".." in Path(rel).parts or ":" in rel:
+        raise Blocked(f"eval job: bad weights path {rel!r} in JOB.json")
+    where = job.get("weights_in")
+    if where == "repo":
+        return REPO / rel
+    if where == "bundle":
+        return work / "training outputs" / str(job.get("dataset_name")) / rel
+    raise Blocked(f"eval job: weights_in {where!r} in JOB.json (need repo or bundle)")
+
+
+def eval_argv(job: dict, work: Path, st: dict) -> list:
+    """Checks the weights' md5, writes work/<job>/eval_request.json and returns the child's argv: this file with
+    --eval-child (hooks: eval_cmd in place of [python, -u, run_job.py]). Raises Blocked."""
+    w = eval_weights(job, work)
+    if not w.is_file():
+        raise Blocked(f"eval job: weights {w} missing after unzip")
+    got = C.md5_file(w)
+    if job.get("weights_md5") and got != str(job["weights_md5"]).lower():
+        raise Blocked(f"eval job: weights md5 {got}, JOB.json says {job['weights_md5']} ({job.get('weights')})")
+    ds = work / "training outputs" / st["dataset"]
+    req = {"weights": str(w), "data": str(ds / "dataset.yaml"), "split": job.get("split") or EVAL_SPLIT,
+           "imgsz": int(job.get("imgsz") or EVAL_IMGSZ), "batch": int(job.get("batch") or EVAL_BATCH),
+           "device": hooks().get("eval_device") or "0", "out": str(work / C.EVAL_OUT), "model": job.get("model"),
+           "dataset": st["dataset"], "n_images": job.get("n_images"), "weights_md5": got}
+    C.write_json(work / EVAL_REQUEST, req)
+    cmd = hooks().get("eval_cmd") or [sys.executable, "-u", str(HERE / "run_job.py")]
+    return [*cmd, "--eval-child", str(work / EVAL_REQUEST)]
+
+
+def load_validate():
+    """The validate entry, imported only here, in the --eval-child process: the runner and the watcher never import
+    train_yolo / torch / Ultralytics (the desktop restarts them on code changes; an import error there would loop).
+    Tests: hooks eval_validate = "<file.py>:<function>" (read only when CRYOEV_JOBS_TESTING is 1)."""
+    stub = hooks().get("eval_validate")
+    if stub:
+        import importlib.util
+        path, fn = stub.rsplit(":", 1)
+        spec = importlib.util.spec_from_file_location("cj_eval_stub", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return getattr(mod, fn)
+    from train_yolo import validate_yolo_model       # lazy: torch / Ultralytics load here only
+    return validate_yolo_model
+
+
+def metrics_from_val(res, req: dict) -> dict:
+    """Ultralytics SegmentMetrics -> metrics.json, in the testmap_<model>.json shape analysis/compare_eval_runs.py
+    reads (mask_map50_95, box_map50_95, per_class_mask_map50_95), plus mAP50s and what was scored."""
+    seg, box = getattr(res, "seg", None), getattr(res, "box", None)
+    if seg is None or box is None:
+        raise RuntimeError("val returned no mask metrics (not a segmentation model?)")
+    names = dict(getattr(res, "names", None) or {})
+    per_mask, per_box = {}, {}
+    idx = getattr(seg, "ap_class_index", None)         # a numpy array: never tested for truth
+    for i, c in enumerate([] if idx is None else list(idx)):
+        name = str(names.get(int(c), int(c)))
+        per_mask[name] = float(seg.class_result(i)[3])
+        per_box[name] = float(box.class_result(i)[3])
+    used = getattr(res, "overlap_mask_used", None)     # what the validator ran with (validate_yolo_model's callback)
+    return {"schema": "eval_metrics/1", "model": req.get("model"), "dataset": req.get("dataset"),
+            "split": req.get("split"), "imgsz": req.get("imgsz"),
+            "overlap_mask": used if isinstance(used, bool) else "unknown",   # finish_eval needs False
+            "n_images": req.get("n_images"), "mask_map50_95": float(seg.map), "mask_map50": float(seg.map50),
+            "box_map50_95": float(box.map), "box_map50": float(box.map50),
+            "per_class_mask_map50_95": per_mask, "per_class_box_map50_95": per_box,
+            "weights_md5": req.get("weights_md5"), "ultralytics": ultralytics_version(), "machine": platform.node(),
+            "ended": C.now()}
+
+
+def eval_child(req_path: Path) -> int:
+    """`run_job.py --eval-child <work>/eval_request.json`: validate_yolo_model(..., overlap_mask=False) (Ultralytics
+    otherwise takes overlap_mask from the checkpoint's train_args, or its own default True, which carves nested
+    membrane layers into rings), then <out>/metrics.json. Exit 0 only with metrics.json written."""
+    req = C.read_json(req_path)
+    out = Path(req["out"])
+    out.mkdir(parents=True, exist_ok=True)
+    validate = load_validate()
+    t0 = time.time()
+    print(f"[eval] {req.get('model')} on {req.get('dataset')} {req['split']} at imgsz {req['imgsz']}, "
+          f"overlap_mask=False", flush=True)
+    res = validate(req["weights"], req["data"], imgsz=int(req["imgsz"]), batch_size=int(req["batch"]),
+                   device=str(req["device"]), split=req["split"], project=str(out), name="val", overlap_mask=False)
+    m = metrics_from_val(res, req)
+    m["val_s"] = round(time.time() - t0, 1)
+    C.write_json(out / C.METRICS, m)
+    print(f"[eval] mask mAP50-95 {m['mask_map50_95']:.4f}, box mAP50-95 {m['box_map50_95']:.4f} -> "
+          f"{out / C.METRICS}", flush=True)
+    return 0
+
+
+def finish_eval(work: Path, st: dict, rc: int, max_hours, log: Path):
+    """After the eval child: complete = exit 0 and e/metrics.json with mask and box mAP50-95, scored with
+    overlap_mask=False. Records the metrics in st. Raises Blocked / Cancelled."""
+    if st.get("cancelled"):
+        raise Cancelled(st["cancelled"])
+    if st.get("time_capped"):
+        raise Blocked(f"time cap: stopped after --max-hours {max_hours:g} (no metrics)")
+    if rc != 0:
+        raise Blocked(f"eval exit {rc}: {log_tail(log)}")
     try:
-        return C.read_json(qdir / C.JOB_FILE).get("type") == "predict"
+        m = C.read_json(work / C.EVAL_OUT / C.METRICS)
+    except (OSError, ValueError) as e:
+        raise Blocked(f"eval wrote no readable {C.EVAL_OUT}/{C.METRICS}: {e}")
+    if not all(isinstance(m.get(k), (int, float)) for k in ("mask_map50_95", "box_map50_95")):
+        raise Blocked(f"{C.METRICS} has no mask / box mAP50-95")
+    if m.get("overlap_mask") is not False:             # as the validator reported it; "unknown" fails too
+        raise Blocked(f"{C.METRICS} was not scored with overlap_mask=False (the validator used "
+                      f"{m.get('overlap_mask')!r})")
+    st["metrics"] = {k: m.get(k) for k in EVAL_KEYS}
+
+
+# ---------------------------------------------------------------- one job
+def queued_type(qdir: Path) -> str:
+    """q/<job>/job.json's type: train / predict / eval, or the unknown type as written (an unreadable job.json, or
+    one with no type, counts as a train job, as before)."""
+    try:
+        return str(C.read_json(qdir / C.JOB_FILE).get("type") or "train")
     except (OSError, ValueError, AttributeError):
-        return False
+        return "train"
+
+
+def queued_predict(qdir: Path) -> bool:
+    """q/<job>/job.json says type predict."""
+    return queued_type(qdir) == "predict"
+
+
+def type_enabled(qtype: str) -> bool:
+    """Predict / eval jobs run only with their flag on ($CRYOEV_PREDICT_JOBS / $CRYOEV_EVAL_JOBS); train jobs always.
+    An unknown type is picked, so that check_job blocks it with a reason instead of leaving it queued forever."""
+    return {"predict": C.predict_enabled, "eval": C.eval_enabled}.get(qtype, lambda: True)()
 
 
 def pick(root: Path, only=None):
     """Oldest q/<job>/ with READY and no d/<job>/ (READY mtime, then name). Predict jobs only when
-    $CRYOEV_PREDICT_JOBS is 1: otherwise they stay queued, untouched."""
+    $CRYOEV_PREDICT_JOBS is 1, eval jobs only when $CRYOEV_EVAL_JOBS is 1: otherwise they stay queued, untouched."""
     qroot = root / C.Q
     if not qroot.is_dir():
         return None
     ready = [d for d in qroot.iterdir() if d.is_dir() and not d.name.startswith(".")
              and (d / C.READY).is_file() and not (root / C.D / d.name).exists() and (only in (None, d.name))
-             and (C.predict_enabled() or not queued_predict(d))]
+             and type_enabled(queued_type(d))]
     return min(ready, key=lambda d: ((d / C.READY).stat().st_mtime, d.name)) if ready else None
 
 
@@ -485,7 +640,7 @@ def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
           "started": C.now(), "queue_dir": str(root), "max_hours": max_hours}
     C.write_json(tmp / C.STATUS, st)
     log = work / "train.log"
-    runs, predict = [], False
+    runs, kind = [], None
     try:
         why = cancel_request(qdir)
         if why:                                        # cancelled while queued: never started
@@ -494,8 +649,8 @@ def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
             raise Blocked(f"killed twice: {n_stale} interrupted attempts in d/.tmp_{job_id}.stale_*; "
                           f"check train.log there, then `sync.py retry`")
         spec, job, zp, names, pack = check_job(qdir, work, st, allow_big)   # GPU-busy first: an orphan may own work/
-        if st.get("job_type") == "predict":
-            predict, log = True, work / C.PREDICT_LOG
+        kind = st.get("job_type") or "train"           # check_job refused any other type
+        log = work / {"train": "train.log", "predict": C.PREDICT_LOG, "eval": C.EVAL_LOG}[kind]
         if work.exists():                              # our own scratch from an earlier attempt
             for i in range(4):                         # a reader over SMB can hold a file for a moment
                 try:
@@ -520,10 +675,15 @@ def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
                 dataset_cache.verify_tree(work / "training outputs" / st["dataset"], pack[1])
             except dataset_cache.PackError as e:
                 raise Blocked(str(e))
-        if predict:                                    # predict_models over the set's images -> work/<job>/p/
+        if kind == "predict":                          # predict_models over the set's images -> work/<job>/p/
             argv = predict_argv(job, work / "training outputs" / st["dataset"] / "images", work / C.PS_PRED)
             st["argv"] = argv
             print(f"[jobs] {job_id}: predicting: {' '.join(argv[2:])}  (log {log})", flush=True)
+        elif kind == "eval":                           # validate_yolo_model in a child -> work/<job>/e/metrics.json
+            argv = eval_argv(job, work, st)
+            st["argv"] = argv
+            print(f"[jobs] {job_id}: evaluating {job.get('model')} on {st['dataset']} "
+                  f"{job.get('split') or EVAL_SPLIT}  (log {log})", flush=True)
         else:
             argv = train_argv(job, work)
             st["argv"] = argv
@@ -549,8 +709,10 @@ def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
                     rc = p.wait()
                     break
         st["exit_code"] = rc
-        if predict:
+        if kind == "predict":
             finish_predict(work, job, st, rc, max_hours, log)   # raises Blocked / Cancelled unless complete
+        elif kind == "eval":
+            finish_eval(work, st, rc, max_hours, log)          # raises Blocked / Cancelled unless complete
         else:
             run_root = work / "training outputs" / st["dataset"] / "runs"
             if st.get("time_capped") or st.get("cancelled"):   # the trainer never wrote run.json: say why, keep last.pt
@@ -593,20 +755,25 @@ def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
         if runs:
             shutil.copy2(runs[-1] / "run.json", tmp / "run.json")
         if log.exists():
-            shutil.copy2(log, tmp / log.name)           # train.log (predict.log for a predict job)
-        if predict and (work / C.PS_PRED).is_dir():    # p/<model>/predictions/ + summary.csv (partial if blocked)
+            shutil.copy2(log, tmp / log.name)           # train.log (predict.log / eval.log for a predict / eval job)
+        if kind == "predict" and (work / C.PS_PRED).is_dir():   # p/<model>/predictions/ + summary.csv (partial if blocked)
             shutil.copytree(work / C.PS_PRED, tmp / C.PS_PRED)
+        if kind == "eval" and (work / C.EVAL_OUT).is_dir():     # e/metrics.json + e/val/ (Ultralytics plots)
+            shutil.copytree(work / C.EVAL_OUT, tmp / C.EVAL_OUT)
     except OSError as e:
         st.update(status="blocked", reason=f"result copy failed: {e}")
     st.update(ended=C.now(), runs=[rd.name for rd in runs])
-    predict = predict or st.get("job_type") == "predict" or queued_predict(qdir)
-    if predict:                                        # also when blocked before JOB.json was read: from job.json
+    kind = kind or st.get("job_type") or queued_type(qdir)   # blocked before JOB.json was read: from job.json
+    if kind in ("predict", "eval"):
         try:
             spec = C.read_json(qdir / C.JOB_FILE)
         except (OSError, ValueError):
             spec = {}
-        for k, v in (("job_type", "predict"), ("ps", spec.get("ps")), ("model", spec.get("model")),
-                     ("n_total", spec.get("n_images")), ("n_done", 0)):
+        fill = ((("job_type", "predict"), ("ps", spec.get("ps")), ("model", spec.get("model")),
+                 ("n_total", spec.get("n_images")), ("n_done", 0)) if kind == "predict" else
+                (("job_type", "eval"), ("model", spec.get("model")), ("split", spec.get("split")),
+                 ("n_images", spec.get("n_images"))))
+        for k, v in fill:
             if st.get(k) is None:
                 st[k] = v
     C.write_json(tmp / C.STATUS, st)
@@ -614,8 +781,12 @@ def run_one(root: Path, qdir: Path, allow_big=False, max_hours=None) -> dict:
     done = {k: st.get(k) for k in ("job", "status", "reason", "dataset", "bundle_id", "run", "run_status",
                                    "runs", "machine", "ended", "allow_big", "max_hours", "time_capped",
                                    "runner_commit", "cryoEV_commit")}
-    if predict:                                        # sync.pull lands p/ in <CryoAI-laptop>/predict/<ps>/
+    if kind == "predict":                              # sync.pull lands p/ in <CryoAI-laptop>/predict/<ps>/
         done.update({k: st.get(k) for k in ("job_type", "ps", "model", "n_done", "n_total")})
+    elif kind == "eval":                               # sync.pull lands e/ in <CryoAI-laptop>/eval/<job>/
+        done.update({k: st.get(k) for k in ("job_type", "model", "split", "imgsz", "n_images", "metrics")})
+    elif kind != "train":                              # refused: say which type, so pull never treats it as training
+        done["job_type"] = kind
     C.write_json(final / C.DONE, done)                  # last: the laptop pulls only folders with DONE.json
     if st["status"] == "done":
         shutil.rmtree(work, ignore_errors=True)
@@ -626,8 +797,14 @@ def notify(done):
     try:
         from notify import _send_ntfy
         title = f"Job {done['status']}: {done['job']}"
-        what = (f"{done.get('ps')}: {done.get('n_done')}/{done.get('n_total')} images predicted"
-                if done.get("job_type") == "predict" else f"{done.get('run')} {done.get('run_status')}")
+        kind, m = done.get("job_type") or "train", done.get("metrics") or {}
+        if kind == "predict":
+            what = f"{done.get('ps')}: {done.get('n_done')}/{done.get('n_total')} images predicted"
+        elif kind == "eval":
+            what = (f"{done.get('model')} on {done.get('dataset')} {done.get('split')}: mask mAP50-95 "
+                    + (f"{m['mask_map50_95']:.3f}" if isinstance(m.get("mask_map50_95"), (int, float)) else "?"))
+        else:
+            what = f"{done.get('run')} {done.get('run_status')}"
         _send_ntfy(title, done.get("reason") or what,
                    priority=3 if done["status"] == "done" else 4)
     except Exception as e:
@@ -695,4 +872,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--eval-child"] and len(sys.argv) == 3:   # an eval job's child process (eval_argv)
+        sys.exit(eval_child(Path(sys.argv[2])))
     sys.exit(main())

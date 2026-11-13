@@ -215,7 +215,7 @@ def href_for(kind, id_, rec_type=None):
     if kind == "review_package":
         return f"/review/{q}/app/" if id_.startswith("pred_") else "/reviews/"
     if kind == "job":
-        return {"train": "/train/", "predict": "/predict/"}.get(rec_type, "/reviews/")
+        return {"train": "/train/", "predict": "/predict/", "eval": "/train/"}.get(rec_type, "/reviews/")
     return None
 
 
@@ -282,7 +282,8 @@ DESK_STATE = {"running": ("running", "run"), "queued": ("waiting", "wait"), "hel
 REG_STATE = {"in_progress": ("in progress", "run"), "ready": ("not started", "wait"), "blocked": ("blocked", "warn"),
              "done": ("done", "ok"), "cancelled": ("cancelled", "off")}
 TYPE_WORD = {"revise": "review", "annotate": "labeling", "check": "check", "train": "training",
-             "predict": "prediction"}
+             "predict": "prediction", "eval": "evaluation"}
+GPU_TYPES = ("train", "predict", "eval")          # registry job types that run on the GPU queue (the training column)
 WATCH_WORD = {"alive": "working normally", "paused": "paused", "waiting for GPU": "waiting for the GPU to be free",
               "waiting": "waiting to start a job", "stale": "status updates have stopped",
               "no watcher": "not set up to run jobs", "stopped": "stopped", "unknown": "status unknown"}
@@ -295,8 +296,10 @@ def hint(rec: dict) -> tuple:
     if st == "blocked":
         return _s(rec.get("blocked_reason")) or "Blocked; no reason was written down.", "registry status: blocked"
     if st == "ready":
-        if typ in ("train", "predict") and where == "desktop":
-            return "Not sent to the GPU computer yet.", "jobs/sync.py push <job> --bundle <zip> --share <queue>"
+        if typ in GPU_TYPES and where == "desktop":
+            return "Not sent to the GPU computer yet.", ("jobs/sync.py push-eval --bundle <zip> --share <queue>"
+                                                         if typ == "eval" else
+                                                         "jobs/sync.py push <job> --bundle <zip> --share <queue>")
         return "Ready to start.", "registry status: ready"
     if st == "in_progress":
         if where == "app":
@@ -304,8 +307,10 @@ def hint(rec: dict) -> tuple:
                     f"review app port {rec.get('port') or 8766}")
         plain = {"annotate": f"Being labeled in {where}.", "revise": f"Being reviewed in {where}.",
                  "train": f"Training on {where}.", "predict": f"Predicting on {where}.",
+                 "eval": f"Scoring a model on {where}.",
                  "check": f"Waiting to be scored on {where}."}.get(typ, f"In progress in {where}.")
-        return plain, ("the run is imported by jobs/sync.py pull" if typ == "train" else "registry status: in_progress")
+        return plain, ("the run is imported by jobs/sync.py pull" if typ == "train" else
+                       "the metrics are pulled by jobs/sync.py pull" if typ == "eval" else "registry status: in_progress")
     if st == "done":
         return "Done.", None
     if st == "cancelled":
@@ -418,12 +423,14 @@ def summary(cfg, user: dict, can_see, now=None) -> dict:
                               "reason": f"{len(waiting)} waiting job(s) will not start until it is resumed.",
                               "tech": (wdet or "STOP is set") + "; jobs/sync.py start resumes it", "stale": stale})
         if _s(r.get("job")):
-            kind = "predict" if r.get("kind") == "predict" else "train"
+            kind = r.get("kind") if r.get("kind") in ("predict", "eval") else "train"
             if kind == "predict":
                 done, total, unit = _i(r.get("n_done")), _i(r.get("n_total")), "images"
+            elif kind == "eval":                        # one Ultralytics val: no progress counter
+                done, total, unit = None, _i(r.get("n_total")), "images"
             else:
                 done, total, unit = _i(r.get("epoch")), _i(r.get("epochs")), "epochs"
-            phase = _s(r.get("phase")) or ("predicting" if kind == "predict" else "training")
+            phase = _s(r.get("phase")) or {"predict": "predicting", "eval": "evaluating"}.get(kind, "training")
             hung = bool(r.get("hung"))
             hung_text = hung_tech = None
             if hung and kind == "train":
@@ -726,7 +733,7 @@ def build_flow(cfg, user, admin, can_see, live, queues, running, queue, review, 
                          link="Open review", who=r.get("who"), via=r.get("via"),
                          prog=(r["decided"], r["cards"]), chip_=label, tone=tone))
     for x in review:
-        if x["type"] in ("train", "predict"):
+        if x["type"] in GPU_TYPES:
             continue
         if x["private"]:
             rev.append(_item("job", None, x["name"], note="Details hidden.", chip_=x["label"], tone=x["tone"],
@@ -784,7 +791,7 @@ def build_flow(cfg, user, admin, can_see, live, queues, running, queue, review, 
                         chip_=x["label"], tone=x["tone"], note=x["note"], act=x, desk=True,
                         pos=x["position"] or "bullet", tech_=x.get("tech")))
     for x in review:
-        if x["type"] in ("train", "predict") and not x["private"]:
+        if x["type"] in GPU_TYPES and not x["private"]:
             tr.append(_item("job", x["id"], x["name"], (x["type_label"],), who=x["who"], via=x["via"],
                             rec_type=x["type"], chip_=x["label"], tone=x["tone"], note=x["hint"]))
     for c in COLUMNS:

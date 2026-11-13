@@ -11,7 +11,9 @@ Every --every seconds it reads each queue (in a thread, given up after 20 s) and
   - every job in q/ (sync.queue_rows, plus ready_at = READY's mtime), and the 10 most recent finished ones with
     their final metrics;
   - a running predict job (job.json type predict): {"kind": "predict", "n_done", "n_total", "eta_s", "hung", ...}
-    from the prediction files in work/<job>/p/ (listed, never opened);
+    from the prediction files in work/<job>/p/ (listed, never opened); a running eval job (type eval):
+    {"kind": "eval", "model", "elapsed_s", "hung"} (no per-image progress), and a finished one carries kind eval and
+    DONE.json's metrics;
   - the running job: phase, epoch / epochs, elapsed, ETA, batch used vs asked, GPU memory, the latest val mask mAP
     and the per-epoch series, from work/<job>/.../runs/<run>/ (progress.json, else results.csv + args.yaml);
   - servers: this laptop's review / sandbox / history servers (--servers), each probed with GET /api/ping on
@@ -307,6 +309,24 @@ def running_predict(share: Path, job: str, spec: dict, now=None) -> dict:
     return out
 
 
+EVAL_HUNG_S = 3600            # a running eval job (one Ultralytics val) with no metrics after this long: hung
+
+
+def running_eval(share: Path, job: str, spec: dict, now=None) -> dict:
+    """A running eval job (one Ultralytics val; no per-image progress): elapsed since work/<job>/eval.log was
+    created (stat'ed only, never opened); hung = still running after EVAL_HUNG_S."""
+    now = time.time() if now is None else now
+    out = {"job": job, "kind": "eval", "model": spec.get("model"), "split": spec.get("split"), "n_done": None,
+           "n_total": spec.get("n_images"), "elapsed_s": None, "eta_s": None, "hung": False}
+    try:
+        t0 = os.stat(share / C.WORK / job / C.EVAL_LOG).st_ctime
+    except OSError:
+        return out
+    out["elapsed_s"] = round(max(0.0, now - t0))
+    out["hung"] = now - t0 > EVAL_HUNG_S
+    return out
+
+
 def ready_at(share: Path, job: str):
     """When q/<job>/READY was written (ISO, local time; its mtime, which `retry` refreshes), or None."""
     try:
@@ -326,6 +346,10 @@ def finished_jobs(share: Path, rows) -> list:
         item = {"job": r["job"], "status": d.get("status"), "reason": d.get("reason"), "ended": d.get("ended"),
                 "run": d.get("run"), "run_status": d.get("run_status"), "pulled": r.get("pulled"), "metrics": None,
                 "best_epoch": None}
+        if C.job_kind(d) == "eval":                    # an eval job has no run.json: its metrics are in DONE.json
+            item.update(kind="eval", model=d.get("model"), metrics=d.get("metrics"))
+            out.append(item)
+            continue
         try:
             rj = C.read_json_shared(share / C.D / r["job"] / "run.json")
             item["metrics"], item["best_epoch"] = rj.get("metrics"), rj.get("best_epoch")
@@ -369,7 +393,8 @@ def watcher_view(w) -> dict:
         display = st or "unknown"
     return {"display": display, "state": st, "detail": detail, "job": w.get("job"), "age_s": age, "stale": stale,
             "machine": w.get("machine"), "heartbeat": w.get("heartbeat"),
-            "predict_jobs": w.get("predict_jobs")}     # None: a watcher from before predict jobs (= off)
+            "predict_jobs": w.get("predict_jobs"),     # None: a watcher from before predict jobs (= off)
+            "eval_jobs": w.get("eval_jobs")}           # None: a watcher from before eval jobs (= off)
 
 
 def read_queue(share: Path, now=None) -> dict:
@@ -388,7 +413,9 @@ def read_queue(share: Path, now=None) -> dict:
     if running:
         r = next((x for x in running if x["job"] == w.get("job")), running[0])
         spec = job_spec(share, r["job"])
-        out["running"] = (running_predict(share, r["job"], spec, now) if spec.get("type") == "predict"
+        kind = spec.get("type") or "train"
+        out["running"] = (running_predict(share, r["job"], spec, now) if kind == "predict"
+                          else running_eval(share, r["job"], spec, now) if kind == "eval"
                           else running_job(share, r["job"], now))
         out["running"]["cancel_requested"] = r["cancel_requested"]
         out["running"]["watcher_on_it"] = w.get("job") == r["job"] and w.get("state") == "running" and not w["stale"]

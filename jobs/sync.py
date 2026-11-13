@@ -25,6 +25,10 @@ pull: for each d/<job>/ with DONE.json not pulled yet, copies runs/<run>/ to <Cr
 retry: moves d/<job>/ to d/.retired/<job>_<time>/ so the runner picks the job again (nothing is deleted).
 queue_train(job, dataset_dir, exp_args, share, max_hours) (Python only; the portal's Train page): make_job_bundle's
   make_bundle, then push, in one call; refusals listed on the function.
+push-eval (--bundle <zip from make_job_bundle.py --eval> | --weights <pt> --dataset <id>) --share ... [--job ...]: an
+  eval job (Ultralytics val, test split, overlap_mask=False); pull lands its e/ in <CryoAI-laptop>/eval/<job>/ and
+  sets the registry job's status, never copying run folders or running the importer. Off unless $CRYOEV_EVAL_JOBS=1
+  (docs/JOBS.md, "Eval jobs").
 push-predict --ps <ps id> --share ...: a prediction set as a predict job (images-only dataset pack + thin zip); pull
   lands its p/ in <CryoAI-laptop>/predict/<ps>/ and updates the set's status.json and registry record. Off unless
   $CRYOEV_PREDICT_JOBS=1 (docs/JOBS.md, "Predict jobs").
@@ -372,6 +376,112 @@ def _push_predict_locked(ps_dir, reg, share, job_id, copier, check_origin, max_h
     return q
 
 
+EVAL_LOCK = Path("jobs") / "eval.lock"           # <CryoAI-laptop>/jobs/eval.lock: one push-eval at a time
+EVAL_HOURS = 1.0                                 # push-eval's default --max-hours (a 39-image test split: minutes)
+EVAL_DIR = "eval"                                # <CryoAI-laptop>/eval/<job>/: a pulled eval job's results
+
+
+def push_eval(share, bundle=None, weights=None, dataset=None, job_id=None, model=None, copier="auto",
+              check_origin=True, max_hours=EVAL_HOURS, hold=False, out=None, allow_dirty=False,
+              force_unwatched=False):
+    """Queue an eval job for the desktop (docs/JOBS.md, "Eval jobs"; needs $CRYOEV_EVAL_JOBS=1). Either `bundle` (a
+    zip from make_job_bundle.py --eval) or `weights` + `dataset` (a registry dataset id or folder: the bundle is made
+    here, into `out`, default <CryoAI-laptop>/job_bundles, reusing the dataset's pack).
+    - the registry job: `job_id`, else job_<today>_eval_<model> (type eval, where desktop; its list = the test
+      images), made only after the push succeeded; if that then fails, q/<job>/CANCEL is written (nothing deleted);
+    - push as a train job's (the dataset pack once per queue, then the thin zip), job.json type eval.
+    Holds <CryoAI-laptop>/jobs/eval.lock for the whole push. -> q/<job>. Refused: the flag off, no share, neither or
+    both of bundle and weights+dataset, the share's watch.json not saying eval_jobs true (unreadable: refused unless
+    force_unwatched), a bundle that is not an eval bundle, the job id not an eval job."""
+    from data_utils.oslock import acquire_lock
+    if not C.eval_enabled():
+        raise SyncError(f"eval jobs are off: set {C.EVAL_ENV}=1 (on this machine, and on the desktop runner "
+                        f"before it can run them)")
+    share = Path(share)
+    if not share.is_dir():
+        raise SyncError(f"share {share} not found: a desktop share is \\\\host\\cj (two leading backslashes)")
+    if (bundle is None) == (weights is None or dataset is None):
+        raise SyncError("give either --bundle (make_job_bundle.py --eval) or --weights and --dataset")
+    w = watch_state(share)                             # the desktop's own flag, from its watcher's watch.json
+    if w is None:
+        if not force_unwatched:
+            raise SyncError(f"can't read {share / C.WATCH_JSON}, so it is unknown whether the desktop runs eval jobs "
+                            f"({C.EVAL_ENV}); nothing was queued (--force-unwatched queues anyway)")
+    elif w.get("eval_jobs") is not True:
+        raise SyncError(f"the desktop has eval jobs off ({C.EVAL_ENV}); set it there first (watch.json eval_jobs: "
+                        f"{w.get('eval_jobs')!r}); nothing was queued")
+    lock_path = config.laptop_root() / EVAL_LOCK
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = acquire_lock(lock_path, 0)
+    if lock is None:
+        raise SyncError(f"another push-eval holds {lock_path}; push when it has finished")
+    try:
+        return _push_eval_locked(share, bundle, weights, dataset, job_id, model, copier, check_origin, max_hours,
+                                 hold, out, allow_dirty)
+    finally:
+        lock.close()
+
+
+def _push_eval_locked(share, bundle, weights, dataset, job_id, model, copier, check_origin, max_hours, hold, out,
+                      allow_dirty):
+    import tempfile
+    import ids
+    import registry
+    me = actor.current(None, default=None)             # the new job's who + via; a bad env fails before the push
+    reg = config.registry_root()
+    if bundle is None:
+        from training import make_job_bundle as MB
+        try:
+            ddir, dname = MB.resolve_dataset(dataset, reg)
+            b = MB.make_eval_bundle(ddir, Path(weights), out, dname, model, allow_dirty=allow_dirty)
+        except SystemExit as e:                        # make_job_bundle refuses with SystemExit (its CLI contract)
+            raise SyncError(f"bundle refused: {e.code}") from None
+        bundle = b["zip"]
+    bundle = Path(bundle)
+    try:
+        with zipfile.ZipFile(bundle) as z:
+            names = [n for n in z.namelist() if n.count("/") == 1 and n.endswith("/JOB.json")]
+            job = json.loads(z.read(names[0])) if len(names) == 1 else {}
+    except (OSError, zipfile.BadZipFile, ValueError) as e:
+        raise SyncError(f"can't read {bundle}: {e}")
+    if C.job_kind(job) != "eval":
+        raise SyncError(f"{bundle.name} is not an eval bundle (JOB.json job_type {job.get('job_type')!r}); make it "
+                        f"with make_job_bundle.py --eval")
+    if model and job.get("model") != model:
+        raise SyncError(f"{bundle.name} scores model {job.get('model')!r}, not {model!r}")
+    jid = job_id or ids.job_id(time.strftime("%Y%m%d"), f"eval_{job.get('model')}")
+    if len(jid) > C.MAX_JOB_ID:
+        raise SyncError(f"{jid} is longer than {C.MAX_JOB_ID} characters; pass a shorter --job")
+    cur = registry_job(jid)
+    if cur is None and job_id:
+        raise SyncError(f"{job_id} is not in the registry (leave --job out to make job_<today>_eval_<model>)")
+    if cur is not None and cur.get("type") != "eval":
+        raise SyncError(f"{jid} is a {cur.get('type')} job in the registry, not eval; pass another --job")
+    q = push(jid, bundle, share, copier, check_registry=False, check_origin=check_origin, max_hours=max_hours,
+             hold=hold, job_type="eval", extra={"model": job.get("model"), "split": job.get("split"),
+                                                "n_images": job.get("n_images")})
+    if cur is None:                                    # the registry job only once the push has succeeded
+        try:
+            with tempfile.TemporaryDirectory(prefix="cj_el_") as td:
+                lst = Path(td) / "images.txt"
+                files = sorted(Path(k).name for k in job.get("md5") or {}   # the scored images (the pack's md5s)
+                               if k.startswith(f"images/{job.get('split') or 'test'}/"))
+                lst.write_text("".join(f + "\n" for f in files), encoding="utf-8")
+                registry.new_job("eval", "desktop", jid.split("_", 2)[2], images=lst, root=reg, date=jid[4:12],
+                                 note=f"eval {job.get('model')} on {job.get('dataset_name')} "
+                                      f"{job.get('split')}", who=me["who"], via=me.get("via"))
+        except Exception as e:                         # roll back without deleting: the runner skips a CANCELled job
+            try:
+                cancel(jid, share, reason=f"push-eval: the registry job was not created ({e})")
+            except Exception as ce:
+                raise SyncError(f"{jid} was queued but its registry job was not created ({e}), and writing its "
+                                f"CANCEL failed too ({type(ce).__name__}: {ce}): cancel it by hand "
+                                f"(`sync.py cancel {jid}`) before the runner picks it") from e
+            raise SyncError(f"{jid} was queued but its registry job was not created ({e}); CANCEL written, so the "
+                            f"runner skips it. Fix the registry, then push again with a new job (or --job)") from e
+    return q
+
+
 def release(job_id, share):
     """Write READY for a job pushed with --hold."""
     qd = Path(share) / C.Q / job_id
@@ -543,6 +653,32 @@ def pull_predict(jd, done, copier="auto"):
     return [C.PS_PRED], [], none
 
 
+def pull_eval(jd, done, copier="auto"):
+    """A done eval job's results -> <CryoAI-laptop>/eval/<job>/: d/<job>/e/ (metrics.json, val/) and eval.log, plus
+    testmap_<model>.json (= metrics.json, the name analysis/compare_eval_runs.py --eval-dir reads). Staged in
+    eval/.pull_tmp_<job>, then renamed; an existing eval/<job>/ is kept, never overwritten. Never touches training
+    outputs and never runs the importer (pull). A blocked or cancelled job copies nothing (its e/ stays on the
+    share). -> (copied, skipped, not_pulled) like copy_runs."""
+    none = {"files": 0, "bytes": 0, "paths": []}
+    if done.get("status") != "done":
+        return [], [], none
+    root = config.laptop_root() / EVAL_DIR
+    dest, part = root / jd.name, root / f".pull_tmp_{jd.name}"
+    if dest.exists():
+        return [], [f"{EVAL_DIR}/{jd.name}"], none
+    guard(part)
+    guard(dest)
+    if not (jd / C.EVAL_OUT / C.METRICS).is_file():
+        raise SyncError(f"{jd.name}: done but d/{jd.name}/{C.EVAL_OUT}/{C.METRICS} is missing")
+    C.copy_tree(jd / C.EVAL_OUT, part, copier)         # raises on failure; the partial copy stays in .pull_tmp_<job>
+    if (jd / C.EVAL_LOG).is_file():
+        (part / C.EVAL_LOG).write_bytes(C.read_shared(jd / C.EVAL_LOG))
+    model = str(done.get("model") or "model")
+    (part / f"testmap_{model}.json").write_bytes((part / C.METRICS).read_bytes())
+    part.rename(dest)
+    return [f"{EVAL_DIR}/{jd.name}"], [], none
+
+
 def predict_pulled(job_id, done, target, reason):
     """After a predict job's pull: its set's status.json (done, or failed with the reason) and registry record
     (done | cancelled | failed). Raises SyncError."""
@@ -592,9 +728,17 @@ def pull(share, who=None, copier="auto", all_weights=False):
         return []
     pulled, errors = [], []
     for jd, done, sha in todo:
+        kind = C.job_kind(done)
+        if kind not in C.JOB_TYPES and done.get("status") == "done":   # a newer runner's type: never as training
+            errors.append(f"{jd.name}: unknown job_type {kind!r}; not pulled (update this checkout)")
+            continue
         try:
-            if done.get("job_type") == "predict":      # results go to the prediction set, not training outputs
+            if kind not in C.JOB_TYPES:                # refused by the runner (blocked): its status only, no files
+                copied, skipped, left = [], [], {"files": 0, "bytes": 0, "paths": []}
+            elif kind == "predict":                      # results go to the prediction set, not training outputs
                 copied, skipped, left = pull_predict(jd, done, copier)
+            elif kind == "eval":                       # results go to <CryoAI-laptop>/eval/<job>/; no run folders
+                copied, skipped, left = pull_eval(jd, done, copier)
             else:
                 copied, skipped, left = (copy_runs(jd, done["dataset"], copier, all_weights) if done.get("dataset")
                                          else ([], [], {"files": 0, "bytes": 0, "paths": []}))
@@ -605,13 +749,14 @@ def pull(share, who=None, copier="auto", all_weights=False):
                      f"(--all-weights copies them)" if left["files"] else ""))
         except (OSError, SyncError) as e:
             errors.append(f"{jd.name}: copy failed: {e}")
-    if any(p[1].get("job_type") != "predict" for p in pulled):   # the importer reads run folders: train jobs only
+    if any(C.job_kind(p[1]) == "train" for p in pulled):   # the importer reads run folders: train jobs only
         registry_cmd("import")
     out = []
     for job_id, done, sha, copied, skipped, left in pulled:
         target = done["status"] if done["status"] in ("done", "cancelled") else "blocked"
         reason = done.get("reason") or ("blocked on the runner" if target == "blocked" else None)
-        predict = done.get("job_type") == "predict"
+        kind = C.job_kind(done)
+        predict = kind == "predict"
         cur = registry_job(job_id)
         if cur is None:
             errors.append(f"{job_id}: not in the registry; status not set")
@@ -624,6 +769,11 @@ def pull(share, who=None, copier="auto", all_weights=False):
             elif predict:
                 args += ["--note", f"{done.get('ps')}: {done.get('n_done')}/{done.get('n_total')} images "
                                    f"predicted ({done.get('machine')})"]
+            elif kind == "eval":
+                m = (done.get("metrics") or {}).get("mask_map50_95")
+                args += ["--note", f"eval {done.get('model')} on {done.get('dataset')} {done.get('split')}: mask "
+                                   f"mAP50-95 {m:.3f} ({done.get('machine')})" if isinstance(m, (int, float)) else
+                         f"eval {done.get('model')} on {done.get('dataset')} ({done.get('machine')})"]
             else:
                 args += ["--note", f"run {done.get('run')} ({done.get('machine')}"
                                    + (", --allow-big" if done.get("allow_big") else "") + ")"]
@@ -782,6 +932,18 @@ def main(argv=None):
     pp.add_argument("--copier", choices=["auto", "robocopy", "shutil"], default="auto")
     pp.add_argument("--max-hours", type=float, default=PREDICT_HOURS)
     pp.add_argument("--hold", action="store_true")
+    ep = sub.add_parser("push-eval", help=f"queue an eval job for the desktop (needs {C.EVAL_ENV}=1)")
+    ep.add_argument("--share", required=True, type=Path)
+    ep.add_argument("--bundle", type=Path, help="a zip from make_job_bundle.py --eval")
+    ep.add_argument("--weights", type=Path, help="or: the model's .pt file (with --dataset; the bundle is made here)")
+    ep.add_argument("--dataset", help="with --weights: a registry dataset id or a dataset folder")
+    ep.add_argument("--model", help="the model name in metrics.json (default: models/<id>/ or the run folder)")
+    ep.add_argument("--job", help="an existing registry eval job (default: job_<today>_eval_<model>, made if new)")
+    ep.add_argument("--copier", choices=["auto", "robocopy", "shutil"], default="auto")
+    ep.add_argument("--max-hours", type=float, default=EVAL_HOURS)
+    ep.add_argument("--hold", action="store_true")
+    ep.add_argument("--force-unwatched", action="store_true",
+                    help="queue even when the share's watch.json can't be read (eval_jobs unknown)")
     for name in ("push", "push-pack", "pull", "status", "retry", "release", "stop", "start", "cancel"):
         p = sub.add_parser(name)
         if name in ("push", "retry", "release", "cancel"):
@@ -816,6 +978,10 @@ def main(argv=None):
         elif a.cmd == "push-predict":
             q = push_predict(a.ps, a.share, a.job, a.copier, max_hours=a.max_hours, hold=a.hold)
             print(f"[push-predict] {'held' if a.hold else 'queued'}: {q}")
+        elif a.cmd == "push-eval":
+            q = push_eval(a.share, a.bundle, a.weights, a.dataset, a.job, a.model, a.copier, max_hours=a.max_hours,
+                          hold=a.hold, force_unwatched=a.force_unwatched)
+            print(f"[push-eval] {'held' if a.hold else 'queued'}: {q}")
         elif a.cmd == "push-pack":
             print(f"[push-pack] {push_bundle_pack(a.bundle, a.share, a.copier)}")
         elif a.cmd == "cancel":

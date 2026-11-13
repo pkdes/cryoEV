@@ -86,7 +86,8 @@ class Watcher:
                 "schema": "watch/1", "state": state, "detail": detail, "job": job, "heartbeat": C.now(),
                 "heartbeat_utc": C.now_utc(), "since": self.started, "pid": os.getpid(), "machine": platform.node(),
                 "repo": str(self.repo), "repo_commit": self.git("rev-parse", "HEAD").stdout.strip() or None,
-                "predict_jobs": C.predict_enabled()})        # off: pushed predict jobs wait (docs/JOBS.md)
+                "predict_jobs": C.predict_enabled(),         # off: pushed predict jobs wait (docs/JOBS.md)
+                "eval_jobs": C.eval_enabled()})              # off: pushed eval jobs wait
         except OSError as e:
             print(f"[watch] watch.json not written: {e}", flush=True)
 
