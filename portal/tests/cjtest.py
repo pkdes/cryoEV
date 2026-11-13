@@ -22,6 +22,14 @@ REPO = HERE.parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+import os  # noqa: E402
+
+# The portal runs with CRYOEV_VIA / CRYOEV_FOR stripped (portal.app main(), services.child_env). Tests start the
+# app without main(), so drop them here too: results must not depend on whether the test run is an agent session.
+# A test that needs them sets them explicitly (mock.patch.dict).
+for _k in [k for k in os.environ if k.upper() in ("CRYOEV_VIA", "CRYOEV_FOR")]:
+    os.environ.pop(_k, None)
+
 import uvicorn  # noqa: E402
 
 from portal import app as APP  # noqa: E402
