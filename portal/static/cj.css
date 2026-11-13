@@ -466,6 +466,9 @@ a.cj-data-graph-node:focus-visible{outline:2px solid var(--acc);outline-offset:1
 .cj-about-sec p{margin:0 0 8px;line-height:1.5;overflow-wrap:anywhere}
 .cj-about-ver{font-size:13px;margin-top:18px}
 .cj-version .cj-about-link{color:inherit}
+.cj-changes .cj-chg-h3{font-size:15px;margin:22px 0 6px;padding-top:12px;border-top:1px solid var(--line,#ddd)}
+.cj-changes li,.cj-changes p{line-height:1.5;overflow-wrap:anywhere}
+.cj-changes code{font-size:12px}
 /* cj-audit:end */
 /* cj-feedback:begin */
 .cj-bar .cj-feedback-link{flex:none;align-self:center;margin-left:auto;font-size:13px;color:var(--mut);text-decoration:none;white-space:nowrap;padding:6px 4px}

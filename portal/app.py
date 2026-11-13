@@ -17,9 +17,14 @@ Routes (everything except OPEN needs a session; see Gate):
   /about                 About CryoEV (every signed-in role): text from a private JSON file outside the repo
                          ($CJ_ABOUT_FILE, default ~/.cryoev/about.json; keys platform, credit, support, cite);
                          missing -> "[not set yet]" placeholders. Never under static/ (served without sign-in)
+  /changes               What changed (every signed-in role): the repo's CHANGELOG.md ($CJ_CHANGELOG_FILE overrides)
+                         as escaped HTML (render_changelog: headings, bullets, **bold**, `code`; no raw HTML)
   /login?k=<key>         key link -> session cookie -> relative redirect to /
   /healthz               {"ok": true}
   /cj/cj.css, brand.json, header.js, live.js, review.js, modules.json, me.json     the shell's own files
+  /cj/version.json       {"version": the portal's stamp, "review_page": {"version", "updated"} of the real review
+                         package's index.html, "review_tool": the same for the repo's review tool (prediction
+                         packages)}: PAGE_VERSION parsed from the page ("unknown" without it) + the file's mtime
   /history/history.html, /history/live/live.json               served from the registry folder (allowlist only);
                          history.html gets the cj.css / header.js include lines before </head> (file untouched).
                          A hidden "classic" page: not in the nav, linked from home's footer.
@@ -181,6 +186,8 @@ ABOUT_ENV = "CJ_ABOUT_FILE"                                          # /about's 
 ABOUT_KEYS = (("platform", "The platform"), ("credit", "Who builds it"), ("support", "Support"),
               ("cite", "How to cite"))
 ABOUT_UNSET = "[not set yet]"
+CHANGELOG_ENV = "CJ_CHANGELOG_FILE"                                  # /changes' source (default: REPO/CHANGELOG.md)
+PAGE_VERSION_RE = re.compile(r'\bPAGE_VERSION\s*=\s*"([0-9A-Za-z][0-9A-Za-z._-]{0,39})"')
 log = logging.getLogger("cj")
 access_log = logging.getLogger("cj.access")
 
@@ -356,8 +363,86 @@ def render_about(doc, version: str) -> str:
         body = "".join(f'<p{" class=cj-mut" if p == ABOUT_UNSET else ""}>{html.escape(p)}</p>' for p in paras)
         secs.append(f'<section class="cj-about-sec" data-key="{key}"><h2>{html.escape(head)}</h2>{body}</section>')
     return (f'<div class="cj-about"><h1>About CryoEV</h1>{"".join(secs)}'
-            f'<p class="cj-mut cj-about-ver">Portal version: {html.escape(version)}</p>'
+            f'<p class="cj-mut cj-about-ver">Portal version: {html.escape(version)} · '
+            '<a href="/changes">What changed (changelog)</a></p>'
             '<p class="cj-mut cj-about-ver">Only signed-in people see this page.</p></div>')
+
+
+def changelog_path() -> Path:
+    return Path(os.environ.get(CHANGELOG_ENV) or (REPO / "CHANGELOG.md"))
+
+
+def _md_inline(text: str) -> str:
+    """Escaped text with `code` and **bold** (the markers survive html.escape; nothing else becomes markup)."""
+    if text.count("`") % 2:                         # an unpaired backtick: no code spans at all
+        text = text.replace("`", "'")
+    out = []
+    for i, part in enumerate(text.split("`")):
+        if i % 2:
+            out.append(f"<code>{html.escape(part)}</code>")
+        else:
+            out.append(re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", html.escape(part)))
+    return "".join(out)
+
+
+def render_changelog(md: str) -> str:
+    """CHANGELOG.md -> HTML, in file order (newest first by convention). A tiny subset: #/##/### headings, "- "/"* "
+    bullets, paragraphs (blank-line separated), **bold**, `code`. Every character of text is escaped: raw HTML in the
+    file shows as text."""
+    out, para, items = [], [], []
+
+    def flush():
+        if para:
+            out.append(f"<p>{_md_inline(' '.join(para))}</p>")
+            para.clear()
+        if items:
+            out.append("<ul>" + "".join(f"<li>{_md_inline(t)}</li>" for t in items) + "</ul>")
+            items.clear()
+    for raw in md.splitlines():
+        line = raw.strip()
+        m = re.match(r"^(#{1,3})\s+(.*)$", line)
+        if not line:
+            flush()
+        elif m:
+            flush()
+            n = len(m.group(1)) + 1                     # # -> h2 (the page's own h1 is the title)
+            out.append(f'<h{n} class="cj-chg-h{n}">{_md_inline(m.group(2))}</h{n}>')
+        elif re.match(r"^[-*]\s+", line):
+            if para:
+                flush()
+            items.append(re.sub(r"^[-*]\s+", "", line))
+        elif items and raw[:1] in (" ", "\t"):      # a bullet's wrapped continuation line
+            items[-1] += " " + line
+        else:
+            if items:
+                flush()
+            para.append(line)
+    flush()
+    return "".join(out)
+
+
+_PAGE_VER_CACHE: dict = {}
+
+
+def page_version(path: Path | None) -> dict:
+    """{"version": PAGE_VERSION in the page (else "unknown"), "updated": the file's mtime "YYYY-MM-DD HH:MM" (None when
+    there is no file)}. Re-read only when the file's mtime/size change (one stat per call). Never shows a path."""
+    try:
+        st = Path(path).stat()
+    except (OSError, TypeError):
+        return {"version": "unknown", "updated": None}
+    key = str(path)
+    hit = _PAGE_VER_CACHE.get(key)
+    if hit and hit[0] == (st.st_mtime_ns, st.st_size):
+        return dict(hit[1])
+    try:
+        m = PAGE_VERSION_RE.search(Path(path).read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        m = None
+    res = {"version": m.group(1) if m else "unknown",
+           "updated": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")}
+    _PAGE_VER_CACHE[key] = ((st.st_mtime_ns, st.st_size), res)
+    return dict(res)
 
 
 def read_review_key(pkg: Path | None) -> str | None:
@@ -939,8 +1024,10 @@ def create_app(cfg: Config) -> Gate:
                 and not (access and m.get("external"))]            # no host:port links through the tunnel
         return no_store(JSONResponse({"schema": "cj_modules/1", "modules": mods}))
 
-    async def version_json(request: Request):
-        return no_store(JSONResponse({"version": version}))
+    def version_json(request: Request):                 # sync: a stat (and a read when a page changed)
+        pkg_page = (Path(cfg.review_package) / "index.html") if cfg.review_package else None
+        return no_store(JSONResponse({"version": version, "review_page": page_version(pkg_page),
+                                      "review_tool": page_version(MRS.TOOL_PAGE)}))
 
     async def me(request: Request):
         u = request.scope["cj_user"]
@@ -987,9 +1074,19 @@ def create_app(cfg: Config) -> Gate:
         doc = read_json(about_path())
         return M.Ctx.page(request, "About CryoEV", render_about(doc, version), active="about")
 
+    def changes(request: Request):                  # sync: a file read
+        try:
+            md = changelog_path().read_text(encoding="utf-8")
+        except OSError:
+            md = ""
+        body = render_changelog(md) or '<p class="cj-mut">No changelog yet.</p>'
+        return M.Ctx.page(request, "What changed", '<div class="cj-about cj-changes"><h1>What changed</h1>'
+                          f'<p class="cj-mut">Portal: {html.escape(version)}</p>{body}</div>', active="about")
+
     routes = [
         Route("/", home, methods=["GET"]),
         Route("/about", about, methods=["GET"]),
+        Route("/changes", changes, methods=["GET"]),
         Route("/login", login, methods=["GET"]),
         Route("/healthz", healthz, methods=["GET"]),
         *[Route(f"/cj/{n}", static(n), methods=["GET"]) for n in STATIC],
@@ -1126,6 +1223,8 @@ def startup_lines(cfg: Config, host: str, port: int) -> list:
         "per day; written off the event loop",
         f"[cj] about: /about (signed in) from {about_path()}"
         + ("" if about_path().is_file() else " (missing: placeholders shown)"),
+        f"[cj] changes: /changes (signed in) from {changelog_path()}"
+        + ("" if changelog_path().is_file() else " (missing: empty page)"),
     ]
 
 

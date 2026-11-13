@@ -137,10 +137,23 @@
   }
   // the running code's version ("Updated <date time> . <commit>"), small, at the foot of every page, with the
   // About link (/about: signed-in only, like version.json)
+  // On /review/ pages, the review page's own version too (a page-only swap shows here): the real review (/review/)
+  // -> version.json's review_page, a prediction package (/review/<id>/) -> review_tool. "What's new" -> /changes.
+  function reviewPage(ver) {
+    var p = location.pathname, m = p.match(/^\/review\/([^\/]+)\//);
+    var rp = p === '/review/' || (m && m[1] === 'app') ? ver.review_page : m ? ver.review_tool : null;
+    if (!rp || !rp.version) return '';
+    return ' · Review page ' + rp.version + (rp.updated ? ' (file ' + rp.updated + ')' : '');
+  }
   function stamp(ver, bar) {
     if (!ver || !ver.version || document.getElementById('cj-version')) return;
-    var v = el('div', 'cj-version', ver.version + ' · ');
+    var v = el('div', 'cj-version', 'Portal ' + ver.version + reviewPage(ver) + ' · ');
     v.id = 'cj-version';
+    var ch = el('a', 'cj-about-link cj-changes-link', "What's new");
+    ch.href = '/changes';
+    if (location.pathname === '/changes') ch.setAttribute('aria-current', 'page');
+    v.appendChild(ch);
+    v.appendChild(document.createTextNode(' · '));
     var ab = el('a', 'cj-about-link', 'About');
     ab.href = '/about';
     if (location.pathname === '/about') ab.setAttribute('aria-current', 'page');
