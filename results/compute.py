@@ -52,6 +52,10 @@ reviewed. `diam_hist` = {"bin_nm": 10, "max_nm": 500, "counts": [51]}: counts of
 (the same ones as the median), bin k = [10k, 10k+10) nm, the last bin = 500 nm and above; sum(counts) == ev_total.
 `diam_hist` is in results.json only, not in SAMPLE_FIELDS / per_sample.csv.
 
+Group notes and rejects (round 12, additive): reviewed.json `sample_groups` (annotation/prediction_package.py) is
+copied to that sample's `group` ({note?, reject?, montages?}) in results.json only (not per_sample.csv). A group
+reject needs nothing else here: every image of the group is rejected (dropped by the rule below).
+
 Rejected images and low confidence (additive, results/1 unchanged; BUILD_CONTRACTS.md section 14). reviewed.json
 images may carry `rejected: true`, `reject_reason`, `note`; objects `low_conf: true`, `note` (read with .get). ONE rule:
 rejected images are dropped from a sample before the refusal check and every number (EV, non-EV, inner, reviewer %,
@@ -464,6 +468,10 @@ def compute(ps_dir, reviewed_json=None) -> dict:
             result["samples"][label] = _sample(imgs, n_rej)
     result["images"] = {k: {f: v[f] for f in IMAGE_FIELDS} for k, v in per_image.items()}
     result["refused"] = "; ".join(refusals) or None
+    groups = (reviewed or {}).get("sample_groups")
+    for label, g in (groups.items() if isinstance(groups, dict) else ()):
+        if label in result["samples"] and isinstance(g, dict):   # results.json only, never per_sample.csv
+            result["samples"][label]["group"] = g
     return result
 
 

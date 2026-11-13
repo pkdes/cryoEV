@@ -306,7 +306,9 @@ def reviewed_polygons(pkg_dir, write=True) -> dict:
     data.js pr items with u = 1) with no accept and no reject decision; all of them for an untouched image.
     Round 7, additive and each key only when set (readers use .get): per image rejected (true) + reject_reason
     (i:reject; such an image has n_candidates_open 0) and note (i:note); per object (edited / reviewed images)
-    low_conf (true: its t: tag, or the Low conf EV class, review_server.is_low_conf) and note (its t: note)."""
+    low_conf (true: its t: tag, or the Low conf EV class, review_server.is_low_conf) and note (its t: note).
+    Round 12, additive: per image reject_scope ("sample" | "montage") when a group action rejected it; top level
+    sample_groups (sample_groups()) when the package has group notes or group rejects."""
     pkg = Path(pkg_dir)
     meta, data = _read_json(pkg / META), read_datajs(pkg)
     by_file = {i["file"]: i for i in data["images"]}
@@ -351,8 +353,43 @@ def reviewed_polygons(pkg_dir, write=True) -> dict:
         out["images"][image] = _image_flags({"reviewed": reviewed, "edited": edited, "reviewed_by": who,
                                              "n_candidates_open": candidates_open(len(im["pr"]), edit),
                                              "objects": objs}, flags)
+    sg = sample_groups(pkg, data, meta)
+    if sg:
+        out["sample_groups"] = sg
     if write:
         _write_json(pkg / "reviewed.json", out)
+    return out
+
+
+def sample_groups(pkg: Path, data: dict, meta: dict) -> dict:
+    """Round 12, additive: the package's group notes and group rejects (edits/_groups.json, annotation/review_groups.py)
+    by real sample label, {} without any: {<sample_label>: {note?, reject?, montages? {<montage>: {note?, reject?}}}}.
+    A group is keyed by data.js split (what the reviewer picked); its images' sample labels say where it goes. The
+    group reject itself is on every image already (rejected / reject_scope): this only carries the group's words."""
+    from annotation import review_groups as rg
+    try:
+        doc = rg.load(Path(pkg) / "edits")
+    except rg.GroupsUnreadable:
+        return {}
+    split_of = {i["file"]: i.get("split") for i in data["images"]}
+    labels = {}
+    for m in meta["images"].values():
+        labels.setdefault(split_of.get(m.get("file")), set()).add(m.get("sample_label"))
+    out = {}
+    for gid, g in sorted(doc.get("groups", {}).items()):
+        parsed = rg.parse_group_id(gid)
+        if not parsed or not isinstance(g, dict):
+            continue
+        kind, split, montage = parsed
+        words = {k: g[k] for k in ("note", "reject") if isinstance(g.get(k), dict)}
+        if not words:
+            continue
+        for label in sorted(x for x in labels.get(split, ()) if isinstance(x, str)):
+            dst = out.setdefault(label, {})
+            if kind == "sample":
+                dst.update(words)
+            else:
+                dst.setdefault("montages", {})[montage] = words
     return out
 
 
@@ -362,6 +399,8 @@ def _image_flags(entry: dict, flags: dict) -> dict:
     if flags.get("rejected"):
         entry["n_candidates_open"] = 0
         entry["rejected"], entry["reject_reason"] = True, flags["reject_reason"]
+        if flags.get("reject_scope"):  # round 12: rejected by a sample / montage group action
+            entry["reject_scope"] = flags["reject_scope"]
     if flags.get("note"):
         entry["note"] = flags["note"]
     return entry

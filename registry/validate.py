@@ -34,6 +34,7 @@ from data_utils import config  # noqa: E402
 from data_utils.config import find_sibling  # noqa: E402,F401  (re-exported for importers, registry, tests)
 from data_utils.path_guard import protected_problem  # noqa: E402
 from registry import ids  # noqa: E402
+from annotation.review_groups import is_record_file  # noqa: E402  (edits/_groups.json is no image record)
 from registry.schema_check import check_record, load_schemas  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
@@ -556,7 +557,7 @@ class Scan:
             pstems = self.pulls.get(base, {}).get("stems", {})
             ed = f.parent / "edits"
             if ed.is_dir():
-                recs = list(ed.glob("*.json"))
+                recs = [r for r in ed.glob("*.json") if is_record_file(r)]
                 legacy = bad_pkg = unknown = 0
                 for r in recs:
                     try:

@@ -68,6 +68,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
+from annotation.review_groups import is_record_file
 from registry import ids
 from registry import store as registry
 from registry.validate import (EXCLUDED_SESSIONS, REPO, Scan, find_sibling, lv_provenance, read_csv, read_datajs,
@@ -149,10 +150,11 @@ def edit_body(o):
 
 
 def package_progress(edits_dir):
-    """edits/*.json -> (n records, n with edit.reviewed true, n with decisions or reviewed, `who` names)."""
+    """edits/*.json -> (n records, n with edit.reviewed true, n with decisions or reviewed, `who` names). The groups
+    file (edits/_groups.json, annotation/review_groups.py) is no image record: not counted."""
     n = reviewed = touched = 0
     who = set()
-    files = sorted(Path(edits_dir).glob("*.json")) if Path(edits_dir).is_dir() else []
+    files = sorted(f for f in Path(edits_dir).glob("*.json") if is_record_file(f)) if Path(edits_dir).is_dir() else []
     for f in files:
         try:
             e = edit_body(read_json(f))
@@ -852,7 +854,8 @@ class Importer:
                 d = read_datajs(e["path"] / "data.js")
                 run = (d.get("run") or "").split(" ")[0]
                 model = run if run in s.models else run_to_model.get(run)
-                edits = list((e["path"] / "edits").glob("*.json")) if (e["path"] / "edits").is_dir() else []
+                edits = [f for f in (e["path"] / "edits").glob("*.json") if is_record_file(f)] \
+                    if (e["path"] / "edits").is_dir() else []
                 parent = ids.package_parent(pid)
                 status = "applied" if pid in lv_pkgs else "in_review" if edits else "built"
                 base_kind = "pull" if e["base"].startswith("roboflow_pull_") else "export"

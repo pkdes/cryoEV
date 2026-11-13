@@ -111,7 +111,7 @@ class ServerAPI(unittest.TestCase):
 
     def test_ping(self):
         code, body, _ = self.srv.request("GET", "/api/ping")
-        self.assertEqual((code, body), (200, {"ok": True, "caps": ["i", "t"]}))  # caps: round 7 (i:, t: keys)
+        self.assertEqual((code, body), (200, {"ok": True, "caps": ["i", "t", "m", "g"]}))  # caps: round 7 (i:, t: keys); round 12 (m: meta, g: groups)
 
     def test_access_key_required(self):
         edits_dir = self.srv.pkg / "edits"

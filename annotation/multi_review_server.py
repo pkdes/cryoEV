@@ -50,7 +50,9 @@ off by the exclude (below, fail-closed) and by the package lock.
   So a package's data.js is frozen at build while the tool page is the repo's: later changes to review_tool/index.html
   must keep reading old data.js files (add fields only; never rename, remove or re-mean one).
 - Capabilities: the page is read from disk on every request, but review_server (valid_edit) is the code this process
-  started with. GET /<id>/api/ping answers review_server's caps (["i", "t"]: image reject / note, object low-conf tag);
+  started with. GET /<id>/api/ping answers review_server's caps (["i", "t", "m", "g"]: image reject / note, object
+  low-conf tag; round 12: /api/meta image info, /api/group sample / montage actions, which this server serves through
+  review_server's handler like every route, with the same key check; a portal identity is the group action's who too);
   a page served by a process started on older code gets {"ok": true} without caps and hides those controls, so it
   never sends keys that process would refuse with a 400. Restart this server when review_server.py changes.
 """

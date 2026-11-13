@@ -45,6 +45,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "training"))
 import build_review_package as B  # noqa: E402
+from review_groups import is_record_file  # noqa: E402
 
 TOOL = "annotation/compare_package.py"
 EV_GROUP = "ev_type"
@@ -470,7 +471,8 @@ def strip_decoys(edits_dir: Path, work: Path, out_dir: Path, now_ms=None) -> dic
     removed, or, when the record's saved polygon list holds an item with src p<k> (that item would otherwise
     survive without a decision), replaced by "no" stamped newer than anything in the record. Accept decoy g<id>
     is a real label: its corrections (reshape, class, tag) stay; only a "del" is removed. Other records are
-    copied byte for byte. -> {"files", "changed": [file], "reject_dropped", "reject_no", "accept_del_dropped"}."""
+    copied byte for byte (the groups file too; "files" counts image records only). -> {"files", "changed": [file],
+    "reject_dropped", "reject_no", "accept_del_dropped"}."""
     key = json.loads((Path(work) / "decoys.json").read_text(encoding="utf-8"))["decoys"]
     by_file = {}
     for d in key:
@@ -480,7 +482,7 @@ def strip_decoys(edits_dir: Path, work: Path, out_dir: Path, now_ms=None) -> dic
     stats = {"files": 0, "changed": [], "reject_dropped": 0, "reject_no": 0, "accept_del_dropped": 0}
     for f in sorted(Path(edits_dir).glob("*.json")):
         raw = f.read_bytes()
-        stats["files"] += 1
+        stats["files"] += is_record_file(f)  # edits/_groups.json (group notes) is copied as is, not counted
         rec = json.loads(raw.decode("utf-8"))
         e = rec.get("edit", rec)
         dec = e.get("dec") or {}

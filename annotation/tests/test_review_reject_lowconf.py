@@ -118,7 +118,7 @@ class ServerMergeTests(unittest.TestCase):
         return self.srv.request("GET", "/api/edits")[1][file]
 
     def test_ping_caps(self):
-        self.assertEqual(self.srv.request("GET", "/api/ping")[:2], (200, {"ok": True, "caps": ["i", "t"]}))
+        self.assertEqual(self.srv.request("GET", "/api/ping")[:2], (200, {"ok": True, "caps": ["i", "t", "m", "g"]}))  # round 12: m (meta), g (groups)
 
     def test_two_devices_merge_per_key_newest_wins(self):
         f = "fixC_old.png"

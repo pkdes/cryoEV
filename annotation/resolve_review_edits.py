@@ -75,6 +75,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_review_package import load_predictions, stem_of  # noqa: E402
 from review_server import _migrate as migrate, effective_labels  # noqa: E402
+from review_groups import record_files  # noqa: E402
 
 RASTER = 2048  # IoU grid: the longer image side is rasterized at this many pixels
 STATUSES = ("applied-ready", "already-done", "conflict", "orphan", "needs-human")
@@ -445,7 +446,7 @@ def main():
     data = read_data_js(args.package / "data.js")
     pkg_images = {im["file"]: im for im in data["images"]}
     edits = {}
-    for f in sorted((args.edits_dir or args.package / "edits").glob("*.json")):
+    for f in record_files(args.edits_dir or args.package / "edits"):  # not edits/_groups.json
         rec = json.loads(f.read_text(encoding="utf-8"))
         edits[rec["file"]] = rec["edit"]
     dup_of = {}

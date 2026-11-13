@@ -14,10 +14,17 @@ page: data.js is served with window.REVIEW_SERVER = {"sandbox": true} appended (
 
 Routes:
   GET  /, /data.js, /images/<name>   the package itself
-  GET  /api/ping                     {"ok": true, "caps": ["i", "t"]}: caps = the decision kinds beyond g/p/n this
-                                     server accepts (i: image reject / note, t: object low-conf tag / note). The page
-                                     hides those controls when they are missing (an older server answers {"ok": true}
-                                     and refuses the keys with a 400)
+  GET  /api/ping                     {"ok": true, "caps": ["i", "t", "m", "g"]}: caps = what this server accepts
+                                     beyond g/p/n decisions (i: image reject / note, t: object low-conf tag / note;
+                                     round 12: m: GET /api/meta, g: group actions and the grp field on i:reject). The
+                                     page hides those controls when they are missing (an older server answers
+                                     {"ok": true} or fewer caps, and refuses the keys with a 400 / the routes with 404)
+  GET  /api/meta                     image metadata (sample, montage, tile, defocus, recipe...), derived read-only
+                                     from the prediction set and conversion folders: annotation/review_meta.py
+  GET  /api/groups                   group notes and group rejects (edits/_groups.json): annotation/review_groups.py
+  POST /api/group?who=<n>            {action: reject|undo|comment, kind: sample|montage, sample, montage?, reason?,
+                                     note?}: one group action, applied to every image of the group under the write
+                                     lock (annotation/review_groups.py); answers the changed records
   GET  /api/people                   the reviewer roster from annotation/people.json, for the name picker
   GET  /api/edits                    {file: edit record} for every saved image
   PUT  /api/edits?f=<file>           merge one image's record into the saved one (per decision, the latest
@@ -63,7 +70,7 @@ SANDBOX_PREFIX = "SANDBOX_"
 DEC_PREFIXES = ("g", "p", "n")  # g<label id>, p<prediction index>, n<id of an outline drawn in the tool>
 # Image and object state (docs/REVIEW_TOOL.md "Reject, notes, low conf"): decisions on keys of their own, so they
 # merge per key, carry who and server_t, and undo like any decision. Never extra fields on a class decision.
-CAPS = ("i", "t")              # /api/ping caps: i:reject / i:note, t:<objkey>
+CAPS = ("i", "t", "m", "g")    # /api/ping caps: i:reject / i:note, t:<objkey>; m: /api/meta; g: group actions (round 12)
 IMAGE_KEYS = ("i:reject", "i:note")
 TAG_KEY_RE = re.compile(r"t:(?:g[0-9]+|p[0-9]+|n[0-9a-z]+)")   # t:<objkey>, objkey = the object's decision key
 REJECT_PREFIX = "reject:"
@@ -74,6 +81,9 @@ TAG_NOTE_MAX = 300
 TAG_VALUES = ("lowconf", "plain")  # lowconf = the Low conf tag (+ note); plain = a note without the tag
 LOW_CONF_EV = "Low conf EV"    # the class stays (old data, the lab package) and is read as EV + low conf
 STATE_FIELDS = frozenset({"v", "t", "who", "server_t", "pending", "note"})  # the only fields of an i: / t: decision
+REJECT_FIELDS = STATE_FIELDS | {"grp"}  # i:reject also: grp, the group action that set it (annotation/review_groups.py)
+GRP_MAX = 500                  # = review_groups.GRP_MAX
+GROUP_BODY_MAX = 16 * 1024
 STATE_KEY_MAX = 64             # an i: / t: key longer than this is refused
 MAX_BODY = 20 * 2**20
 CLAIM_SECONDS = 90
@@ -165,6 +175,28 @@ def _write_lock(edits_dir: Path) -> threading.Lock:
         return _WRITE.setdefault(_norm(edits_dir), threading.Lock())
 
 
+def _annotation(name: str):
+    """annotation.<name> (review_meta, review_groups), with the repo on sys.path: this file also runs as a script."""
+    repo = str(Path(__file__).resolve().parent.parent)
+    if repo not in sys.path:
+        sys.path.insert(0, repo)
+    import importlib
+    return importlib.import_module(f"annotation.{name}")
+
+
+def package_meta(pkg: Path, valid_files=None) -> dict:
+    """review_meta.package_meta(pkg), never raising (a broken folder costs the metadata, not the page); images limited
+    to valid_files (this handler's data.js) when given."""
+    try:
+        meta = _annotation("review_meta").package_meta(pkg)
+    except Exception as e:  # noqa: BLE001
+        meta = {"schema": "review_meta/1", "package": {"error": f"metadata unavailable ({type(e).__name__})"},
+                "images": {}}
+    if valid_files is not None:
+        meta["images"] = {f: m for f, m in meta.get("images", {}).items() if f in valid_files}
+    return meta
+
+
 def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people: list = (), sandbox: bool = False):
     people = list(people)
     edits_dir = pkg / "edits"
@@ -227,10 +259,20 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
             if url.path == "/api/claims":
                 with lock:
                     return self._json(200, {"claims": active_claims(time.time())})
+            if url.path == "/api/meta":
+                return self._json(200, package_meta(pkg, valid_files))
+            if url.path == "/api/groups":
+                rg = _annotation("review_groups")
+                with lock:
+                    try:
+                        doc = rg.public(rg.load(edits_dir, pkg_id))
+                    except rg.GroupsUnreadable as e:
+                        doc = {**rg.public(rg.empty(pkg_id)), "error": str(e)}
+                return self._json(200, doc)
             if url.path == "/api/edits":
                 out = {}
                 with lock:
-                    for f in edits_dir.glob("*.json"):
+                    for f in _annotation("review_groups").record_files(edits_dir):
                         try:
                             rec = json.loads(f.read_text(encoding="utf-8"))
                             out[rec["file"]] = rec["edit"]
@@ -297,6 +339,8 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
             q = parse_qs(url.query)
             if not self._authed(q):
                 return self._json(403, {"error": "access key required"})
+            if url.path == "/api/group":
+                return self._group(q)
             if url.path != "/api/claim":
                 return self._json(404, {"error": "not found"})
             case, who = q.get("c", [""])[0][:600], q.get("who", ["anonymous"])[0][:WHO_MAX] or "anonymous"
@@ -314,6 +358,34 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
                     del claims[k]
                 active = active_claims(now)
             return self._json(200, {"claims": active})
+
+        def _group(self, q):
+            """POST /api/group: one group action (annotation/review_groups.py), under the package write lock."""
+            who = q.get("who", [""])[0][:WHO_MAX]
+            if not who.strip() or not valid_who(who):
+                return self._json(400, {"error": "a reviewer name is required"})
+            who = _request_identity(self, who)
+            try:
+                n = int(self.headers.get("Content-Length", ""))
+            except ValueError:
+                n = -1
+            if n <= 0:
+                return self._json(400, {"error": "bad Content-Length"})
+            if n > GROUP_BODY_MAX:
+                return self._json(413, {"error": "body too large"})
+            rg = _annotation("review_groups")
+            try:
+                body = json.loads(self.rfile.read(n), parse_constant=_no_constant)
+            except ValueError:
+                return self._json(400, {"error": "bad body"})
+            why = rg.check_body(body, REJECT_REASONS)
+            if why:
+                return self._json(400, {"error": why})
+            images = package_meta(pkg, valid_files)["images"]
+            with lock:
+                code, ans = rg.act(sys.modules[__name__], edits_dir, pkg_id, images, body, who,
+                                   claims=active_claims(time.time()))
+            return self._json(code, ans)
 
     claims = {}  # "<file>|<case key>" -> (reviewer, expiry): the card on each reviewer's screen
 
@@ -404,9 +476,13 @@ def _utf8(s) -> bool:
 
 
 def _valid_state_dec(k, d) -> bool:
-    """An i:reject / i:note / t:<objkey> decision: a dict (never a bare string) with only STATE_FIELDS, v from its
-    own set, notes UTF-8 strings within their caps."""
-    if not isinstance(d, dict) or not set(d) <= STATE_FIELDS or not _num(d.get("t", 0)):
+    """An i:reject / i:note / t:<objkey> decision: a dict (never a bare string) with only STATE_FIELDS (i:reject also
+    grp: the group action that set it, a UTF-8 string within GRP_MAX), v from its own set, notes UTF-8 strings within
+    their caps."""
+    if not isinstance(d, dict) or not set(d) <= (REJECT_FIELDS if k == "i:reject" else STATE_FIELDS) \
+            or not _num(d.get("t", 0)):
+        return False
+    if "grp" in d and not (isinstance(d["grp"], str) and 0 < len(d["grp"]) <= GRP_MAX and _utf8(d["grp"])):
         return False
     if any(isinstance(d.get(f), str) and not _utf8(d[f]) for f in ("v", "note")):
         return False
@@ -640,12 +716,22 @@ def _with_tags(out: list, dec: dict) -> list:
 
 def image_flags(edit) -> dict:
     """A record's image-level state, each key only when set: rejected (True) + reject_reason from i:reject, note
-    from i:note. {} for a record without them (every record saved before round 7)."""
+    from i:note; reject_scope ("sample" | "montage") + reject_group (its id) when a group action set the reject
+    (round 12, annotation/review_groups.py). {} for a record without them (every record saved before round 7)."""
     dec = _migrate(edit)["dec"] if edit else {}
     out = {}
     v = (dec.get("i:reject") or {}).get("v")
     if isinstance(v, str) and v.startswith(REJECT_PREFIX):
         out["rejected"], out["reject_reason"] = True, v[len(REJECT_PREFIX):]
+        grp = dec["i:reject"].get("grp")
+        kind = None
+        if isinstance(grp, str) and grp.startswith('["'):
+            try:
+                kind = json.loads(grp)[0]
+            except (ValueError, IndexError, KeyError, TypeError):
+                kind = None
+        if kind in ("sample", "montage"):
+            out["reject_scope"], out["reject_group"] = kind, grp
     n = (dec.get("i:note") or {}).get("v")
     if isinstance(n, str) and n.strip():
         out["note"] = n

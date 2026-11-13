@@ -113,11 +113,13 @@ REPO = HERE.parent
 if __package__:   # imported as annotation.apply_review_edits (the portal's apply preview): no sys.path changes
     from .review_server import (LOW_CONF_EV, _migrate, _num, effective_labels, image_flags, is_low_conf,  # noqa: E402
                                 load_people, object_key, tag_of)
+    from .review_groups import record_files  # noqa: E402
 else:             # the CLI, and the tests' `import apply_review_edits` with annotation/ on sys.path
     sys.path.insert(0, str(HERE))
     sys.path.insert(0, str(REPO))
     from review_server import (LOW_CONF_EV, _migrate, _num, effective_labels, image_flags, is_low_conf,  # noqa: E402
                                load_people, object_key, tag_of)
+    from review_groups import record_files  # noqa: E402
 from data_utils.path_guard import PROTECTED_ROOTS, normalize, protected_problem  # noqa: E402
 from data_utils import actor  # noqa: E402
 
@@ -183,9 +185,11 @@ def roster_lookup(people: list):
 
 
 def load_records(edits_dir: Path) -> list:
-    """[(path, wrapper)] sorted by file name. Unreadable files abort: an edit must never be lost silently."""
+    """[(path, wrapper)] sorted by file name. Unreadable files abort: an edit must never be lost silently. The
+    groups file (edits/_groups.json, review_groups.py: group notes) is no image record and is skipped; a group reject
+    is on each image's own record."""
     out = []
-    for f in sorted(Path(edits_dir).glob("*.json")):
+    for f in record_files(edits_dir):
         try:
             rec = json.loads(f.read_text(encoding="utf-8"))
         except ValueError as e:
