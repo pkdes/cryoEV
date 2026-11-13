@@ -285,6 +285,57 @@ def hide_private(records, viewer, ref_id, hint=None):
     return "Not visible to you" if ref_hidden(records, viewer, ref_id, hint) else ref_id
 
 
+# provenance.derived_from kind -> (records table, href kind, word); "other" has no table and is never linked
+DERIVED_KIND = {"dataset": ("dataset", "dataset", "dataset"),
+                "label_version": ("label_version", "labels", "label version"),
+                "session": ("session", "session", "session"),
+                "prediction_set": ("prediction_set", "images", "prediction set"), "model": ("model", "model", "model")}
+
+
+def tiling_text(tiling) -> str | None:
+    """A prediction set's provenance.tiling as one line: 'tiles 1440 px, overlap 20%, 0.368 nm/px, no downsampling'."""
+    t = _dict(tiling)
+    parts = []
+    if _number(t.get("tile_px")) is not None:
+        parts.append(f"tiles {t['tile_px']:g} px")
+    px, frac = _number(t.get("overlap_px")), _number(t.get("overlap_frac"))
+    if px is not None or frac is not None:
+        pct = f"{format_number(frac * 100, 1)}%" if frac is not None else None
+        parts.append("overlap " + (f"{px:g} px ({pct})" if px is not None and pct
+                                   else f"{px:g} px" if px is not None else pct))
+    if _number(t.get("nm_per_px")) is not None:
+        parts.append(f"{t['nm_per_px']:.6g} nm/px")
+    if _number(t.get("downsample")) is not None:
+        parts.append("no downsampling" if t["downsample"] == 1 else f"downsampled {format_number(t['downsample'], 3)}x")
+    return ", ".join(parts) or None
+
+
+def made_how(provenance) -> list:
+    """'How the images were made': provenance.steps, then the tiling line."""
+    p = _dict(provenance)
+    lines = [s for s in _list(p.get("steps")) if _text(s)]
+    tiling = tiling_text(p.get("tiling"))
+    return lines + ([tiling] if tiling else [])
+
+
+def derived_from(records, viewer, provenance) -> list:
+    """'Derived from': [text, href or None] per provenance.derived_from entry; linked only when that record exists
+    (and, for a private set, only when this viewer may see it; otherwise its id is never quoted)."""
+    out = []
+    for entry in _list(_dict(provenance).get("derived_from")):
+        kind, rid = _dict(entry).get("kind"), _text(_dict(entry).get("id"))
+        if not rid:
+            continue
+        table, href_kind, word = DERIVED_KIND.get(kind, (None, None, _text(kind) or "other"))
+        shown = hide_private(records, viewer, rid)
+        if shown != rid:
+            out.append([shown, None])
+            continue
+        known = table is not None and rid in records.get(table, {})
+        out.append([f"{rid} ({word})", entity_href(href_kind, rid) if known else None])
+    return out
+
+
 def detail_images(records, entity, record, viewer, page) -> dict:
     set_id = record["id"]
     model, source = _text(record.get("model")), _dict(record.get("source"))
@@ -299,6 +350,10 @@ def detail_images(records, entity, record, viewer, page) -> dict:
         field("Created", short_date(_when(record))),
         field("Made by", (who_label(record.get("owner"), _actor_module().via_of(record, "owner")) or None)
               if entity == "prediction_set" else None),   # set_is_visible already requires viewer.may_see(owner)
+        *((field("Note", _text(record.get("note"))),
+           field("How the images were made", made_how(record.get("provenance"))),
+           field("Derived from", derived_from(records, viewer, record.get("provenance"))))
+          if entity == "prediction_set" else ()),         # round 11b: absent fields show nothing
         field("Model", model, entity_href("model", model) if model in records["model"] else None),
         field("Detection threshold", format_number(record.get("conf")) if _number(record.get("conf")) is not None
               else None),

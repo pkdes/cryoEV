@@ -93,14 +93,23 @@ def render_list(title, rows, error) -> str:
             + '<div class="cj-card">' + render_rows(rows) + "</div>")
 
 
+def list_item(v) -> str:
+    """One bullet: a plain value escaped, or [text, href] (a link when href is set)."""
+    if isinstance(v, (list, tuple)) and len(v) == 2:
+        text, href = v
+        return f'<a href="{esc(href)}">{esc(str(text))}</a>' if href else esc(str(text))
+    return esc(str(v))
+
+
 def render_fields(fields) -> str:
-    """A list value is a bulleted list (one item per value); anything else is one escaped line."""
+    """A list value is a bulleted list (one item per value; an item [text, href] is a link when href is set);
+    anything else is one escaped line."""
     if not fields:
         return ""
     items = []
     for label, value, href in fields:
         if isinstance(value, (list, tuple)):
-            shown = '<ul class="cj-data-vlist">' + "".join(f"<li>{esc(str(v))}</li>" for v in value) + "</ul>"
+            shown = '<ul class="cj-data-vlist">' + "".join(f"<li>{list_item(v)}</li>" for v in value) + "</ul>"
         else:
             shown = f'<a href="{esc(href)}">{esc(value)}</a>' if href else esc(value)
         items.append(f"<div><dt>{esc(label)}</dt><dd>{shown}</dd></div>")
