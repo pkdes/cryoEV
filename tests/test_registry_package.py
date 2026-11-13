@@ -219,6 +219,20 @@ class ByPath(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("registry", r.stderr)
 
+    def test_store_refusal_is_rc2_whichever_way_it_runs(self):
+        """QC: store.py run as __main__ used to define its own RegistryError, so a refusal raised inside
+        registry.store (via importers) escaped main() as a traceback. All three entry points now run the package's
+        store.main(): the FORMAT min_reader refusal is a message and exit 2."""
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "FORMAT.json").write_text('{"min_reader": 99}', encoding="utf-8")
+            for args in ([str(REPO / "registry" / "store.py")], ["-m", "registry.store"],
+                         [str(REPO / "registry" / "registry.py")]):
+                with self.subTest(args=args[-1]):
+                    r = self.run_py([*args, "--root", tmp, "import"], REPO)
+                    self.assertEqual(r.returncode, 2, r.stderr[-2000:])
+                    self.assertIn("needs reader version 99", r.stderr)
+                    self.assertNotIn("Traceback", r.stderr)
+
     def test_shim_runs_store_main(self):
         with tempfile.TemporaryDirectory() as tmp:
             r = self.run_py([str(REPO / "registry" / "registry.py"), "--root", tmp, "list"], REPO)

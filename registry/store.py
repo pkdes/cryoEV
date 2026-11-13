@@ -538,5 +538,6 @@ def main(argv=None):
     return 0
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+if __name__ == "__main__":     # run as a script: use the package module, so one store (one RegistryError) is loaded
+    from registry import store as _s
+    sys.exit(_s.main())
