@@ -460,7 +460,7 @@ def routes(ctx) -> list:
         ids = roster_ids(roster) if roster else []
         forms = [render_picker(sets, lv, cov)] + [render_form(p, tok, sets, models, lv, b, cov, ids, me, bool(active))
                                                   for p in RB.PURPOSES]
-        forms.append(render_objects_form(tok, RB.schema_choices(ctx.cfg), RB.ps_choices(ctx.cfg), ids, me))
+        forms.append(render_objects_form(tok, RB.schema_choices(ctx.cfg), RB.ps_choices(ctx.cfg, me), ids, me))
         return {"forms": forms, "active": active}
 
     def start_page(request: Request):

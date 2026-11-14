@@ -48,6 +48,7 @@ PRED_ID_R14 = re.compile(r"^(?:pred_ps_\d{8}_[0-9a-f]{6}|pred_obj_[a-z0-9][a-z0-
                          r"|lab_[A-Za-z0-9][A-Za-z0-9_.-]{0,100})\Z")
 PRED = "pred_ps_20261112_aaaaa1"
 PS = "ps_20261114_abcdef"
+PS_OTHER = "ps_20261114_0f0e0d"
 TOKEN_RE = re.compile(r'name="t" value="([0-9a-f]{40})"')
 CM = {"schema": "class_map/1", "id": "cm_ev_nonev_v1", "name": "ev_nonev", "version": 1, "maker": "builtin",
       "description": "EV and non-EV.", "source_schema": "ls_legacy_v1", "classes": ["EV", "non-EV"],
@@ -103,9 +104,13 @@ class ObjectSetsPortal(unittest.TestCase):
         (cls.pred / ".review_key").write_text("k" * 20, encoding="utf-8")
         ps = cls.predict / PS
         ps.mkdir()
-        (ps / "request.json").write_text(json.dumps({"owner": "maker", "name": "Poster run", "created": "2026-11-14"}),
+        (ps / "request.json").write_text(json.dumps({"owner": T.USER, "name": "Poster run", "created": "2026-11-14"}),
                                          encoding="utf-8")
         (ps / "status.json").write_text(json.dumps({"state": "done", "n_total": 677}), encoding="utf-8")
+        other = cls.predict / PS_OTHER                       # someone else's set: never offered or accepted
+        other.mkdir()
+        (other / "request.json").write_text(json.dumps({"owner": "maker", "name": "Maker run"}), encoding="utf-8")
+        (other / "status.json").write_text(json.dumps({"state": "done", "n_total": 3}), encoding="utf-8")
         reg = cls.env.registry
         (reg / "defs" / "label_schema").mkdir(parents=True)
         (reg / "defs" / "label_schema" / "ls_lamellarity_v1.json").write_text(json.dumps(OF.SCHEMA), encoding="utf-8")
@@ -283,6 +288,7 @@ class ObjectSetsPortal(unittest.TestCase):
         self.assertIn('<option value="ls_lamellarity_v1">', page)
         self.assertIn(f'<option value="{PS}">Poster run · {PS} · 677 img</option>', page)
         self.assertIn('value="target+contained"', page)
+        self.assertNotIn(PS_OTHER, page)
         self.assertIn("Create object set", page)
         self.assertIn("Order shuffled. Exports are for you and admins until the set is closed.", page)
         st, _, basic = self.get("/reviews/start/", "rev1")
@@ -314,6 +320,7 @@ class ObjectSetsPortal(unittest.TestCase):
             for fields, csv, why in ((base + [("blind_ui", "1"), ("blind", "image")], None, "a key column"),
                                      ([x for x in base if x[0] != "schema"] + [("schema", "ls_nope_v1")], None, "schema"),
                                      ([x for x in base if x[0] != "ps"] + [("ps", "ps_20990101_000000")], None, "ps"),
+                                     ([x for x in base if x[0] != "ps"] + [("ps", PS_OTHER)], None, "not own ps"),
                                      (base + [("reviewer", "ghost")], None, "roster"),
                                      (base, b"just one line\n", "csv"),
                                      (base, b"a,b\n1,2\n", "no image column")):

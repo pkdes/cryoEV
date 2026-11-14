@@ -1092,12 +1092,13 @@ def schema_choices(cfg) -> list:
     return out
 
 
-def ps_choices(cfg) -> list:
-    """[{id, name, images}] of finished prediction sets (newest first) an object set can be built from (admin)."""
+def ps_choices(cfg, owner) -> list:
+    """[{id, name, images}] of the admin's OWN finished prediction sets (newest first) an object set can be built
+    from: the Start page's rule for (a); someone else's set is never listed or accepted."""
     from portal import names
     from portal.predict_parts import sets as SETS
     out = []
-    for d, req, st in SETS.list_sets(cfg, {"id": None, "role": "admin"}, lambda u, owner: True):
+    for d, req, st in SETS.list_sets(cfg, {"id": owner}, lambda u, o: bool(owner) and o == owner):
         if st.get("state") != "done" or not OBJ_PS_RE.match(d.name):
             continue
         n = st.get("n_total")
@@ -1125,7 +1126,7 @@ def start_objects(cfg, owner, *, name, schema, ps, items_csv: bytes, blind_cols=
     schemas = schema_choices(cfg) if schemas is None else schemas
     if not isinstance(schema, str) or not OBJ_SCHEMA_RE.match(schema) or schema not in {s["id"] for s in schemas}:
         raise BuildError("pick a registered label schema")
-    sets = ps_choices(cfg) if sets is None else sets
+    sets = ps_choices(cfg, owner) if sets is None else sets
     if not isinstance(ps, str) or not OBJ_PS_RE.match(ps) or ps not in {s["id"] for s in sets}:
         raise BuildError("pick a finished prediction set")
     if outline_mode not in OUTLINE_MODES:

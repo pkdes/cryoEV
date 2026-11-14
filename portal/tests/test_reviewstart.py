@@ -776,7 +776,8 @@ class Pages(unittest.TestCase):
         self.assertEqual(len(re.findall(r'<input type="hidden" name="lv" value="lv_20990101_0101">', page)), 2)
         page = self.get(T.USER, f"/reviews/start/?lv={F.LV_BASE}")[2].decode()
         self.assertIn("no registered Roboflow export is linked", page)             # the base has no export
-        self.assertEqual(len(re.findall(r'type="submit" disabled', page)), 2)       # nothing to build from it
+        lv_forms = page.split('id="rs-objects"', 1)[0]                              # (round 14: the object set form
+        self.assertEqual(len(re.findall(r'type="submit" disabled', lv_forms)), 2)   # has its own rules) nothing to build
 
 
 if __name__ == "__main__":

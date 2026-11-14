@@ -195,7 +195,8 @@ class RealTree(unittest.TestCase):
 
     def test_the_family_is_complete(self):
         self.assertEqual(sorted(self.fam), [PKG] + [f"{PKG}.{p}" for p in
-                                                    ("details", "graphs", "lineage", "records", "render", "routes")])
+                                                    ("details", "graphs", "labelmeta", "labelpages", "lineage", "records",
+                                                     "render", "routes")])
         for n, m in self.fam.items():
             if n != PKG:
                 self.assertTrue(m.names, n)
