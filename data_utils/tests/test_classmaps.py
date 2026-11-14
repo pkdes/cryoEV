@@ -160,6 +160,25 @@ class TestLabelsSha(unittest.TestCase):
             with self.assertRaises(CM.ClassMapError):
                 CM.labels_sha(Path(t))
 
+    def test_same_names_other_image_bytes_differ(self):
+        """QC 17: two datasets with the same file names and labels but different image files must not match."""
+        with tempfile.TemporaryDirectory(prefix="cm_") as t:
+            a = Path(t) / "a"
+            (a / "labels" / "train").mkdir(parents=True)
+            (a / "images" / "train").mkdir(parents=True)
+            (a / "labels" / "train" / "x.txt").write_bytes(b"0 0.1 0.2 0.3 0.4 0.5 0.6\n")
+            (a / "images" / "train" / "x.jpg").write_bytes(b"img")
+            (a / "dataset.yaml").write_text("train: images/train\nnc: 1\nnames:\n  0: EV\n", encoding="utf-8")
+            b = Path(t) / "b"
+            shutil.copytree(a, b)
+            self.assertEqual(CM.labels_sha(b), CM.labels_sha(a))                   # control: a copy matches
+            (b / "images" / "train" / "x.jpg").write_bytes(b"other pixels")
+            self.assertNotEqual(CM.labels_sha(b), CM.labels_sha(a))
+            self.assertEqual(CM.labels_sha_of({}, "", {"images/train/x.jpg": 3}),
+                             CM.labels_sha_of({}, "", {"images/train/x.jpg": 3}))
+            self.assertNotEqual(CM.labels_sha_of({}, "", {"images/train/x.jpg": 3}),
+                                CM.labels_sha_of({}, "", {"images/train/x.jpg": 4}))
+
 
 class TestModelClasses(unittest.TestCase):
     def reg(self, models):

@@ -172,6 +172,64 @@ class TestDerive(F.Fixture):
         with self.assertRaisesRegex(D.BuildError, "changed"):
             D.derive_preview("lv_ds_undet", "cm_ev_nonev_v1", self.reg)
 
+    # ---- round 14 QC fixes (items 17-19)
+    def test_parent_drift_is_refused(self):
+        """derive_preview / derive first preview the parent with its own classes: that must equal the parent folder's
+        labels_sha (the known answer). A label file edited in the parent folder breaks it: refused, nothing written."""
+        pv = D.derive_preview("lv_ds_undet", "cm_ev_nonev_v1", self.reg)             # control: unchanged parent passes
+        self.assertEqual(pv["parent_check"], "ok")
+        lab = next((self.out / "lv_ds_undet" / "labels" / "train").glob("*.txt"))
+        lab.write_bytes(lab.read_bytes() + b"0 0.1 0.1 0.2 0.1 0.2 0.2\n")
+        with self.assertRaisesRegex(D.BuildError, "does not match a rebuild"):
+            D.derive_preview("lv_ds_undet", "cm_ev_nonev_v1", self.reg)
+        with self.assertRaisesRegex(D.BuildError, "does not match a rebuild"):
+            D.derive("lv_ds_undet", "cm_ev_nonev_v1", self.reg, self.out, register_it=True, log=lambda *a: None)
+        self.assertFalse((self.out / "lv_ds_undet__cm_ev_nonev_v1").exists())
+
+    def test_failed_register_leaves_no_folder(self):
+        with mock.patch.object(D, "register", side_effect=D.BuildError("registry refused: boom")):
+            with self.assertRaisesRegex(D.BuildError, "boom"):
+                D.derive("lv_ds_undet", "cm_ev_nonev_v1", self.reg, self.out, register_it=True, log=lambda *a: None)
+        self.assertFalse((self.out / "lv_ds_undet__cm_ev_nonev_v1").exists())
+        self.assertEqual([p.name for p in self.out.iterdir() if p.name.startswith(".")], [])    # no temp left
+
+    def test_derive_builds_in_temp_then_renames(self):
+        seen = []
+        real = D.build
+
+        def spy(*a, **kw):
+            seen.append(Path(a[3]))
+            return real(*a, **kw)
+        with mock.patch.object(D, "build", side_effect=spy):
+            prov = D.derive("lv_ds_undet", "cm_ev_v1", self.reg, self.out, register_it=True, log=lambda *a: None)
+        final = self.out / "lv_ds_undet__cm_ev_v1"
+        self.assertNotEqual(seen[-1], self.out)                                    # built under a temp root
+        self.assertEqual(seen[-1].parent, self.out)
+        self.assertFalse(seen[-1].exists())                                        # temp root removed
+        self.assertEqual(prov["dataset_record"]["dataset_dir"], str(final))
+        disk = json.loads((final / D.PROVENANCE).read_text(encoding="utf-8"))["dataset_record"]
+        self.assertEqual(disk["dataset_dir"], str(final))
+        self.assertIn(f"path: {final.as_posix()}\n", (final / "dataset.yaml").read_text(encoding="utf-8"))
+        from registry import store
+        self.assertEqual(store.current("dataset", self.reg)[final.name]["dataset_dir"], str(final))
+        self.assertEqual(D.labels_sha(final), D.labels_sha(self.out / "lv_ds_ev"))     # known answer still holds
+
+    def test_preview_flags_unregistered_folder(self):
+        pv = D.derive_preview("lv_ds_undet", "cm_ev_v1", self.reg, output_root=self.out)
+        self.assertFalse(pv["target_dir_exists"])
+        (self.out / "lv_ds_undet__cm_ev_v1").mkdir()
+        pv = D.derive_preview("lv_ds_undet", "cm_ev_v1", self.reg, output_root=self.out)
+        self.assertTrue(pv["target_dir_exists"])
+        self.assertFalse(pv["target_exists"])
+
+    def test_superseded_lv_is_flagged_in_the_picker(self):
+        rec = D.registered(self.reg)["lv_ds_undet"]
+        self.assertIsNone(D.derive_problem(rec))
+        (self.base_lv / "SUPERSEDED.md").write_text("use lv_x", encoding="utf-8")
+        self.assertIn("superseded", D.derive_problem(rec))
+        with self.assertRaisesRegex(D.BuildError, "superseded"):
+            D.derive_preview("lv_ds_undet", "cm_ev_v1", self.reg)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -61,6 +61,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 from datetime import datetime
@@ -1251,6 +1252,56 @@ COLLAPSE_ACTION = "dataset_collapse"
 _collapse_lock = threading.Lock()       # guards _collapses and _target_locks
 _collapses: dict = {}                   # target -> {state running|done|failed, uid, dataset, cm, t, ended, error, ...}
 _target_locks: dict = {}                # target -> threading.Lock held by its build (one build per target)
+_preview_locks: dict = {}               # (dataset, cm id) -> Lock: one preview computation per key at a time
+_preview_cache: dict = {}               # key -> (monotonic t, preview); small, short-lived (guarded by _collapse_lock)
+PREVIEW_TTL_S = 120.0
+PREVIEW_CACHE_MAX = 16
+COLLAPSE_SPACE_FACTOR = 1.5             # free space needed in the output root: 1.5 x the parent's images
+
+
+def collapse_need_bytes(rec) -> int:
+    """Bytes a collapsed copy needs: COLLAPSE_SPACE_FACTOR x the parent folder's images (copied byte for byte)."""
+    d = Path(str(_d(rec).get("dataset_dir") or "")) / "images"
+    total = sum(p.stat().st_size for p in d.rglob("*") if p.is_file()) if d.is_dir() else 0
+    return int(total * COLLAPSE_SPACE_FACTOR)
+
+
+def output_root(cfg) -> Path:
+    r = getattr(cfg, "dataset_output_root", None)
+    return Path(r) if r else dfl_module().default_output_root()
+
+
+def free_bytes(path: Path) -> int:
+    p = Path(path)
+    while not p.exists() and p.parent != p:              # the output root may not exist yet: its nearest parent
+        p = p.parent
+    return shutil.disk_usage(p).free
+
+
+def cached_preview(cfg, data, rec, cm):
+    """derive_preview for (dataset, map), at most one computation per key at a time, kept PREVIEW_TTL_S. The cache key
+    also holds the map's sha256, the parent record and the registry's dataset ids, so a changed map, a re-registered
+    parent or a new identical dataset is never served stale."""
+    D, CM = dfl_module(), cm_module()
+    datasets = _d(data.get("dataset"))
+    key = (rec["id"], cm["id"])
+    sig = (CM.sha256(cm), json.dumps(rec, sort_keys=True, default=str), tuple(sorted(datasets)),
+           str(output_root(cfg)))
+    with _collapse_lock:
+        lock = _preview_locks.setdefault(key, threading.Lock())
+    with lock:
+        now = time.monotonic()
+        with _collapse_lock:
+            hit = _preview_cache.get(key)
+            if hit and hit[1] == sig and now - hit[0] < PREVIEW_TTL_S:
+                return hit[2]
+        pv = D.derive_preview(rec["id"], cm, getattr(cfg, "registry", None), datasets=datasets,
+                              output_root=output_root(cfg))
+        with _collapse_lock:
+            _preview_cache[key] = (now, sig, pv)
+            while len(_preview_cache) > PREVIEW_CACHE_MAX:
+                _preview_cache.pop(min(_preview_cache, key=lambda k: _preview_cache[k][0]))
+        return pv
 
 
 def dfl_module():
@@ -1399,7 +1450,7 @@ def collapse_html(cfg, user, form: dict, data) -> tuple:
         return 200, f'<section class="cj-card cj-train-sum"><h3 class="cj-sec">Collapse classes</h3>' \
                     f'{collapse_status_html(pub)}</section>'
     try:
-        pv = D.derive_preview(rec["id"], cm, getattr(cfg, "registry", None), datasets=_d(data.get("dataset")))
+        pv = cached_preview(cfg, data, rec, cm)
     except (D.BuildError, OSError, ValueError) as e:
         return 409, errors_html(["The preview could not be made." + (f" ({e})" if admin else " Ask an admin.")])
     head = (f'<h3 class="cj-sec">Collapse classes: preview</h3>'
@@ -1412,6 +1463,10 @@ def collapse_html(cfg, user, form: dict, data) -> tuple:
     if pv["target_exists"]:
         foot = (f'<p class="cj-train-warn" role="status">{esc(target)} is already in the registry. '
                 f'<a href="{PREFIX}/?dataset={esc(target)}#cj-train-h-new">Use it for a training job</a>.</p>')
+    elif pv.get("target_dir_exists"):
+        foot = (f'<p class="cj-train-warn" role="status" id="cj-train-collapse-orphan">{esc(target)}: folder exists, '
+                f'not registered. Nothing new can be made under that name; an admin can register the folder '
+                f'(dataset_from_lv.py --register-existing) or move it away.</p>')
     else:
         confirm = (f'<form method="post" action="{PREFIX}/collapse" class="cj-train-btns">'
                    f'<input type="hidden" name="dataset" value="{esc(rec["id"])}">'
@@ -1479,6 +1534,15 @@ def collapse_start(cfg, user, form: dict, request=None) -> tuple:
     target = dfl_module().derived_name(rec["id"], cm["id"])
     if target in _d(data.get("dataset")):
         return 409, errors_html([f"{target} is already in the registry; nothing was made."])
+    try:                                         # before the audit line: a refusal here writes nothing
+        need, free = collapse_need_bytes(rec), free_bytes(output_root(cfg))
+    except OSError as e:
+        return 409, errors_html(["The free space for the copy can’t be checked, so nothing was made."
+                                 + (f" ({e})" if admin else "")])
+    if free < need:
+        return 409, errors_html([f"Not enough free space for {target}: it needs about {need / 1e9:.1f} GB "
+                                 f"({COLLAPSE_SPACE_FACTOR:g} × the images of {rec['id']}), "
+                                 f"{free / 1e9:.1f} GB free. Nothing was made."])
     with _collapse_lock:
         lock = _target_locks.setdefault(target, threading.Lock())
         if not lock.acquire(blocking=False):

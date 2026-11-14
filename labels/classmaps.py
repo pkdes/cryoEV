@@ -277,29 +277,33 @@ def yaml_norm(text: str) -> str:
     return "".join(ln + "\n" for ln in text.splitlines() if not ln.startswith(YAML_SKIP))
 
 
-def labels_sha_of(label_files: dict, yaml_text: str | None, image_files) -> str:
-    """label_files {"labels/<split>/<name>.txt": bytes}, the dataset yaml text, image paths "images/<split>/<name>".
-    -> sha256 over sorted `L\\t<rel>\\t<sha256 of the text with LF line ends>` lines (prepare writes labels in text
-    mode: CRLF on Windows), one `Y\\t<sha256 of the yaml without its folder lines>` line and sorted `I\\t<rel>` lines.
-    A copy of a dataset in another folder has the same value."""
+def labels_sha_of(label_files: dict, yaml_text: str | None, image_files: dict) -> str:
+    """label_files {"labels/<split>/<name>.txt": bytes}, the dataset yaml text, image files {"images/<split>/<name>":
+    size in bytes}. -> sha256 over sorted `L\\t<rel>\\t<sha256 of the text with LF line ends>` lines (prepare writes
+    labels in text mode: CRLF on Windows), one `Y\\t<sha256 of the yaml without its folder lines>` line and sorted
+    `I\\t<rel>\\t<size>` lines. A copy of a dataset in another folder has the same value; two datasets whose images
+    have the same names but other files (other sizes) do not (QC r14 #17; sizes, not content hashes, so a preview
+    never reads every image)."""
+    if not isinstance(image_files, dict):
+        raise TypeError("image_files must be {rel path: size in bytes}")
     crlf, lf = b"\r\n", b"\n"
     lines = [f"L\t{rel}\t{hashlib.sha256(b.replace(crlf, lf)).hexdigest()}\n" for rel, b in sorted(label_files.items())]
     lines.append(f"Y\t{hashlib.sha256(yaml_norm(yaml_text or '').encode('utf-8')).hexdigest()}\n")
-    lines += [f"I\t{rel}\n" for rel in sorted(image_files)]
+    lines += [f"I\t{rel}\t{int(image_files[rel])}\n" for rel in sorted(image_files)]
     return hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
 
 
 def labels_sha(dataset_dir) -> str:
     """The "identical dataset" hash of a YOLO dataset folder: its label files, its dataset.yaml (folder lines left
-    out) and the list of its image files. Raises ClassMapError when the folder has no labels/ or yaml."""
+    out) and its image files' names and sizes. Raises ClassMapError when the folder has no labels/ or yaml."""
     d = Path(dataset_dir)
     lab = d / "labels"
     y = next((d / n for n in YAML_NAMES if (d / n).is_file()), None)
     if not lab.is_dir() or y is None:
         raise ClassMapError(f"{d} is not a YOLO dataset folder (labels/ and dataset.yaml)")
     files = {p.relative_to(d).as_posix(): p.read_bytes() for p in sorted(lab.rglob("*.txt")) if p.is_file()}
-    imgs = [p.relative_to(d).as_posix() for p in sorted((d / "images").rglob("*")) if p.is_file()] \
-        if (d / "images").is_dir() else []
+    imgs = {p.relative_to(d).as_posix(): p.stat().st_size for p in sorted((d / "images").rglob("*")) if p.is_file()} \
+        if (d / "images").is_dir() else {}
     return labels_sha_of(files, y.read_text(encoding="utf-8"), imgs)
 
 

@@ -93,6 +93,7 @@ class Base(unittest.TestCase):
         with TR._collapse_lock:
             TR._collapses.clear()
             TR._target_locks.clear()
+        getattr(TR, "_preview_cache", {}).clear()
 
     def get(self, path, role="admin"):
         return T.request(self.p.port, "GET", path, T.cookie(self.tok[role]))
@@ -206,6 +207,50 @@ class Collapse(Base):
         self.assertEqual(self.get("/train/api/collapse?target=x__cm_ev_v1", "advanced")[0], 404)
         j = json.loads(self.get("/train/api/collapse?target=x__cm_ev_v1")[2])
         self.assertIn("secret", j["error"])                                        # admins see the error
+
+    # ---- round 14 QC fixes (items 16, 19)
+    def test_low_disk_space_refuses_before_audit(self):
+        before, n = self.files(), len(self.audits())
+        Usage = type("U", (), {"total": 10, "used": 10, "free": 0})
+        with mock.patch.object(TR.shutil, "disk_usage", return_value=Usage()):
+            st, _, body = self.post("/train/collapse", {"dataset": EVNONEV, "cm": "cm_ev_v1"})
+        self.assertEqual(st, 409, body.decode()[-1500:])
+        self.assertIn("free space", body.decode())
+        self.assertEqual((self.files(), len(self.audits())), (before, n))      # no audit line, nothing written
+        self.assertNotIn("lv_ds_evnonev__cm_ev_v1", TR._collapses)
+        self.assertTrue(TR._target_locks.get("lv_ds_evnonev__cm_ev_v1", threading.Lock()).acquire(blocking=False))
+
+    def test_need_bytes_counts_parent_images(self):
+        rec = D.registered(self.env.registry)[EVNONEV]
+        size = sum(p.stat().st_size for p in (Path(rec["dataset_dir"]) / "images").rglob("*") if p.is_file())
+        self.assertGreater(size, 0)
+        self.assertEqual(TR.collapse_need_bytes(rec), int(size * 1.5))
+
+    def test_preview_is_cached_and_locked_per_key(self):
+        real = D.derive_preview
+        calls = []
+
+        def spy(*a, **kw):
+            calls.append(a[:2])
+            return real(*a, **kw)
+        with mock.patch.object(D, "derive_preview", side_effect=spy):
+            for _ in range(2):
+                st, _, body = self.get(f"/train/collapse?dataset={UNDET}&cm=cm_ev_v1")
+                self.assertEqual(st, 200, body.decode()[-1500:])
+        self.assertEqual(len(calls), 1)                                         # second view from the cache
+        self.assertIn((UNDET, "cm_ev_v1"), TR._preview_locks)
+
+    def test_preview_says_folder_exists_not_registered(self):
+        d = self.out / f"{EVNONEV}__cm_ev_v1"
+        d.mkdir()
+        try:
+            st, _, body = self.get(f"/train/collapse?dataset={EVNONEV}&cm=cm_ev_v1")
+            t = body.decode()
+            self.assertEqual(st, 200, t[-1500:])
+            self.assertIn("folder exists, not registered", t)
+            self.assertNotIn("Make collapsed copy", t)
+        finally:
+            d.rmdir()
 
 
 if __name__ == "__main__":

@@ -47,6 +47,7 @@ import importlib.util
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -650,7 +651,7 @@ def preview(lv, split_from, export_only=None, scheme="ev", class_map=None, allow
     anns_by_image = defaultdict(list)
     for a in lv_coco["annotations"]:
         anns_by_image[a["image_id"]].append(a)
-    stats, label_files, image_files = {}, {}, []
+    stats, label_files, image_files = {}, {}, {}
     names = list(tables[1])
     # explicit tables, not prepare's globals: a preview never waits for (or disturbs) a build running in this process
     with tempfile.TemporaryDirectory(prefix="dataset_from_lv_preview_") as tmp:
@@ -663,7 +664,9 @@ def preview(lv, split_from, export_only=None, scheme="ev", class_map=None, allow
                                    Path(tmp) / "labels" / dst, dry_run=True, tables=tables)
             stats[split] = s
             label_files.update({f"labels/{dst}/{n}": t.encode("utf-8") for n, t in s["label_texts"].items()})
-            image_files += [f"images/{dst}/{n}" for n in s["image_names"]]
+            # build() copies each image byte for byte (convert_split): its size here is the size it will have there
+            image_files.update({f"images/{dst}/{n}": (export_dir / split / n).stat().st_size
+                                for n in s["image_names"]})
         yaml_text = prep.dataset_yaml_text(Path(tmp) / "preview", has_test="test" in stats, class_names=names)
     class_counts = {}
     for split, s in stats.items():
@@ -694,6 +697,12 @@ def derive_problem(rec) -> str | None:
     d = rec.get("dataset_dir")
     if not d or not (Path(d) / PROVENANCE).is_file():
         return "its folder (with provenance.json) is not on this computer"
+    try:                                     # parent_inputs reads the lv without allow_superseded: say so up front
+        lv_dir, _ = resolve_lv(rec["label_version"])
+    except BuildError:
+        return "its label set is not on this computer"
+    if (lv_dir / "SUPERSEDED.md").exists():
+        return "its label set is superseded (rebuild from its successor)"
     return None
 
 
@@ -761,26 +770,63 @@ def find_identical(sha, datasets: dict) -> list:
     return sorted(i for i, r in datasets.items() if sha and dataset_labels_sha(r) == sha)
 
 
-def derive_preview(dataset_id, class_map, registry_root=None, datasets=None):
+def check_parent(rec, lv_id, export, choice):
+    """The known answer before any derive: a preview of the parent with its OWN classes (its class map, else its
+    class scheme) must give its folder's labels_sha. Anything else (a label file edited in the folder, an export
+    image replaced, a code change in the conversion) means a collapsed copy would not be the parent with fewer
+    classes: BuildError."""
+    kw = {"class_map": rec["class_map_id"]} if rec.get("class_map_id") else {"scheme": rec.get("class_scheme") or "ev"}
+    want = labels_sha(rec["dataset_dir"])
+    got = preview(lv_id, export, choice, **kw)["labels_sha"]
+    if got != want:
+        raise BuildError(f"{rec.get('id')}'s folder does not match a rebuild from its own label set and export "
+                         f"(labels_sha {want[:12]} != {got[:12]}): its labels or images drifted; not derived")
+
+
+def default_output_root():
+    return config.cryoai_root() / "training outputs"
+
+
+def derive_preview(dataset_id, class_map, registry_root=None, datasets=None, output_root=None):
     """Counts before (the dataset's record) and after (preview with the map), the target id, and the registered
-    datasets with the same labels_sha. Writes nothing."""
+    datasets with the same labels_sha. Checks the parent first (check_parent: "parent_check" "ok"). target_dir_exists:
+    the target folder is already in the output root (built but not registered: derive would refuse). Writes nothing."""
     datasets = registered(registry_root) if datasets is None else datasets
     rec = datasets.get(dataset_id)
     if rec is None:
         raise BuildError(f"no dataset {dataset_id} in the registry")
     lv_id, export, choice = parent_inputs(rec)
+    check_parent(rec, lv_id, export, choice)
     pv = preview(lv_id, export, choice, class_map=class_map)
     target = derived_name(dataset_id, pv["class_map_id"])
+    out_root = Path(output_root) if output_root else default_output_root()
     return dict(pv, dataset=dataset_id, target=target, before=rec.get("class_counts") or {},
                 before_classes=rec.get("classes") or [], target_exists=target in datasets,
+                target_dir_exists=(out_root / target).exists(), parent_check="ok",
                 identical=find_identical(pv["labels_sha"], datasets))
+
+
+def _move_built(prov, tmp_dir: Path, final: Path):
+    """Rename a dataset built in tmp_dir to final, and point its dataset.yaml `path:` line and provenance.json /
+    record dataset_dir at the new place."""
+    if final.exists():
+        raise BuildError(f"{final} appeared during the build; datasets are never overwritten")
+    tmp_dir.rename(final)
+    y = final / "dataset.yaml"
+    if y.is_file():
+        y.write_text("".join((f"path: {final.as_posix()}\n" if ln.startswith("path:") else ln + "\n")
+                             for ln in y.read_text(encoding="utf-8").splitlines()), encoding="utf-8")
+    prov = dict(prov, dataset_record=dict(prov["dataset_record"], dataset_dir=str(final)))
+    (final / PROVENANCE).write_bytes((json.dumps(prov, indent=1, ensure_ascii=False) + "\n").encode("utf-8"))
+    return prov
 
 
 def derive(dataset_id, class_map, registry_root=None, output_root=None, output_name=None, register_it=False,
            log=print):
     """Rebuild a registered dataset from its recorded label version + export (+ export-only choice) with a class map,
     as `<dataset>__<map id>` (record: parent_dataset, class_map_id, class_map_sha256). register_it: append it to the
-    registry. -> provenance dict. Raises BuildError."""
+    registry. Checks the parent first (check_parent). Built under <output root>/.d_<hex>/<name> and renamed
+    into place only when complete; a failed register removes the folder again. -> provenance dict. Raises BuildError."""
     datasets = registered(registry_root)
     rec = datasets.get(dataset_id)
     if rec is None:
@@ -790,10 +836,28 @@ def derive(dataset_id, class_map, registry_root=None, output_root=None, output_n
     name = output_name or derived_name(dataset_id, cm["id"])
     if register_it:
         check_id_free(name, registry_root)
-    prov = build(lv_id, export, name, output_root, export_only=choice, log=log, class_map=cm,
-                 parent_dataset=dataset_id)
-    if register_it:
-        register(prov, prov["dataset_record"]["dataset_dir"], registry_root)
+    check_parent(rec, lv_id, export, choice)
+    out_root = Path(output_root) if output_root else default_output_root()
+    final = out_root / name
+    if final.exists():
+        raise BuildError(f"{final} exists (built but not registered?); datasets are never overwritten")
+    out_root.mkdir(parents=True, exist_ok=True)
+    tmp_root = out_root / f".d_{secrets.token_hex(4)}"      # short: Windows MAX_PATH
+    moved = False
+    try:
+        prov = build(lv_id, export, name, tmp_root, export_only=choice, log=log, class_map=cm,
+                     parent_dataset=dataset_id)
+        prov = _move_built(prov, tmp_root / name, final)
+        moved = True
+        if register_it:
+            register(prov, final, registry_root)
+    except BaseException:
+        if moved and final.exists():
+            shutil.rmtree(final, ignore_errors=True)
+        raise
+    finally:
+        if tmp_root.exists():
+            shutil.rmtree(tmp_root, ignore_errors=True)
     return prov
 
 
