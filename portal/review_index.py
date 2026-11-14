@@ -188,24 +188,32 @@ def _status(pkg_id, records, applied, decided, cards, last_edit) -> str:
     return "not_started"
 
 
-def _facets(ps_dir, req, user, records) -> dict:
+def hidden_for(cfg, user, can_see):
+    """The viewer's `hidden` callable for listing.facets: listing.hidden_for (B2; records.ref_hidden over the registry
+    with a records.Viewer), built once per list. Never None: facets must never name a private set."""
+    from portal import listing
+    fn = getattr(listing, "hidden_for", None)
+    if fn is not None:
+        return fn(cfg, user, can_see)
+    from portal.modules.data import records as REC         # the same rule, before B2's helper is merged
+    recs, _err = REC.read_registry(getattr(cfg, "registry", None))
+    viewer = REC.Viewer(can_see, user, cfg)
+    return lambda kind, rid: REC.ref_hidden(recs, viewer, rid, kind)
+
+
+def _facets(ps_dir, req, user, hidden) -> dict:
     """listing.facets for a prediction package's set (B2's helper); {} when it can't be built."""
-    if ps_dir is None:
+    if ps_dir is None or hidden is None:
         return {}
     try:
         from portal import listing
-        from portal.modules.data import records as DREC
-
-        def hidden(kind, rid):
-            return DREC.ref_hidden(records, user, rid, kind)
-
         out = listing.facets(ps_dir, req if isinstance(req, dict) else {}, viewer=user, hidden=hidden)
         return out if isinstance(out, dict) else {}
     except Exception:                                   # noqa: BLE001  a facet failure never hides the row
         return {}
 
 
-def _row(d: Path, meta: dict, *, user, records, applied, proot, core: bool, with_facets: bool = True) -> dict:
+def _row(d: Path, meta: dict, *, user, records, applied, proot, core: bool, hidden=None) -> dict:
     """One allowlisted row. The caller has already checked access (may_open, or admin for the core package)."""
     from portal.modules import reviews as REV
     pid = d.name
@@ -224,7 +232,7 @@ def _row(d: Path, meta: dict, *, user, records, applied, proot, core: bool, with
     ps_dir = Path(proot) / pid[len("pred_"):] if kind == "prediction" and proot else None
     req = _read_json(ps_dir / "request.json") if ps_dir is not None else None
     req = req if isinstance(req, dict) else None
-    facets = _facets(ps_dir, req, user, records) if with_facets else {}
+    facets = _facets(ps_dir, req, user, hidden)         # hidden None (with_facets=False): no facets
     open_url = "/review/" if core else f"/review/{pid}/"
     via = _str(meta.get("owner_via")) or _str((req or {}).get("owner_via"))
     n = meta.get("n_images")
@@ -239,6 +247,12 @@ def _row(d: Path, meta: dict, *, user, records, applied, proot, core: bool, with
         "can_assign": not core and (is_admin or (bool(owner) and owner == me)),
         "blind": blind, "via": None if blind else via, "facets": facets,
     }
+
+
+def _mine(user, meta) -> bool:
+    me = user.get("id")
+    revs = meta.get("reviewers") if isinstance(meta.get("reviewers"), list) else []
+    return bool(me) and (_str(meta.get("owner")) == me or me in revs)
 
 
 def sandbox_url(host, manifest=None) -> str | None:
@@ -270,19 +284,27 @@ def list_reviews(cfg, user, can_see, *, show_all=False, access_mode=False, host=
     is_admin = user.get("role") == "admin"
     records = _records(cfg)
     applied = TT.applied_map(records)
+    hidden = None
+    if with_facets:
+        try:
+            hidden = hidden_for(cfg, user, can_see)
+        except Exception:                               # noqa: BLE001  no hidden rule: no facets at all
+            hidden = None
     proot = RES.predict_root(cfg)
     core = core_dir(cfg)
     rows = []
     for d, meta in REV.served_packages(cfg, user, can_see):        # may_open is checked inside, before any read
         if d.name.startswith(".") or _same(d, core):
             continue
+        if not show_all and not _mine(user, meta):
+            continue                                    # Mine: skip before any count or facet is computed
         rows.append(_row(d, meta, user=user, records=records, applied=applied, proot=proot, core=False,
-                         with_facets=with_facets))
+                         hidden=hidden))
     if is_admin and core is not None and ID_RE.match(core.name) and not core.name.startswith("."):
         meta = _read_json(core / "review_package.json")
         if isinstance(meta, dict) and (core / "data.js").is_file():
             rows.append(_row(core, meta, user=user, records=records, applied=applied, proot=proot, core=True,
-                             with_facets=with_facets))
+                             hidden=hidden))
     if is_admin and not access_mode:
         rows.append(_sandbox_row(host, getattr(cfg, "manifest", None)))
     if not show_all:

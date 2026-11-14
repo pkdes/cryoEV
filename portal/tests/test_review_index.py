@@ -253,11 +253,23 @@ class ListTests(World):
         self.assertEqual(rows[REV_LAB]["kind"], "label_review")
 
     def test_facets_from_listing_for_prediction_rows_only(self):
-        calls = []
+        calls, hiders = [], []
 
         def fake(ps_dir, request, *, viewer=None, hidden=None):
             calls.append((Path(ps_dir).name, viewer["id"], callable(hidden)))
+            hiders.append(hidden)
             return {"model": "v5", "person": "x"}
+
+        with mock.patch.object(listing, "facets", fake):                    # hidden is the viewer's real rule
+            self.rows(user("bas"))
+            self.assertTrue(hiders and all(h is hiders[0] for h in hiders))  # built once per list
+            self.assertTrue(hiders[0]("prediction_set", "ps_20261101_ffffff"))   # someone else's private set
+            hiders.clear()
+            self.rows(user("adm", "admin"))                                 # admin Mine: no prediction rows,
+            self.assertEqual(hiders, [])                                    # so no facets are built at all
+            self.rows(user("adm", "admin"), show_all=True)
+            self.assertFalse(hiders[0]("prediction_set", "ps_20261101_ffffff"))  # control: an admin sees it
+            calls.clear()
 
         with mock.patch.object(listing, "facets", fake):
             rows = self.rows(user("adm", "admin"), show_all=True)
