@@ -157,6 +157,12 @@ class Steps(unittest.TestCase):
         inner = json.loads(out["children"][1])
         self.assertLess(abs(inner[0]["gap_median_nm"] - 20 * 2.0), 1.5 * 2.0)
 
+    def test_nesting_tree_columns(self):
+        """QC E: parent_line = the smallest container's line (blank for roots), depth along it; the non-EV blank."""
+        out = ST.STEPS[("nesting", 1)].run_image(self.CTX, self.objs(), {})
+        self.assertEqual(out["parent_line"], [None, 0, 1, None, None, None])
+        self.assertEqual(out["depth"], [0, 1, 2, 0, 0, None])
+
     def test_nesting_no_size_ratio_filter(self):
         """A tight layer (r 58 in r 60, ratio 0.93 > the roles 0.75) is not a roles child but IS a nesting child."""
         objs = [{"line": 0, "cls": 0, "conf": 0.9, "mask": disc(100, 100, 60)},
@@ -210,8 +216,11 @@ class ComputeWithSteps(unittest.TestCase):
             self.assertEqual({k: v for k, v in res.items() if k not in ("steps", "computed")},
                              {k: v for k, v in base.items() if k != "computed"})          # counts unchanged
             rows = read_csv(out / "objects.csv")
-            self.assertEqual(list(rows[0])[-4:], ["nesting.n_contained", "nesting.n_direct_children",
-                                                   "nesting.d_outer_nm", "nesting.children"])
+            self.assertEqual(list(rows[0])[-6:], ["nesting.n_contained", "nesting.n_direct_children",
+                                                   "nesting.d_outer_nm", "nesting.children", "nesting.parent_line",
+                                                   "nesting.depth"])
+            self.assertEqual((rows[0]["nesting.parent_line"], rows[0]["nesting.depth"]), ("", "0"))
+            self.assertEqual((rows[1]["nesting.parent_line"], rows[1]["nesting.depth"]), ("0", "1"))
             self.assertEqual(rows[0]["nesting.n_contained"], "2")
             self.assertEqual([c["child"] for c in json.loads(rows[0]["nesting.children"])], [1])
             self.assertEqual(rows[6]["nesting.children"], "")                  # conf 0.3: no step ran on it

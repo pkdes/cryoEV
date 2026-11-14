@@ -15,6 +15,9 @@ Columns per object (blank for a non-EV outline or one with no pixels):
   d_outer_nm         area-equivalent diameter (nm, 1 dp) of an outermost outline (contained in none); blank inside
   children           JSON list, one per direct child: child (its prediction line), d_child_nm, area_ratio,
                      gap_median_nm, gap_min_nm, gap_p90_nm, gap_cv (rounded as the poster's items.csv)
+  parent_line        the prediction line of the SMALLEST outline this one is contained in (same >= 99 % rule);
+                     blank for a root (contained in none). Tree-ready: parent_line links form a forest.
+  depth              0 for a root, else the parent's depth + 1 (along parent_line)
 nm values are blank (null in the JSON) when the image has no nm/px.
 """
 from __future__ import annotations
@@ -113,6 +116,12 @@ def nest(objs_crop, H, W, nm):
                   "d_outer_nm": (round(float(2 * np.sqrt(o.area / np.pi) * float(nm)), 1)
                                  if nm is not None and i not in contained else None),
                   "direct": direct, "children": [child_stats(o, objs_crop[j], H, W, nm) for j in direct]}
+    for j in ids:                       # parent = the smallest container (strictly larger, so the chain ends)
+        cont = [i for i in ids if j in kids[i]]
+        out[j]["parent"] = min(cont, key=lambda i: (objs_crop[i].area, i)) if cont else None
+    for j in sorted(ids, key=lambda k: -objs_crop[k].area):   # parents (larger) first
+        par = out[j]["parent"]
+        out[j]["depth"] = 0 if par is None else out[par]["depth"] + 1
     return out
 
 
@@ -128,6 +137,8 @@ def run_image(ctx, objs, prior):
         out["d_outer_nm"][k] = r["d_outer_nm"]
         out["children"][k] = json.dumps([{"child": objs[j].get("line"), **st}
                                          for j, st in zip(r["direct"], r["children"])])
+        out["parent_line"][k] = objs[r["parent"]].get("line") if r["parent"] is not None else None
+        out["depth"][k] = r["depth"]
     return out
 
 
@@ -141,7 +152,8 @@ def summary(rows) -> str:
             f"({n[1]} with 1 direct child, {nested - n[1]} with 2 or more); {n[0]} contain nothing")
 
 
-NESTING_V1 = Step("nesting", 1, needs=(), columns=("n_contained", "n_direct_children", "d_outer_nm", "children"),
+NESTING_V1 = Step("nesting", 1, needs=(), columns=("n_contained", "n_direct_children", "d_outer_nm", "children",
+                                                      "parent_line", "depth"),
                   params=PARAMS, fn=run_image, sources=("analysis/steps/nesting.py",),
                   title="Nesting",
                   description="What each EV outline contains (99 % of the inner outline's area inside, no size "
