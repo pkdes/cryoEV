@@ -314,7 +314,8 @@ class AttributeOnlyControl(unittest.TestCase):
                 f.write_text(json.dumps(rec), encoding="utf-8")
             f1, v1 = run("mixed")
             self.assertEqual(f1, f0)
-            strip = lambda v: {k: x for k, x in v.items() if k not in ("edits_dir", "package_path")}
+            volatile = ("edits_dir", "package_path", "created", "tool")   # wall clock / paths, not the review's content
+            strip = lambda v: {k: x for k, x in v.items() if k not in volatile}
             self.assertEqual(strip(v1), strip(v0))
             # an attribute-only record for an image without one: labels / changes / conflicts unchanged; version.json
             # counts it as a record without changes (as an i:note-only record), nothing else
@@ -322,7 +323,7 @@ class AttributeOnlyControl(unittest.TestCase):
             f2, v2 = run("attronly")
             self.assertEqual(f2, f0)
             diff = {k for k in set(v0) | set(v2) if v0.get(k) != v2.get(k)}
-            self.assertEqual(diff - {"edits_dir", "package_path"}, {"n_records", "n_records_without_changes"})
+            self.assertEqual(diff - set(volatile), {"n_records", "n_records_without_changes"})
             self.assertEqual(v2["n_records"], v0["n_records"] + 1)
         finally:
             shutil.rmtree(w.tmp, ignore_errors=True)
