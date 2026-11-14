@@ -370,16 +370,16 @@ class StripThroughThePortal(unittest.TestCase):
         """fixer 4: data/details.disk_reviewers hides a revise package's reviewers once it has a _work_ folder."""
         from portal.modules.data import details as DD
         from portal.modules.data import records as DR
-        meta = {"kind": "compare", "purpose": "revise", "owner": "u-adv", "reviewers": ["u-basic"]}
-        recs = {"review_package": {REVISE: {}}}
-        with mock.patch.object(DD, "package_meta", lambda r, i: meta), \
-                mock.patch.object(DR, "package_folder", lambda i, r: self.root / REVISE):
-            self.assertEqual(DD.disk_reviewers(recs, REVISE), "u-basic")                 # control
-            (self.root / f"_work_{REVISE}").mkdir()
-            try:
-                self.assertIsNone(DD.disk_reviewers(recs, REVISE))
-            finally:
-                (self.root / f"_work_{REVISE}").rmdir()
+        pid = f"lab_compare_dd_{time.time_ns()}"          # its own id: package_meta's file cache never holds it
+        pkg = self.e.tmp / "dd_review" / pid
+        pkg.mkdir(parents=True)
+        (pkg / "review_package.json").write_text(json.dumps(
+            {"kind": "compare", "purpose": "revise", "owner": "u-adv", "reviewers": ["u-basic"]}), encoding="utf-8")
+        recs = {"review_package": {pid: {}}}
+        with mock.patch.object(DR, "package_folder", lambda i, r: pkg if i == pid else None):
+            self.assertEqual(DD.disk_reviewers(recs, pid), "u-basic")                    # control
+            (pkg.parent / f"_work_{pid}").mkdir()
+            self.assertIsNone(DD.disk_reviewers(recs, pid))
 
     def test_audit_owner_rule(self):
         u = {"id": "u-adv", "role": "admin"}
