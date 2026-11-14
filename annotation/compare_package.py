@@ -406,6 +406,8 @@ def _build(args, purpose, decoys, work):
     stems = select_stems(args.select_csv, parse_where(args.where))
     flat, staged, missing = stage_images(coco, args.images_root, stems, work)
     print(f"[images] {len(staged)} staged" + (f", {len(missing)} selected but not found: {missing[:5]}" if missing else ""))
+    if not staged:
+        raise SystemExit("no images of the label set found under --images-root: nothing to build")
     if args.b_model:
         print("[phase] predicting", flush=True)
         pred_dir = predict_cached(args.b_model, flat, work / "preds", staged, args)

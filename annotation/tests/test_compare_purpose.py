@@ -159,6 +159,13 @@ class Purpose(CompareKnownAnswer):
                 if wd:
                     self.assertFalse(wd.exists())
 
+    def test_no_images_refused_and_cleaned(self):
+        (self.t / "empty").mkdir()
+        with self.assertRaises(SystemExit) as cm:
+            self.run_build("lab_noimg", images_root=[self.t / "empty"])
+        self.assertIn("nothing to build", str(cm.exception))
+        self.assertEqual(list((self.t / "review").iterdir()) if (self.t / "review").exists() else [], [])
+
     def test_review_package_json_last_and_atomic(self):
         seen = {}
         real = CP.write_json_atomic
