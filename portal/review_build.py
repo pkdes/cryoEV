@@ -12,12 +12,13 @@ Inputs from a label set (an `lv` id):
     same two checks on the lv's base (version.json `base`, else the registry line's base input), and so on down the
     chain of label versions. Two different exports at one step is refused (ambiguous). The split is the export's own
     `split_file`, else the dataset's split file, else the folder (train / valid / test) each image was found in;
-  - every label-set image must be found in the export, by its image key or else by the one registry alias of it
-    (image records' `duplicate_of`, both ways: the importer's link between a Roboflow name and the session-prefixed
-    name of the same image), with the same width:height ratio as its COCO entry (1 % tolerance). Any missing or
-    mismatched image refuses the build, with the counts; "Images found N of M" is shown before starting. The runner
-    stages the checked images under their label-set keys (hard links, else copies) in the state folder and passes
-    that folder and a split CSV to compare_package.
+  - every label-set image must be found in the export (check_images): by its own key with the COCO width:height
+    (1 % tolerance), else through its registry alias (image records' `duplicate_of`, both ways: the importer's link
+    between a Roboflow name and the session-prefixed name of the same image; a 2-name cluster only) with EXACTLY the
+    COCO pixel size. A key that is not a plain file name, a stem found twice in the export or a bigger alias cluster
+    is refused too. Any refusal stops the build, with the counts; "Images found N of M (k through duplicate_of)" is
+    shown before starting. The runner stages the checked images under their label-set keys (hard links, else
+    copies) in the state folder and passes that folder and a split CSV to compare_package.
 
 A build (start() in the portal, run() in the runner):
   - admin only (the routes check); ONE build at a time across both portal doors: the runner holds the OS lock
@@ -30,9 +31,16 @@ A build (start() in the portal, run() in the runner):
   - the spec and the raw log of compare_package: <portal state>/review_build/<name>/ (spec.json, build.log,
     runner.out), never under the review root and never shown on a page; a revise's scratch folder is
     <portal state>/review_build/<name>/work (compare_package --work-dir, deleted after a successful build);
-  - B is a model (`--b-model`, YOLO on the GPU): the runner takes <predict root>/predict.lock itself (as
+  - compare_package.build() runs IN the runner process (QC 1): when B is a model, YOLO runs there too, so a killed
+    runner can't leave an orphaned GPU child. The runner takes <predict root>/predict.lock itself (as
     jobs/predict_local.py does) and waits for jobs.predict_local.gpu_check (run_job.gpu_state) to find the GPU free,
-    up to WAIT_S; B is a label set (`--b-coco`): no GPU, no lock;
+    up to WAIT_S; after the build it releases the lock and starts the next queued prediction set
+    (predict_local.next_queued + start_detached, as its --chain does). B is a label set (`--b-coco`): no GPU, no lock;
+  - the package (and an audit's _work_) is built in <review root>/.building/<name>/pkg/ and renamed into the review
+    root only once complete and checked (_work_ first), so a killed build never leaves a listable package. On start,
+    under the build lock, the runner marks every other non-final status failed "stopped" and sweeps leftovers of
+    killed builds (NAME_RE names only: staging folders, a <name> without a finished portal review_package.json, a
+    _work_<name> whose package is gone);
   - after a successful build the runner appends an allowlisted review_package registry line (ALLOWED_LINE_KEYS: no
     `cards`, no `path`, no decoy counts) under <registry>/.review_package.lock, recorded_by "portal/review_build.py"
     (as portal/predict_parts/sets.py register_package); the registry importer skips the package (built_by "portal").
@@ -56,7 +64,6 @@ from data_utils.oslock import acquire_lock
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
-COMPARE = REPO / "annotation" / "compare_package.py"
 TOOL = "annotation/compare_package.py"
 RECORDED_BY = "portal/review_build.py"
 PURPOSES = ("revise", "audit")
@@ -71,6 +78,7 @@ START_LOCK = "start.lock"              # held by start() while it checks and sta
 STATE_SUB = "review_build"             # <portal state>/review_build/<name>/
 REVIEW_PACKAGE_LOCK = ".review_package.lock"   # in the registry folder (portal/predict_parts/sets.py)
 RATIO_TOL = 0.01
+KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")    # a label-set image key: it names the staged file
 SPLIT_DIRS = ("train", "valid", "val", "test")
 IMG_SUFFIXES = (".png", ".jpg", ".jpeg", ".tif", ".tiff")
 WAIT_S = 6 * 3600                      # a model build waits this long for the predict lock / a free GPU
@@ -258,10 +266,11 @@ def _split_of(export, dataset) -> Path | None:
     return None
 
 
-def export_images(export_path: Path) -> dict:
-    """{image key: (path, split folder or "")}: the export folder's own images and those in its split folders."""
+def export_images(export_path: Path) -> tuple:
+    """-> ({image key: (path, split folder or "")}, {keys found more than once}): the export folder's own images and
+    those in its split folders. A key seen twice is ambiguous: left out of the first dict, never matched."""
     from annotation import build_review_package as B
-    out = {}
+    out, dups = {}, set()
     roots = [(Path(export_path), "")] + [(Path(export_path) / s, s) for s in SPLIT_DIRS]
     for root, split in roots:
         try:
@@ -270,20 +279,35 @@ def export_images(export_path: Path) -> dict:
             continue
         for p in files:
             if p.is_file() and p.suffix.lower() in IMG_SUFFIXES:
-                out.setdefault(B.stem_of(p.name), (p, split))
-    return out
+                k = B.stem_of(p.name)
+                if k in out or k in dups:
+                    dups.add(k)
+                    out.pop(k, None)
+                else:
+                    out[k] = (p, split)
+    return out, dups
 
 
 def image_aliases(recs) -> dict:
-    """{image key: [other keys of the same image]} from the registry's image records: `duplicate_of` both ways (the
-    importer's link between a Roboflow name and the session-prefixed name of one image). Exact, never a name guess."""
-    out = {}
+    """{image key: set of every key of the same image, itself included} from the registry's image records'
+    `duplicate_of` (the importer's link between a Roboflow name and the session-prefixed name of one image), joined
+    both ways into clusters. Exact, never a name guess. Keys without a link are absent."""
+    parent = {}
+
+    def find(x):
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
     for k, r in (recs or {}).items():
-        d = r.get("duplicate_of") if r.get("schema") == "image/1" else None
+        d = r.get("duplicate_of") if isinstance(r, dict) and r.get("schema") == "image/1" else None
         if isinstance(d, str) and d and d != k:
-            out.setdefault(k, []).append(d)
-            out.setdefault(d, []).append(k)
-    return out
+            parent[find(k)] = find(d)
+    groups = {}
+    for k in list(parent):
+        groups.setdefault(find(k), set()).add(k)
+    return {k: g for g in groups.values() for k in g}
 
 
 def split_map(split_file) -> dict:
@@ -298,40 +322,61 @@ def split_map(split_file) -> dict:
 
 
 def check_images(labels: Path, export_path: Path, aliases=None, splits=None) -> dict:
-    """Every label-set image found in the export (by its key, else by one registry alias of it: image_aliases) with
-    its COCO width:height ratio (RATIO_TOL). -> {total, found, missing, mismatched, aliased, missing_ex,
-    mismatched_ex, files: {label-set key: [path, split]}}; split = the split file's, else the export folder's."""
+    """Every label-set image found in the export with its COCO size. -> {total, found, missing, mismatched, ambiguous,
+    bad_key, aliased, *_ex (first 5 keys each), files: {label-set key: [path, split]}}; split = the split file's, else
+    the export folder's. Per image:
+      - its key must be a plain file name (KEY_RE, no ".."): else bad_key (it names the staged file);
+      - found under its own key: the width:height ratio must match the COCO entry within RATIO_TOL;
+      - else through its registry alias cluster (image_aliases): only a cluster of exactly 2 keys, and only when the
+        other key is on disk; then the pixel size must match the COCO width and height EXACTLY (a different crop or
+        scale of the "same" image would put the outlines in the wrong place);
+      - a key (own or alias) found more than once in the export, or a cluster of more than 2: ambiguous."""
     from PIL import Image
     from annotation import build_review_package as B
     coco = json.loads(Path(labels).read_text(encoding="utf-8"))
-    have, aliases, splits = export_images(export_path), aliases or {}, splits or {}
-    missing, mismatched, files, aliased = [], [], {}, 0
+    (have, dups), aliases, splits = export_images(export_path), aliases or {}, splits or {}
+    bad = {"missing": [], "mismatched": [], "ambiguous": [], "bad_key": []}
+    files, aliased = {}, 0
     for im in coco.get("images") or []:
         key = B.image_key(im)
+        if not isinstance(key, str) or not KEY_RE.match(key) or ".." in key:
+            bad["bad_key"].append(str(key)[:80])
+            continue
+        via_alias = False
+        if key in dups:
+            bad["ambiguous"].append(key)
+            continue
         got = key if key in have else None
         if got is None:
-            alts = sorted({a for a in aliases.get(key, []) if a in have})
-            got = alts[0] if len(alts) == 1 else None          # two different aliases on disk: not a match
-            aliased += got is not None
-        if got is None:
-            missing.append(key)
-            continue
+            cluster = aliases.get(key) or {key}
+            if len(cluster) > 2 or any(a in dups for a in cluster):
+                bad["ambiguous" if len(cluster) > 1 else "missing"].append(key)
+                continue
+            other = next((a for a in cluster if a != key), None)
+            if other is None or other not in have:
+                bad["missing"].append(key)
+                continue
+            got, via_alias = other, True
         p, folder = have[got]
         try:
             with Image.open(p) as img:
                 w, h = img.size
-            ok = w > 0 and h > 0 and im.get("width") and im.get("height") and \
-                abs((w / h) / (float(im["width"]) / float(im["height"])) - 1) <= RATIO_TOL
-        except (OSError, ValueError, ZeroDivisionError, TypeError):
+            cw, ch = float(im["width"]), float(im["height"])
+            ok = (w, h) == (cw, ch) if via_alias else (
+                w > 0 and h > 0 and cw > 0 and ch > 0 and abs((w / h) / (cw / ch) - 1) <= RATIO_TOL)
+        except (OSError, ValueError, ZeroDivisionError, TypeError, KeyError):
             ok = False
         if not ok:
-            mismatched.append(key)
+            bad["mismatched"].append(key)
             continue
+        aliased += via_alias
         sp = splits.get(got) or splits.get(key) or folder
         files[key] = [str(p), {"val": "valid"}.get(sp, sp)]
     total = len(coco.get("images") or [])
-    return {"total": total, "found": len(files), "missing": len(missing), "mismatched": len(mismatched),
-            "aliased": aliased, "missing_ex": missing[:5], "mismatched_ex": mismatched[:5], "files": files}
+    out = {"total": total, "found": len(files), "aliased": aliased, "files": files}
+    for k, v in bad.items():
+        out[k], out[f"{k}_ex"] = len(v), v[:5]
+    return out
 
 
 def coverage(cfg, lv, use_cache=True) -> dict:
@@ -362,15 +407,13 @@ def coverage(cfg, lv, use_cache=True) -> dict:
         if not e.get("path") or not Path(e["path"]).is_dir():
             raise BuildError(f"the linked export {e.get('id')} has no folder on this computer")
         chk = check_images(labels, Path(e["path"]), image_aliases(recs), split_map(link["split_file"]))
-        out.update({k: chk[k] for k in ("total", "found", "missing", "mismatched", "aliased", "missing_ex",
-                                        "mismatched_ex", "files")})
+        out.update({k: v for k, v in chk.items()})
         out.update({"export": e.get("id"), "export_path": e["path"], "how": link["how"],
                     "split_file": str(link["split_file"]) if link["split_file"] else None})
         if not chk["total"]:
             out["problem"] = "the label set has no images"
-        elif chk["missing"] or chk["mismatched"]:
-            out["problem"] = (f"Images found {chk['found']} of {chk['total']}: {chk['missing']} missing, "
-                              f"{chk['mismatched']} with a different width:height than their labels")
+        elif chk["found"] < chk["total"]:
+            out["problem"] = f"Images found {chk['found']} of {chk['total']}: " + refused_text(chk)
         else:
             out["ok"] = True
     except BuildError as e:
@@ -382,12 +425,27 @@ def coverage(cfg, lv, use_cache=True) -> dict:
     return out
 
 
+REFUSED_TEXT = (("missing", "missing"), ("mismatched", "with a different size than their labels"),
+                ("ambiguous", "ambiguous (in the export more than once, or more than 2 linked names)"),
+                ("bad_key", "with a name that can't be used"))
+
+
+def refused_text(chk) -> str:
+    """"2 missing, 1 ambiguous ...": the non-zero refusal counts."""
+    return ", ".join(f"{chk[k]} {t}" for k, t in REFUSED_TEXT if chk.get(k))
+
+
+def found_text(cov) -> str:
+    """"Images found 3 of 3 (1 through the registry's duplicate_of link)"."""
+    al = cov.get("aliased") or 0
+    return f"Images found {cov['found']} of {cov['total']}" + (
+        f" ({al} through the registry's duplicate_of link)" if al else "")
+
+
 def coverage_line(cov: dict) -> str:
     """The one line the Start page shows (plain text; the page escapes it)."""
     if cov.get("ok"):
-        return f"Images found {cov['found']} of {cov['total']} · splits from {cov.get('export')}"
-    if cov.get("total"):
-        return cov.get("problem") or "not ready"
+        return f"{found_text(cov)} · splits from {cov.get('export')}"
     return cov.get("problem") or "not ready"
 
 
@@ -602,22 +660,29 @@ def spawn_runner(spec_path: Path) -> int:
 
 
 # ---------------------------------------------------------------- run (the detached runner)
-def compare_argv(spec, staged: Path, split_csv: Path) -> list:
-    """compare_package.py's command line for this build (images: the staged folder; splits: the staged CSV)."""
-    rr, b = Path(spec["review_root"]), spec["b"]
-    argv = [sys.executable, "-u", str(COMPARE), "--labels", spec["labels"], "--purpose", spec["purpose"],
-            "--owner", spec["owner"], "--out", str(rr / spec["name"]), "--built-by", "portal",
+def staging_dir(rr, name) -> Path:
+    """<review root>/.building/<name>/pkg: the package (and an audit's _work_ folder) is built here, under a dot
+    folder nothing lists or serves, and renamed into the review root only once it is complete and checked."""
+    return building_dir(rr) / name / "pkg"
+
+
+def compare_args(spec, staged: Path, split_csv: Path) -> list:
+    """compare_package.py's arguments for this build (images: the staged folder; splits: the staged CSV; out: the
+    staging folder)."""
+    b = spec["b"]
+    args = ["--labels", spec["labels"], "--purpose", spec["purpose"], "--owner", spec["owner"],
+            "--out", str(staging_dir(spec["review_root"], spec["name"]) / spec["name"]), "--built-by", "portal",
             "--source-title", spec["lv"], "--images-root", str(staged), "--split-csv", str(split_csv)]
     if b["kind"] == "model":
-        argv += ["--b-model", b["weights"], "--imgsz", str(b["imgsz"]), "--pred-classes", b["classes"],
+        args += ["--b-model", b["weights"], "--imgsz", str(b["imgsz"]), "--pred-classes", b["classes"],
                  "--b-label", b["id"]]
     else:
-        argv += ["--b-coco", b["coco"], "--b-label", b["id"]]
+        args += ["--b-coco", b["coco"], "--b-label", b["id"]]
     if spec["purpose"] == "revise":
-        argv += ["--work-dir", str(Path(spec["state"]) / "work")]
+        args += ["--work-dir", str(Path(spec["state"]) / "work")]
     for r in spec.get("reviewers") or []:
-        argv += ["--reviewer", r]
-    return argv
+        args += ["--reviewer", r]
+    return args
 
 
 def stage(spec, cov) -> tuple:
@@ -688,6 +753,118 @@ def wait_for_gpu(spec, set_status, sleep=time.sleep, clock=time.time):
         sleep(max(0.05, min(poll, deadline - clock())))
 
 
+def finished(folder: Path, name: str) -> bool:
+    """folder holds a finished portal build of `name` (its review_package.json: id and built_by "portal")."""
+    meta = _read_json(Path(folder) / "review_package.json")
+    return isinstance(meta, dict) and meta.get("id") == name and meta.get("built_by") == "portal"
+
+
+def sweep(rr: Path, own: str) -> dict:
+    """Run by the runner while it holds the build lock (so no other runner lives): every other non-final status is
+    rewritten failed "stopped"; leftovers of killed builds of portal names (NAME_RE only, never another package):
+    a staging folder, a <name> folder without a finished review_package.json, and a _work_<name> folder whose
+    package folder is gone (only its name is looked at; it is never opened). -> counts."""
+    n = {"stopped": 0, "staging": 0, "package": 0, "work": 0}
+    b = building_dir(rr)
+    try:
+        for d in sorted(b.iterdir()) if b.is_dir() else []:
+            if not d.is_dir() or not NAME_RE.match(d.name) or d.name == own:
+                continue
+            raw = _read_json(d / "status.json")
+            if isinstance(raw, dict) and raw.get("phase") in PHASES and raw["phase"] not in TERMINAL:
+                write_status(rr, d.name, phase="failed", failed_at=raw["phase"], reason="stopped", finished=_now())
+                n["stopped"] += 1
+            if (d / "pkg").exists():
+                shutil.rmtree(d / "pkg", ignore_errors=True)
+                n["staging"] += 1
+        for d in sorted(Path(rr).iterdir()):
+            if d.name == own or not d.is_dir():
+                continue
+            if NAME_RE.match(d.name) and not finished(d, d.name):
+                shutil.rmtree(d, ignore_errors=True)
+                n["package"] += 1
+            elif d.name.startswith("_work_") and NAME_RE.match(d.name[6:]) and d.name[6:] != own \
+                    and not (Path(rr) / d.name[6:]).exists():
+                shutil.rmtree(d, ignore_errors=True)
+                n["work"] += 1
+    except OSError:
+        pass
+    return n
+
+
+class _LogLines:
+    """sys.stdout / sys.stderr for compare_package run in this process: every line to the raw log, its
+    "[phase] ..." markers to the status."""
+
+    def __init__(self, fh, say):
+        self.fh, self.say, self.buf = fh, say, ""
+
+    def write(self, text):
+        self.fh.write(text)
+        self.fh.flush()
+        self.buf += text
+        while "\n" in self.buf:
+            line, self.buf = self.buf.split("\n", 1)
+            s = line.strip()
+            if s == "[phase] predicting":
+                self.say(phase="predicting")
+            elif s == "[phase] writing":
+                self.say(phase="writing")
+        return len(text)
+
+    def flush(self):
+        self.fh.flush()
+
+    def isatty(self):
+        return False
+
+
+def run_compare(args, log: Path, say) -> int:
+    """compare_package.build() IN this process (QC 1): YOLO, when B is a model, runs here too, so killing the runner
+    kills the GPU work with it: no orphaned child under a dead runner. Output -> the raw log; markers -> the status.
+    -> 0 built, 1 refused or failed."""
+    import contextlib
+    import traceback
+    from annotation import compare_package as CP
+    with open(log, "a", encoding="utf-8", errors="replace") as fh:
+        out = _LogLines(fh, say)
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            try:
+                CP.build(CP.parser().parse_args(args))
+                return 0
+            except SystemExit as e:                  # a refusal (or argparse): its message goes to the log
+                print(f"[refused] {e.code}")
+                return 1
+            except Exception:
+                traceback.print_exc()
+                return 1
+
+
+def publish(rr: Path, name: str, purpose: str) -> None:
+    """Move the checked build from its staging folder into the review root: an audit's _work_ first (a package is
+    never there without its key), then the package. Renames retried (antivirus / indexer hold folders briefly)."""
+    from jobs.predict_local import rename_retry
+    st = staging_dir(rr, name)
+    if (Path(rr) / name).exists() or (Path(rr) / f"_work_{name}").exists():
+        raise OSError("the package or its work folder already exists in the review root")
+    if purpose == "audit":
+        rename_retry(st / f"_work_{name}", Path(rr) / f"_work_{name}")
+    rename_retry(st / name, Path(rr) / name)
+
+
+def chain_next_prediction(spec, log_note):
+    """After predict.lock is released (a model build): start the oldest queued laptop prediction set of that root,
+    one step down the queue, as jobs/predict_local.py run(chain=True) does. Never fails the build."""
+    try:
+        from jobs import predict_local as PL
+        nxt = PL.next_queued(Path(spec["predict_root"]))
+        if nxt is not None:
+            PL.start_detached(nxt, Path(spec["predict_root"]), spec.get("registry"), chain=True)
+            log_note(f"chained: started the next queued prediction set {nxt.name}")
+    except Exception as e:
+        log_note(f"next queued prediction not started: {type(e).__name__}: {e}")
+
+
 def run(spec_path) -> int:
     """The runner's body (jobs/review_build_run.py). -> exit code (0 done, 1 failed, 3 another build holds the lock)."""
     spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
@@ -708,20 +885,22 @@ def run(spec_path) -> int:
         say(phase="failed", reason="busy", finished=_now(), pid=os.getpid())
         return 3
     gpu_lock = None
-    out = rr / name
+    stage_dir = staging_dir(rr, name)
     try:
         say(phase="checking", pid=os.getpid(), reason=None)
+        swept = sweep(rr, name)
+        if any(swept.values()):
+            note(f"swept leftovers of earlier builds: {swept}")
         cov = coverage(_Cfg(spec), spec["lv"], use_cache=False)
         if not cov.get("ok") or cov.get("export") != spec.get("export"):
             note(f"inputs refused: {cov.get('problem') or 'the linked export changed since the build was started'}")
-            detail = (f"Images found {cov.get('found', 0)} of {cov.get('total', 0)}; {cov.get('missing', 0)} missing, "
-                      f"{cov.get('mismatched', 0)} mismatched") if cov.get("total") else None
+            detail = (f"{found_text(cov)}; " + refused_text(cov)) if cov.get("total") else None
             say(phase="failed", reason="images" if cov.get("total") else "inputs", detail=detail, finished=_now())
             return 1
-        say(detail=f"Images found {cov['found']} of {cov['total']} · aspect ratios match")
+        say(detail=f"{found_text(cov)} · sizes match")
         staged, splits = stage(spec, cov)
-        if out.exists() or (rr / f"_work_{name}").exists():
-            note("refused: the package or its work folder already exists")
+        if (rr / name).exists() or (rr / f"_work_{name}").exists() or stage_dir.exists():
+            note("refused: the package, its work folder or its staging folder already exists")
             say(phase="failed", reason="build", finished=_now())
             return 1
         if spec["b"]["kind"] == "model":
@@ -732,18 +911,27 @@ def run(spec_path) -> int:
             say(phase="predicting", reason=None)
         else:
             say(phase="writing", reason=None)
-        rc = run_compare(compare_argv(spec, staged, splits), log, say)
+        stage_dir.mkdir(parents=True)
+        rc = run_compare(compare_args(spec, staged, splits), log, say)
+        if gpu_lock is not None:                # the GPU work is over: free the queue before writing the rest
+            gpu_lock.close()
+            gpu_lock = None
+            chain_next_prediction(spec, note)
         if rc != 0:
-            note(f"compare_package exited {rc}")
-            _remove_unfinished(out, name)
+            note(f"compare_package failed ({rc})")
             say(phase="failed", reason="build", finished=_now())
             return 1
-        meta = _read_json(out / "review_package.json")
+        pkg = stage_dir / name
+        meta = _read_json(pkg / "review_package.json")
         if not isinstance(meta, dict) or meta.get("id") != name or meta.get("built_by") != "portal" \
                 or meta.get("purpose") != spec["purpose"] or meta.get("n_images") != cov["found"]:
-            note("the finished package's review_package.json is missing or not this build's")
+            note("the finished package's review_package.json is missing or not this build's: removed")
             say(phase="failed", reason="check", finished=_now())
             return 1
+        meta["path"] = str((rr / name).resolve())          # where it will live (it was built in the staging folder)
+        from annotation.compare_package import write_json_atomic
+        write_json_atomic(pkg / "review_package.json", meta)
+        publish(rr, name, spec["purpose"])
         try:
             register(spec, meta)
         except Exception as e:                  # the package is usable; the line can be added by hand
@@ -755,7 +943,6 @@ def run(spec_path) -> int:
     except BaseException as e:
         try:
             note(f"runner error: {type(e).__name__}: {e}")
-            _remove_unfinished(out, name)
             say(phase="failed", reason="build", finished=_now())
         except Exception:
             pass
@@ -763,38 +950,10 @@ def run(spec_path) -> int:
     finally:
         if gpu_lock is not None:
             gpu_lock.close()
+            chain_next_prediction(spec, note)
+        shutil.rmtree(stage_dir, ignore_errors=True)        # gone once published; a failed build's leftovers too
         shutil.rmtree(Path(spec["state"]) / "images", ignore_errors=True)    # staged links / copies
         lock.close()
-
-
-def _remove_unfinished(out: Path, name: str):
-    """A package folder this build left without a finished review_package.json (compare_package removes its own on an
-    error; this covers a killed child). Only a folder of this build's own name; never a _work_ folder."""
-    meta = _read_json(out / "review_package.json")
-    if out.is_dir() and not (isinstance(meta, dict) and meta.get("id") == name and meta.get("built_by") == "portal"):
-        shutil.rmtree(out, ignore_errors=True)
-
-
-def run_compare(argv, log: Path, say) -> int:
-    """compare_package as a child: its output appended to the raw log; its "[phase] ..." markers move the status."""
-    env = {k: v for k, v in os.environ.items() if k not in ("CRYOEV_VIA", "CRYOEV_FOR")}
-    with open(log, "a", encoding="utf-8", errors="replace") as fh,             subprocess.Popen(argv, cwd=REPO, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                             env={**env, "PYTHONIOENCODING": "utf-8"}, text=True, encoding="utf-8",
-                             errors="replace") as p:
-        try:
-            for line in p.stdout:
-                fh.write(line)
-                fh.flush()
-                s = line.strip()
-                if s == "[phase] predicting":
-                    say(phase="predicting")
-                elif s == "[phase] writing":
-                    say(phase="writing")
-            return p.wait()
-        except BaseException:
-            p.kill()
-            p.wait()
-            raise
 
 
 def registry_line(spec, meta) -> dict:

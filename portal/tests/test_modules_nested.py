@@ -41,6 +41,23 @@ class Nested(unittest.TestCase):
             with self.subTest(prefix=prefix), self.assertRaises(ValueError):
                 M.load(M.Ctx(cfg=None), names=extra + [fake(name, prefix, ("admin",), paths)])
 
+    def test_roles_within_parent_and_no_parent_route_inside(self):
+        parent = fake("zzv", "/zzv", ("admin", "advanced"), ["/zzv/"])
+        wider = fake("zzw", "/zzv/kid", ("admin", "basic"), ["/zzv/kid/"])     # basic: the parent keeps it out
+        with self.assertRaises(ValueError) as cm:
+            M.load(M.Ctx(cfg=None), names=[parent, wider])
+        self.assertIn("ROLES must be within", str(cm.exception))
+        for paths in (["/zzx/", "/zzx/kid"], ["/zzx/", "/zzx/kid/x"]):            # the parent routes into it
+            with self.subTest(paths=paths):
+                par = fake("zzx", "/zzx", ("admin",), paths)
+                kid = fake("zzy", "/zzx/kid", ("admin",), ["/zzx/kid/"])
+                with self.assertRaises(ValueError) as cm:
+                    M.load(M.Ctx(cfg=None), names=[par, kid])
+                self.assertIn("fall inside", str(cm.exception))
+        par = fake("zzx", "/zzx", ("admin",), ["/zzx/", "/zzx/kidney"])           # control: another segment is fine
+        kid = fake("zzy", "/zzx/kid", ("admin",), ["/zzx/kid/"])
+        M.load(M.Ctx(cfg=None), names=[par, kid])
+
     def test_real_modules(self):
         import cjtest as T
         env = T.Env()

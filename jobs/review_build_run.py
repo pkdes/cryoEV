@@ -5,8 +5,9 @@
 
 Started by portal/review_build.py start() with no console window, so it survives a portal restart. It holds
 <review root>/.building/build.lock for its whole life (one build at a time across both portal doors), and for a
-model build <predict root>/predict.lock too (as jobs/predict_local.py), then runs annotation/compare_package.py as a
-child. Progress: <review root>/.building/<name>/status.json (allowlisted phases). The raw log stays in the portal's
+model build <predict root>/predict.lock too (as jobs/predict_local.py), then runs annotation/compare_package.py's
+build() IN this process (no child: killing the runner stops any GPU work with it), building under
+<review root>/.building/<name>/pkg and renaming the checked package into the review root at the end. Progress: <review root>/.building/<name>/status.json (allowlisted phases). The raw log stays in the portal's
 state folder (<state>/review_build/<name>/build.log).
 Exit: 0 done, 1 failed, 2 usage, 3 another build holds the lock.
 """

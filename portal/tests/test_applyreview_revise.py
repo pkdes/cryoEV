@@ -34,6 +34,18 @@ class ReviseEligible(unittest.TestCase):
         mk("lab_forged", {"kind": "compare", "purpose": "revise", "base": base, "owner": "pujan"})
         (self.w.review / "_work_lab_forged").mkdir()
         mk("lab_regonly", {"kind": "compare", "base": base, "owner": "pujan"})
+        for name, extra, meta_text in (("lab_halfbuilt", {"kind": "compare"}, None),          # json missing
+                                       ("lab_portal_bad", {"built_by": "portal"}, "{not json"),  # json unreadable
+                                       ("lab_portal_ok", {"built_by": "portal"}, None)):
+            pkg = TA.make_package(self.w.review, name, self.w.base)
+            d = json.loads((pkg / "data.js").read_text(encoding="utf-8").split("=", 1)[1].strip().rstrip(";"))
+            (pkg / "data.js").write_text("window.REVIEW_DATA = " + json.dumps({**d, **extra}) + ";",
+                                         encoding="utf-8")
+            if meta_text:
+                (pkg / "review_package.json").write_text(meta_text, encoding="utf-8")
+        (self.w.review / "lab_portal_ok" / "review_package.json").write_text(json.dumps(   # control: json present
+            {"kind": "compare", "purpose": "revise", "built_by": "portal", "base": base, "owner": "pujan"}),
+            encoding="utf-8")
         import shutil
         shutil.rmtree(self.w.review.parent / "_build", ignore_errors=True)
         self.records = {"review_package": {"lab_regonly": {"id": "lab_regonly", "kind": "compare",
@@ -47,8 +59,20 @@ class ReviseEligible(unittest.TestCase):
         rows = self.rows()
         self.assertTrue(rows["lab_ok"]["eligible"], rows["lab_ok"]["why"])            # control (label-set package)
         self.assertTrue(rows["lab_revise_ok"]["eligible"], rows["lab_revise_ok"]["why"])
-        for pkg in ("lab_audit_x", "lab_cmp_old", "lab_forged", "lab_regonly", "cmp_audit"):
+        self.assertTrue(rows["lab_portal_ok"]["eligible"], rows["lab_portal_ok"]["why"])
+        for pkg in ("lab_audit_x", "lab_cmp_old", "lab_forged", "lab_regonly", "cmp_audit", "lab_halfbuilt",
+                    "lab_portal_bad"):
             self.assertNotIn(pkg, rows, pkg)
+
+    def test_unbacked_compare_excluded(self):
+        """QC 3: data.js says compare / portal-built while the package's own json is missing or unreadable."""
+        cfg = self.w.cfg()
+        for pkg in ("lab_halfbuilt", "lab_portal_bad"):
+            self.assertTrue(M.unbacked_compare(self.w.review, pkg), pkg)
+            self.assertTrue(M.excluded(cfg, pkg, self.records), pkg)
+        for pkg in ("lab_ok", "lab_portal_ok", "lab_revise_ok"):           # controls
+            self.assertFalse(M.unbacked_compare(self.w.review, pkg), pkg)
+            self.assertFalse(M.excluded(cfg, pkg, self.records), pkg)
 
     def test_serve_time_recheck(self):
         cfg = self.w.cfg()

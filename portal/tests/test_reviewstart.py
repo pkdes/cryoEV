@@ -82,7 +82,8 @@ class Inputs(Base):
         self.assertEqual({k: v[1] for k, v in cov["files"].items()},
                          {"img_a_png": "train", "img_b_png": "valid", "img_c_png": "test"})   # the split file's
         self.assertTrue(cov["files"]["img_c_png"][0].endswith("S1__img_c_png.rf.0003.jpg"))
-        self.assertEqual(RB.coverage_line(cov), "Images found 3 of 3 · splits from roboflow - fixture")
+        self.assertEqual(RB.coverage_line(cov), "Images found 3 of 3 (1 through the registry's duplicate_of link) · "
+                                                "splits from roboflow - fixture")
 
     def test_missing_and_mismatched_refused(self):
         img = self.w["export"] / "valid" / "img_b_png.rf.0002.jpg"
@@ -90,8 +91,7 @@ class Inputs(Base):
         shutil.move(img, moved)
         cov = RB.coverage(self.cfg, F.LV, use_cache=False)
         self.assertFalse(cov["ok"])
-        self.assertEqual(cov["problem"], "Images found 2 of 3: 1 missing, 0 with a different width:height than "
-                                         "their labels")
+        self.assertEqual(cov["problem"], "Images found 2 of 3: 1 missing")
         F.picture(img, w=400, h=400)                                # back, but square: the ratio differs
         cov = RB.coverage(self.cfg, F.LV, use_cache=False)
         self.assertEqual((cov["ok"], cov["missing"], cov["mismatched"]), (False, 0, 1))
@@ -125,14 +125,47 @@ class Inputs(Base):
         with self.assertRaises(RB.BuildError):
             RB.find_export(F.LV, lroot, None)
 
-    def test_aliases_both_ways_and_ambiguity(self):
-        al = RB.image_aliases({"a": {"schema": "image/1", "duplicate_of": "b"}, "c": {"schema": "image/1"}})
-        self.assertEqual(al, {"a": ["b"], "b": ["a"]})
-        F.picture(self.w["export"] / "test" / "T2__img_c_png.rf.0009.jpg")
-        F.jline(self.w["registry"] / "image.jsonl", {"schema": "image/1", "id": "T2__img_c_png",
+    def test_aliases_both_ways_and_clusters(self):
+        al = RB.image_aliases({"a": {"schema": "image/1", "duplicate_of": "b"}, "c": {"schema": "image/1"},
+                               "d": {"schema": "image/1", "duplicate_of": "e"},
+                               "f": {"schema": "image/1", "duplicate_of": "e"}})
+        self.assertEqual(al, {"a": {"a", "b"}, "b": {"a", "b"}, "d": {"d", "e", "f"}, "e": {"d", "e", "f"},
+                              "f": {"d", "e", "f"}})
+        F.jline(self.w["registry"] / "image.jsonl", {"schema": "image/1", "id": "T2__img_c_png",   # a third name
                                                      "duplicate_of": "img_c_png"})
-        cov = RB.coverage(self.cfg, F.LV, use_cache=False)          # two aliases of img_c on disk: not a match
-        self.assertEqual((cov["ok"], cov["missing"]), (False, 1))
+        cov = RB.coverage(self.cfg, F.LV, use_cache=False)          # a 3-name cluster: refused, even with 1 on disk
+        self.assertEqual((cov["ok"], cov["ambiguous"], cov["ambiguous_ex"]), (False, 1, ["img_c_png"]))
+        self.assertIn("1 ambiguous", cov["problem"])
+
+    def test_alias_needs_the_exact_pixel_size(self):
+        img = self.w["export"] / "train" / "S1__img_c_png.rf.0003.jpg"
+        F.picture(img, w=404, h=302)                                # same ratio within 1 %, other pixel size
+        cov = RB.coverage(self.cfg, F.LV, use_cache=False)
+        self.assertEqual((cov["ok"], cov["mismatched"], cov["mismatched_ex"]), (False, 1, ["img_c_png"]))
+        self.assertIn("1 with a different size", cov["problem"])
+        F.picture(self.w["export"] / "train" / "img_a_png.rf.0001.jpg", w=404, h=302)  # control: own key, ratio ok
+        F.picture(img)
+        self.assertTrue(RB.coverage(self.cfg, F.LV, use_cache=False)["ok"])
+
+    def test_stem_twice_in_the_export_is_ambiguous(self):
+        F.picture(self.w["export"] / "valid" / "img_a_png.rf.0099.jpg")   # img_a in train AND valid
+        cov = RB.coverage(self.cfg, F.LV, use_cache=False)
+        self.assertEqual((cov["ok"], cov["found"], cov["ambiguous"]), (False, 2, 1))
+        self.assertEqual(cov["problem"], "Images found 2 of 3: 1 ambiguous (in the export more than once, or more "
+                                         "than 2 linked names)")
+        F.picture(self.w["export"] / "test" / "S1__img_c_png.rf.0098.jpg")  # an alias's stem twice: ambiguous too
+        self.assertEqual(RB.coverage(self.cfg, F.LV, use_cache=False)["ambiguous"], 2)
+
+    def test_unusable_keys_refused(self):
+        labels = self.w["labels"] / F.LV / "labels.coco.json"
+        coco = json.loads(labels.read_text(encoding="utf-8"))
+        for i, name in enumerate(("..evil_png", "a b_png", "_x_png")):
+            coco["images"].append({"id": 90 + i, "file_name": f"x{i}.png", "width": F.W, "height": F.H,
+                                   "extra": {"name": name}})
+        labels.write_text(json.dumps(coco), encoding="utf-8")
+        cov = RB.coverage(self.cfg, F.LV, use_cache=False)
+        self.assertEqual((cov["ok"], cov["bad_key"], cov["found"], cov["total"]), (False, 3, 3, 6))
+        self.assertIn("3 with a name that can't be used", cov["problem"])
 
     def test_validate(self):
         with self.assertRaises(RB.BuildError) as cm:
@@ -181,7 +214,8 @@ class Builds(Base):
             self.assertNotIn(k, line)
         raw = json.loads(RB.status_path(rr, name).read_text(encoding="utf-8"))
         self.assertTrue(set(raw) <= set(RB.STATUS_KEYS), raw)
-        self.assertEqual(raw["detail"], "Images found 3 of 3 · aspect ratios match")
+        self.assertEqual(raw["detail"], "Images found 3 of 3 (1 through the registry's duplicate_of link) · "
+                                        "sizes match")
 
     def test_audit_end_to_end_nothing_blind_outside_work(self):
         name, rc, st = self.build("audit", reviewers=["alyssia"])
@@ -215,6 +249,134 @@ class Builds(Base):
         self.assertTrue(rows[rev]["eligible"], rows[rev]["why"])
         self.assertEqual(rows[rev]["base_lv"], F.LV)
         self.assertNotIn(aud, rows)
+
+    def test_built_in_staging_then_published(self):
+        """QC 3: nothing listable in the review root until the build is complete and checked; _work_ moves first."""
+        seen, real = {}, RB.publish
+
+        def spy(rr, name, purpose):
+            seen["root"] = sorted(p.name for p in Path(rr).iterdir())
+            seen["staged"] = sorted(p.name for p in RB.staging_dir(rr, name).iterdir())
+            real(rr, name, purpose)
+            seen["after"] = sorted(p.name for p in Path(rr).iterdir())
+
+        with mock.patch.object(RB, "publish", spy):
+            name, rc, st = self.build("audit", reviewers=["alyssia"])
+        self.assertEqual(rc, 0, st)
+        self.assertEqual(seen["root"], [".building"])
+        self.assertEqual(seen["staged"], [f"_work_{name}", name])
+        self.assertEqual(seen["after"], [".building", f"_work_{name}", name])
+        self.assertFalse(RB.staging_dir(self.w["review"], name).exists())
+        meta = json.loads((self.w["review"] / name / "review_package.json").read_text(encoding="utf-8"))
+        self.assertEqual(Path(meta["path"]), (self.w["review"] / name).resolve())   # its final place, not staging
+
+    def test_compare_runs_in_the_runner_process(self):
+        """QC 1: no child process for compare_package (a killed runner can't orphan GPU work)."""
+        import subprocess
+        with mock.patch.object(subprocess, "Popen", side_effect=AssertionError("no child process")):
+            name, rc, st = self.build("revise")
+        self.assertEqual((rc, st["phase"]), (0, "done"), st)
+        log = (Path(self.cfg.state_dir) / RB.STATE_SUB / name / "build.log").read_text(encoding="utf-8")
+        self.assertIn("[phase] writing", log)
+        self.assertIn(f"[OK] {name}", log)
+
+    def test_sweep_of_killed_builds(self):
+        """QC 3 + 4: at runner start, other non-final statuses become stopped; leftovers of NAME_RE builds go;
+        everything else (another package, its _work_, a finished portal build) stays."""
+        rr = self.w["review"]
+        dead, dead2, done = ("lab_revise_lv_20990101_0101_20990101_0000_aaaa",
+                             "lab_audit_lv_20990101_0101_20990101_0000_bbbb",
+                             "lab_revise_lv_20990101_0101_20990101_0000_cccc")
+        (rr / dead).mkdir()                                         # killed mid-publish: no review_package.json
+        (rr / dead / "data.js").write_text("x", encoding="utf-8")
+        (rr / f"_work_{dead2}").mkdir()                             # its package folder is gone
+        (rr / done).mkdir()                                         # a finished portal build: kept
+        (rr / done / "review_package.json").write_text(json.dumps({"id": done, "built_by": "portal"}),
+                                                       encoding="utf-8")
+        (rr / f"_work_{done}").mkdir()
+        for other in ("lab_compare_live_audit", "_work_lab_compare_live_audit", "pred_ps_20990101_cccccc"):
+            (rr / other).mkdir()                                    # never a portal name: never touched
+        RB.write_status(rr, dead2, phase="predicting", started=RB._now(), pid=999999)
+        RB.staging_dir(rr, dead2).mkdir(parents=True)
+        name, rc, st = self.build("revise")
+        self.assertEqual(rc, 0, st)
+        left = sorted(p.name for p in rr.iterdir())
+        self.assertEqual(left, sorted([".building", name, done, f"_work_{done}", "lab_compare_live_audit",
+                                       "_work_lab_compare_live_audit", "pred_ps_20990101_cccccc"]))
+        raw = json.loads(RB.status_path(rr, dead2).read_text(encoding="utf-8"))
+        self.assertEqual((raw["phase"], raw["reason"], raw["failed_at"]), ("failed", "stopped", "predicting"))
+        self.assertFalse(RB.staging_dir(rr, dead2).exists())
+        self.assertIn("swept leftovers", (Path(self.cfg.state_dir) / RB.STATE_SUB / name / "build.log")
+                      .read_text(encoding="utf-8"))
+
+    def test_check_failure_removes_the_build(self):
+        """QC 11a: a complete build that fails the final check is never published or registered."""
+        real = RB.run_compare
+
+        def tamper(args, log, say):
+            rc = real(args, log, say)
+            out = Path(args[args.index("--out") + 1])
+            meta = json.loads((out / "review_package.json").read_text(encoding="utf-8"))
+            (out / "review_package.json").write_text(json.dumps(dict(meta, n_images=99)), encoding="utf-8")
+            return rc
+
+        with mock.patch.object(RB, "run_compare", tamper):
+            name, rc, st = self.build("audit", reviewers=["alyssia"])
+        self.assertEqual((rc, st["phase"], st["reason"]), (1, "failed", "check"))
+        self.assertEqual(sorted(p.name for p in self.w["review"].iterdir()), [".building"])
+        self.assertFalse(RB.staging_dir(self.w["review"], name).exists())
+        self.assertNotIn(name, store.current("review_package", self.w["registry"]))
+
+    def test_model_build_frees_predict_lock_and_chains(self):
+        """QC 11c: after a model build the predict lock is released and the next queued prediction set started."""
+        from jobs import predict_local as PL
+        model = {"id": "fake_model", "production": True, "weights": "x.pt", "imgsz": 1440, "classes": "EV,non-EV"}
+        lockf = self.w["predict"] / PL.LOCK_FILE
+        calls = []
+
+        def compare(args, log, say):
+            calls.append(("compare", acquire_lock(lockf, 0) is None))   # the lock is held while it runs
+            return 1                                                    # (it fails: no real YOLO here)
+
+        with mock.patch.object(RB, "models", return_value=[model]), \
+                mock.patch.object(RB, "wait_for_gpu", lambda spec, say: (acquire_lock(lockf, 0), None)), \
+                mock.patch.object(RB, "run_compare", compare), \
+                mock.patch.object(PL, "next_queued", return_value=self.w["predict"] / "ps_next"), \
+                mock.patch.object(PL, "start_detached", side_effect=lambda *a, **k: calls.append(("next", a[0].name))):
+            name, rc, st = self.build("revise", b={"kind": "model", "id": "fake_model"})
+        self.assertEqual((rc, st["phase"]), (1, "failed"))
+        self.assertEqual(calls, [("compare", True), ("next", "ps_next")])
+        free = acquire_lock(lockf, 0)
+        self.assertIsNotNone(free)                                      # released
+        free.close()
+
+    def test_apply_preview_lands_on_the_label_set_ids(self):
+        """QC 11d: the Apply preview (apply_review_edits.make_version) on a portal-built revise: a "del" on label
+        g<id> removes exactly that annotation id, a "keep:MV" reclasses exactly that id, every other id is kept."""
+        from portal.modules import applyreview as AP
+        name, rc, _ = self.build("revise")
+        pkg = self.w["review"] / name
+        data = json.loads((pkg / "data.js").read_text(encoding="utf-8").split("=", 1)[1].strip().rstrip(";"))
+        im = next(r for r in data["images"] if r["file"] == "img_a.png")
+        g_del, g_mv = [g["id"] for g in im["gt"]][:2]
+        (pkg / "edits").mkdir()
+        (pkg / "edits" / "img_a.png.json").write_text(json.dumps(
+            {"file": "img_a.png", "pkg": name, "fmt": 1,
+             "edit": {"dec": {f"g{g_del}": {"v": "del", "t": 5, "who": "pujan"},
+                              f"g{g_mv}": {"v": "keep:MV", "t": 5, "who": "pujan"}},
+                      "t": 5, "modified": True, "reviewed": True, "reviewedT": 5}}), encoding="utf-8")
+        row = next(r for r in AP.packages(self.cfg, {}, set(), None) if r["id"] == name)
+        self.assertTrue(row["eligible"], row["why"])
+        ts, info = AP.run_preview(self.cfg, row, "pujan")
+        self.assertFalse(info.get("error"), info)
+        base = json.loads((self.w["labels"] / F.LV / "labels.coco.json").read_text(encoding="utf-8"))
+        out = json.loads((AP.scratch_root(self.cfg) / name / ts / "labels" / info["lv"] / "labels.coco.json")
+                         .read_text(encoding="utf-8"))
+        cats = {c["id"]: c["name"] for c in out["categories"]}
+        got = {a["id"]: cats[a["category_id"]] for a in out["annotations"]}
+        want = {a["id"]: "EV" for a in base["annotations"] if a["id"] != g_del}
+        want[g_mv] = "MV"
+        self.assertEqual(got, want)
 
     def test_failed_build_cleans_up(self):
         name = RB.start(self.cfg, T.USER, "revise", F.LV, B_LV, spawn=False)
@@ -322,6 +484,9 @@ class Detached(Base):
         st = wait_done(self.w["review"], name)
         self.assertEqual(st["phase"], "done", st)
         self.assertNotEqual(st["pid"], os.getpid())
+        end = time.time() + 60                                      # let it exit before the temp folder goes
+        while RB._pid_alive(st["pid"]) and time.time() < end:
+            time.sleep(0.2)
 
 
 @unittest.skipUnless(os.environ.get("CJ_TEST_GPU_BUILD") == "1", "real GPU build: CJ_TEST_GPU_BUILD=1 only")
@@ -457,13 +622,16 @@ class Pages(unittest.TestCase):
             held.close()
             RB.write_status(rr, busy, phase="failed", reason="stopped")
 
-    def test_5_check_images_get_is_cleaned(self):
-        st, h, _ = self.get(T.USER, f"/reviews/start/?t=abc&purpose=audit&lv={F.LV}&reviewer=alyssia")
-        self.assertEqual(st, 303)
-        self.assertEqual(T.hget(h, "location"), f"/reviews/start/?lv={F.LV}&reviewer=alyssia#rs-audit")
-        page = self.get(T.USER, f"/reviews/start/?lv={F.LV_BASE}&reviewer=alyssia")[2].decode()
+    def test_5_check_images_is_its_own_get_form(self):
+        """QC 9: the label-set picker is a GET form without the form token; the build forms carry the lv hidden."""
+        page = self.get(T.USER, "/reviews/start/")[2].decode()
+        get_form = re.search(r'<form method="get"[^>]*>(.*?)</form>', page, re.S).group(1)
+        self.assertNotIn('name="t"', get_form)
+        self.assertIn('name="lv"', get_form)
+        self.assertEqual(len(re.findall(r'<input type="hidden" name="lv" value="lv_20990101_0101">', page)), 2)
+        page = self.get(T.USER, f"/reviews/start/?lv={F.LV_BASE}")[2].decode()
         self.assertIn("no registered Roboflow export is linked", page)             # the base has no export
-        self.assertIn('value="alyssia" checked', page)
+        self.assertEqual(len(re.findall(r'type="submit" disabled', page)), 2)       # nothing to build from it
 
 
 if __name__ == "__main__":

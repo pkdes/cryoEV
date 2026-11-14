@@ -10,8 +10,9 @@ Each portal/modules/<id>.py defines:
 (routes, rules) where rules = [(prefix, roles), ...] longest prefix first, for the Gate.
 
 A nested PREFIX (round 13: "/reviews/start", portal/modules/reviewstart.py) is one more segment under another
-module's PREFIX; that module must be loaded too. Its routes come first, so the parent's routes (e.g. a /reviews/{id}
-pattern) never shadow it; its own ROLES decide under it (the Gate's longest prefix wins).
+module's PREFIX; that module must be loaded too, the nested ROLES must be a subset of the parent's, and no parent
+route may equal or start with the nested PREFIX. Its routes come first, so the parent's patterns (e.g. /reviews/{id})
+never shadow it; its own ROLES decide under it (the Gate's longest prefix wins).
 """
 from __future__ import annotations
 
@@ -96,13 +97,21 @@ def load(ctx: Ctx, names=None):
         seen.add(prefix)
         own = [Route(prefix, _redirect(prefix + "/"), methods=["GET"])] + mod_routes
         if prefix.count("/") > 1:
-            nested.append((name, prefix, own))
+            nested.append((name, prefix, roles, own))
         else:
             routes.extend(own)
         rules.append((prefix, roles))
-    for name, prefix, own in reversed(nested):
-        if "/" + prefix.split("/")[1] not in seen:
+    by_prefix = dict(rules)
+    for name, prefix, roles, own in reversed(nested):
+        parent = "/" + prefix.split("/")[1]
+        if parent not in seen:
             raise ValueError(f"portal module {name}: nested PREFIX {prefix!r} needs the module that owns its parent")
+        if not set(roles) <= set(by_prefix[parent]):     # never opens a door the parent module keeps shut
+            raise ValueError(f"portal module {name}: nested PREFIX {prefix!r} ROLES must be within {parent}'s")
+        clash = [r.path for r in routes if getattr(r, "path", "") == prefix or
+                 getattr(r, "path", "").startswith(prefix + "/")]
+        if clash:                                         # the parent may not already route into the nested space
+            raise ValueError(f"portal module {name}: {parent}'s routes {clash} fall inside nested PREFIX {prefix!r}")
         routes[:0] = own                                 # before every one-segment module's routes
     rules.sort(key=lambda pr: -len(pr[0]))
     return routes, rules

@@ -6,7 +6,8 @@ a label-set build. The logic lives in portal/review_build.py; this module holds 
                                   EXISTING Predict button (POST /predict/<ps>/review; all roles, own sets only);
                                   (b) Revise a label set and (c) Blind audit forms (admin only): label set, compare
                                   with a model or another label set, the "Images found N of M" coverage line
-                                  (?lv=<id> checks another label set: the forms' "Check images" button, no script),
+                                  (the label set is picked first in its own GET form, "Check images": ?lv=<id>;
+                                  no form token in any URL, no script),
                                   an audit's reviewers from the roster (the owner can't be one)
     POST /reviews/start/build     admin, form token (t) + the Gate's Origin check, never bearer: purpose, lv,
                                   b (model:<id> | lv:<id>), reviewer (repeatable) -> review_build.start() ->
@@ -198,18 +199,31 @@ def render_cov(cov) -> str:
             f'<span aria-hidden="true">{mark}</span><span>{esc(RB.coverage_line(cov))}</span></div>')
 
 
-def render_form(purpose, tok, sets, models, lv, b, cov, roster, me, busy, picked=()) -> str:
+def render_picker(sets, lv, cov) -> str:
+    """Step 1 of (b)/(c): the label set, in its own GET form (no form token: nothing is written), and the
+    "Images found N of M" line for it. Both build forms below take this label set."""
+    return (f'<section class="cj-rs-sec" id="rs-lv" aria-labelledby="rs-lv-h"><div><h2 id="rs-lv-h">Label set to '
+            f'review</h2><span class="cj-mut">For a revision or a blind audit (admin). Every image is looked up in '
+            f'the label set\'s Roboflow export before anything is built.</span></div>'
+            f'<form method="get" action="{PREFIX}/#rs-lv" class="cj-rs-acts">'
+            f'<label class="cj-rs-field" style="flex:1 1 360px">Label set<select name="lv">{lv_options(sets, lv)}'
+            f'</select></label><button class="cj-rs-btn" type="submit" style="align-self:flex-end">Check images'
+            f'</button></form>{render_cov(cov)}</section>')
+
+
+def render_form(purpose, tok, sets, models, lv, b, cov, roster, me, busy) -> str:
     rid = f"rs-{purpose}"
     title = "Revise a label set" if purpose == "revise" else "Blind audit"
-    grid = [f'<label>Label set<select name="lv">{lv_options(sets, lv)}</select></label>',
+    grid = [f'<div class="cj-rs-field"><span>Label set</span><span class="cj-rs-fixed">{esc(lv or "none")}</span>'
+            f'<a class="cj-mut" href="#rs-lv">change above</a></div>',
             f'<label>{"Compare with (model or label set)" if purpose == "revise" else "Versus (model or label set)"}'
             f'<select name="b">{b_options(models, sets, b, lv)}</select></label>']
     if purpose == "audit":
         grid.append('<div class="cj-rs-field"><span>Decoys</span><span class="cj-rs-fixed">10% of cards</span></div>')
     revs = ""
     if purpose == "audit":
-        boxes = "".join(f'<label><input type="checkbox" name="reviewer" value="{esc(p)}"'
-                        f'{" checked" if p in picked else ""}> {esc(p)}</label>' for p in roster if p != me)
+        boxes = "".join(f'<label><input type="checkbox" name="reviewer" value="{esc(p)}"> {esc(p)}</label>'
+                        for p in roster if p != me)
         if me in roster:
             boxes += f'<label class="cj-mut"><input type="checkbox" disabled> {esc(me)} (owner, can\'t review)</label>'
         revs = (f'<fieldset class="cj-rs-field" style="border:0;margin:0;padding:0"><legend>Reviewers '
@@ -219,15 +233,17 @@ def render_form(purpose, tok, sets, models, lv, b, cov, roster, me, busy, picked
     note = ("No decoys. Reviewers are added afterwards. When done, Apply makes a new label set that supersedes this "
             "one." if purpose == "revise" else "")
     dis = " disabled" if busy or not cov.get("ok") else ""
+    why = "" if not dis else (' <span class="cj-mut">' + ("Another review is being built." if busy else
+                                                         "The label set's images aren't ready (see above).")
+                              + "</span>")
     return (f'<section class="cj-rs-sec" id="{rid}" aria-labelledby="{rid}-h"><h2 id="{rid}-h">{title}</h2>'
             f'<form method="post" action="{PREFIX}/build">{AD.hidden_token(tok)}'
             f'<input type="hidden" name="purpose" value="{purpose}">'
-            f'<div class="cj-rs-grid">{"".join(grid)}</div>{render_cov(cov)}{revs}'
+            f'<input type="hidden" name="lv" value="{esc(lv or "")}">'
+            f'<div class="cj-rs-grid">{"".join(grid)}</div>{revs}'
             + (f'<span class="cj-mut">{esc(note)}</span>' if note else "")
-            + f'<div class="cj-rs-acts"><button class="cj-rs-btn" type="submit" formmethod="get" '
-            f'formaction="{PREFIX}/#{rid}" formnovalidate>Check images</button>'
-            f'<button class="cj-rs-btn cj-rs-primary" type="submit"{dis}>'
-            f'{"Create review" if purpose == "revise" else "Create audit"}</button></div></form></section>')
+            + f'<div class="cj-rs-acts"><button class="cj-rs-btn cj-rs-primary" type="submit"{dis}>'
+            f'{"Create review" if purpose == "revise" else "Create audit"}</button>{why}</div></form></section>')
 
 
 def render_start(user, pred_rows, admin_parts) -> str:
@@ -343,16 +359,11 @@ def routes(ctx) -> list:
         active = RB.active_build(rr) if rr else None
         tok = token(request)
         ids = roster_ids(roster) if roster else []
-        picked = set(q.getlist("reviewer"))
-        forms = [render_form(p, tok, sets, models, lv, b, cov, ids, me, bool(active), picked) for p in RB.PURPOSES]
+        forms = [render_picker(sets, lv, cov)] + [render_form(p, tok, sets, models, lv, b, cov, ids, me, bool(active))
+                                                  for p in RB.PURPOSES]
         return {"forms": forms, "active": active}
 
     def start_page(request: Request):
-        q = request.query_params
-        if "t" in q or "purpose" in q:      # "Check images" sends the whole form by GET: keep only what the page reads
-            keep = [(k, v) for k, v in q.multi_items() if k in ("lv", "b", "reviewer")]
-            frag = "#rs-audit" if q.get("purpose") == "audit" else "#rs-revise"
-            return RedirectResponse(f"{PREFIX}/" + (f"?{urlencode(keep)}" if keep else "") + frag, status_code=303)
         user = ctx.user(request)
         pred_rows = finished_without_package(ctx.cfg, user)
         parts = admin_parts(request) if is_admin(request) else None

@@ -37,7 +37,8 @@ audit's answer key; only its existence is checked, it is never listed or read). 
 a label-set revision, i.e. kind "compare" with purpose "revise" in the package's OWN review_package.json (never the
 registry's line) and no _work_ folder (compare_package.py --purpose revise: no decoys, scratch outside the review
 root). An audit, a compare without a purpose (built before round 13: an audit) or any compare with a _work_ folder
-(a forged purpose) stays excluded.
+(a forged purpose) stays excluded, and so does any package whose data.js says kind "compare" or built_by "portal"
+while its own review_package.json is missing or unreadable.
 
 Preview: the package's edits/*.json are copied into <state>/apply_preview/<pkg>/<UTC ts>/edits (frozen: the report's
 "decisions copy sha256" is theirs), then apply_review_edits.make_version (reviewed_only, out_root
@@ -219,6 +220,8 @@ def packages(cfg, records, served, served_problem=None) -> list:
             continue
         if p["kind"] == "compare" and not is_revise(root, pkg):
             continue
+        if unbacked_compare(root, pkg):                  # data.js says compare / portal-built, its json is not there
+            continue
         if not p["base_lv"]:
             continue                                     # a Roboflow export / pull base: not a label set
         row = {"id": pkg, "title": p["title"], "base_lv": p["base_lv"], "source": None, "base": None,
@@ -265,11 +268,51 @@ def is_revise(root, pkg) -> bool:
         return False
 
 
+_marks: dict = {}
+_marks_lock = threading.Lock()
+
+
+def datajs_marks(folder: Path) -> tuple:
+    """(kind, built_by) from a package's data.js, cached by its mtime and size. Unreadable: ("?", "?")."""
+    f = Path(folder) / "data.js"
+    try:
+        st = f.stat()
+    except OSError:
+        return None, None
+    sig = (st.st_mtime_ns, st.st_size)
+    with _marks_lock:
+        hit = _marks.get(str(f))
+    if hit and hit[0] == sig:
+        return hit[1]
+    try:
+        d = json.loads(f.read_text(encoding="utf-8").split("=", 1)[1].strip().rstrip(";"))
+        got = (d.get("kind"), d.get("built_by")) if isinstance(d, dict) else ("?", "?")
+    except (OSError, ValueError, IndexError):
+        got = ("?", "?")
+    with _marks_lock:
+        _marks[str(f)] = (sig, got)
+    return got
+
+
+def unbacked_compare(root, pkg) -> bool:
+    """data.js says kind "compare" or built_by "portal" (or can't be read) while the package's own
+    review_package.json is missing or unreadable: a half-written or hand-damaged build, never applied. Any error:
+    True."""
+    try:
+        kind, by = datajs_marks(Path(root) / pkg)
+        if kind != "compare" and by != "portal" and kind != "?":
+            return False
+        return not isinstance(TT.read_json(Path(root) / pkg / "review_package.json"), dict)
+    except Exception:
+        return True
+
+
 def excluded(cfg, pkg, records=None) -> bool:
-    """Serve-time re-check: a _work_ folder, or a compare package (its review_package.json or registry record) that
-    is not a revise (is_revise)."""
+    """Serve-time re-check: a _work_ folder, a compare package (its review_package.json or registry record) that
+    is not a revise (is_revise), or one whose data.js says compare / portal-built without its own json
+    (unbacked_compare)."""
     root = RES.review_root(cfg)
-    if has_work(root, pkg):
+    if has_work(root, pkg) or unbacked_compare(root, pkg):
         return True
     try:
         meta = {**TT._dict(TT._dict(TT._dict(records).get("review_package")).get(pkg)),
