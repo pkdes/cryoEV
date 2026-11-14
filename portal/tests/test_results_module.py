@@ -507,7 +507,8 @@ class Access(Base):
         self.assertEqual(T.hget(h, "content-disposition"), f'attachment; filename="results_{REVIEWED}.zip"')
         self.assertEqual(T.hget(h, "x-content-type-options"), "nosniff")
         z = zipfile.ZipFile(io.BytesIO(body))
-        self.assertEqual(sorted(z.namelist()), ["README.txt", "per_image.csv", "per_sample.csv", "results.json"])
+        self.assertEqual(sorted(z.namelist()), ["README.txt", "objects.csv", "per_image.csv", "per_sample.csv",
+                                                "results.json", "steps.json"])   # round 14: + objects / steps
         readme = z.read("README.txt").decode()
         for want in ("Model: v5_evnonev_y8m_20261029", "1 of 3 images reviewed", "Counting rule:",
                      f"Prediction set: {REVIEWED}", "by pujan", "Computed:"):
