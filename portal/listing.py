@@ -540,7 +540,7 @@ def row_html(r: dict) -> str:
             f'<div class="cj-list-c cj-list-name">{name}'
             f'<span class="cj-mut cj-list-id cj-wrap">{esc(str(r.get("id") or ""))}</span></div>'
             f'<div class="cj-list-c cj-list-owner">{owner_html(r.get("owner"), r.get("via"))}</div>'
-            f'<span class="cj-list-c cj-list-model cj-wrap" data-k="model">{esc(str(r.get("model") or ""))}</span>'
+            f'<span class="cj-list-c cj-list-model" data-k="model">{esc(str(r.get("model") or ""))}</span>'
             f'<span class="cj-list-c cj-list-num" data-k="images">'
             f'{esc(str(int(n_img))) if _num(n_img) is not None else ""}<small> images</small></span>'
             f'<span class="cj-list-c cj-list-num" data-k="samples" title="{esc("; ".join(samples))}">'
@@ -570,7 +570,7 @@ def rows_html(groups, by: str, *, shown: int, total: int, empty_text="No sets ma
     """The list: a count line, a column header, then one <ul> (by none) or one <details open> per group."""
     count = f'<p class="cj-mut cj-list-count" id="cj-list-count">{shown} of {plural(total, "set")}</p>'
     if shown == 0:
-        return count + f'<div class="cj-list"><p class="cj-list-empty">{esc(empty_text)}</p></div>'
+        return count + f'<div class="cj-list-box"><p class="cj-list-empty">{esc(empty_text)}</p></div>'
     parts = []
     for n, (label, rows) in enumerate(groups):
         body = f'<ul class="cj-list-rows {esc(ul_class)}">{"".join(row_html(r) for r in rows)}</ul>'
@@ -582,7 +582,7 @@ def rows_html(groups, by: str, *, shown: int, total: int, empty_text="No sets ma
                      f'<span class="cj-list-gname cj-wrap">{esc(group_label(by, label))}</span>'
                      f'<span class="cj-list-gcount">· {plural(len(rows), "set")}</span>'
                      f'<span class="cj-list-gimg">{plural(imgs, "image")}</span></summary>{body}</details>')
-    return count + f'<div class="cj-list">{HEAD}{"".join(parts)}</div>'
+    return count + f'<div class="cj-list-box">{HEAD}{"".join(parts)}</div>'
 
 
 def choices(rows, *, key=lambda r: r["facets"]) -> tuple:
@@ -627,7 +627,7 @@ STYLE = """<style>
   background:var(--acc);color:var(--card);cursor:pointer}
 .cj-list-reset{font-size:.85rem}
 .cj-list-count{margin:4px 0}
-.cj-list{background:var(--card);border:1px solid var(--line);border-radius:var(--cj-r);overflow:hidden}
+.cj-list-box{background:var(--card);border:1px solid var(--line);border-radius:var(--cj-r);overflow:hidden}
 .cj-list-rows{list-style:none;margin:0;padding:0}
 .cj-list-head,.cj-list-row{display:flex;flex-direction:row;flex-wrap:wrap;gap:6px 12px;align-items:center;padding:10px 14px}
 .cj-list-head{background:var(--bg);border-bottom:1px solid var(--line);font-size:.72rem;font-weight:600;
@@ -636,16 +636,18 @@ STYLE = """<style>
 .cj-list-rows:last-child .cj-list-row:last-child{border-bottom:0}
 .cj-list-name{flex:3 1 260px;min-width:0;display:flex;flex-direction:column;gap:2px}
 .cj-list-t{text-decoration:none}
+.cj-list-name .cj-wrap{word-break:normal}
+.cj-list-head span{font-family:inherit;font-size:inherit}
 .cj-list-id{font-family:var(--cj-mono);font-size:.75rem}
-.cj-list-owner{flex:1.2 1 140px;display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center;font-size:.85rem}
+.cj-list-owner{flex:1.2 1 140px;min-width:0;display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center;font-size:.85rem}
 .cj-list-via{padding:0 6px;border-radius:999px;font-size:.72rem;color:var(--prod);background:var(--prodbg);
   border:1px solid var(--line)}
-.cj-list-model{flex:1 1 120px;font-family:var(--cj-mono);font-size:.78rem;min-width:0}
-.cj-list-num{flex:0 0 70px;text-align:right;font-family:var(--cj-mono);font-size:.8rem}
+.cj-list-model{flex:1 1 180px;font-family:var(--cj-mono);font-size:.78rem;min-width:0;overflow-wrap:anywhere}
+.cj-list-num{flex:0 0 62px;text-align:right;font-family:var(--cj-mono);font-size:.8rem}
 .cj-list-num small{display:none}
 .cj-list-when{flex:.8 1 110px;font-size:.8rem;color:var(--mut)}
-.cj-list-status{flex:0 0 120px}
-.cj-list-act{flex:0 0 auto;margin-left:auto;display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;
+.cj-list-status{flex:0 1 120px;min-width:0}
+.cj-list-act{flex:0 1 150px;min-width:0;display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;
   justify-content:flex-end}
 .cj-list-act form{margin:0}
 .cj-list-open{display:inline-flex;padding:4px 10px;border-radius:6px;border:1px solid var(--acc);font-weight:600;
@@ -655,14 +657,22 @@ STYLE = """<style>
 .cj-list-group>summary{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:9px 14px;background:var(--accbg);
   cursor:pointer;font-size:.88rem}
 .cj-list-group[open]>summary{border-bottom:1px solid var(--line)}
+.cj-list-group>summary{list-style:none}
+.cj-list-group>summary::-webkit-details-marker{display:none}
+.cj-list-group>summary::before{content:"";flex:none;width:6px;height:6px;border:solid var(--mut);border-width:0 2px 2px 0;
+  transform:rotate(45deg);margin:0 4px 3px 0}
+.cj-list-group:not([open])>summary::before{transform:rotate(-45deg);margin-bottom:0}
+.cj-list-group>summary:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
 .cj-list-gname{font-weight:600;min-width:0}
 .cj-list-gcount,.cj-list-gimg{font-family:var(--cj-mono);font-size:.78rem;color:var(--mut)}
 .cj-list-gimg{margin-left:auto}
 .cj-list-empty{margin:0;padding:24px 14px;text-align:center;color:var(--mut)}
+@media (min-width:761px){.cj-list-head,.cj-list-row{flex-wrap:nowrap}}
 @media (max-width:760px){
   .cj-list-head{display:none}
   .cj-list-num,.cj-list-when,.cj-list-status,.cj-list-model{flex:0 1 auto;text-align:left}
   .cj-list-num small{display:inline}
   .cj-list-btns{margin-left:0}
+  .cj-list-act{flex:1 0 auto}
 }
 </style>"""
