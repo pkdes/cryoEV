@@ -74,7 +74,7 @@ class Schemas(unittest.TestCase):
     def test_legacy_is_todays_tool(self):
         """ls_legacy_v1 = review_tool CLASS_ORDER, CLASS_COLOR, hotkeys 1-8, the Low conf tag, MV's display label."""
         page = (REPO / "annotation" / "review_tool" / "index.html").read_text(encoding="utf-8")
-        order = json.loads(re.search(r"const CLASS_ORDER = (\[.*?\]);", page).group(1))
+        order = json.loads(re.search(r"const CLASS_ORDER = [^;]*?:\s*(\[[^\]]*\]);", page, re.S).group(1))  # legacy path
         colors = dict(re.findall(r'"([^"]+)": "(#[0-9a-f]{6})"', re.search(r"const CLASS_COLOR = \{(.*?)\};", page,
                                                                           re.S).group(1)))
         doc = S.load("ls_legacy_v1")
@@ -141,8 +141,57 @@ class Schemas(unittest.TestCase):
 
 
 # ---------------------------------------------------------------- server (C3)
-def put(srv, file, dec, key=KEY, t=1000, **extra):
-    return srv.request("PUT", f"/api/edits?f={file}", {"t": t, "dec": dec, **extra}, key=key)[:2]
+class MultiLive:
+    """multi_review_server in a thread on a temp review root holding a copy of one package (key = KEY), reached as
+    the portal reaches it: loopback, X-Review-Key and X-CJ-User (who=; None sends no identity header)."""
+
+    def __init__(self, src: Path):
+        from annotation import multi_review_server as mrs
+        self.dir = Path(tempfile.mkdtemp(prefix="objset_multi_"))
+        root = self.dir / "review"
+        root.mkdir()
+        self.pkg = root / Path(src).name
+        shutil.copytree(src, self.pkg)
+        (self.pkg / ".review_key").write_text(KEY, encoding="utf-8")
+        self.data = load_data(self.pkg)
+        env = {"CRYOEV_SERVICES_CONFIG": str(self.dir / "no_services.json"), "CJ_REVIEW_EXCLUDE": "",
+               "CJ_REVIEW_PREFIXES": ""}
+        with mock.patch.dict(os.environ, env):
+            self.server = mrs.make_server(root, port=0, people=[{"id": "au1"}, {"id": "au2"}, {"id": "au3"}])
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def request(self, method, path, body=None, key=KEY, headers=None, who="au1"):
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        h = dict(headers or {})
+        if key is not None:
+            h["X-Review-Key"] = key
+        if who is not None:
+            h["X-CJ-User"] = who
+        data = json.dumps(body).encode() if body is not None and not isinstance(body, bytes) else body
+        c.request(method, f"/{self.pkg.name}{path}", body=data, headers=h)
+        r = c.getresponse()
+        raw = r.read()
+        c.close()
+        try:
+            return r.status, json.loads(raw), r
+        except ValueError:
+            return r.status, raw, r
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def put(srv, file, dec, key=KEY, t=1000, who=None, **extra):
+    """PUT one record; on a MultiLive the identity header is `who`, else the first decision's who."""
+    kw = {}
+    if isinstance(srv, MultiLive):
+        kw["who"] = who if who is not None else next((d.get("who") for d in dec.values()
+                                                      if isinstance(d, dict) and d.get("who")), "au1")
+    return srv.request("PUT", f"/api/edits?f={file}", {"t": t, "dec": dec, **extra}, key=key, **kw)[:2]
 
 
 def dec(v, who, t=1000, pending=True):
@@ -155,9 +204,7 @@ class AttrServer(unittest.TestCase):
         cls.tmp = Path(tempfile.mkdtemp(prefix="objset_srv_"))
         cls.pkg = build_set(cls.tmp)
 
-        def copy(dst):
-            shutil.copytree(cls.pkg, dst)
-        cls.srv = LiveServer(build=copy, name=cls.pkg.name)
+        cls.srv = MultiLive(cls.pkg)            # attribute decisions need the portal's trusted identity (QC 9)
 
     @classmethod
     def tearDownClass(cls):
@@ -187,6 +234,59 @@ class AttrServer(unittest.TestCase):
         self.assertNotIn(rs.ATTR_LOG, json.dumps(body))
         self.assertIn("a:g1:type@au1", body["0001.png"]["dec"])
 
+    def obj_of(self, stem):
+        return [it["obj"] for it in self.srv.data["items"] if it["image"] == stem]
+
+    def test_rater_independence(self):
+        """QC 8: GET /api/edits holds only the requester's own attribute decisions; none without an identity."""
+        o = self.obj_of("0003")[0]
+        self.assertEqual(put(self.srv, "0003.png", {f"a:{o}:inner@au1": dec("1", "au1")})[0], 200)
+        self.assertEqual(put(self.srv, "0003.png", {f"a:{o}:inner@au2": dec("2", "au2")})[0], 200)
+
+        def keys(who):
+            body = self.srv.request("GET", "/api/edits", who=who)[1]
+            return {k for k in body.get("0003.png", {}).get("dec", {}) if k.startswith("a:")}
+        self.assertEqual(keys("au1"), {f"a:{o}:inner@au1"})
+        self.assertEqual(keys("au2"), {f"a:{o}:inner@au2"})
+        self.assertEqual(keys(None), set())
+        # the admin export (the files) still has both
+        tab = OS.table(self.srv.pkg)
+        row = next(r for r in tab["rows"] if r["obj"] == o and r["image"] == "0003")
+        self.assertEqual((row["inner@au1"], row["inner@au2"]), ("1", "2"))
+
+    def test_identity_and_reviewers(self):
+        """QC 9: no trusted identity -> 403; an identity that is not one of the set's reviewers -> 403."""
+        o = self.obj_of("0003")[0]
+        self.assertEqual(put(self.srv, "0003.png", {f"a:{o}:type@au3": dec("ML", "au3")})[0], 403)   # not a reviewer
+        code = self.srv.request("PUT", "/api/edits?f=0003.png",
+                                {"t": 1, "dec": {f"a:{o}:type@au1": dec("ML", "au1")}}, who=None)[0]
+        self.assertEqual(code, 403)                                                                     # no identity
+        # a non-attribute decision without identity still saves
+        code = self.srv.request("PUT", "/api/edits?f=0003.png", {"t": 1, "dec": {"i:note": dec("hi", "x")}},
+                                who=None)[0]
+        self.assertEqual(code, 200)
+
+    def test_resend_logs_once(self):
+        """QC 10: the same pending decision sent twice is one history row."""
+        o = self.obj_of("0002")[-1]
+        k = f"a:{o}:membranes@au1"
+        log = self.srv.pkg / "edits" / rs.ATTR_LOG
+        for _ in range(2):
+            self.assertEqual(put(self.srv, "0002.png", {k: dec("2", "au1", t=4242)})[0], 200)
+        rows = [json.loads(x) for x in log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(sum(r["key"] == k for r in rows), 1)
+
+    def test_only_items_objects_and_cap(self):
+        """QC 11: a: only on the objects of that image's items; at most 64 new ones per PUT."""
+        other = self.obj_of("0001")[0]                                  # an item, but of another image
+        code, body = put(self.srv, "0002.png", {f"a:{other}:type@au1": dec("ML", "au1")})
+        self.assertEqual(code, 400, body)
+        self.assertIn("objects", body["error"])
+        many = {f"a:g{n}:type@au1": dec("ML", "au1") for n in range(1, 66)}
+        code, body = put(self.srv, "0001.png", many)
+        self.assertEqual(code, 400)
+        self.assertIn("at most 64", body["error"])
+
     def test_echo_of_saved_copy_dropped(self):
         put(self.srv, "0002.png", {"a:g6:type@au2": dec("single", "au2")})
         saved = json.loads((self.srv.pkg / "edits" / "0002.png.json").read_text(encoding="utf-8"))["edit"]["dec"]
@@ -196,25 +296,28 @@ class AttrServer(unittest.TestCase):
         self.assertEqual(body["edit"]["dec"]["a:g6:type@au2"], saved["a:g6:type@au2"])
 
     def test_refused(self):
+        o = self.obj_of("0003")[0]
         bad = [
-            {"a:g1:nosuch@au1": dec("x", "au1")},                             # unknown attribute
-            {"a:g1:type@au1": dec("MV", "au1")},                              # not an option
-            {"a:g1:outline_wrong@au1": dec("true", "au1")},                   # bool as text
-            {"a:g1:note@au1": dec("x" * 301, "au1")},                         # text cap
-            {"a:g1:type@au1": {"v": "ML", "t": 1, "who": "au1", "pending": True, "note": "x"}},   # extra field
-            {"a:g1:type@au1": dec("ML", None)},                               # no reviewer
+            {f"a:{o}:nosuch@au1": dec("x", "au1")},                           # unknown attribute
+            {f"a:{o}:type@au1": dec("MV", "au1")},                            # not an option
+            {f"a:{o}:outline_wrong@au1": dec("true", "au1")},                 # bool as text
+            {f"a:{o}:note@au1": dec("x" * 301, "au1")},                       # text cap
+            {f"a:{o}:type@au1": {"v": "ML", "t": 1, "who": "au1", "pending": True, "note": "x"}},   # extra field
             {"a:x1:type@au1": dec("ML", "au1")},                              # bad object key
             {"a:n" + "a" * 90 + ":type@au1": dec("ML", "au1")},               # key over 96
             {"i:a:type@au1": dec("ML", "au1")},                               # no image attributes in this schema
-            {"a:g1:type@<b>": dec("ML", "au1")},                              # rid not a name
-        ]
+            {f"a:{o}:type@<b>": dec("ML", "au1")},                            # rid not a name
+        ]   # (a decision without who: the portal identity stamps it, so that is no refusal here)
         before = (self.srv.pkg / "edits" / rs.ATTR_LOG).read_bytes() if (self.srv.pkg / "edits" / rs.ATTR_LOG).exists() else b""
         for d in bad:
             self.assertEqual(put(self.srv, "0003.png", d)[0], 400, d)
         # a lone surrogate (JSON "\ud800") in a text value
-        raw = b'{"t": 1, "dec": {"a:g9:note@au1": {"v": "\\ud800", "t": 1, "who": "au1", "pending": true}}}'
+        raw = ('{"t": 1, "dec": {"a:%s:note@au1": {"v": "\\ud800", "t": 1, "who": "au1", "pending": true}}}'
+               % o).encode()
+        rec = self.srv.pkg / "edits" / "0003.png.json"
+        had = rec.read_bytes() if rec.exists() else None
         self.assertEqual(self.srv.request("PUT", "/api/edits?f=0003.png", raw)[0], 400)
-        self.assertFalse((self.srv.pkg / "edits" / "0003.png.json").exists())
+        self.assertEqual(rec.read_bytes() if rec.exists() else None, had)
         after = (self.srv.pkg / "edits" / rs.ATTR_LOG).read_bytes() if (self.srv.pkg / "edits" / rs.ATTR_LOG).exists() else b""
         self.assertEqual(before, after)
 
@@ -411,7 +514,7 @@ class ObjectSet(unittest.TestCase):
         """10 items on ls_lamellarity_v1, scripted decisions from two reviewers through the real server:
         export -> import -> export identical; COCO carries the attributes; progress counts done items."""
         pkg = build_set(self.tmp)
-        srv = LiveServer(build=lambda dst: shutil.copytree(pkg, dst), name=pkg.name)
+        srv = MultiLive(pkg)
         try:
             items = load_data(srv.pkg)["items"]
             file_of = {Path(i["file"]).stem: i["file"] for i in load_data(srv.pkg)["images"]}
@@ -493,7 +596,9 @@ class BlindHttp(unittest.TestCase):
         srv = LiveServer(build=lambda dst: shutil.copytree(self.pkg, dst), name=self.pkg.name)
         try:
             d = srv.data
-            put(srv, d["images"][0]["file"], {f"a:{d['items'][0]['obj']}:type@au1": dec("ML", "au1")})
+            im = next(i["file"] for i in d["images"] if Path(i["file"]).stem == d["items"][0]["image"])
+            # standalone review_server: no trusted identity, so attribute decisions are refused (QC 9)
+            self.assertEqual(put(srv, im, {f"a:{d['items'][0]['obj']}:type@au1": dec("ML", "au1")})[0], 403)
             bodies = {}
             for path in ("/", "/data.js", "/api/ping", "/api/meta", "/api/edits", "/api/groups", "/api/people",
                          "/api/claims", "/items.json", "/schema.json", "/edits/_attr_log.jsonl",
@@ -533,11 +638,17 @@ class BlindHttp(unittest.TestCase):
                 b = r.read()
                 c.close()
                 return r.status, b
+            im0 = next(i["file"] for i in d["images"] if Path(i["file"]).stem == d["items"][0]["image"])
             c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
             body = json.dumps({"t": 1, "dec": {f"a:{d['items'][0]['obj']}:type@au1": dec("ML", "au1")}}).encode()
-            c.request("PUT", f"/{pid}/api/edits?f={d['images'][0]['file']}", body=body,
+            c.request("PUT", f"/{pid}/api/edits?f={im0}", body=body,
                       headers={"X-Review-Key": key, "Content-Type": "application/json"})
-            self.assertEqual(c.getresponse().status, 200)
+            self.assertEqual(c.getresponse().status, 403)                # no portal identity: refused (QC 9)
+            c.close()
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            c.request("PUT", f"/{pid}/api/edits?f={im0}", body=body,
+                      headers={"X-Review-Key": key, "X-CJ-User": "au1", "Content-Type": "application/json"})
+            self.assertEqual(c.getresponse().status, 200)                # the portal's identity, a set reviewer
             c.close()
             for path in ("/", "/data.js", "/api/ping", "/api/meta", "/api/edits", "/api/groups", "/items.json",
                          "/schema.json", *(f"/{im['src']}" for im in d["images"])):

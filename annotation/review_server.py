@@ -56,6 +56,12 @@ before the merge, so the saved entry stays as it is. Each accepted decision is a
 edits/_attr_log.jsonl ({t, who, key, v, file}) under the package write lock: the history. That file is no image
 record (every reader takes edits/*.json). Attributes never change an object: effective_labels ignores the keys, and
 prediction_package.is_edited / apply_review_edits leave them out.
+Round 14 QC: a new attribute decision needs a TRUSTED identity (trusted_identity: multi_review_server's portal
+X-CJ-User; a standalone review_server has none and answers 403) that is one of the set's reviewers
+(review_package.json, read per request; no list: anyone on the roster); at most ATTR_PUT_MAX per PUT; in an object set
+only on the objects of that image's items (and their `also`). GET /api/edits of a package with a schema.json holds
+only the requester's own attribute decisions (none without an identity): reviewers never see each other's answers;
+the admin export reads the files. The history logs a key only when its saved entry changed (a resend logs nothing).
 
 Usage:
   python annotation/review_server.py --package "../CryoAI/annotation review/cryoai_v4_review"
@@ -105,6 +111,8 @@ ATTR_KEY_RE = re.compile(r"a:(g[0-9]+|p[0-9]+|n[0-9a-z]+):([a-z][a-z0-9_]{0,15})
 IMAGE_ATTR_KEY_RE = re.compile(r"i:a:([a-z][a-z0-9_]{0,15})@(.+)")
 ATTR_FIELDS = frozenset({"v", "t", "who", "server_t", "pending"})
 ATTR_TEXT_MAX = 300
+ATTR_PUT_MAX = 64              # new (pending) attribute decisions one PUT may bring
+RECORD = "review_package.json"  # <pkg>/review_package.json: an object set's reviewers (changed by the portal hub)
 ATTR_LOG = "_attr_log.jsonl"   # edits/_attr_log.jsonl: the decision history (not an image record: not *.json)
 SCHEMA_FILE = "schema.json"    # <pkg>/schema.json: the package's label schema (object sets); never served
 MAX_BODY = 20 * 2**20
@@ -295,12 +303,16 @@ def check_attrs(edit: dict, schema):
     return None
 
 
-def append_attr_log(edits_dir: Path, file: str, keys, merged: dict):
+def append_attr_log(edits_dir: Path, file: str, keys, merged: dict, cur=None):
     """edits/_attr_log.jsonl += {t, who, key, v, file} per attribute decision this save stamped (call under the
-    package write lock)."""
+    package write lock). cur: the saved record before this save; a key whose merged entry equals its saved one (a
+    resend of a decision the server already has) is not logged again."""
+    old = (_migrate(cur) if cur else {"dec": {}})["dec"]
     rows = []
     for k in keys:
         d = merged["dec"].get(k)
+        if old.get(k) == d:
+            continue
         if isinstance(d, dict) and _num(d.get("server_t")):
             rows.append(json.dumps({"t": d["server_t"], "who": d.get("who"), "key": k, "v": d.get("v"),
                                     "file": file}, ensure_ascii=False))
@@ -309,12 +321,74 @@ def append_attr_log(edits_dir: Path, file: str, keys, merged: dict):
             fh.write("\n".join(rows) + "\n")
 
 
+def trusted_identity(handler):
+    """The request's TRUSTED reviewer id: multi_review_server's portal identity (X-CJ-User from loopback with the
+    package key in X-Review-Key; Dispatch.reviewer), else None. A standalone review_server has none: its picker
+    name is never trusted for attribute decisions."""
+    who = getattr(handler, "reviewer", None)
+    return who if isinstance(who, str) and who else None
+
+
+def package_reviewers(pkg: Path):
+    """<pkg>/review_package.json reviewers (read per request: the portal hub changes them), or None when the file
+    has no reviewers list."""
+    try:
+        rec = json.loads((Path(pkg) / RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    revs = rec.get("reviewers") if isinstance(rec, dict) else None
+    return [r for r in revs if isinstance(r, str)] if isinstance(revs, list) and revs else None
+
+
+def object_targets(pkg: Path):
+    """{image file: {object keys of its items (and their also)}} for an object set (data.js kind "objects"), else
+    None (no restriction)."""
+    try:
+        data = json.loads((Path(pkg) / "data.js").read_text(encoding="utf-8").split("=", 1)[1].strip().rstrip(";"))
+    except (OSError, ValueError, IndexError):
+        return None
+    if not isinstance(data, dict) or data.get("kind") != "objects":
+        return None
+    by_stem = {}
+    for im in data.get("images") or []:
+        f = str(im.get("file") or "")
+        by_stem[f] = f
+        by_stem[Path(f).stem] = f
+    out = {}
+    for it in data.get("items") or []:
+        f = by_stem.get(str(it.get("image")))
+        if f is None:
+            continue
+        s = out.setdefault(f, set())
+        s.add(str(it.get("obj")))
+        s.update(str(x) for x in it.get("also") or [])
+    return out
+
+
+def own_attrs_only(edit: dict, who):
+    """A record with only `who`'s own attribute decisions (a: / i:a: keys @who); other reviewers' are left out (rater
+    independence: a reviewer never sees another's answers). who None: no attribute decisions at all."""
+    dec = edit.get("dec") if isinstance(edit, dict) else None
+    if not isinstance(dec, dict):
+        return edit
+    keep = {}
+    for k, d in dec.items():
+        if is_attr_key(k):
+            p = parse_attr_key(k)
+            if who is None or p is None or p[2] != who:
+                continue
+        keep[k] = d
+    return {**edit, "dec": keep}
+
+
 def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people: list = (), sandbox: bool = False):
     people = list(people)
     edits_dir = pkg / "edits"
     edits_dir.mkdir(exist_ok=True)
     lock = _write_lock(edits_dir)
     schema = package_schema(pkg)  # round 14: attribute decisions only for a package with a schema.json
+    targets = object_targets(pkg) if schema is not None else None  # an object set: a: only on its items' objects
+    roster = {p.get("id") for p in people if isinstance(p, dict) and isinstance(p.get("id"), str)}
 
     def active_claims(now):
         for k in [k for k, (_, exp) in claims.items() if exp < now]:
@@ -391,6 +465,9 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
                             out[rec["file"]] = rec["edit"]
                         except (ValueError, KeyError):
                             pass
+                if schema is not None:  # round 14: each reviewer gets only their own attribute decisions
+                    who = trusted_identity(self)
+                    out = {f: own_attrs_only(e, who) for f, e in out.items()}
                 return self._json(200, out)
             rel = "index.html" if url.path in ("/", "/index.html") else url.path.lstrip("/")
             if not (rel in ("index.html", "data.js") or (rel.startswith("images/") and "/" not in rel[7:] and ".." not in rel)):
@@ -436,10 +513,26 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
                         d["who"] = who
             attr_new = None
             if any(is_attr_key(k) for k in edit.get("dec") or {}):  # round 14: only bodies with attributes
+                pend = [k for k, d in edit["dec"].items() if is_attr_key(k) and isinstance(d, dict)
+                        and d.get("pending") is True]
+                if pend and schema is not None:
+                    who = trusted_identity(self)
+                    if who is None:
+                        return self._json(403, {"error": "attribute decisions need a signed-in reviewer (open the "
+                                                         "set from the portal)"})
+                    revs = package_reviewers(pkg)
+                    if not (who in revs if revs else who in roster):
+                        return self._json(403, {"error": "you are not a reviewer of this set"})
+                    if len(pend) > ATTR_PUT_MAX:
+                        return self._json(400, {"error": f"at most {ATTR_PUT_MAX} attribute decisions per save"})
                 why = check_attrs(edit, schema)
                 if why:
                     return self._json(400, {"error": why})
                 attr_new = [k for k in edit["dec"] if is_attr_key(k)]
+                if targets is not None:
+                    allowed = targets.get(file, set())
+                    if any((parse_attr_key(k) or (None,))[0] not in allowed | {None} for k in attr_new):
+                        return self._json(400, {"error": "attribute decisions only on this set's objects"})
             target = edits_dir / f"{file}.json"
             with lock:
                 saved = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
@@ -452,7 +545,7 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
                                encoding="utf-8")
                 os.replace(tmp, target)
                 if attr_new:
-                    append_attr_log(edits_dir, file, attr_new, merged)
+                    append_attr_log(edits_dir, file, attr_new, merged, cur)
             return self._json(200, {"edit": merged})
 
         def do_POST(self):
