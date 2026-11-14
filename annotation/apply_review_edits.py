@@ -55,7 +55,8 @@ attributes.low_conf = true; a tag note goes in attributes.note. version.json "lo
 objects that are low conf (the tag, or the Low conf EV class: what reviewed_polygons calls low_conf), "object_notes"
 the other objects with a tag note; each row image, key (the object's decision key), ann (its id in the output, null
 if not written), cls (its category there), tagged (t: "lowconf"), note. A record whose only decisions are i: keys
-counts as a record without changes; a t: tag counts as a change.
+counts as a record without changes; a t: tag counts as a change. Round 14: attribute decisions (a:<obj>:<attr>@<rid>,
+i:a:<attr>@<rid>; contract C3) are no object decisions either: left out of the diff and of the changed-image test.
 
 Not logged (no label change, no review verdict): null (undone) decisions, n<uid>/p<k> "del" of an
 outline that was drawn/accepted and then removed again. Counted in version.json "skipped".
@@ -352,7 +353,7 @@ def image_ops(im: dict, rec: dict, base_anns: dict, w: int, h: int, dup_iou: flo
     edit = rec["edit"]
     e = _migrate(edit)
     full = e["dec"]
-    dec = {k: d for k, d in full.items() if not k.startswith(("i:", "t:"))}
+    dec = {k: d for k, d in full.items() if not k.startswith(("i:", "t:", "a:"))}  # a: attributes (round 14)
     final = [coco_rule(f, full) for f in effective_labels(im, edit)]
     if tags is not None:  # (key, object, low conf (is_low_conf, as reviewed_polygons), tag note)
         for f in final:
@@ -708,8 +709,9 @@ def apply(base_path: Path, package: Path, edits_dir: Path, people: list, dup_iou
             rejected.append({"image": image, "reason": flags["reject_reason"], "reviewed": reviewed,
                              "who_raw": e["dec"]["i:reject"].get("who"), "who": who_of(e["dec"]["i:reject"].get("who")),
                              **({"note": flags["note"]} if flags.get("note") else {})})
-        # the image-level i: keys change no label; a t: tag can (coco_rule), so it counts as a change
-        if not (any(not k.startswith("i:") for k in e["dec"]) or e.get("modified")):
+        # the image-level i: keys change no label; a t: tag can (coco_rule), so it counts as a change; a: attribute
+        # decisions (round 14, contract C3) never do
+        if not (any(not k.startswith(("i:", "a:")) for k in e["dec"]) or e.get("modified")):
             n_unchanged += 1
             continue
         if scope == "reviewed_only" and not reviewed:

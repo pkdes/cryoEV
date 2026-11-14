@@ -260,7 +260,7 @@ class ServerCase(FixtureCase):
 
 class RouteTests(ServerCase):
     def test_ping_meta_groups_need_the_key(self):
-        self.assertEqual(self.req("GET", "/api/ping"), (200, {"ok": True, "caps": ["i", "t", "m", "g"]}))
+        self.assertEqual(self.req("GET", "/api/ping"), (200, {"ok": True, "caps": ["i", "t", "m", "g", "a"]}))
         for path in ("/api/meta", "/api/groups"):
             self.assertEqual(self.req("GET", path, key="wrong")[0], 403)
             self.assertEqual(self.req("GET", path, key=None)[0], 403)

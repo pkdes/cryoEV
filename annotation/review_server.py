@@ -14,9 +14,11 @@ page: data.js is served with window.REVIEW_SERVER = {"sandbox": true} appended (
 
 Routes:
   GET  /, /data.js, /images/<name>   the package itself
-  GET  /api/ping                     {"ok": true, "caps": ["i", "t", "m", "g"]}: caps = what this server accepts
+  GET  /api/ping                     {"ok": true, "caps": ["i", "t", "m", "g", "a"]}: caps = what this server accepts
                                      beyond g/p/n decisions (i: image reject / note, t: object low-conf tag / note;
-                                     round 12: m: GET /api/meta, g: group actions and the grp field on i:reject). The
+                                     round 12: m: GET /api/meta, g: group actions and the grp field on i:reject;
+                                     round 14: a: attribute decisions a:<obj>:<attr>@<rid> / i:a:<attr>@<rid>, taken
+                                     only by a package with a schema.json, see "Attribute decisions" below). The
                                      page hides those controls when they are missing (an older server answers
                                      {"ok": true} or fewer caps, and refuses the keys with a 400 / the routes with 404)
   GET  /api/meta                     image metadata (sample, montage, tile, defocus, recipe...), derived read-only
@@ -44,6 +46,17 @@ replace). The record format (decision keys and values) is in docs/REVIEW_TOOL.md
 effective_labels() applies one record to its image without the browser, for the
 planned annotation/apply_review_edits.py that turns them into a new COCO export.
 
+Attribute decisions (round 14, contract C3; an object set, annotation/object_set.py): keys a:<obj>:<attr>@<rid>
+(<obj> = g<id> | p<k> | n<uid>) and i:a:<attr>@<rid>, at most ATTR_KEY_MAX characters, value {v, t, who, server_t,
+pending}. Only a package with <pkg>/schema.json (a label schema, labels/schemas.py) takes them; each new (pending)
+one is checked against it (the attribute exists; v is one of its options, true / false, or text through _utf8 within
+300 characters; null = undone), its who comes from the request's identity (_request_identity) and its key's @<rid>
+is rewritten to that who (a client's rid never counts). Saved copies a request echoes (not pending) are dropped
+before the merge, so the saved entry stays as it is. Each accepted decision is also appended to
+edits/_attr_log.jsonl ({t, who, key, v, file}) under the package write lock: the history. That file is no image
+record (every reader takes edits/*.json). Attributes never change an object: effective_labels ignores the keys, and
+prediction_package.is_edited / apply_review_edits leave them out.
+
 Usage:
   python annotation/review_server.py --package "../CryoAI/annotation review/cryoai_v4_review"
   python annotation/review_server.py --package <pkg> --host 100.x.y.z   # this PC's Tailscale IP: phones on the tailnet
@@ -70,7 +83,8 @@ SANDBOX_PREFIX = "SANDBOX_"
 DEC_PREFIXES = ("g", "p", "n")  # g<label id>, p<prediction index>, n<id of an outline drawn in the tool>
 # Image and object state (docs/REVIEW_TOOL.md "Reject, notes, low conf"): decisions on keys of their own, so they
 # merge per key, carry who and server_t, and undo like any decision. Never extra fields on a class decision.
-CAPS = ("i", "t", "m", "g")    # /api/ping caps: i:reject / i:note, t:<objkey>; m: /api/meta; g: group actions (round 12)
+CAPS = ("i", "t", "m", "g", "a")  # /api/ping caps: i:reject / i:note, t:<objkey>; m: /api/meta; g: group actions
+                                  # (round 12); a: attribute decisions (round 14, a package with a schema.json)
 IMAGE_KEYS = ("i:reject", "i:note")
 TAG_KEY_RE = re.compile(r"t:(?:g[0-9]+|p[0-9]+|n[0-9a-z]+)")   # t:<objkey>, objkey = the object's decision key
 REJECT_PREFIX = "reject:"
@@ -85,6 +99,14 @@ REJECT_FIELDS = STATE_FIELDS | {"grp"}  # i:reject also: grp, the group action t
 GRP_MAX = 500                  # = review_groups.GRP_MAX
 GROUP_BODY_MAX = 16 * 1024
 STATE_KEY_MAX = 64             # an i: / t: key longer than this is refused
+# Attribute decisions (round 14, contract C3; module doc "Attribute decisions")
+ATTR_KEY_MAX = 96
+ATTR_KEY_RE = re.compile(r"a:(g[0-9]+|p[0-9]+|n[0-9a-z]+):([a-z][a-z0-9_]{0,15})@(.+)")
+IMAGE_ATTR_KEY_RE = re.compile(r"i:a:([a-z][a-z0-9_]{0,15})@(.+)")
+ATTR_FIELDS = frozenset({"v", "t", "who", "server_t", "pending"})
+ATTR_TEXT_MAX = 300
+ATTR_LOG = "_attr_log.jsonl"   # edits/_attr_log.jsonl: the decision history (not an image record: not *.json)
+SCHEMA_FILE = "schema.json"    # <pkg>/schema.json: the package's label schema (object sets); never served
 MAX_BODY = 20 * 2**20
 CLAIM_SECONDS = 90
 MAX_CLAIMS = 200      # active claims kept at most (one per reviewer is the norm); the soonest to expire go first
@@ -197,11 +219,102 @@ def package_meta(pkg: Path, valid_files=None) -> dict:
     return meta
 
 
+def package_schema(pkg: Path):
+    """<pkg>/schema.json (a label schema, labels/schemas.py), validated; None when the package has none (every
+    package before round 14: attribute decisions are refused) or it doesn't validate."""
+    f = Path(pkg) / SCHEMA_FILE
+    if not f.is_file():
+        return None
+    try:
+        doc = json.loads(f.read_text(encoding="utf-8"))
+        return doc if not _labels_schemas().validate(doc) else None
+    except Exception:  # noqa: BLE001  an unreadable schema: no attributes, never a broken page
+        return None
+
+
+def _labels_schemas():
+    """labels.schemas, with the repo on sys.path (imported only for a package that has a schema.json)."""
+    repo = str(Path(__file__).resolve().parent.parent)
+    if repo not in sys.path:
+        sys.path.insert(0, repo)
+    import importlib
+    return importlib.import_module("labels.schemas")
+
+
+def is_attr_key(k) -> bool:
+    """An attribute decision key (a:<obj>:<attr>@<rid>, i:a:<attr>@<rid>): never an object change."""
+    return isinstance(k, str) and (k.startswith("a:") or k.startswith("i:a:"))
+
+
+def parse_attr_key(k):
+    """(obj | None for an image attribute, attr, rid) of an attribute key, or None when it isn't one."""
+    if not isinstance(k, str) or len(k) > ATTR_KEY_MAX:
+        return None
+    m = ATTR_KEY_RE.fullmatch(k)
+    if m:
+        return m.group(1), m.group(2), m.group(3)
+    m = IMAGE_ATTR_KEY_RE.fullmatch(k)
+    return (None, m.group(1), m.group(2)) if m else None
+
+
+def attr_key(obj, attr: str, rid: str) -> str:
+    return f"a:{obj}:{attr}@{rid}" if obj is not None else f"i:a:{attr}@{rid}"
+
+
+def check_attrs(edit: dict, schema):
+    """Prepare a PUT body's attribute decisions (valid_edit has checked their shape; who is already the request's
+    identity): drop the saved copies it echoes (not pending: the saved entry stays), check each new one against the
+    package schema, and re-key it to @<its who>. Changes edit in place. -> an error text, or None."""
+    dec = edit.get("dec") or {}
+    keys = [k for k in dec if is_attr_key(k)]
+    if not keys:
+        return None
+    if schema is None:
+        return "this package takes no attribute decisions"
+    S = _labels_schemas()
+    new = {}
+    for k in keys:
+        d = dec.pop(k)
+        if not (isinstance(d, dict) and d.get("pending") is True):
+            continue
+        obj, attr, _ = parse_attr_key(k)
+        a = S.attr(schema, attr, image=obj is None)
+        if a is None:
+            return f"unknown attribute {attr!r}"
+        v = d.get("v")
+        if not S.value_ok(a, v) or (isinstance(v, str) and (len(v) > ATTR_TEXT_MAX or not _utf8(v))):
+            return f"bad value for {attr!r}"
+        who = d.get("who")
+        if not who or not valid_who(who) or not who.strip():
+            return "an attribute decision needs a reviewer"
+        nk = attr_key(obj, attr, who)
+        if parse_attr_key(nk) is None:
+            return "attribute key too long"
+        new[nk] = d
+    dec.update(new)
+    return None
+
+
+def append_attr_log(edits_dir: Path, file: str, keys, merged: dict):
+    """edits/_attr_log.jsonl += {t, who, key, v, file} per attribute decision this save stamped (call under the
+    package write lock)."""
+    rows = []
+    for k in keys:
+        d = merged["dec"].get(k)
+        if isinstance(d, dict) and _num(d.get("server_t")):
+            rows.append(json.dumps({"t": d["server_t"], "who": d.get("who"), "key": k, "v": d.get("v"),
+                                    "file": file}, ensure_ascii=False))
+    if rows:
+        with open(Path(edits_dir) / ATTR_LOG, "a", encoding="utf-8", newline="\n") as fh:
+            fh.write("\n".join(rows) + "\n")
+
+
 def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people: list = (), sandbox: bool = False):
     people = list(people)
     edits_dir = pkg / "edits"
     edits_dir.mkdir(exist_ok=True)
     lock = _write_lock(edits_dir)
+    schema = package_schema(pkg)  # round 14: attribute decisions only for a package with a schema.json
 
     def active_claims(now):
         for k in [k for k, (_, exp) in claims.items() if exp < now]:
@@ -321,6 +434,12 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
                     who = _request_identity(self, d.get("who"))
                     if who != d.get("who"):
                         d["who"] = who
+            attr_new = None
+            if any(is_attr_key(k) for k in edit.get("dec") or {}):  # round 14: only bodies with attributes
+                why = check_attrs(edit, schema)
+                if why:
+                    return self._json(400, {"error": why})
+                attr_new = [k for k in edit["dec"] if is_attr_key(k)]
             target = edits_dir / f"{file}.json"
             with lock:
                 saved = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
@@ -332,6 +451,8 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
                 tmp.write_text(json.dumps({"file": file, "pkg": pkg_id, "fmt": RECORD_FMT, "edit": merged, "rx": rx}),
                                encoding="utf-8")
                 os.replace(tmp, target)
+                if attr_new:
+                    append_attr_log(edits_dir, file, attr_new, merged)
             return self._json(200, {"edit": merged})
 
         def do_POST(self):
@@ -447,6 +568,10 @@ def valid_edit(edit) -> bool:
     if not all(_valid_item(g) for g in edit.get("gt") or []):
         return False
     for k, d in (edit.get("dec") or {}).items():
+        if is_attr_key(k):  # round 14: a:<obj>:<attr>@<rid> / i:a:<attr>@<rid>; the schema check is check_attrs
+            if not _valid_attr_dec(k, d):
+                return False
+            continue
         if k in IMAGE_KEYS or (len(k) <= STATE_KEY_MAX and TAG_KEY_RE.fullmatch(k)):  # a longer t: key: refused below
             if not _valid_state_dec(k, d):
                 return False
@@ -501,6 +626,22 @@ def _valid_state_dec(k, d) -> bool:
         return "note" not in d and (v is None or (isinstance(v, str) and len(v) <= IMAGE_NOTE_MAX))
     note = d.get("note")
     return (v is None or v in TAG_VALUES) and (note is None or (isinstance(note, str) and len(note) <= TAG_NOTE_MAX))
+
+
+def _valid_attr_dec(k, d) -> bool:
+    """An attribute decision's shape (round 14): a known key form within ATTR_KEY_MAX, a dict with only ATTR_FIELDS,
+    v null / true / false / a UTF-8 string within ATTR_TEXT_MAX."""
+    p = parse_attr_key(k)
+    if p is None or not valid_who(p[2]) or not p[2].strip():
+        return False
+    if not isinstance(d, dict) or not set(d) <= ATTR_FIELDS or not _num(d.get("t", 0)):
+        return False
+    v = d.get("v")
+    if not (v is None or isinstance(v, bool) or (isinstance(v, str) and len(v) <= ATTR_TEXT_MAX and _utf8(v))):
+        return False
+    if d.get("who") is not None and not valid_who(d["who"]):
+        return False
+    return not (("server_t" in d and not _num(d["server_t"])) or ("pending" in d and not isinstance(d["pending"], bool)))
 
 
 def _migrate(e):
