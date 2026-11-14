@@ -70,6 +70,16 @@ when the sample has no EV; pct_multilayer_reviewer is null with no reviewed imag
 per image nm_per_px is null when images.csv has no confirmed nm/px (that sample is then refused); `refused`
 is null unless something was refused.
 
+Analysis steps (round 14, contract C5). compute(..., recipe=None) runs the recipe's steps (analysis/steps; default
+roles v1 = the roles_for rule above, so the counts take their roles from the roles step) on each image's accepted
+outlines, and write_results writes, in this order, per_image.csv, per_sample.csv, objects.csv (one row per outline:
+image, line = 0-based line of the prediction .txt, pkg_key = the review package's g<id> / p<k>, cls, conf, included,
+exclude_reason in conf / no_diameter / rejected_image / refused_sample / non_ev, then <step>.<column>), steps.json
+(the recipe stamp + objects.csv sha256) and results.json last. included = 1 for the outlines the counts use (EVs and
+inner layers). A reviewed / edited image lists its reviewed objects; one kept exactly as the model drew it gets its
+line by polygon match, a drawn or reshaped one has a blank line (unless reviewed.json gives its package `key`).
+results.json is byte-identical to before under the default recipe; any other recipe adds a "steps" key.
+
 A sample whose images differ in tile size, or whose nm/px values spread (max - min) by more than NM_TOLERANCE
 (1 %) of their median, or that lack a confirmed nm/px, is refused (left out of `samples`, reason in `refused`),
 never mixed or defaulted. Within the tolerance the sample counts as one scale (contract section 8): each image
@@ -80,6 +90,7 @@ keeps and uses its OWN nm/px (diameters are converted per image) and the sample 
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import math
@@ -98,6 +109,8 @@ from data_utils.longpath import long_path, prediction_file
 from inference.model_classes import ev_class_ids, model_classes
 
 SCHEMA = "results/1"
+STEPS_SCHEMA = "steps/1"
+OBJECTS_CSV, STEPS_JSON = "objects.csv", "steps.json"
 CONF = 0.5
 CAND_CONF = 0.25      # = annotation.prediction_package.CAND_CONF (a test pins both equal): lowest "unsure" confidence
 HIST_BIN_NM = 10      # diam_hist: 10 nm bins from 0 to HIST_MAX_NM, then one overflow bin
@@ -126,32 +139,17 @@ _CHAIN_LOCK = threading.Lock()
 
 def _chain():
     """(load_predictions_yolo_format, polygon_to_mask, roles_for, compute_morphology) from the counting chain,
-    imported once per process under a lock.
-
-    analysis.add_layer_roles takes its validated containment pair (0.99 / 0.75) from analysis.layer_count_stats,
-    whose module body resolves the CryoAI training folder for its own CLI defaults and raises ConfigError on a
-    host without one. Counting never reads that folder, so on that error the import is retried with
-    $CRYOEV_CRYOAI_ROOT pointed at the repo, inside the lock and restored before the lock is released; it
-    happens at most once per process (the result is cached). The thresholds stay the chain's own."""
+    imported once per process under a lock. roles_for comes from analysis.steps.roles.load_roles_for (it retries
+    the import with $CRYOEV_CRYOAI_ROOT pointed at the repo on a host without a CryoAI training folder; the
+    thresholds stay the chain's own)."""
     global _CHAIN
     with _CHAIN_LOCK:
         if _CHAIN is None:
             from training.train_yolo import load_predictions_yolo_format
             from analysis.multilayer_containment import polygon_to_mask
             from analysis.morphology import compute_morphology
-            try:
-                from analysis.add_layer_roles import roles_for
-            except config.ConfigError:
-                old = os.environ.get("CRYOEV_CRYOAI_ROOT")
-                os.environ["CRYOEV_CRYOAI_ROOT"] = str(config.REPO)
-                try:
-                    from analysis.add_layer_roles import roles_for
-                finally:
-                    if old is None:
-                        os.environ.pop("CRYOEV_CRYOAI_ROOT", None)
-                    else:
-                        os.environ["CRYOEV_CRYOAI_ROOT"] = old
-            _CHAIN = (load_predictions_yolo_format, polygon_to_mask, roles_for, compute_morphology)
+            from analysis.steps.roles import load_roles_for
+            _CHAIN = (load_predictions_yolo_format, polygon_to_mask, load_roles_for(), compute_morphology)
         return _CHAIN
 
 
@@ -163,6 +161,10 @@ class _Obj:
     cls: int
     reviewer_class: str | None = None
     low_conf: bool = False
+    line: int | None = None          # 0-based line of the prediction .txt (contract C5); None = drawn / reshaped
+    conf: float | None = None
+    poly: list | None = None         # [[x, y], ...] in pixels (analysis steps' poly_px)
+    key: str | None = None           # the review package's object key (g<id> / p<k> / n<uid>) when known
 
 
 def _read_json(path: Path) -> dict:
@@ -206,10 +208,28 @@ def _image_size(ps_dir: Path, rel: str) -> tuple[int, int]:
         return im.size
 
 
-def _split_predictions(pred_dir: Path, image: str, w: int, h: int, load) -> tuple[list[_Obj], int]:
-    """(outlines at conf >= CONF, number of candidates CAND_CONF <= conf < CONF) from the prediction .txt."""
+def _prediction_lines(pred_dir: Path, image: str) -> list[tuple[int, list[str]]]:
+    """[(0-based line index, tokens)] of the prediction .txt's non-blank lines: the lines (and the order)
+    load_predictions_yolo_format reads. Missing file = error."""
+    with open(prediction_file(pred_dir, image, image)) as f:
+        return [(n, line.strip().split()) for n, line in enumerate(f) if line.strip()]
+
+
+def _split_predictions(pred_dir: Path, image: str, w: int, h: int, load, lines=None) -> tuple[list[_Obj], int]:
+    """(outlines at conf >= CONF, number of candidates CAND_CONF <= conf < CONF) from the prediction .txt.
+    `lines` (_prediction_lines) adds each outline's line, conf and pixel polygon."""
     masks, confs, classes = load(prediction_file(pred_dir, image, image), w, h)   # missing file = error
-    objs = [_Obj(m, k) for m, c, k in zip(masks, confs, classes) if c >= CONF]
+    if lines is not None and len(lines) != len(masks):
+        raise ValueError(f"predictions for image {image}: {len(lines)} lines but {len(masks)} outlines read")
+    objs = []
+    for n, (m, c, k) in enumerate(zip(masks, confs, classes)):
+        if c >= CONF:
+            o = _Obj(m, k)
+            if lines is not None:
+                t = lines[n][1]
+                o.line, o.conf = lines[n][0], c
+                o.poly = [[float(t[i]) * w, float(t[i + 1]) * h] for i in range(2, len(t) - 1, 2)]
+            objs.append(o)
     return objs, sum(1 for c in confs if CAND_CONF <= c < CONF)
 
 
@@ -228,8 +248,11 @@ def _objects_from_reviewed(entry: dict, image: str, w: int, h: int, to_mask) -> 
         rc = o.get("reviewer_class")
         if rc is not None and rc not in REVIEWER_CLASSES:
             raise ValueError(f"reviewed image {image} object {n}: unknown reviewer_class {rc!r}")
+        conf = o.get("conf")
         out.append(_Obj(to_mask([float(c) for xy in poly for c in xy], w, h), int(o["cls"]), rc,
-                        bool(o.get("low_conf"))))
+                        bool(o.get("low_conf")), None, float(conf) if isinstance(conf, (int, float)) else None,
+                        [[float(xy[0]), float(xy[1])] for xy in poly],
+                        o.get("key") if isinstance(o.get("key"), str) else None))
     return out
 
 
@@ -243,17 +266,23 @@ def _diameter(mask: np.ndarray, nm_per_px: float | None, compute_morphology) -> 
     return float(np.sqrt(4 * area_px / np.pi) * (nm_per_px if nm_per_px is not None else 1.0))
 
 
-def _measure(objs: list[_Obj], nm_per_px: float | None, ev_ids, roles_for, compute_morphology) -> dict:
+def _measure(objs: list[_Obj], nm_per_px: float | None, ev_ids, roles_for, compute_morphology, roles=None) -> dict:
     """Geometry counts for one image's accepted outlines (classes from `cls` only), the EV diameters (nm),
-    and the reviewer-label tallies (zero unless some object carries a reviewer_class)."""
+    and the reviewer-label tallies (zero unless some object carries a reviewer_class). `roles`: the roles step's
+    `role` column (one per object, None for a non-EV outline); without it roles_for assigns them here (the same
+    rule). `_no_diam`: the EV outlines dropped for having no diameter (objects.csv exclude_reason no_diameter)."""
     ev_idx = [k for k, o in enumerate(objs) if ev_ids is None or o.cls in ev_ids]
-    role, _ = roles_for([objs[k].mask for k in ev_idx])
-    geo_role = {k: role[j] for j, k in enumerate(ev_idx)}
+    if roles is None:
+        role, _ = roles_for([objs[k].mask for k in ev_idx])
+        geo_role = {k: role[j] for j, k in enumerate(ev_idx)}
+    else:
+        geo_role = {k: roles[k] for k in ev_idx}
     ev = ml = inner = low = 0
-    diam = []
+    diam, no_diam = [], set()
     for k in ev_idx:
         d = _diameter(objs[k].mask, nm_per_px, compute_morphology)
         if d is None:
+            no_diam.add(k)
             continue
         if geo_role[k] == "inner-layer":
             inner += 1
@@ -264,6 +293,7 @@ def _measure(objs: list[_Obj], nm_per_px: float | None, ev_ids, roles_for, compu
         low += bool(objs[k].low_conf)          # counted EVs only: a low-conf non-EV or inner layer is not here
     calls = [(o.reviewer_class, geo_role.get(k)) for k, o in enumerate(objs) if o.reviewer_class is not None]
     return {"ev": ev, "multilayer": ml, "inner": inner, "nonev": len(objs) - len(ev_idx), "_diam": diam, "_low_conf": low,
+            "_no_diam": no_diam,
             "_rev_ev": sum(rc in ("EV", "MV") for rc, _ in calls),
             "_rev_mv": sum(rc == "MV" for rc, _ in calls),
             "_rev_inner": sum(rc == "inner" for rc, _ in calls),
@@ -362,12 +392,138 @@ def _refusal(label: str, imgs: list[dict]) -> str | None:
     return None
 
 
+# ---- objects.csv (contract C5) -----------------------------------------------------------------------------
+
+OBJECT_COLUMNS = ["image", "line", "pkg_key", "cls", "conf", "included", "exclude_reason"]
+EXCLUDE_REASONS = ("conf", "no_diameter", "rejected_image", "refused_sample", "non_ev")
+
+
+class Result(dict):
+    """results/1 (a plain dict to every reader) carrying what write_results also writes: `objects` (objects.csv
+    rows: OBJECT_COLUMNS + step columns), `object_columns` and `steps` (the validated recipe, [Step]). A copy
+    (dict(res)) drops them, and write_results then writes the three classic files only."""
+    objects = None
+    object_columns = None
+    steps = None
+
+
+def _ring5(tokens) -> list:
+    """build_review_package.load_predictions' normalised ring: float32, rounded to 5 places."""
+    return [round(float(x), 5) for x in np.asarray(tokens[2:], dtype=np.float32)]
+
+
+def _package_lines(lines) -> tuple[dict, dict]:
+    """The review package's keys for one image's prediction lines (annotation.prediction_package._build_into):
+    ({label n (0-based, conf >= CONF): line}, {candidate k (CAND_CONF <= conf < CONF): line}). Lines with fewer
+    than 3 points are not in the package."""
+    labels, cands = {}, {}
+    for line, t in lines:
+        if len(t) < 8:
+            continue
+        c = float(t[1])
+        if c >= CONF:
+            labels[len(labels)] = line
+        elif c >= CAND_CONF:
+            cands[len(cands)] = line
+    return labels, cands
+
+
+def _model_polys(lines, w: int, h: int) -> dict:
+    """{reviewed.json polygon (tuple of (x, y)) -> [line, ...]}: how reviewed_polygons writes an outline kept as the
+    model drew it (source "model"): a label goes through the package's COCO stub (px rounded to 3 places, back to
+    5-place normalised), an accepted candidate is the data.js ring. So such an object finds its prediction line."""
+    out = {}
+    for line, t in lines:
+        if len(t) < 8:
+            continue
+        r, c = _ring5(t), float(t[1])
+        if c >= CONF:
+            seg = [round(v * (w if i % 2 == 0 else h), 3) for i, v in enumerate(r)]
+            r = [round(v / (w if i % 2 == 0 else h), 5) for i, v in enumerate(seg)]
+        elif c < CAND_CONF:
+            continue
+        key = tuple((round(r[i] * w, 3), round(r[i + 1] * h, 3)) for i in range(0, len(r) - 1, 2))
+        out.setdefault(key, []).append(line)
+    return out
+
+
+def _match_lines(objs: list, lines, w: int, h: int) -> None:
+    """A reviewed / edited image's objects kept exactly as the model drew them get their prediction line (first
+    unused match); a drawn or reshaped outline keeps line None (unless reviewed.json gives its package key)."""
+    if lines is None:
+        return
+    polys, used = _model_polys(lines, w, h), set()
+    for o in objs:
+        if o.key or not o.poly:
+            continue
+        for line in polys.get(tuple((x, y) for x, y in o.poly), ()):
+            if line not in used:
+                o.line = line
+                used.add(line)
+                break
+
+
+def _images_csv_order(ps_dir: Path) -> list:
+    """images.csv's image column in FILE order (the review package numbers its labels in this order)."""
+    with (ps_dir / "images.csv").open(newline="", encoding="utf-8") as fh:
+        return [r["image"] for r in csv.DictReader(fh)]
+
+
+def _object_rows(image, objs, step_out, steps, m, lines) -> list:
+    """objects.csv rows for one image (included / exclude_reason are settled later, once refusals are known): every
+    accepted outline, plus, on an untouched image (`lines` given), every other prediction line (conf below CONF)."""
+    rows = []
+    for k, o in enumerate(objs):
+        rows.append({"image": image, "line": o.line, "_key": o.key, "cls": o.cls, "conf": o.conf,
+                     "_reason": ("non_ev" if k not in m["_ev_idx"] else "no_diameter" if k in m["_no_diam"] else None),
+                     **{f"{st.name}.{c}": step_out[st.name][c][k] for st in steps for c in st.columns}})
+    if lines is not None:
+        accepted = {o.line for o in objs}
+        rows += [{"image": image, "line": line, "_key": None, "cls": int(t[0]), "conf": float(t[1]), "_reason": "conf"}
+                 for line, t in lines if line not in accepted]
+        rows.sort(key=lambda r: r["line"])
+    return rows
+
+
+def _resolve_keys(rows: list, pkg: dict, order: list) -> None:
+    """pkg_key per row (g<COCO id> / p<k>, or the reviewed object's own n<uid>) and, for an object known only by its
+    package key, its line. COCO ids run over images.csv in file order (prediction_package._build_into)."""
+    offset, start = {}, 0
+    for image in order:
+        offset[image] = start
+        start += len(pkg.get(image, ({}, {}))[0])
+    by_image = {}
+    for image, (labels, cands) in pkg.items():
+        d = {line: f"g{offset.get(image, 0) + n + 1}" for n, line in labels.items()}
+        d.update({line: f"p{k}" for k, line in cands.items()})
+        by_image[image] = d
+    for r in rows:
+        labels, cands = pkg.get(r["image"], ({}, {}))
+        key = r.pop("_key")
+        if key and r["line"] is None:
+            if key[:1] == "g" and key[1:].isdigit():
+                r["line"] = labels.get(int(key[1:]) - 1 - offset.get(r["image"], 0))
+            elif key[:1] == "p" and key[1:].isdigit():
+                r["line"] = cands.get(int(key[1:]))
+        r["pkg_key"] = by_image.get(r["image"], {}).get(r["line"]) if r["line"] is not None else key
+
+
+def steps_summary(rows: list, steps) -> dict:
+    """{step name: summary text} over the counted objects (included = 1)."""
+    inc = [r for r in rows if r.get("included") == 1]
+    return {st.name: st.summary([{c: r.get(f"{st.name}.{c}") for c in st.columns} for r in inc]) for st in steps}
+
+
 # ---- entry points -----------------------------------------------------------------------------------------
 
-def compute(ps_dir, reviewed_json=None) -> dict:
+def compute(ps_dir, reviewed_json=None, recipe=None) -> dict:
     """results/1 dict for the prediction_set folder `ps_dir` (contract section 4). `reviewed_json`: None (model
-    predictions at conf >= 0.5), a path to reviewed.json, or the dict reviewed_polygons() returns. Slow on big
-    sets: call it from a background job or thread."""
+    predictions at conf >= 0.5), a path to reviewed.json, or the dict reviewed_polygons() returns. `recipe`: the
+    analysis steps (analysis.steps.validate_recipe; None = DEFAULT_RECIPE = roles v1); their per-object columns go
+    to objects.csv, and results.json gains a "steps" key only when the recipe is not the default. Returns a Result
+    (a dict) that write_results turns into the files. Slow on big sets: call it from a background job or thread."""
+    from analysis import steps as ST
+    steps = ST.validate_recipe(recipe)
     ps_dir = Path(ps_dir)
     request = _read_json(ps_dir / "request.json")
     ps_id, model = request["ps"], request["model"]
@@ -386,6 +542,11 @@ def compute(ps_dir, reviewed_json=None) -> dict:
               "computed": datetime.now().astimezone().isoformat(timespec="seconds"),
               "rule": {"conf": CONF, "ev_classes": rule_classes, "multilayer": MULTILAYER_RULE},
               "samples": {}, "images": {}, "refused": None}
+    if not ST.is_default(steps):
+        result["steps"] = [{"step": st.name, "version": st.version} for st in steps]
+    result = Result(result)
+    result.steps, result.objects = steps, []
+    result.object_columns = OBJECT_COLUMNS + [f"{st.name}.{c}" for st in steps for c in st.columns]
 
     status_path = ps_dir / "status.json"
     status = _read_json(status_path) if status_path.is_file() else None
@@ -404,7 +565,7 @@ def compute(ps_dir, reviewed_json=None) -> dict:
 
     load, to_mask, roles_for, compute_morphology = _chain()
     pred_dir = ps_dir / "p" / model / "predictions"
-    per_image = {}
+    per_image, objects, pkg = {}, [], {}
     for r in rows:
         image = r["image"]
         nm = _nm_per_px(r)
@@ -414,11 +575,18 @@ def compute(ps_dir, reviewed_json=None) -> dict:
         rejected = bool(entry and entry.get("rejected"))
         note = (entry.get("note") if entry else None) or None
         try:
+            lines = _prediction_lines(pred_dir, image)
+        except (OSError, UnicodeDecodeError):
+            lines = None                    # a reviewed image needs no .txt; an untouched one fails just below
+        if lines is not None:
+            pkg[image] = _package_lines(lines)
+        try:
             w, h = _image_size(ps_dir, r["file"])
             if is_rev or is_edited:
                 objs, n_cand = _objects_from_reviewed(entry, image, w, h, to_mask), None
+                _match_lines(objs, lines, w, h)
             else:
-                objs, n_cand = _split_predictions(pred_dir, image, w, h, load)
+                objs, n_cand = _split_predictions(pred_dir, image, w, h, load, lines)
             # unsure candidates still open: Reviewed 0; edited = the package's own count (None = unknown, an old
             # reviewed.json); untouched = all candidates (the package's count when it gives one, else the .txt's)
             if is_rev:
@@ -427,7 +595,15 @@ def compute(ps_dir, reviewed_json=None) -> dict:
                 unsure = entry.get("n_candidates_open")
             else:
                 unsure = entry["n_candidates_open"] if entry and entry.get("n_candidates_open") is not None else n_cand
-            m = _measure(objs, nm, ev_ids, roles_for, compute_morphology)
+            # the analysis steps (roles first), then the counts with the roles step's roles
+            ctx = {"image": image, "nm_per_px": nm, "ev_ids": ev_ids, "H": h, "W": w}
+            sobjs = [{"line": o.line, "cls": o.cls, "conf": o.conf, "poly_px": o.poly, "mask": o.mask} for o in objs]
+            prior = {}
+            for st in steps:
+                prior[st.name] = st.run_image(ctx, sobjs, prior)
+            m = _measure(objs, nm, ev_ids, roles_for, compute_morphology, roles=prior["roles"]["role"])
+            m["_ev_idx"] = {k for k, o in enumerate(objs) if ev_ids is None or o.cls in ev_ids}
+            img_rows = _object_rows(image, objs, prior, steps, m, None if (is_rev or is_edited) else lines)
         except Exception as e:  # noqa: BLE001
             if not rejected:
                 raise                       # a counted image that can't be read is a real error
@@ -438,6 +614,10 @@ def compute(ps_dir, reviewed_json=None) -> dict:
             m = {"ev": 0, "multilayer": 0, "inner": 0, "nonev": 0, "_diam": [], "_low_conf": 0, "_rev_ev": 0,
                  "_rev_mv": 0, "_rev_inner": 0, "_rev_nonev": 0, "_disagree": 0}
             note = (note + " | " if note else "") + f"not read ({type(e).__name__}: {e})"
+            img_rows = []                   # nothing was read, so no object rows
+        for o in img_rows:
+            o["_sample"], o["_rejected"] = r["sample_label"], rejected
+        objects += img_rows
         if rejected:
             unsure = 0                      # a rejected image has nothing left to decide
         per_image[image] = {"sample_label": r["sample_label"], "reviewed": is_rev, "edited": is_edited,
@@ -468,6 +648,13 @@ def compute(ps_dir, reviewed_json=None) -> dict:
             result["samples"][label] = _sample(imgs, n_rej)
     result["images"] = {k: {f: v[f] for f in IMAGE_FIELDS} for k, v in per_image.items()}
     result["refused"] = "; ".join(refusals) or None
+    counted = set(result["samples"])     # an all-rejected sample is listed, but its rows are rejected_image anyway
+    _resolve_keys(objects, pkg, _images_csv_order(ps_dir))
+    for o in objects:
+        rejected, sample, reason = o.pop("_rejected"), o.pop("_sample"), o.pop("_reason")
+        reason = "rejected_image" if rejected else "refused_sample" if sample not in counted else reason
+        o["included"], o["exclude_reason"] = (1, None) if reason is None else (0, reason)
+    result.objects = objects
     groups = (reviewed or {}).get("sample_groups")
     for label, g in (groups.items() if isinstance(groups, dict) else ()):
         if label in result["samples"] and isinstance(g, dict):   # results.json only, never per_sample.csv
@@ -504,10 +691,31 @@ def _csv_text(header: list[str], rows: list[list]) -> str:
     return buf.getvalue()
 
 
+def objects_csv_text(result) -> str | None:
+    """objects.csv for a Result (None for a plain dict: no objects were kept)."""
+    if getattr(result, "objects", None) is None:
+        return None
+    cols = result.object_columns
+    return _csv_text(cols, [[o.get(c) for c in cols] for o in result.objects])
+
+
+def steps_doc(result, objects_text: str) -> dict:
+    """steps.json (contract C5): the recipe stamp, the sha256 of objects.csv, and (additive) the results' `computed`,
+    object counts and each step's one-line summary over the counted objects, for the Results page."""
+    from analysis import steps as ST
+    return {"schema": STEPS_SCHEMA, "recipe": ST.recipe_doc(result.steps),
+            "objects_csv_sha256": hashlib.sha256(objects_text.encode("utf-8")).hexdigest(),
+            "computed": result.get("computed"), "default": ST.is_default(result.steps),
+            "n_objects": len(result.objects), "n_included": sum(1 for o in result.objects if o.get("included") == 1),
+            "summary": steps_summary(result.objects, result.steps)}
+
+
 def write_results(result: dict, out_dir) -> Path:
-    """per_image.csv, per_sample.csv, then results.json under `out_dir` (each replaced atomically). results.json is
-    written LAST: it is the commit marker (readers trust the CSVs only next to a results.json at least as new).
-    Stray *.tmp files from an interrupted earlier write are removed first."""
+    """per_image.csv, per_sample.csv, objects.csv, steps.json, then results.json under `out_dir` (each replaced
+    atomically). results.json is written LAST: it is the commit marker (readers trust the other files only next to
+    a results.json at least as new). objects.csv + steps.json come from a Result (compute()); for a plain dict they
+    are not written, and old ones are removed so they never sit next to results they do not belong to. Stray *.tmp
+    files from an interrupted earlier write are removed first."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     for stray in out_dir.glob("*.tmp"):
@@ -516,11 +724,18 @@ def write_results(result: dict, out_dir) -> Path:
         ["image"] + IMAGE_FIELDS, [[k] + [v[f] for f in IMAGE_FIELDS] for k, v in result["images"].items()]))
     _atomic_write(out_dir / "per_sample.csv", _csv_text(
         ["sample_label"] + SAMPLE_FIELDS, [[k] + [v[f] for f in SAMPLE_FIELDS] for k, v in result["samples"].items()]))
+    objects_text = objects_csv_text(result)
+    if objects_text is None:
+        for name in (OBJECTS_CSV, STEPS_JSON):
+            (out_dir / name).unlink(missing_ok=True)
+    else:
+        _atomic_write(out_dir / OBJECTS_CSV, objects_text)
+        _atomic_write(out_dir / STEPS_JSON, json.dumps(steps_doc(result, objects_text), indent=1) + "\n")
     _atomic_write(out_dir / "results.json", json.dumps(result, indent=1) + "\n")
     return out_dir
 
 
-def compute_and_write(ps_dir, reviewed_json=None, out_dir=None) -> tuple[dict, Path]:
+def compute_and_write(ps_dir, reviewed_json=None, out_dir=None, recipe=None) -> tuple[dict, Path]:
     """compute() then write_results() to `out_dir` (default <ps_dir>/results). Run it off the request path."""
-    res = compute(ps_dir, reviewed_json)
+    res = compute(ps_dir, reviewed_json, recipe=recipe)
     return res, write_results(res, out_dir or Path(ps_dir) / "results")
