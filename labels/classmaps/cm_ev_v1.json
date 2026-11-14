@@ -1,0 +1,28 @@
+{
+ "schema": "class_map/1",
+ "id": "cm_ev_v1",
+ "name": "ev",
+ "version": 1,
+ "maker": "builtin",
+ "description": "Single class: every vesicle layer is EV; non-EV, VLDL and the root placeholder are dropped.",
+ "source_schema": "ls_legacy_v1",
+ "classes": [
+  "EV"
+ ],
+ "map": {
+  "EV": "EV",
+  "Incomplete": "EV",
+  "Low conf EV": "EV",
+  "MV": "EV",
+  "inner": "EV",
+  "Overlapping": "EV",
+  "non-EV": null,
+  "items-nfaR": null,
+  "VLDL": null
+ },
+ "ev_classes": [
+  "EV"
+ ],
+ "supersedes": null,
+ "rename": null
+}

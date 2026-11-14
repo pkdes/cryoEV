@@ -27,6 +27,12 @@ Pixels come from the export's image files; outlines are normalized by the lv ima
 export copy (same aspect ratio) is reported; another aspect ratio (padded / cropped) is refused. Every planned
 image must be copied; the list, counts and hashes come from the files written.
 
+Classes: --class-scheme NAME (prepare's CLASS_SCHEMES; unchanged), or --class-map ID|FILE (labels/classmaps.py, round
+14): the same conversion with the map's table (the built-ins give byte-identical output to their scheme); the record
+then also has class_map_id and class_map_sha256. preview() is a dry run (counts + labels_sha, nothing written);
+derive(dataset, map) rebuilds a registered dataset from its recorded lv + export + export-only choice with a map, as
+`<dataset>__<map id>` with parent_dataset (portal Train > Advanced > Collapse classes).
+
 Registry: the dataset/1 record is printed. --register (only for an lv_* with version.json labels_sha256; the id is
 checked before building) appends it (registry.append, schema-checked) and writes <registry>/lists/<output-name>.tsv.
 --register-existing FOLDER registers a folder built earlier. Without them nothing outside the dataset folder is
@@ -45,6 +51,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from collections import Counter, defaultdict
 from contextlib import contextmanager
 from datetime import datetime
@@ -56,6 +63,7 @@ sys.path.insert(0, str(REPO))
 from data_utils import config  # noqa: E402
 from data_utils import prepare_all_layer_singleclass as prep  # noqa: E402
 from data_utils.path_guard import protected_problem  # noqa: E402
+from labels import classmaps as CM  # noqa: E402
 
 LV_RE = re.compile(r"^lv_\d{8}_\d{4}$")
 DATASET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")    # registry/ids.py "dataset"
@@ -70,6 +78,9 @@ ASPECT_TOL = 0.01                 # lv vs export aspect ratio: within 1 % = a re
 
 class BuildError(RuntimeError):
     pass
+
+
+_tables_lock = threading.RLock()
 
 
 def _load(name, path):
@@ -116,12 +127,36 @@ def class_scheme(name):
     """prepare's convert_split reads module globals; set them as its main() does, and put them back."""
     if name not in prep.CLASS_SCHEMES:
         raise BuildError(f"unknown class scheme {name!r} (have {sorted(prep.CLASS_SCHEMES)})")
-    old = prep.CATEGORY_NAME_TO_CLASS, prep.CLASS_NAMES
-    prep.CATEGORY_NAME_TO_CLASS, prep.CLASS_NAMES = prep.CLASS_SCHEMES[name]
+    with use_tables(prep.CLASS_SCHEMES[name]) as names:
+        yield names
+
+
+@contextmanager
+def use_tables(tables):
+    """(CATEGORY_NAME_TO_CLASS, CLASS_NAMES) into prepare's module globals for the block, then put back. The globals
+    are process-wide, so one conversion at a time in this process (_tables_lock; the portal builds in a thread)."""
+    with _tables_lock:
+        old = prep.CATEGORY_NAME_TO_CLASS, prep.CLASS_NAMES
+        prep.CATEGORY_NAME_TO_CLASS, prep.CLASS_NAMES = tables
+        try:
+            yield prep.CLASS_NAMES
+        finally:
+            prep.CATEGORY_NAME_TO_CLASS, prep.CLASS_NAMES = old
+
+
+def resolve_classes(scheme, class_map):
+    """-> (scheme name for the record, (CATEGORY_NAME_TO_CLASS, CLASS_NAMES), class map dict or None).
+    --class-scheme: the CLASS_SCHEMES entry; --class-map (id, file or dict): labels.classmaps.to_scheme of it, and the
+    record's class_scheme is the map's name."""
+    if class_map is None:
+        if scheme not in prep.CLASS_SCHEMES:
+            raise BuildError(f"unknown class scheme {scheme!r} (have {sorted(prep.CLASS_SCHEMES)})")
+        return scheme, prep.CLASS_SCHEMES[scheme], None
     try:
-        yield prep.CLASS_NAMES
-    finally:
-        prep.CATEGORY_NAME_TO_CLASS, prep.CLASS_NAMES = old
+        cm = CM.load(class_map)
+    except CM.ClassMapError as e:
+        raise BuildError(f"class map refused: {e}")
+    return cm["name"], CM.to_scheme(cm), cm
 
 
 # ---------------------------------------------------------------- inputs
@@ -307,9 +342,12 @@ def check_registrable_lv(lv_dir, lv_path, version):
 
 
 def build(lv, split_from, output_name, output_root=None, scheme="ev", allow_superseded=False, export_only=None,
-          log=print):
+          log=print, class_map=None, parent_dataset=None):
     """Write the dataset. -> provenance dict {"dataset_record": ..., "details": ...}. Raises BuildError.
-    export_only: None (refuse when the export has images the lv lacks), "drop" or "export-labels"."""
+    export_only: None (refuse when the export has images the lv lacks), "drop" or "export-labels".
+    class_map (id, file or dict; labels/classmaps.py) replaces `scheme`: the record then also has class_map_id and
+    class_map_sha256. parent_dataset (derive): the record gets parent_dataset and a `base` input."""
+    scheme, tables, cm = resolve_classes(scheme, class_map)
     if not DATASET_RE.match(output_name or ""):
         raise BuildError(f"--output-name {output_name!r} is not a dataset id ({DATASET_RE.pattern})")
     if export_only not in (None, *EXPORT_ONLY):
@@ -322,6 +360,33 @@ def build(lv, split_from, output_name, output_root=None, scheme="ev", allow_supe
         raise BuildError(f"refused: output {out} {problem}")
     if out.exists():
         raise BuildError(f"{out} exists; datasets are never overwritten (pick another --output-name)")
+    (lv_sha, lv_coco, where, cocos, split_file, split_rows, batches, per_split, missing, n_export_only,
+     stretched) = read_inputs(lv_path, version, lv_id, export_dir, export_only, scheme, tables, cm)
+    longest = max((str(out / "images" / YOLO_SPLIT[s] / e[3]["file_name"]) for s, es in per_split.items()
+                   for e in es), key=len, default="")
+    if os.name == "nt" and len(longest) >= MAX_PATH:
+        raise BuildError(f"an output file path would be {len(longest)} characters (Windows limit {MAX_PATH}; "
+                         f"training could not read it either): use a shorter --output-root / --output-name")
+
+    log(f"Label version: {lv_id}  ({lv_path})")
+    log(f"Split from:    {export_dir.name}  ({export_dir})")
+    log(f"Output:        {out}")
+    ctx = dict(out=out, lv_coco=lv_coco, lv_dir=lv_dir, lv_id=lv_id, lv_sha=lv_sha, version=version,
+               export_dir=export_dir, cocos=cocos, where=where, split_file=split_file, batches=batches,
+               scheme=scheme, per_split=per_split, missing=missing, n_export_only=n_export_only,
+               export_only=export_only, stretched=stretched, output_name=output_name, log=log,
+               tables=tables, cm=cm, parent_dataset=parent_dataset)
+    try:
+        return _write(**ctx)
+    except BaseException:
+        if out.exists():                    # this run created it (it didn't exist above): no half-built dataset
+            shutil.rmtree(out, ignore_errors=True)
+        raise
+
+
+def read_inputs(lv_path, version, lv_id, export_dir, export_only, scheme, tables, cm):
+    """The lv (sha-checked against version.json), the export, the plan, and the class check: every category used
+    must be in the scheme / map (a missing one is a BuildError, never a silent drop)."""
     lv_bytes = lv_path.read_bytes()
     lv_sha = sha256_bytes(lv_bytes)
     if version.get("labels_sha256") and version["labels_sha256"] != lv_sha:
@@ -335,37 +400,23 @@ def build(lv, split_from, output_name, output_root=None, scheme="ev", allow_supe
         raise BuildError(f"{sum(n_export_only.values())} export image(s) are not in {lv_id} ({n_export_only}). "
                          f"Choose --export-only drop (leave them out) or --export-only export-labels (keep them "
                          f"with the export's own labels)")
-    with class_scheme(scheme):
-        used = {c["name"] for c in lv_coco["categories"]}
-        if export_only == "export-labels":
-            used |= {c["name"] for c in cocos[next(iter(cocos))]["categories"]}
-        unmapped = sorted(used - set(prep.CATEGORY_NAME_TO_CLASS))
+    used = {c["name"] for c in lv_coco["categories"]}
+    if export_only == "export-labels":
+        used |= {c["name"] for c in cocos[next(iter(cocos))]["categories"]}
+    unmapped = sorted(used - set(tables[0]))
+    if unmapped and cm is not None:
+        raise BuildError(f"categories {unmapped} are not in class map {cm['id']} (its `map`): add them (null drops "
+                         f"a class) in a new version of the map")
     if unmapped:
         raise BuildError(f"categories {unmapped} are not in class scheme {scheme!r} "
                          f"(prepare_all_layer_singleclass.CATEGORY_NAME_TO_CLASS)")
-    longest = max((str(out / "images" / YOLO_SPLIT[s] / e[3]["file_name"]) for s, es in per_split.items()
-                   for e in es), key=len, default="")
-    if os.name == "nt" and len(longest) >= MAX_PATH:
-        raise BuildError(f"an output file path would be {len(longest)} characters (Windows limit {MAX_PATH}; "
-                         f"training could not read it either): use a shorter --output-root / --output-name")
-
-    log(f"Label version: {lv_id}  ({lv_path})")
-    log(f"Split from:    {export_dir.name}  ({export_dir})")
-    log(f"Output:        {out}")
-    ctx = dict(out=out, lv_coco=lv_coco, lv_dir=lv_dir, lv_id=lv_id, lv_sha=lv_sha, version=version,
-               export_dir=export_dir, cocos=cocos, where=where, split_file=split_file, batches=batches,
-               scheme=scheme, per_split=per_split, missing=missing, n_export_only=n_export_only,
-               export_only=export_only, stretched=stretched, output_name=output_name, log=log)
-    try:
-        return _write(**ctx)
-    except BaseException:
-        if out.exists():                    # this run created it (it didn't exist above): no half-built dataset
-            shutil.rmtree(out, ignore_errors=True)
-        raise
+    return (lv_sha, lv_coco, where, cocos, split_file, split_rows, batches, per_split, missing, n_export_only,
+            stretched)
 
 
 def _write(out, lv_coco, lv_dir, lv_id, lv_sha, version, export_dir, cocos, where, split_file, batches, scheme,
-           per_split, missing, n_export_only, export_only, stretched, output_name, log):
+           per_split, missing, n_export_only, export_only, stretched, output_name, log, tables, cm=None,
+           parent_dataset=None):
     anns_by_image = defaultdict(list)
     for a in lv_coco["annotations"]:
         anns_by_image[a["image_id"]].append(a)
@@ -374,10 +425,13 @@ def _write(out, lv_coco, lv_dir, lv_id, lv_sha, version, export_dir, cocos, wher
                      and len(a["segmentation"]) > 1 and isinstance(a["segmentation"][0], list))
     no_outline = sum(1 for a in lv_coco["annotations"] if a["image_id"] in used and not a.get("segmentation"))
     stats = {}
-    with class_scheme(scheme) as names, tempfile.TemporaryDirectory(prefix="dataset_from_lv_") as tmp:
+    with use_tables(tables) as names, tempfile.TemporaryDirectory(prefix="dataset_from_lv_") as tmp:
         names = list(names)
         cmap = prep.CATEGORY_NAME_TO_CLASS
-        log(f"Class scheme:  {scheme} -> {names}\n")
+        if cm is None:
+            log(f"Class scheme:  {scheme} -> {names}\n")
+        else:
+            log(f"Class map:     {cm['id']} ({scheme}) -> {names}\n")
         for split in export_splits(export_dir):
             entries = per_split.get(split, [])
             coco_path = Path(tmp) / f"{split}.coco.json"
@@ -435,6 +489,8 @@ def _write(out, lv_coco, lv_dir, lv_id, lv_sha, version, export_dir, cocos, wher
         "counts": {split: {"images": s["n_images"], "instances": s["n_instances"],
                            "labeled": s["n_labels"], "dropped": s["n_dropped"]} for split, s in stats.items()},
         "classes": names, "class_scheme": scheme, "class_map": class_map,
+        **({"class_map_id": cm["id"], "class_map_sha256": CM.sha256(cm)} if cm is not None else {}),
+        **({"parent_dataset": parent_dataset} if parent_dataset else {}),
         "class_counts": class_counts,
         "images_sha256": sha256_bytes("".join(images_lines).encode("utf-8")),
         "images_sha256_method": "importer definition: sorted `split\\tstem` lines of the dataset's images, "
@@ -452,7 +508,8 @@ def _write(out, lv_coco, lv_dir, lv_id, lv_sha, version, export_dir, cocos, wher
                                                      sorted(n_export_only, key=lambda k: SPLIT_ORDER.get(k, 9))}},
         "status": "frozen",
         "inputs": [{"id": lv_id, "role": "source", "entity": "label_version"},
-                   {"id": export_dir.name, "role": "images", "entity": "roboflow_export"}],
+                   {"id": export_dir.name, "role": "images", "entity": "roboflow_export"}]
+        + ([{"id": parent_dataset, "role": "base", "entity": "dataset"}] if parent_dataset else []),
         "recorded_by": f"dataset_from_lv.py {git_sha()}",
         "note": None,
     }
@@ -572,6 +629,174 @@ def register_existing(folder, root=None):
     return register(prov, folder, root)
 
 
+# ---------------------------------------------------------------- class maps: preview, derive, identity
+def labels_sha(dataset_dir):
+    """labels.classmaps.labels_sha: the "identical dataset" hash of a dataset folder (labels, yaml, image files)."""
+    try:
+        return CM.labels_sha(dataset_dir)
+    except CM.ClassMapError as e:
+        raise BuildError(str(e))
+
+
+def preview(lv, split_from, export_only=None, scheme="ev", class_map=None, allow_superseded=False):
+    """What build() would make, WITHOUT writing anything outside a temp folder (convert_split dry_run: no image copy,
+    no label file). -> {"classes", "class_scheme", "class_map_id", "counts" {split: {images, instances, labeled,
+    dropped}}, "class_counts" {split: {class: n}}, "labels_sha" (= labels_sha() of the folder build() writes)}."""
+    scheme, tables, cm = resolve_classes(scheme, class_map)
+    lv_dir, lv_path, version, lv_id = read_lv(lv, allow_superseded)
+    export_dir = resolve_export(split_from)
+    (_lv_sha, lv_coco, _where, cocos, _sf, _rows, _batches, per_split, _missing, _n_eo,
+     _stretched) = read_inputs(lv_path, version, lv_id, export_dir, export_only, scheme, tables, cm)
+    anns_by_image = defaultdict(list)
+    for a in lv_coco["annotations"]:
+        anns_by_image[a["image_id"]].append(a)
+    stats, label_files, image_files = {}, {}, []
+    names = list(tables[1])
+    # explicit tables, not prepare's globals: a preview never waits for (or disturbs) a build running in this process
+    with tempfile.TemporaryDirectory(prefix="dataset_from_lv_preview_") as tmp:
+        for split in export_splits(export_dir):
+            coco_path = Path(tmp) / f"{split}.coco.json"
+            coco_path.write_text(json.dumps(split_coco(lv_coco, per_split.get(split, []), anns_by_image,
+                                                      cocos[split])), encoding="utf-8")
+            dst = YOLO_SPLIT[split]
+            s = prep.convert_split(coco_path, export_dir / split, Path(tmp) / "images" / dst,
+                                   Path(tmp) / "labels" / dst, dry_run=True, tables=tables)
+            stats[split] = s
+            label_files.update({f"labels/{dst}/{n}": t.encode("utf-8") for n, t in s["label_texts"].items()})
+            image_files += [f"images/{dst}/{n}" for n in s["image_names"]]
+        yaml_text = prep.dataset_yaml_text(Path(tmp) / "preview", has_test="test" in stats, class_names=names)
+    class_counts = {}
+    for split, s in stats.items():
+        c = Counter()
+        for dests in s["movement"].values():
+            for dest, n in dests.items():
+                if dest != "DROPPED":
+                    c[dest] += n
+        class_counts[split] = {k: c[k] for k in names}
+    return {"classes": names, "class_scheme": scheme, "class_map_id": cm["id"] if cm else None,
+            "class_map_sha256": CM.sha256(cm) if cm else None, "label_version": lv_id, "export": export_dir.name,
+            "export_only": export_only,
+            "counts": {split: {"images": s["n_images"], "instances": s["n_instances"], "labeled": s["n_labels"],
+                               "dropped": s["n_dropped"]} for split, s in stats.items()},
+            "class_counts": class_counts,
+            "labels_sha": CM.labels_sha_of(label_files, yaml_text, image_files)}
+
+
+def derive_problem(rec) -> str | None:
+    """Why a registered dataset can't be rebuilt with a class map (plain words), or None. Only a dataset built from a
+    label set (dataset_from_lv.py: a label version + an export, provenance.json in its folder) can."""
+    if not isinstance(rec, dict):
+        return "not in the registry"
+    if not LV_RE.match(str(rec.get("label_version") or "")) or (rec.get("source") or {}).get("kind") != "label_version":
+        return "not built from a label set (made from a Roboflow export)"
+    if not rec.get("export"):
+        return "its record names no export to take the split from"
+    d = rec.get("dataset_dir")
+    if not d or not (Path(d) / PROVENANCE).is_file():
+        return "its folder (with provenance.json) is not on this computer"
+    return None
+
+
+def parent_inputs(rec):
+    """-> (lv id, export name, export_only choice) to rebuild a registered dataset, after checking that its label
+    version and export are unchanged since it was built. Raises BuildError."""
+    why = derive_problem(rec)
+    if why:
+        raise BuildError(f"{rec.get('id') if isinstance(rec, dict) else rec}: {why}")
+    prov = json.loads((Path(rec["dataset_dir"]) / PROVENANCE).read_text(encoding="utf-8"))
+    details = prov.get("details") or {}
+    choice = (rec.get("export_only") or {}).get("choice", details.get("export_only_choice"))
+    lv_dir, lv_path, version, lv_id = read_lv(rec["label_version"])
+    want = (rec.get("labels") or {}).get("lv_labels_sha256")
+    if want and sha256_file(lv_path) != want:
+        raise BuildError(f"{lv_id}'s labels changed since {rec['id']} was built (lv sha256 differs)")
+    export_dir = resolve_export(rec["export"])
+    want = (rec.get("split") or {}).get("export_images_sha256")
+    if want:
+        where, _ = read_export(export_dir)
+        got = sha256_bytes("".join(sorted(f"{split}\t{k}\n" for k, (split, _) in where.items())).encode("utf-8"))
+        if got != want:
+            raise BuildError(f"the export {export_dir.name} changed since {rec['id']} was built")
+    return lv_id, rec["export"], choice
+
+
+def derived_name(dataset_id, class_map_id):
+    return f"{dataset_id}__{class_map_id}"
+
+
+def registered(registry_root=None):
+    """{id: record} of the registry's datasets (read only)."""
+    from registry import store
+    try:
+        return store.current("dataset", Path(registry_root) if registry_root else None)
+    except store.RegistryError as e:
+        raise BuildError(f"registry not readable: {e}")
+
+
+_sha_cache: dict = {}
+
+
+def dataset_labels_sha(rec):
+    """labels_sha of a registered dataset's folder, or None (no folder here / not a YOLO folder). Cached per folder
+    state (the yaml and the label/image split folders' mtimes)."""
+    d = rec.get("dataset_dir") if isinstance(rec, dict) else None
+    if not d or not Path(d).is_dir():
+        return None
+    p = Path(d)
+    try:
+        key = (str(p),) + tuple(q.stat().st_mtime_ns for q in sorted([*p.glob("*.yaml"), *p.glob("labels/*"),
+                                                                       *p.glob("images/*")]))
+    except OSError:
+        return None
+    if key not in _sha_cache:
+        try:
+            _sha_cache[key] = CM.labels_sha(p)
+        except (CM.ClassMapError, OSError):
+            _sha_cache[key] = None
+    return _sha_cache[key]
+
+
+def find_identical(sha, datasets: dict) -> list:
+    """Ids of registered datasets whose folder has this labels_sha."""
+    return sorted(i for i, r in datasets.items() if sha and dataset_labels_sha(r) == sha)
+
+
+def derive_preview(dataset_id, class_map, registry_root=None, datasets=None):
+    """Counts before (the dataset's record) and after (preview with the map), the target id, and the registered
+    datasets with the same labels_sha. Writes nothing."""
+    datasets = registered(registry_root) if datasets is None else datasets
+    rec = datasets.get(dataset_id)
+    if rec is None:
+        raise BuildError(f"no dataset {dataset_id} in the registry")
+    lv_id, export, choice = parent_inputs(rec)
+    pv = preview(lv_id, export, choice, class_map=class_map)
+    target = derived_name(dataset_id, pv["class_map_id"])
+    return dict(pv, dataset=dataset_id, target=target, before=rec.get("class_counts") or {},
+                before_classes=rec.get("classes") or [], target_exists=target in datasets,
+                identical=find_identical(pv["labels_sha"], datasets))
+
+
+def derive(dataset_id, class_map, registry_root=None, output_root=None, output_name=None, register_it=False,
+           log=print):
+    """Rebuild a registered dataset from its recorded label version + export (+ export-only choice) with a class map,
+    as `<dataset>__<map id>` (record: parent_dataset, class_map_id, class_map_sha256). register_it: append it to the
+    registry. -> provenance dict. Raises BuildError."""
+    datasets = registered(registry_root)
+    rec = datasets.get(dataset_id)
+    if rec is None:
+        raise BuildError(f"no dataset {dataset_id} in the registry")
+    lv_id, export, choice = parent_inputs(rec)
+    _, _, cm = resolve_classes(None, class_map)
+    name = output_name or derived_name(dataset_id, cm["id"])
+    if register_it:
+        check_id_free(name, registry_root)
+    prov = build(lv_id, export, name, output_root, export_only=choice, log=log, class_map=cm,
+                 parent_dataset=dataset_id)
+    if register_it:
+        register(prov, prov["dataset_record"]["dataset_dir"], registry_root)
+    return prov
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--lv", help="lv id (under <CryoAI-laptop>/labels/), lv folder or labels COCO")
@@ -581,6 +806,9 @@ def main(argv=None):
                     help="folder to create the dataset in (default <CryoAI>/training outputs)")
     ap.add_argument("--class-scheme", choices=sorted(prep.CLASS_SCHEMES), default="ev",
                     help="as prepare_all_layer_singleclass.py --class-scheme")
+    ap.add_argument("--class-map", metavar="ID|FILE",
+                    help="a class map (labels/classmaps.py: built-in or user map id, or a class_map/1 file) instead "
+                         "of --class-scheme; the record gains class_map_id and class_map_sha256")
     ap.add_argument("--export-only", choices=EXPORT_ONLY,
                     help="export images the lv doesn't have: drop them, or keep them with the export's labels. "
                          "Required when there are any (no default)")
@@ -598,12 +826,15 @@ def main(argv=None):
             return 0
         if not (a.lv and a.split_from and a.output_name):
             ap.error("--lv, --split-from and --output-name are required (or --register-existing FOLDER)")
+        if a.class_map and any(x == "--class-scheme" or x.startswith("--class-scheme=")
+                               for x in (sys.argv[1:] if argv is None else argv)):
+            ap.error("--class-map and --class-scheme are alternatives: give one")
         if a.register:                                   # everything --register needs, before building
             lv_dir, lv_path, version, _ = read_lv(a.lv, a.allow_superseded)
             check_registrable_lv(lv_dir, lv_path, version)
             check_id_free(a.output_name, a.registry)
         prov = build(a.lv, a.split_from, a.output_name, a.output_root, a.class_scheme, a.allow_superseded,
-                     a.export_only)
+                     a.export_only, **({"class_map": a.class_map} if a.class_map else {}))
         rec = prov["dataset_record"]
         if a.register:
             line = register(prov, rec["dataset_dir"], a.registry)
