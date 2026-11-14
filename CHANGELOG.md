@@ -7,6 +7,15 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-14 15:30 · Round 14: object sets with your own label questions, class maps, analysis steps
+
+- **Object sets:** review a chosen list of objects (for example nested EVs) as phone-friendly cards that ask a label schema's questions: type, membrane count, inner vesicles, "outlines wrong", note. Every tap saves. Each reviewer's answers are kept separately and nobody sees anyone else's. An admin starts one from Reviews → Start a review → Object set.
+- **Blind sets:** measured columns (sizes, gaps) never reach the reviewer's browser; the export joins them back. Exports are for admins and the set's maker until the set is closed.
+- **Label schemas:** versioned lists of classes and questions (Data → schema pages, read only). Today's fixed classes are "legacy v1"; old MV shows as "MV · stack outline", the new scheme's as "MV multivesicular".
+- **Collapse classes:** Train → Advanced makes a dataset with fewer classes from a class map (e.g. Low conf EV → EV), shows the counts first, and offers an identical existing dataset instead of a copy.
+- **Analysis steps on Results:** Results lists the steps it ran (roles v1 by default, the same numbers as before) and offers objects.csv, one row per outline with its layer count; admins can add the nesting step (membrane gaps, parent and depth per outline).
+- **Components:** portal / review page 2026-11-14.1 / registry (label_schema kind, object sets, adopted prediction sets) / CLI (`cryoev schema register`, `jobs.predict_set adopt`, `annotation.object_set`).
+
 ## 2026-11-13 22:45 · Round 13: one Reviews page, start and assign reviews, list filters
 
 - **Reviews** (one menu entry, replaces Label review / My reviews / Sandbox): "Needs your review" first (most recent first), then all reviews by kind (predictions, label sets, audits, practice). Finished and applied reviews are hidden until you change the status filter. Continue opens Quick check if cards are open, else the Editor.
