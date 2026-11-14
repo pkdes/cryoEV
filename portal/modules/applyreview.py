@@ -33,7 +33,11 @@ Eligible (all of):
     CRYOEV_SERVICES_CONFIG, else ~/.cryoev/services.json; an unreadable config makes nothing eligible);
   - not a prediction package (pred_*: never scanned).
 Excluded ENTIRELY (not even listed): compare packages and any package with a <review root>/_work_<pkg> folder (a blind
-audit's answer key; only its existence is checked, it is never listed or read).
+audit's answer key; only its existence is checked, it is never listed or read). The one compare exception (round 13):
+a label-set revision, i.e. kind "compare" with purpose "revise" in the package's OWN review_package.json (never the
+registry's line) and no _work_ folder (compare_package.py --purpose revise: no decoys, scratch outside the review
+root). An audit, a compare without a purpose (built before round 13: an audit) or any compare with a _work_ folder
+(a forged purpose) stays excluded.
 
 Preview: the package's edits/*.json are copied into <state>/apply_preview/<pkg>/<UTC ts>/edits (frozen: the report's
 "decisions copy sha256" is theirs), then apply_review_edits.make_version (reviewed_only, out_root
@@ -43,7 +47,8 @@ refused before anything is written. Each preview gets its own folder; folders ol
 visit. A preview writes nothing outside <state>/apply_preview (and the portal audit line): never the label sets
 (CryoAI-laptop/labels), the package or the registry (only the Apply button does, above). The page also shows the CLI
 command (`--out-root` explicit, because the CLI's default <base>/../../labels is wrong for a label-set base).
-Serve time re-checks: /run and /view answer 404 once the package has a _work_ folder or is a compare package; /run
+Serve time re-checks: /run and /view answer 404 once the package has a _work_ folder or is a compare package other
+than a revise; /run
 warns "decisions changed since this preview" when the package's edits no longer match the frozen copy's sha256 (and
 then hides the CLI command). The edits copy takes regular files only (no symlinks / junctions).
 Served files: only under that preview's folder, by a strict name pattern per path part, real path checked, a fixed
@@ -208,9 +213,11 @@ def packages(cfg, records, served, served_problem=None) -> list:
     out = []
     for p in TT.scan_packages(root, records):
         pkg = p["id"]
-        if p["kind"] == "compare" or pkg.startswith("pred_") or not PKG_RE.fullmatch(pkg):
+        if pkg.startswith("pred_") or not PKG_RE.fullmatch(pkg):
             continue
         if has_work(root, pkg):                          # a blind audit's answer key: exists() only, never read
+            continue
+        if p["kind"] == "compare" and not is_revise(root, pkg):
             continue
         if not p["base_lv"]:
             continue                                     # a Roboflow export / pull base: not a label set
@@ -246,15 +253,28 @@ def has_work(root, pkg) -> bool:
         return True
 
 
+def is_revise(root, pkg) -> bool:
+    """A label-set revision (round 13): the package's own review_package.json says kind "compare" and purpose
+    "revise", and it has no _work_ folder. Any error: False."""
+    try:
+        if has_work(root, pkg):
+            return False
+        meta = TT._dict(TT.read_json(Path(root) / pkg / "review_package.json"))
+        return meta.get("kind") == "compare" and meta.get("purpose") == "revise"
+    except Exception:
+        return False
+
+
 def excluded(cfg, pkg, records=None) -> bool:
-    """Serve-time re-check: a _work_ folder, or a compare package (its review_package.json or registry record)."""
+    """Serve-time re-check: a _work_ folder, or a compare package (its review_package.json or registry record) that
+    is not a revise (is_revise)."""
     root = RES.review_root(cfg)
     if has_work(root, pkg):
         return True
     try:
         meta = {**TT._dict(TT._dict(TT._dict(records).get("review_package")).get(pkg)),
                 **TT._dict(TT.read_json(Path(root) / pkg / "review_package.json"))}
-        return meta.get("kind") == "compare"
+        return meta.get("kind") == "compare" and not is_revise(root, pkg)
     except Exception:
         return True
 
