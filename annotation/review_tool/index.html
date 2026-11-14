@@ -2782,6 +2782,21 @@ function scheduleSync(ms = 800) { if (!server) return; clearTimeout(syncTimer); 
 const srvT = {};  // file -> {key: t} of the server's copy, from the last pull / PUT reply
 const noteSrv = (file, s) => { const m = migrate(clone(s || {})); srvT[file] = Object.fromEntries(Object.entries(m.dec || {}).map(([k, d]) => [k, d.t])); };
 const blankOwn = file => Object.entries((edits[file] && edits[file].dec) || {}).filter(([k, d]) => d && !d.who && !(srvT[file] && srvT[file][k] === d.t));
+// Round 14 (C3): the server rewrites an attribute key's @<rid> to the signed-in identity. A local pending a: / i:a:
+// key whose rewritten twin (same key up to @, the reply's who) is in the reply is that same decision: drop it, so it
+// is never sent again (no resend loop).
+function dropRekeyed(file, merged) {
+  const loc = edits[file], dec = loc && loc.dec, srv = (merged && merged.dec) || {};
+  if (!dec) return;
+  for (const [k, d] of Object.entries(dec)) {
+    if (!d || d.pending !== true || !(k.startsWith("a:") || k.startsWith("i:a:"))) continue;
+    const at = k.lastIndexOf("@"); if (at < 0) continue;
+    const base = k.slice(0, at + 1);
+    const twin = Object.entries(srv).find(([sk, sd]) => sk !== k && sk.startsWith(base) && sk.indexOf("@", base.length) < 0
+      && sd && sk.slice(base.length) === sd.who && sameDec(sd, d));
+    if (twin) delete dec[k];
+  }
+}
 async function sync() {
   if (!server || syncing) return; syncing = true; let err = false;
   try {
@@ -2795,6 +2810,7 @@ async function sync() {
       if (r.status === 400) { err = true; banner(`The server rejected the edits for ${file}. Export them and tell the lab.`); continue; }
       if (!r.ok) { err = true; break; }
       const merged = (await r.json()).edit;  // server merged our record with everyone else's
+      dropRekeyed(file, merged);
       noteSrv(file, merged);
       const local = edits[file]; edits[file] = mergeEdit(merged, local);
       if (!newerThan(local, merged)) dirty.delete(file);
@@ -2857,9 +2873,11 @@ window.addEventListener("online", () => scheduleSync(100));
 // OBJECT SET CARD (round 14, contracts C2-C4): one block, so it can move to its own file later. Runs only when
 // D.kind === "objects" (annotation/object_set.py); every other package never reaches it (OBJ stays null).
 //   D.schema.object_attrs  the attribute rows (choice / ordinal = buttons with key hints, bool = toggle, text = note)
-//   D.items                [{id (opaque), image (stem), obj (package object key g<id> / p<k>), crop [x0,y0,x1,y1]}]
-//   D.blind_cols / D.blind when set: the amber blind banner (the hidden values are never in data.js)
-//   D.outline_mode         "target" (default: only the item's own outline) or "target+contained"
+//   D.items                [{id (opaque), image (stem), obj (package object key g<id> / p<k>), crop [x0,y0,x1,y1],
+//                          also (target+contained: the keys of the objects inside the target, chosen by the builder)}]
+//   D.blind                true: the amber blind banner (a flag only: no column names or values are in data.js)
+//   D.title                the set's name as its maker typed it (the header and the tab title)
+//   D.outline_mode         "target" (default: only the item's own outline) or "target+contained" (+ it.also)
 // Every tap saves at once: a decision a:<obj>:<attr>@<me> on the item's image record (the server overwrites @<rid>
 // from the signed-in identity). Attribute keys never count as object edits (statusOf, restoreSnap). Only this
 // reviewer's own answers are read back; others' are never shown. Saving needs the server's "a" cap (/api/ping).
@@ -2885,10 +2903,10 @@ function makeObjectView() {
   const byStem = new Map();
   for (const im of D.images || []) { byStem.set(im.file, im); byStem.set(stemOf(im.file), im); }
   const items = (Array.isArray(D.items) ? D.items : []).filter(it => it && typeof it.id === "string" && byStem.has(String(it.image)));
-  const blind = (Array.isArray(D.blind_cols) && D.blind_cols.length > 0) || D.blind === true;
+  const blind = D.blind === true;
   const contained = D.outline_mode === "target+contained";
   const POS_KEY = KEY + ":objpos";
-  const st = {pos: 0, outlines: true, img: null, imgSrc: "", ready: false, undo: []};
+  const st = {pos: 0, outlines: true, img: null, imgSrc: "", ready: false, undo: [], drawn: []};
   const imOf = it => byStem.get(String(it.image));
   const can = () => capOn("a") && server;
   const akey = (it, a) => `a:${it.obj}:${a.id}@${me()}`;
@@ -2926,6 +2944,7 @@ function makeObjectView() {
       st.img.src = im.src;
       const nx = items[st.pos + 1]; if (nx) (new Image()).src = imOf(nx).src;
     }
+    st.drawn = [];
     if (!st.ready) return;
     const Wi = st.img.naturalWidth, Hi = st.img.naturalHeight, rings = ringsOf(im, String(it.obj)), ring = rings && rings[0];
     const [x0, y0, x1, y1] = cropOf(it, im, ring), cw = (x1 - x0) * Wi, ch = (y1 - y0) * Hi;
@@ -2933,18 +2952,18 @@ function makeObjectView() {
     cx.imageSmoothingEnabled = true; cx.drawImage(st.img, ox, oy, Wi * s, Hi * s);
     if (!st.outlines || !rings) return;
     const path = rg => { cx.beginPath(); for (let k = 0; k < rg.length; k += 2) { const X = rg[k] * Wi * s + ox, Y = rg[k + 1] * Hi * s + oy; k ? cx.lineTo(X, Y) : cx.moveTo(X, Y); } cx.closePath(); };
-    if (contained && ring) {  // other objects of this image whose centre is inside the target: drawn thinner, green
-      const others = [...(im.gt || []).map(g => ["g" + g.id, g.p]), ...(im.pr || []).map((p, k) => ["p" + k, p.p])];
+    if (contained && Array.isArray(it.also)) {  // the objects the builder found inside the target (it.also): thinner, green
       cx.strokeStyle = "#4ade80"; cx.lineWidth = 1.6;
-      for (const [k, ps] of others) {
-        if (k === String(it.obj) || !Array.isArray(ps) || !ps[0]) continue;
-        const r0 = ps[0]; let mx = 0, my = 0; for (let j = 0; j < r0.length; j += 2) { mx += r0[j]; my += r0[j + 1]; }
-        mx /= r0.length / 2; my /= r0.length / 2;
-        if (pip(mx, my, ring)) for (const rg of ps) { path(rg); cx.stroke(); }
+      for (const k of it.also) {
+        const ps = typeof k === "string" && k !== String(it.obj) ? ringsOf(im, k) : null;
+        if (!Array.isArray(ps)) continue;
+        for (const rg of ps) { path(rg); cx.stroke(); }
+        st.drawn.push(k);
       }
     }
     cx.strokeStyle = "#38bdf8"; cx.lineWidth = 2.2;
     for (const rg of rings) { path(rg); cx.stroke(); }
+    st.drawn.push(String(it.obj));
   }
 
   function setAttr(it, a, v) {  // one tap = one saved decision; the same choice again clears it
@@ -3100,6 +3119,7 @@ function makeObjectView() {
   }
   return {start, render, key, saved, go, state: () => ({pos: st.pos, n: items.length, done: nDone(), outlines: st.outlines, can: can(),
     item: items[st.pos] ? {...items[st.pos]} : null, attrs: attrs.map(a => a.id), keys: Object.keys(keymap), blind, contained,
+    drawn: [...st.drawn],
     mine: items[st.pos] ? Object.fromEntries(attrs.map(a => [a.id, mineOf(items[st.pos], a)])) : {}, undo: st.undo.length})};
 }
 if (D.kind === "objects") OBJ = makeObjectView();

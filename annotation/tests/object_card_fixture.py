@@ -107,13 +107,13 @@ def build(folder, *, blind=True, outline_mode="target", n_items=6, sentinel=None
     rnd.shuffle(items)
     data = {"id": folder.name, "title": title, "kind": "objects", "source": "prediction_set:ps_20261114_abcdef",
             "run": "fixture", "categories": ["EV"], "schema": SCHEMA, "items": items, "outline_mode": outline_mode,
-            "blind_cols": ["d_outer_nm", "gap_median_nm"] if blind else [], "images": [img_a, img_b]}
+            "blind": bool(blind), "images": [img_a, img_b]}   # a flag only (QC 4): no column names in data.js
     if sentinel:                                       # a test may plant a value that must never reach the page
         data["note_for_tests"] = sentinel
     (folder / "data.js").write_text("window.REVIEW_DATA = " + json.dumps(data) + ";\n", encoding="utf-8")
     (folder / "review_package.json").write_text(json.dumps({
         "kind": "objects", "schema": SCHEMA["id"], "base": "ps_20261114_abcdef", "base_kind": "prediction_set",
-        "n_items": len(items), "blind_cols": data["blind_cols"], "outline_mode": outline_mode, "reviewers": ["rev1"],
+        "n_items": len(items), "blind_cols": ["d_outer_nm", "gap_median_nm"] if blind else [], "outline_mode": outline_mode, "reviewers": ["rev1"],
         "owner": "admin1", "built_by": "portal", "title": title}), encoding="utf-8")
     return data
 
@@ -167,6 +167,7 @@ class FakeServer:
                     for k, d in (rec.get("dec") or {}).items():
                         if outer.who and k.startswith("a:") and "@" in k:
                             k = k.rsplit("@", 1)[0] + "@" + outer.who
+                            d = {**d, "who": outer.who}           # the real server stamps who too (stamp_identity)
                         old = have["dec"].get(k)
                         if d.get("pending") or not old:
                             outer.t += 1

@@ -142,6 +142,54 @@ class ObjectCardTests(_Browser):
         d, srv, pg = self.open_card(blind=False)
         self.assertFalse(pg.is_visible("#oBlind"))
 
+    def test_blind_banner_from_the_flag_only(self):
+        """QC 4: the banner follows D.blind; a stray blind_cols list (older fixtures) never turns it on."""
+        def build(f):
+            data = F.build(f, blind=False)
+            data["blind_cols"] = ["d_outer_nm"]
+            (f / "data.js").write_text("window.REVIEW_DATA = " + json.dumps(data) + ";\n", encoding="utf-8")
+        d, srv = self.serve(build)
+        pg = self.page(srv.url + "?who=rev1")
+        pg.wait_for_function("window.__review && __review.obj() && __review.state().server", timeout=15000)
+        self.assertFalse(self.obj(pg)["blind"])
+        self.assertFalse(pg.is_visible("#oBlind"))
+        self.assertEqual(pg.inner_text("#oTitle"), "Lamellarity check 1")              # D.title
+
+    def test_contained_outlines_come_from_it_also(self):
+        """QC 5: target+contained draws exactly it.also (the builder's list), not the page's own centroid test."""
+        def build(f):
+            data = F.build(f, outline_mode="target+contained")
+            for it in data["items"]:
+                it["also"] = ["g3"] if (it["image"], it["obj"]) == ("imgA", "g1") else []
+            (f / "data.js").write_text("window.REVIEW_DATA = " + json.dumps(data) + ";\n", encoding="utf-8")
+        d, srv = self.serve(build)
+        pg = self.page(srv.url + "?who=rev1")
+        pg.wait_for_function("window.__review && __review.obj() && __review.state().server", timeout=15000)
+        n = pg.evaluate("__review.D.items.findIndex(it => it.image === 'imgA' && it.obj === 'g1')")
+        pos = self.obj(pg)["pos"]
+        key = "ArrowRight" if n >= pos else "ArrowLeft"
+        for _ in range(abs(n - pos)):
+            pg.keyboard.press(key)
+        self.assertEqual(self.obj(pg)["pos"], n)
+        pg.wait_for_function("__review.obj().drawn.length > 0", timeout=10000)
+        self.assertEqual(self.obj(pg)["drawn"], ["g3", "g1"])                    # g2's centre is inside too: not drawn
+
+    def test_rekeyed_answer_is_not_resent(self):
+        """QC 6: the server rewrites @rev1 to its identity; the page drops its pending @rev1 copy (no resend loop)."""
+        d, srv = self.serve(F.build, who="srv_id")
+        pg = self.page(srv.url + "?who=rev1")
+        pg.wait_for_function("window.__review && __review.obj() && __review.state().server", timeout=15000)
+        pg.keyboard.press("2")
+        pg.wait_for_function("__review.state().dirty === 0", timeout=8000)
+        it = self.obj(pg)["item"]
+        file = it["image"] + ".png"
+        local = pg.evaluate(f"Object.keys(__review.edits()[{json.dumps(file)}].dec)")
+        self.assertNotIn(f"a:{it['obj']}:type@rev1", local)
+        self.assertIn(f"a:{it['obj']}:type@srv_id", srv.records[file]["dec"])
+        n = len(srv.puts)
+        pg.wait_for_timeout(1500)
+        self.assertEqual(len(srv.puts), n)                                       # nothing sent again
+
     def test_other_reviewers_answers_never_shown(self):
         d, srv, pg = self.open_card()
         it = self.obj(pg)["item"]
