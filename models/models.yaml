@@ -1,6 +1,7 @@
 # Registry of exported EV segmentation models, read by inference/predict_models.py.
 # weights paths are relative to the repo root. imgsz is the model's own inference size -- keep it.
 # classes: optional {id: name} map; absent or one class = single-class (every prediction is an EV). See inference/model_classes.py.
+# class_map: optional class map id (labels/classmaps/); a multi-class model's EV ids are then the map's ev_classes.
 # val_mask_map50_95 is each model's OWN val set (different sets, different sizes): not comparable across models.
 
 models:
@@ -9,6 +10,7 @@ models:
     imgsz: 1440
     class_name: EV (0), non-EV (1; VLDL + non-EV)   # prediction lines carry the class id; summary.csv n_detections counts BOTH classes
     classes: {0: EV, 1: non-EV}   # structured map (inference/model_classes.py): counts, sizes and layer roles keep class 0 only
+    class_map: cm_ev_nonev_v1      # the class map its training data was built with (labels/classmaps/); ev_classes [EV] -> class 0
     annotation: all membrane layers as separate polygons, collapsed to EV; VLDL/non-EV as a second class
     arch: yolov8m-seg, rect=False (mosaic + mixup on), overlap_mask=False, batch 8, fine-tuned from v4_y8m_20260924, ultralytics 8.4.94
     train_data: roboflow - 20261028 cryoai v5 S1 (114 train / 26 val / 39 test images; split balanced by session)

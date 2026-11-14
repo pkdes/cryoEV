@@ -1,0 +1,29 @@
+{
+ "schema": "class_map/1",
+ "id": "cm_ev_nonev_v1",
+ "name": "ev_nonev",
+ "version": 1,
+ "maker": "builtin",
+ "description": "EV + non-EV: vesicle layers are EV; VLDL and non-EV are non-EV.",
+ "source_schema": "ls_legacy_v1",
+ "classes": [
+  "EV",
+  "non-EV"
+ ],
+ "map": {
+  "EV": "EV",
+  "Incomplete": "EV",
+  "Low conf EV": "EV",
+  "MV": "EV",
+  "inner": "EV",
+  "Overlapping": "EV",
+  "non-EV": "non-EV",
+  "items-nfaR": null,
+  "VLDL": "non-EV"
+ },
+ "ev_classes": [
+  "EV"
+ ],
+ "supersedes": null,
+ "rename": null
+}

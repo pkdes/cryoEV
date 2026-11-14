@@ -1,0 +1,30 @@
+{
+ "schema": "class_map/1",
+ "id": "cm_ev_nonev_undet_v1",
+ "name": "ev_nonev_undet",
+ "version": 1,
+ "maker": "builtin",
+ "description": "EV + non-EV + Undetermined: as ev_nonev, with Low conf EV as its own class.",
+ "source_schema": "ls_legacy_v1",
+ "classes": [
+  "EV",
+  "non-EV",
+  "Undetermined"
+ ],
+ "map": {
+  "EV": "EV",
+  "Incomplete": "EV",
+  "Low conf EV": "Undetermined",
+  "MV": "EV",
+  "inner": "EV",
+  "Overlapping": "EV",
+  "non-EV": "non-EV",
+  "items-nfaR": null,
+  "VLDL": "non-EV"
+ },
+ "ev_classes": [
+  "EV"
+ ],
+ "supersedes": null,
+ "rename": null
+}

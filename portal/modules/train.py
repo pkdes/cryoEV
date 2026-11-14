@@ -5,6 +5,12 @@ Train module (CryoEV portal): a new training job, the live training run, and pas
     GET  /train/train.js         the form's helper (placeholders follow the preset); the page works without it
     POST /train/check            validate the form -> the same page with a summary and the exact job JSON
     POST /train/queue            CJ_TRAIN_QUEUE on: create the job; off: the same preview, nothing written (409)
+    GET  /train/collapse         Advanced > Collapse classes: ?dataset=&cm= -> per-class counts before/after and the
+                                 "identical dataset exists" check (dataset_from_lv.derive_preview); writes nothing
+    POST /train/collapse         build + register <dataset>__<map id> (dataset_from_lv.derive) in a worker thread, one
+                                 build per target (refused while it runs); audit lines `dataset_collapse` requested /
+                                 result (write-ahead: no line, nothing built)
+    GET  /train/api/collapse     ?target= -> that build's state (admins: any; others: their own; no paths for them)
     GET  /train/api/options      datasets, base models, presets, the queue setting (schema cj_train/1)
     GET  /train/api/runs         past training jobs and runs with their metrics and models
     GET  /train/api/live.json    live/live.json for this page (advanced users can't open /history/live/live.json):
@@ -1239,7 +1245,281 @@ def runs_html(data, err, admin: bool, live=None) -> str:
             'dataset only.</p>')
 
 
-def page_body(cfg, user, form=None, result="", status_note="") -> str:
+# ---------------------------------------------------------------- collapse classes (round 14, class maps)
+COLLAPSE_FIELDS = ("dataset", "cm")
+COLLAPSE_ACTION = "dataset_collapse"
+_collapse_lock = threading.Lock()       # guards _collapses and _target_locks
+_collapses: dict = {}                   # target -> {state running|done|failed, uid, dataset, cm, t, ended, error, ...}
+_target_locks: dict = {}                # target -> threading.Lock held by its build (one build per target)
+
+
+def dfl_module():
+    from data_utils import dataset_from_lv as D
+    return D
+
+
+def cm_module():
+    from labels import classmaps as CM
+    return CM
+
+
+def collapse_options(data) -> tuple:
+    """-> (dataset rows [{id, classes, problem}], class maps [{id, name, classes, origin}], error or None)."""
+    D, CM = dfl_module(), cm_module()
+    rows = [{"id": i, "classes": _l(_d(r).get("classes")), "problem": D.derive_problem(r)}
+            for i, r in sorted(_d(data.get("dataset")).items())]
+    try:
+        maps = [{"id": m["id"], "name": m["name"], "classes": m["classes"], "origin": m["_origin"],
+                 "description": m.get("description") or ""} for m in CM.list_all()]
+        err = None
+    except (CM.ClassMapError, OSError) as e:
+        maps, err = [], f"class maps not readable ({e})"
+    return rows, maps, err
+
+
+def collapse_form_html(data, sel: dict, admin: bool, open_: bool = False, result: str = "") -> str:
+    """Train > Advanced > Collapse classes: a GET form (the preview writes nothing)."""
+    rows, maps, err = collapse_options(data)
+    sel_ds = sel.get("dataset") or next((r["id"] for r in rows if not r["problem"]), "")
+    sel_cm = sel.get("cm") or ""
+    ds_opts = options_html(rows, sel_ds, lambda r: r["id"] + (f" ({r['problem']})" if r["problem"] else ""),
+                           lambda r: r["id"], lambda r: bool(r["problem"]))
+    cm_opts = options_html(maps, sel_cm, lambda m: f"{m['id']}: {' + '.join(m['classes'])}"
+                           + (" (user map)" if m["origin"] == "user" else ""), lambda m: m["id"])
+    usable = sum(1 for r in rows if not r["problem"])
+    note = ("" if usable else '<p class="cj-mut">No dataset here was built from a label set, so none can be '
+                              'collapsed.</p>')
+    if err:
+        note += f'<p class="cj-train-warn">{esc(err if admin else "The class maps can’t be read.")}</p>'
+    return (f'<details class="cj-train-more cj-card" id="cj-train-adv"{" open" if open_ else ""}>'
+            f'<summary>Advanced</summary>'
+            f'<h3 class="cj-sec" id="cj-train-h-collapse">Collapse classes</h3>'
+            f'<p class="cj-mut">Make a copy of a dataset with fewer classes, using a class map. Only datasets built '
+            f'from a label set can be collapsed: they are rebuilt from the same labels and split. Preview shows the '
+            f'counts first and writes nothing.</p>{note}'
+            f'<form class="cj-train-form" method="get" action="{PREFIX}/collapse" id="cj-train-collapse-form">'
+            f'<label class="cj-train-lbl" for="cj-train-c-dataset">Dataset'
+            f'<select class="cj-train-in" id="cj-train-c-dataset" name="dataset">{ds_opts}</select></label>'
+            f'<label class="cj-train-lbl" for="cj-train-c-cm">Class map'
+            f'<select class="cj-train-in" id="cj-train-c-cm" name="cm">{cm_opts}</select></label>'
+            f'<div class="cj-train-btns"><button class="cj-train-btn" type="submit"'
+            f'{"" if usable and maps else " disabled"}>Preview counts</button></div></form>{result}</details>')
+
+
+def collapse_check(data, form: dict) -> tuple:
+    """-> (errors, dataset record, class map). Plain words."""
+    D, CM = dfl_module(), cm_module()
+    ds_id, cm_id = (form.get("dataset") or "").strip(), (form.get("cm") or "").strip()
+    rec = _d(data.get("dataset")).get(ds_id)
+    errs = []
+    if not ds_id or rec is None:
+        errs.append("Pick a dataset from the list.")
+    else:
+        why = D.derive_problem(rec)
+        if why:
+            errs.append(f"{ds_id} can’t be collapsed: {why}.")
+    cm = None
+    try:
+        cm = CM.load(cm_id) if CM.ID_RE.match(cm_id) else None
+    except CM.ClassMapError:
+        cm = None
+    if cm is None:
+        errs.append("Pick a class map from the list.")
+    return errs, rec, cm
+
+
+def collapse_state(target):
+    with _collapse_lock:
+        s = _collapses.get(target)
+        return dict(s) if s else None
+
+
+def collapse_public(s: dict, admin: bool, uid) -> dict | None:
+    """A build's state for this user (admins: all; others only their own), without paths or raw errors for others."""
+    if s is None or not (admin or s.get("uid") == uid):
+        return None
+    out = {k: s.get(k) for k in ("target", "dataset", "cm", "state", "phase", "started", "ended")}
+    out["error"] = s.get("error") if admin else ("the build failed; an admin can see why" if s.get("error") else None)
+    if admin:
+        out["dataset_dir"] = s.get("dataset_dir")
+    return out
+
+
+def counts_table(pv: dict) -> str:
+    """Per class: train now -> after, valid, test (after). Classes the map merges or drops show "–" after."""
+    before, after = _d(pv.get("before")), _d(pv.get("class_counts"))
+    tr_b, tr_a, va, te = _d(before.get("train")), _d(after.get("train")), _d(after.get("valid")), _d(after.get("test"))
+    names = list(pv.get("classes") or [])
+    old = [c for c in (pv.get("before_classes") or []) if c not in names]
+    rows = []
+    for c in names:
+        now = tr_b.get(c)
+        rows.append(f'<tr><td data-k="Class">{esc(c)}</td><td data-k="Train now">{"–" if now is None else now}</td>'
+                    f'<td data-k="Train after"><b>{tr_a.get(c, 0)}</b></td><td data-k="Valid">{va.get(c, 0)}</td>'
+                    f'<td data-k="Test">{te.get(c, 0)}</td></tr>')
+    for c in old:
+        rows.append(f'<tr><td data-k="Class"><span class="cj-mut">{esc(c)}</span></td>'
+                    f'<td data-k="Train now">{tr_b.get(c, 0)}</td><td data-k="Train after"><span class="cj-mut">'
+                    f'merged or dropped</span></td><td data-k="Valid">–</td><td data-k="Test">–</td></tr>')
+    tot = lambda d: sum(v for v in d.values() if _num(v) is not None)     # noqa: E731
+    rows.append(f'<tr><td data-k="Class"><b>All</b></td><td data-k="Train now">{tot(tr_b)}</td>'
+                f'<td data-k="Train after"><b>{tot(tr_a)}</b></td><td data-k="Valid">{tot(va)}</td>'
+                f'<td data-k="Test">{tot(te)}</td></tr>')
+    return ('<table class="cj-train-runs" id="cj-train-collapse-counts"><thead><tr><th>Class</th><th>Train now</th>'
+            '<th>Train after</th><th>Valid</th><th>Test</th></tr></thead><tbody>' + "".join(rows) + "</tbody></table>")
+
+
+def collapse_status_html(s: dict) -> str:
+    st = s["state"]
+    if st == "running":
+        msg = (f'Building <b>{esc(s["target"])}</b>: {esc(s.get("phase") or "starting")}. This takes a few minutes; '
+               f'the page updates by itself (or reload it).')
+        cls = "cj-train-preview"
+    elif st == "done":
+        msg = (f'<b>{esc(s["target"])}</b> was built and registered. '
+               f'<a href="{PREFIX}/?dataset={esc(s["target"])}#cj-train-h-new">Use it for a training job</a>.')
+        cls = "cj-train-ok"
+    else:
+        msg = f'<b>{esc(s["target"])}</b> was not made: {esc(s.get("error") or "the build failed")}.'
+        cls = "cj-train-warn"
+    return (f'<p class="{cls}" role="status" id="cj-train-collapse-status" data-target="{esc(s["target"])}" '
+            f'data-state="{esc(st)}" data-dataset="{esc(s["dataset"])}" data-cm="{esc(s["cm"])}">{msg}</p>')
+
+
+def collapse_html(cfg, user, form: dict, data) -> tuple:
+    """GET /train/collapse: the preview (writes nothing), or the state of the build for that target. -> (status, html)."""
+    admin, uid = is_admin(user), (user or {}).get("id")
+    errs, rec, cm = collapse_check(data, form)
+    if errs:
+        return 400, errors_html(errs)
+    D = dfl_module()
+    target = D.derived_name(rec["id"], cm["id"])
+    pub = collapse_public(collapse_state(target), admin, uid)
+    if pub is not None:
+        return 200, f'<section class="cj-card cj-train-sum"><h3 class="cj-sec">Collapse classes</h3>' \
+                    f'{collapse_status_html(pub)}</section>'
+    try:
+        pv = D.derive_preview(rec["id"], cm, getattr(cfg, "registry", None), datasets=_d(data.get("dataset")))
+    except (D.BuildError, OSError, ValueError) as e:
+        return 409, errors_html(["The preview could not be made." + (f" ({e})" if admin else " Ask an admin.")])
+    head = (f'<h3 class="cj-sec">Collapse classes: preview</h3>'
+            f'<dl class="cj-train-kv"><div><dt>Dataset</dt><dd>{esc(rec["id"])}</dd></div>'
+            f'<div><dt>Class map</dt><dd>{esc(cm["id"])}: {esc(" + ".join(cm["classes"]))}</dd></div>'
+            f'<div><dt>New dataset</dt><dd>{esc(target)}</dd></div>'
+            f'<div><dt>Labels from</dt><dd>label set {esc(str(pv["label_version"]))}, split of '
+            f'{esc(str(pv["export"]))}</dd></div></dl>')
+    same = [i for i in pv["identical"] if i != target]
+    if pv["target_exists"]:
+        foot = (f'<p class="cj-train-warn" role="status">{esc(target)} is already in the registry. '
+                f'<a href="{PREFIX}/?dataset={esc(target)}#cj-train-h-new">Use it for a training job</a>.</p>')
+    else:
+        confirm = (f'<form method="post" action="{PREFIX}/collapse" class="cj-train-btns">'
+                   f'<input type="hidden" name="dataset" value="{esc(rec["id"])}">'
+                   f'<input type="hidden" name="cm" value="{esc(cm["id"])}">'
+                   f'<button class="cj-train-btn{"" if same else " cj-train-primary"}" type="submit">'
+                   f'Make collapsed copy</button></form>')
+        if same:
+            use = same[0]
+            foot = (f'<div class="cj-train-preview" role="status" id="cj-train-collapse-same"><p><b>An identical dataset '
+                    f'already exists: {esc(use)}.</b> Its labels, split and images are the same as this collapse '
+                    f'would make.</p><div class="cj-train-btns"><a class="cj-train-btn cj-train-primary" '
+                    f'href="{PREFIX}/?dataset={esc(use)}#cj-train-h-new">Use existing dataset</a></div>'
+                    f'<p class="cj-mut">Or make a copy anyway, named {esc(target)} (recorded with its parent '
+                    f'{esc(rec["id"])}):</p>{confirm}</div>')
+        else:
+            foot = (f'{confirm}<p class="cj-mut">This builds {esc(target)} (images copied, labels rebuilt with the '
+                    f'map), registers it with its parent {esc(rec["id"])}, and writes an audit line.</p>')
+    return 200, (f'<section class="cj-card cj-train-sum" id="cj-train-collapse">{head}{counts_table(pv)}{foot}'
+                 f'</section>')
+
+
+def _collapse_run(cfg, uid, target, dataset, cm_id, lock):
+    """The worker: dataset_from_lv.derive (build + register), then the audit's result line. Holds the target's lock."""
+    D = dfl_module()
+
+    def progress(*a):
+        line = " ".join(str(x) for x in a).strip()
+        m = re.match(r"^=== (\w+) -> (\w+) ===$", line)
+        if m:
+            with _collapse_lock:
+                _collapses[target]["phase"] = f"converting {m.group(1)}"
+    try:
+        try:
+            prov = D.derive(dataset, cm_id, registry_root=Path(cfg.registry),
+                            output_root=getattr(cfg, "dataset_output_root", None), register_it=True, log=progress)
+            state, error, ddir, result = "done", None, prov["dataset_record"].get("dataset_dir"), "ok"
+        except Exception as e:                   # BuildError, ConfigError, OSError, a bug: never unhandled
+            state, error, ddir = "failed", f"{type(e).__name__}: {e}", None
+            result = f"failed: {error}"[:500]
+            log.error("train: collapse %s failed: %s", target, error)
+        try:
+            PA.audit(cfg.state_dir, uid, COLLAPSE_ACTION, target,
+                     {"dataset": dataset, "cm": cm_id, "phase": "result", "result": result})
+        except (OSError, TypeError, AttributeError) as e:
+            log.warning("train collapse audit result line not written (%s): %s %s", type(e).__name__, target, result)
+        with _reg_lock:
+            _reg_cache.pop(str(cfg.registry), None)
+        with _collapse_lock:
+            _collapses[target].update(state=state, error=error, dataset_dir=ddir, phase=None,
+                                      ended=datetime.now().isoformat(timespec="seconds"))
+    finally:
+        lock.release()                           # the target is free again only once its state is final
+
+
+def collapse_start(cfg, user, form: dict, request=None) -> tuple:
+    """POST /train/collapse (runs in a worker thread). -> (status, html). Checks again on a fresh registry read,
+    refuses while the same target is being built, writes the audit line first (write-ahead), then starts the build."""
+    admin, uid = is_admin(user), (user or {}).get("id")
+    data, err = read_registry(getattr(cfg, "registry", None), fresh=True)
+    if err:
+        return 503, errors_html(["The registry can’t be read, so nothing was made." + (f" ({err})" if admin else "")])
+    errs, rec, cm = collapse_check(data, form)
+    if errs:
+        return 400, errors_html(errs)
+    target = dfl_module().derived_name(rec["id"], cm["id"])
+    if target in _d(data.get("dataset")):
+        return 409, errors_html([f"{target} is already in the registry; nothing was made."])
+    with _collapse_lock:
+        lock = _target_locks.setdefault(target, threading.Lock())
+        if not lock.acquire(blocking=False):
+            return 409, errors_html([f"{target} is being built already; nothing new was started."])
+        detail = {"dataset": rec["id"], "cm": cm["id"], "cm_sha256": cm_module().sha256(cm), "phase": "requested"}
+        ok = PA.event(cfg.state_dir, request, COLLAPSE_ACTION, target, detail, actor=uid) if request is not None \
+            else _audit_plain(cfg, uid, target, detail)
+        if not ok:
+            lock.release()
+            return 500, errors_html(["The audit log can’t be written, so nothing was made."])
+        _collapses[target] = {"target": target, "dataset": rec["id"], "cm": cm["id"], "uid": uid, "state": "running",
+                              "phase": "starting", "started": datetime.now().isoformat(timespec="seconds"),
+                              "ended": None, "error": None}
+        t = threading.Thread(target=_collapse_run, args=(cfg, uid, target, rec["id"], cm["id"], lock),
+                             name=f"cj-train-collapse-{target}", daemon=True)
+        _collapses[target]["thread"] = t
+    t.start()
+    pub = collapse_public(collapse_state(target), admin, uid)
+    return 202, (f'<section class="cj-card cj-train-sum"><h3 class="cj-sec">Collapse classes</h3>'
+                 f'{collapse_status_html(pub)}</section>')
+
+
+def _audit_plain(cfg, uid, target, detail) -> bool:
+    try:
+        PA.audit(cfg.state_dir, uid, COLLAPSE_ACTION, target, detail)
+        return True
+    except (OSError, TypeError, AttributeError):
+        return False
+
+
+def wait_collapses(timeout: float = 120.0) -> bool:
+    """Wait for every collapse build started in this process (tests). -> True when none is still running."""
+    with _collapse_lock:
+        threads = [s["thread"] for s in _collapses.values() if s.get("thread")]
+    end = time.monotonic() + timeout
+    for t in threads:
+        t.join(max(0.0, end - time.monotonic()))
+    return not any(t.is_alive() for t in threads)
+
+
+def page_body(cfg, user, form=None, result="", status_note="", collapse=None) -> str:
     admin = is_admin(user)
     root = getattr(cfg, "registry", None)
     data, err = read_registry(root)
@@ -1250,6 +1530,9 @@ def page_body(cfg, user, form=None, result="", status_note="") -> str:
     form_part = (form_html(data, form or {}, admin, root) if not err else
                  f'<p class="cj-mut">The registry can’t be read, so no job can be made'
                  f'{(": " + esc(err)) if admin else "."}</p>')
+    if not err:
+        c = collapse or {}
+        form_part += collapse_form_html(data, c.get("sel") or {}, admin, bool(c), c.get("result") or "")
     tpl = TEMPLATE.read_text(encoding="utf-8")
     live, live_err = read_live(root)
     parts = {"banner": banner + status_note, "result": result, "form": form_part,
@@ -1273,11 +1556,30 @@ JS = r"""// Train page (portal/modules/train.py): the number fields' placeholder
   sel.addEventListener('change', upd);
   upd();
 })();
+// Collapse classes: while the build runs, poll its state and reload when it ends.
+(function () {
+  'use strict';
+  var st = document.getElementById('cj-train-collapse-status');
+  if (!st || st.getAttribute('data-state') !== 'running') return;
+  var url = '/train/api/collapse?target=' + encodeURIComponent(st.getAttribute('data-target'));
+  function tick() {
+    fetch(url, {credentials: 'same-origin'}).then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
+      if (!j) return;
+      if (j.state !== 'running') {
+        window.location.href = '/train/collapse?dataset=' + encodeURIComponent(st.getAttribute('data-dataset')) +
+          '&cm=' + encodeURIComponent(st.getAttribute('data-cm')) + '#cj-train-adv';
+        return;
+      }
+      setTimeout(tick, 3000);
+    }).catch(function () { setTimeout(tick, 10000); });
+  }
+  setTimeout(tick, 3000);
+})();
 """
 
 
 # ---------------------------------------------------------------- routes
-async def read_form(request: Request):
+async def read_form(request: Request, fields=FIELDS):
     """application/x-www-form-urlencoded body, at most MAX_BODY bytes. -> {field: value} or None."""
     ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
     if ctype != "application/x-www-form-urlencoded":
@@ -1291,12 +1593,48 @@ async def read_form(request: Request):
         q = parse_qs(buf.decode("utf-8"), keep_blank_values=True, max_num_fields=40)
     except (UnicodeDecodeError, ValueError):
         return None
-    return {k: (q.get(k) or [""])[0][:200] for k in FIELDS}
+    return {k: (q.get(k) or [""])[0][:200] for k in fields}
 
 
 def routes(ctx) -> list:
     def page(request: Request):                 # sync: Starlette runs it in a worker thread (file reads)
-        return ctx.page(request, "Train", page_body(ctx.cfg, ctx.user(request)), active="train")
+        ds = (request.query_params.get("dataset") or "")[:200]       # "Use existing dataset" preselects it
+        return ctx.page(request, "Train", page_body(ctx.cfg, ctx.user(request), {"dataset": ds} if ds else None),
+                        active="train")
+
+    def collapse_page(request: Request):        # GET: the preview (writes nothing) or the build's state
+        user = ctx.user(request)
+        sel = {k: (request.query_params.get(k) or "")[:200] for k in COLLAPSE_FIELDS}
+        data, err = read_registry(getattr(ctx.cfg, "registry", None))
+        if err:
+            code, res = 503, errors_html(["The registry can’t be read." + (f" ({err})" if is_admin(user) else "")])
+        else:
+            code, res = collapse_html(ctx.cfg, user, sel, data)
+        r = ctx.page(request, "Train", page_body(ctx.cfg, user, collapse={"sel": sel, "result": res}), active="train")
+        r.status_code = code
+        return r
+
+    async def collapse_post(request: Request):
+        form = await read_form(request, COLLAPSE_FIELDS)
+        if form is None:
+            return await run_in_threadpool(bad_request, request)
+        user = ctx.user(request)
+
+        def work():
+            code, res = collapse_start(ctx.cfg, user, form, request)
+            r = ctx.page(request, "Train", page_body(ctx.cfg, user, collapse={"sel": form, "result": res}),
+                         active="train")
+            r.status_code = code
+            return r
+        return await run_in_threadpool(work)
+
+    def collapse_api(request: Request):
+        user = ctx.user(request)
+        target = (request.query_params.get("target") or "")[:200]
+        pub = collapse_public(collapse_state(target), is_admin(user), (user or {}).get("id"))
+        if pub is None:
+            return ctx.json({"problem": "no such build"}, 404)
+        return ctx.json(dict(pub, schema=SCHEMA))
 
     def script(request: Request):
         r = Response(JS, media_type="text/javascript; charset=utf-8")
@@ -1382,6 +1720,9 @@ def routes(ctx) -> list:
             Route(PREFIX + "/train.js", script, methods=["GET"]),
             Route(PREFIX + "/check", check, methods=["POST"]),
             Route(PREFIX + "/queue", do_queue, methods=["POST"]),
+            Route(PREFIX + "/collapse", collapse_page, methods=["GET"]),
+            Route(PREFIX + "/collapse", collapse_post, methods=["POST"]),
+            Route(PREFIX + "/api/collapse", collapse_api, methods=["GET"]),
             Route(PREFIX + "/api/options", options, methods=["GET"]),
             Route(PREFIX + "/api/runs", runs, methods=["GET"]),
             Route(PREFIX + "/api/live.json", live, methods=["GET"])]
