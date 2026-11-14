@@ -7,9 +7,13 @@ when it is missing, a button computes it in a worker thread (results.compute_and
                                            &from=&to=&model=&status=&q=&sort=&group=, portal/listing.py)
     GET  /results/<ps_id>/                 the results page (or the compute button / progress)
     POST /results/<ps_id>/compute          start (or redo) the computation in a thread; 303 back to the page
+                                           (keeps the recipe of the current steps.json)
+    POST /results/<ps_id>/recipe           admin: recompute with a chosen analysis-step recipe (form `step` =
+                                           name:version, repeatable; roles v1 always), round 14
     GET  /results/<ps_id>/api/status       {"state": none|queued|running|ready|error|waiting, ...} for the poll
-    GET  /results/<ps_id>/download/<file>  per_sample.csv, per_image.csv, results.json, results_<ps_id>.zip
-                                           (the three + README.txt with the provenance); always attachments
+    GET  /results/<ps_id>/download/<file>  per_sample.csv, per_image.csv, objects.csv, steps.json, results.json,
+                                           results_<ps_id>.zip (the tables + README.txt with the provenance); always
+                                           attachments
     GET  /results/results.js               the page's script (a file: no inline script)
 
 Rules:
@@ -62,6 +66,12 @@ Rules:
     10 nm bins, 0-500 nm + a >= 500 nm bin; hover titles; a table under <details>).
   - The analysis is shown by its display name (portal/names.py), the ps id as small text.
   - Every text goes through html.escape; the page loads nothing from another origin.
+  - Analysis steps (round 14, contract C5): an "Analysis steps" box shows the recipe of <ps>/results/steps.json (step +
+    version, settings, the columns it adds per object, a one-line summary) to everyone who may see the set, the
+    objects.csv download, and for admins "Change recipe" (POST /results/<ps>/recipe). objects.csv follows the set's
+    normal visibility, except while an OPEN object review set (registry review_package kind "objects", base = this
+    set, status not closed) builds on it: then only admins and the set's owner get it (page link, standalone file,
+    results zip, Everything zip); an unreadable registry counts as open (fail closed).
 """
 from __future__ import annotations
 
@@ -78,6 +88,7 @@ from pathlib import Path
 
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, RedirectResponse, Response
+from starlette.concurrency import run_in_threadpool
 from starlette.routing import Route
 
 from portal import listing as LS
@@ -91,7 +102,11 @@ TEMPLATE = HERE.parent / "templates" / "results.html"
 PS_RE = re.compile(r"^ps_\d{8}_[0-9a-f]{6}$")
 SCHEMA = "results/1"
 FILES = {"per_sample.csv": "text/csv; charset=utf-8", "per_image.csv": "text/csv; charset=utf-8",
+         "objects.csv": "text/csv; charset=utf-8", "steps.json": "application/json",
          "results.json": "application/json"}
+OBJECTS_CSV, STEPS_JSON = "objects.csv", "steps.json"     # = results.compute (round 14, contract C5)
+# review_package statuses after which an object set is no longer open (contract C4: blind while open)
+CLOSED_SET_STATUSES = frozenset({"reviewed", "applied", "superseded", "abandoned"})
 NOT_FOUND = "No analysis with this name, or it is not yours."
 SMALL_BASE = 20              # reviewer % on fewer reviewer EVs than this is flagged "small sample"
 NM_TOLERANCE = 0.01          # = results.compute.NM_TOLERANCE (the text here; a test pins both equal)
@@ -276,14 +291,16 @@ def job_state(ps: dict) -> dict | None:
         return dict(j) if j else None
 
 
-def _worker(cfg, ps: dict, key: str):
+def _worker(cfg, ps: dict, key: str, recipe=None):
     try:
         with _slot:
             with _jobs_lock:
                 _jobs[key]["state"] = "running"
             read_at, edits = time.time(), edit_names(cfg, ps["id"])     # taken BEFORE the read: conservative
             reviewed = reviewed_source(cfg, ps["id"])
-            res, _ = _compute_fn()(ps["dir"], reviewed)
+            # recipe None = the default (roles v1); the 2-argument call keeps a replaced COMPUTE (tests) working
+            res, _ = (_compute_fn()(ps["dir"], reviewed) if recipe is None
+                      else _compute_fn()(ps["dir"], reviewed, recipe=recipe))
             # results.json is committed; record which review it counted (stale_info compares edits with read_at)
             _write_review_read(ps, res.get("computed"), read_at, edits)
         with _jobs_lock:
@@ -294,15 +311,18 @@ def _worker(cfg, ps: dict, key: str):
                           "detail": f"{type(e).__name__}: {e}", "started": _jobs.get(key, {}).get("started")}
 
 
-def start_compute(cfg, ps: dict) -> bool:
-    """Start the worker unless one is already queued or running for this set. -> True when started."""
+def start_compute(cfg, ps: dict, recipe="keep") -> bool:
+    """Start the worker unless one is already queued or running for this set. -> True when started.
+    recipe: "keep" (the recipe of the set's current steps.json, else the default), None (the default) or a list."""
+    if recipe == "keep":
+        recipe = current_recipe(ps)
     key = str(ps["dir"])
     with _jobs_lock:
         j = _jobs.get(key)
         if j and j["state"] in ("queued", "running"):
             return False
         _jobs[key] = {"state": "queued", "error": None, "detail": None, "started": time.time()}
-    threading.Thread(target=_worker, args=(cfg, ps, key), daemon=True, name=f"cj-results-{ps['id']}").start()
+    threading.Thread(target=_worker, args=(cfg, ps, key, recipe), daemon=True, name=f"cj-results-{ps['id']}").start()
     return True
 
 
@@ -863,17 +883,186 @@ CSV_NOTE = "CSV files start with # lines describing how they were made (pandas: 
 
 
 INCOMPLETE = "Results are being written or were interrupted: compute again."
+OBJECTS_BLIND = ("objects.csv is limited to admins and the owner of this analysis while a blind object review is open "
+                 "on it.")
+NL = chr(10)
 
 
 def incomplete(ps: dict) -> bool:
-    """A CSV newer than results.json (which is written last) = a write in progress or one that stopped halfway."""
+    """A CSV or steps.json newer than results.json (which is written last) = a write in progress or one that stopped
+    halfway."""
     rdir = ps["dir"] / "results"
     try:
         done = (rdir / "results.json").stat().st_mtime
         return any((rdir / f).is_file() and (rdir / f).stat().st_mtime > done
-                   for f in FILES if f.endswith(".csv"))
+                   for f in FILES if f != "results.json")
     except OSError:
         return True
+
+
+# ---------------------------------------------------------------- round 14: analysis steps (contract C5)
+def open_object_sets(cfg, ps_id: str):
+    """Ids of the OPEN object review sets built on this prediction set: registry review_package records with kind
+    "objects", base == ps_id and a status that is not closed (CLOSED_SET_STATUSES; no status = open). [] without a
+    configured registry (no object set can exist); None when the configured registry can not be read (callers fail
+    closed)."""
+    reg = getattr(cfg, "registry", None)
+    if not reg:
+        return []
+    try:
+        from portal.modules.data import records as DREC
+        recs, err = DREC.read_registry(reg)
+    except Exception:                                   # noqa: BLE001 - unreadable = unknown, fail closed
+        return None
+    if err:
+        return None
+    return sorted(rid for rid, r in (recs.get("review_package") or {}).items()
+                  if isinstance(r, dict) and r.get("kind") == "objects" and r.get("base") == ps_id
+                  and r.get("status") not in CLOSED_SET_STATUSES)
+
+
+def objects_restricted(cfg, ps: dict) -> bool:
+    """True while the set feeds an open (blind) object review set, or when that can not be checked: objects.csv then
+    goes to admins and the set's owner only (contracts C4/C5)."""
+    sets = open_object_sets(cfg, ps["id"])
+    return sets is None or bool(sets)
+
+
+def may_get_objects(cfg, ps: dict, user: dict) -> bool:
+    """objects.csv: the set's normal visibility (load_set already checked it), narrowed to admin or the set's owner
+    while objects_restricted."""
+    if (user or {}).get("role") == "admin" or ((user or {}).get("id") and user.get("id") == ps["request"].get("owner")):
+        return True
+    return not objects_restricted(cfg, ps)
+
+
+def files_for(cfg, ps: dict, user: dict) -> list:
+    """FILES this viewer may download (objects.csv only under may_get_objects)."""
+    ok = None
+    out = []
+    for f in FILES:
+        if f == OBJECTS_CSV:
+            ok = may_get_objects(cfg, ps, user) if ok is None else ok
+            if not ok:
+                continue
+        out.append(f)
+    return out
+
+
+def read_steps(ps: dict, res: dict) -> dict | None:
+    """<ps>/results/steps.json when it belongs to these results (same `computed`), else None."""
+    doc = _read_json(ps["dir"] / "results" / STEPS_JSON)
+    if (isinstance(doc, dict) and doc.get("schema") == "steps/1" and isinstance(doc.get("recipe"), list)
+            and doc.get("computed") == res.get("computed")):
+        return doc
+    return None
+
+
+def _steps_mod():
+    from analysis import steps as ST
+    return ST
+
+
+def current_recipe(ps: dict):
+    """The recipe the set's results were last computed with ([(name, version)], from steps.json when it is valid),
+    else None (= the default). A plain "Update results" keeps it, so a recipe chosen by an admin is not lost."""
+    doc = _read_json(ps["dir"] / "results" / STEPS_JSON)
+    rec = doc.get("recipe") if isinstance(doc, dict) else None
+    if not isinstance(rec, list):
+        return None
+    try:
+        steps = _steps_mod().validate_recipe([(e.get("step"), e.get("version")) for e in rec if isinstance(e, dict)])
+    except ValueError:
+        return None
+    return None if _steps_mod().is_default(steps) else [s.key for s in steps]
+
+
+def fparams(params: dict) -> str:
+    return " · ".join(f"{k.replace('_', ' ')} {'none' if v is None else v}" for k, v in (params or {}).items()) or "–"
+
+
+def recipe_text(doc: dict) -> str:
+    return ", ".join(f"{e.get('step')} v{e.get('version')}" for e in doc.get("recipe") or [])
+
+
+def steps_panel(cfg, ps: dict, res: dict, user: dict, busy: bool) -> str:
+    """The "Analysis steps" box: the recipe as a table (step + version pill, settings, columns it adds per object, a
+    one-line summary), the objects.csv download (when this viewer may have it) and, for admins, Change recipe."""
+    ps_id = ps["id"]
+    doc = read_steps(ps, res)
+    out = ['<section class="cj-card" id="cj-results-steps" aria-labelledby="cj-results-steps-h">'
+           f'<h2 class="cj-sec" id="cj-results-steps-h">{esc("Analysis steps")}</h2>']
+    if doc is None:
+        out.append(f'<p class="cj-mut">{esc("These results were computed before analysis steps were recorded, so there is no objects.csv. Update the results to add it.")}</p>')
+    else:
+        try:
+            known = _steps_mod().STEPS
+        except Exception:                               # noqa: BLE001 - the panel never takes the page down
+            known = {}
+        rows = []
+        for e in doc["recipe"]:
+            st = known.get((e.get("step"), e.get("version")))
+            name = st.title if st else str(e.get("step"))
+            cols = ", ".join(f"{e.get('step')}.{c}" for c in (st.columns if st else ()))
+            summ = (doc.get("summary") or {}).get(e.get("step")) or "–"
+            rows.append(f'<tr data-step="{esc(str(e.get("step")))}">'
+                        f'<th scope="row" data-label="Step" class="cj-results-l">{esc(name)} '
+                        f'{chip("v" + str(e.get("version")), "model")}</th>'
+                        f'<td data-label="Settings" class="cj-results-l">{esc(fparams(e.get("params")))}</td>'
+                        f'<td data-label="Adds per object" class="cj-results-l">{esc(cols or "–")}</td>'
+                        f'<td data-label="Summary" class="cj-results-l">{esc(str(summ))}</td></tr>')
+        out.append(f'<p class="cj-mut">{esc("Recipe: " + recipe_text(doc) + (" (default)" if doc.get("default") else ""))}</p>')
+        out.append('<div class="cj-results-wrap"><table class="cj-results-tab cj-results-stack" id="cj-results-steptab">'
+                   '<thead><tr><th scope="col">Step</th><th scope="col">Settings</th><th scope="col">Adds per object</th>'
+                   f'<th scope="col">Summary</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>')
+        n = doc.get("n_objects")
+        if may_get_objects(cfg, ps, user):
+            out.append(f'<p class="cj-results-dlmain"><a class="cj-results-btn" id="cj-results-objects" '
+                       f'href="/results/{esc(ps_id)}/download/{OBJECTS_CSV}" download>{esc("Download objects.csv")}</a> '
+                       f'<span class="cj-mut">{esc(plural(n if isinstance(n, int) else 0, "row") + ", stamped with step versions (steps.json)")}</span></p>')
+        else:
+            out.append(f'<p class="cj-mut" id="cj-results-objects-blind">{esc("objects.csv is limited to admins and the set owner while a blind object review is open on this analysis.")}</p>')
+    if (user or {}).get("role") == "admin" and not busy and predictions_ready(ps):
+        out.append(recipe_form(ps_id, doc))
+    out.append("</section>")
+    return "".join(out)
+
+
+def recipe_form(ps_id: str, doc) -> str:
+    """Admin: recompute with optional steps on top of the default recipe (POST /results/<ps>/recipe)."""
+    try:
+        ST = _steps_mod()
+        optional = [s for k, s in ST.STEPS.items() if s.name not in ST.REQUIRED]
+        req = [ST.STEPS[tuple(e)] for e in ST.DEFAULT_RECIPE]
+    except Exception:                                   # noqa: BLE001
+        return ""
+    have = {(e.get("step"), e.get("version")) for e in (doc or {}).get("recipe") or []}
+    boxes = "".join(f'<li><label><input type="checkbox" checked disabled> {esc(s.title)} v{s.version} '
+                    f'<span class="cj-mut">{esc("(always)")}</span></label></li>' for s in req)
+    boxes += "".join(f'<li><label><input type="checkbox" name="step" value="{esc(s.name)}:{s.version}"'
+                     f'{" checked" if s.key in have else ""}> {esc(s.title)} v{s.version} '
+                     f'<span class="cj-mut">{esc(s.description)}</span></label></li>' for s in optional)
+    return (f'<details class="cj-results-det" id="cj-results-recipe"><summary>{esc("Change recipe (admin)")}</summary>'
+            f'<form class="cj-results-form" method="post" action="/results/{esc(ps_id)}/recipe">'
+            f'<ul class="cj-results-ul">{boxes}</ul>'
+            f'<p class="cj-mut">{esc("Recomputes the results with these steps. The counts do not change; objects.csv gains the columns.")}</p>'
+            f'<button type="submit" class="cj-results-btn cj-results-btn-s">{esc("Recompute with this recipe")}</button>'
+            '</form></details>')
+
+
+def parse_recipe_form(values) -> list:
+    """['nesting:1', ...] from the form -> a recipe (DEFAULT_RECIPE + the chosen optional steps, in STEPS order).
+    ValueError on anything that is not a known optional step."""
+    ST = _steps_mod()
+    chosen = set()
+    for v in values:
+        name, _, ver = str(v).partition(":")
+        if not ver.isdigit() or (name, int(ver)) not in ST.STEPS or name in ST.REQUIRED:
+            raise ValueError(f"unknown step {v!r}")
+        chosen.add((name, int(ver)))
+    recipe = [tuple(e) for e in ST.DEFAULT_RECIPE] + [k for k in ST.STEPS if k in chosen]
+    ST.validate_recipe(recipe)
+    return recipe
 
 
 def csv_header(res: dict, ps: dict) -> bytes:
@@ -994,6 +1183,7 @@ def render_set(cfg, ps: dict, user: dict) -> str:
     out.append('<h2 class="cj-sec">Download</h2>')
     out.append(downloads_zips(ps_id, package_dir(cfg, ps_id) is not None, (ps["dir"] / "p").is_dir()))
     out.append(downloads(ps_id))
+    out.append(steps_panel(cfg, ps, res, user, st["state"] in ("queued", "running")))
     out.append('<h2 class="cj-sec">How these numbers were made</h2>')
     out.append('<dl class="cj-card cj-results-prov" id="cj-results-prov">' + "".join(
         f"<div><dt>{esc(k)}</dt><dd>{esc(v)}</dd></div>" for k, v in provenance(res, ps).items()) + "</dl>")
@@ -1094,6 +1284,14 @@ def results_doc_lines(prefix: str = "") -> list:
         f"  {p}per_image.csv   one row per image; reviewed / edited say whether a person checked it (reviewed = true),",
         "                  changed it without marking it reviewed (edited = true), or neither (model only).",
         "                  rejected / reject_reason / note: a rejected image stays in this file but is not counted.",
+        f"  {p}objects.csv     one row per outline (round 14): image, line (0-based line of the model's prediction",
+        "                  .txt; blank for an outline a reviewer drew or reshaped), pkg_key (the review package's",
+        "                  object key), cls, conf, included (1 = counted: an EV or an inner layer), exclude_reason",
+        "                  (conf, no_diameter, rejected_image, refused_sample, non_ev), then <step>.<column> per",
+        "                  analysis step (roles.role, roles.layer_count, ...). Present only when this viewer may have",
+        "                  it (it is limited to admins and the set owner while a blind object review is open).",
+        f"  {p}steps.json      the analysis steps that made objects.csv: name, version, settings and code sha",
+        "                  of each, and the sha256 of objects.csv",
         f"  {p}results.json    everything above, schema results/1", "",
         "Columns",
         "  n_images                  images COUNTED in the sample (rejected images are not in this number)",
@@ -1570,7 +1768,7 @@ def build_zip(cfg, ps: dict, user: dict, kind: str):
         res, _ = read_results(ps)
         has_results = res is not None and not incomplete(ps)
         if has_results:
-            entries += [(f"results/{f}", lp(rdir / f)) for f in FILES if (rdir / f).is_file()]
+            entries += [(f"results/{f}", lp(rdir / f)) for f in files_for(cfg, ps, user) if (rdir / f).is_file()]
     stale = stale_info(cfg, ps) if has_results else None
     readme_txt = zip_readme(kind, ps, user, stale, has_results, rev is not None, problems)
 
@@ -1669,6 +1867,32 @@ def routes(ctx) -> list:
                                       f"be computed once it is done.", "state": state}, 409)
         return ctx.no_store(RedirectResponse(f"/results/{ps['id']}/", status_code=303))
 
+    async def recipe(request: Request):
+        """Admin: recompute with a chosen recipe (form field `step` = name:version, repeatable; DEFAULT_RECIPE is
+        always included). A worker thread like compute; 303 back to the page."""
+        ps = await run_in_threadpool(get_set, request)
+        if ps is None:
+            return not_found(request)
+        if ctx.user(request).get("role") != "admin":   # the Gate lets every Results role in; this one is admin only
+            r = ctx.page(request, "Admins only", '<h1>Admins only</h1><p>Only an admin can change the recipe.</p>',
+                         active="results")
+            r.status_code = 403
+            return r
+        form = await request.form()
+        try:
+            chosen = parse_recipe_form(form.getlist("step"))
+        except ValueError as e:
+            r = ctx.page(request, "Recipe not accepted", f'<h1>Recipe not accepted</h1><p>{esc(str(e))}</p>'
+                         f'<p><a href="/results/{esc(ps["id"])}/">Back to the results</a></p>', active="results")
+            r.status_code = 400
+            return r
+        if not predictions_ready(ps):
+            return ctx.json({"error": f"The predictions of {ps['id']} are not finished.",
+                             "state": (ps["status"] or {}).get("state") or "unknown"}, 409)
+        default = [tuple(e) for e in _steps_mod().DEFAULT_RECIPE]
+        start_compute(ctx.cfg, ps, None if chosen == default else chosen)
+        return ctx.no_store(RedirectResponse(f"/results/{ps['id']}/", status_code=303))
+
     def api_status(request: Request):
         ps = get_set(request)
         if ps is None:
@@ -1720,15 +1944,24 @@ def routes(ctx) -> list:
             return r
         if name in FILES:
             p = rdir / name
+            if name == OBJECTS_CSV and not may_get_objects(ctx.cfg, ps, ctx.user(request)):
+                r = ctx.page(request, "Not available", f'<h1>Not available</h1><p>{esc(OBJECTS_BLIND)}</p>'
+                             f'<p><a href="/results/{esc(ps["id"])}/">Back to the results</a></p>', active="results")
+                r.status_code = 403
+                return ctx.no_store(r)
             if not p.is_file():
                 return not_found(request)
             head = csv_header(res, ps) if name.endswith(".csv") else b""
+            if name == OBJECTS_CSV:
+                doc = read_steps(ps, res)
+                head += (f"# steps={recipe_text(doc)} (steps.json); one row per outline, see the results zip README" + NL
+                         if doc else "# steps=unknown (no steps.json for these results)" + NL).encode("utf-8")
             return attachment(head + p.read_bytes(), f"{ps['id']}_{name}", FILES[name])
         if name == f"results_{ps['id']}.zip":
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
                 z.writestr("README.txt", readme(res, ps, ctx.user(request)))
-                for f in FILES:
+                for f in files_for(ctx.cfg, ps, ctx.user(request)):
                     if (rdir / f).is_file():
                         z.write(rdir / f, f)
             return attachment(buf.getvalue(), name, "application/zip")
@@ -1750,5 +1983,6 @@ def routes(ctx) -> list:
             Route(PREFIX + "/{ps}", slash, methods=["GET"]),
             Route(PREFIX + "/{ps}/", show, methods=["GET"]),
             Route(PREFIX + "/{ps}/compute", compute, methods=["POST"]),
+            Route(PREFIX + "/{ps}/recipe", recipe, methods=["POST"]),
             Route(PREFIX + "/{ps}/api/status", api_status, methods=["GET"]),
             Route(PREFIX + "/{ps}/download/{name}", download, methods=["GET"])]

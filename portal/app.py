@@ -220,6 +220,7 @@ AUDIT_LABELS = {      # route template -> (action, frequent: first per 10 min wr
     "/reviews/{pkg_id}/reviewers": ("reviewers changed", False),
     "/reviews/start/objects": ("object set built", False),
     "/train/collapse": ("dataset derived (collapse)", False),
+    "/results/{ps}/recipe": ("results recomputed (recipe)", False),
     "/predict/api/upload":("upload started", False),
     "/predict/api/upload/{uid}/file": ("upload chunk", True),
     "/predict/api/upload/{uid}/create": ("prediction set created", False),

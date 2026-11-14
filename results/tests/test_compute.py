@@ -501,8 +501,10 @@ class Outputs(unittest.TestCase):
                 write_results(res, out)
             finally:
                 C._atomic_write = real
-            self.assertEqual(order, ["per_image.csv", "per_sample.csv", "results.json"])
-            self.assertEqual(sorted(p.name for p in out.iterdir()), ["per_image.csv", "per_sample.csv", "results.json"])
+            # contract C5 (round 14): objects.csv, then steps.json, then results.json last
+            self.assertEqual(order, ["per_image.csv", "per_sample.csv", "objects.csv", "steps.json", "results.json"])
+            self.assertEqual(sorted(p.name for p in out.iterdir()),
+                             ["objects.csv", "per_image.csv", "per_sample.csv", "results.json", "steps.json"])
 
     def test_cli(self):
         with TempPS() as t:
