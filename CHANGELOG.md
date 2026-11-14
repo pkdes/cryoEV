@@ -7,6 +7,17 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-13 22:45 · Round 13: one Reviews page, start and assign reviews, list filters
+
+- **Reviews** (one menu entry, replaces Label review / My reviews / Sandbox): "Needs your review" first (most recent first), then all reviews by kind (predictions, label sets, audits, practice). Finished and applied reviews are hidden until you change the status filter. Continue opens Quick check if cards are open, else the Editor.
+- **Switch packages without leaving the tool:** a bar above the review tool with "← All reviews", the current package and a list of your other reviews. (Not on the running audit's page until it ends.)
+- **Assign reviewers:** the owner or an admin adds lab members to a review; they see it under "Needs your review".
+- **Start a review:** from a finished prediction set (everyone, own sets), or, for admins, revise a label set or build a blind audit from the web, with a progress page. Revised label sets can then be Applied.
+- **Results and My analyses:** filter by person (agent-made on/off), date, model, status and search; sort; group by person, imaging session, source images, model or sample.
+- Blind audits show counts only to everyone but admins; an audit's owner can't decide its cards.
+
+**Components:** portal, review servers (settings), compare_package, registry (schema, importer)
+
 ## 2026-11-13 15:00 · Review page 2026-11-13.1: image info, sample switcher, sample / montage reject
 
 - **Image info** in the Editor's side panel: sample, montage, tile, defocus, magnification, pixel size, dose, when it was taken, and how it was processed (recipe, contrast clip, bandpass, denoise). Anything the lab's folders don't have says "not recorded". Quick check shows montage, tile and defocus under the card.
