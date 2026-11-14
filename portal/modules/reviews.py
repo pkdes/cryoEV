@@ -333,7 +333,7 @@ def write_reviewers(root, pkg: Path, add=(), remove=(), *, allowed=None, lock_wa
             raise ReviewersError("This review's settings could not be read, so nothing was changed.")
         old = [r for r in meta["reviewers"] if isinstance(r, str)] if isinstance(meta.get("reviewers"), list) else []
         owner = meta.get("owner") if isinstance(meta.get("owner"), str) else None
-        if TT.is_blind(meta) and owner and owner in add:
+        if TT.is_blind(meta, pkg) and owner and owner in add:
             raise ReviewersError("The audit's owner can't be a reviewer on it.")
         new = [r for r in old if r not in remove]
         new += [a for a in add if a not in new]
@@ -569,7 +569,7 @@ def render_hub(rows, *, user, params, flash_html="") -> str:
             else "Every review you own or were added to.")
     out = [STYLE, getattr(listing, "STYLE", ""),          # the shared filter form's own styles (B2)
            '<div class="cj-rv"><div class="cj-rv-head"><div><h1>Reviews</h1>'
-           f'<p class="cj-mut">{esc(lead)}</p></div><a class="cj-rv-btn" href="/reviews/start">+ Start a review</a></div>',
+           f'<p class="cj-mut">{esc(lead)}</p></div><a class="cj-rv-btn" href="/reviews/start/">+ Start a review</a></div>',
            flash_html]
 
     need = RI.needs_you(rows)
@@ -589,7 +589,7 @@ def render_hub(rows, *, user, params, flash_html="") -> str:
     out.append('<section class="cj-rv-sec" aria-labelledby="cj-rv-all-h"><h2 id="cj-rv-all-h">All reviews</h2>')
     if not rows:
         out.append(f'<div class="cj-rv-list"><div class="cj-rv-empty">{esc(HUB_EMPTY)} '
-                   '<a href="/reviews/start">Start a review</a></div></div></section></div>')
+                   '<a href="/reviews/start/">Start a review</a></div></div></section></div>')
         return "".join(out)
     counts = {k: (len(rows) if k == "all" else sum(1 for r in rows if r["kind"] == k)) for k, _ in TABS}
     tabs = []
@@ -642,14 +642,14 @@ def render_hub(rows, *, user, params, flash_html="") -> str:
     return "".join(out)
 
 
-def render_panel(pkg_id, row, meta, roster, token_html, error="") -> str:
+def render_panel(pkg_id, row, meta, roster, token_html, error="", panel_dir=None) -> str:
     """The Assign reviewers panel (owner or admin only). row = the viewer's hub row, for the title and counts."""
     from portal import review_index as RI
     from portal import titles as TT
-    blind = TT.is_blind(meta)
+    blind = TT.is_blind(meta, panel_dir)
     owner = meta.get("owner") if isinstance(meta.get("owner"), str) else None
     revs = [r for r in meta["reviewers"] if isinstance(r, str)] if isinstance(meta.get("reviewers"), list) else []
-    kind = RI.kind_of(pkg_id, meta)
+    kind = RI.kind_of(pkg_id, meta, panel_dir)
     title = (row or {}).get("title") or pkg_id
     prog = (f'<span class="cj-rv-prog">{row.get("decided") or 0} of {row["cards"]} cards</span>'
             if row and row.get("cards") is not None else "")
@@ -749,7 +749,7 @@ def routes(ctx) -> list:
         pid = hit[0].name
         row = next((r for r in rows_for(request, with_facets=False) if r["id"] == pid), None)
         body = render_panel(pid, row, hit[1], roster_ids(getattr(ctx.cfg, "roster", None)),
-                            AD.hidden_token(token(request)), error)
+                            AD.hidden_token(token(request)), error, panel_dir=hit[0])
         return show(request, "Assign reviewers", body, status)
 
     def reviewers_get(request: Request):

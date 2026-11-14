@@ -195,7 +195,7 @@ class Hub(unittest.TestCase):
             self.assert_no_audit(text, who, strict=True)
         _, _, nobody = self.get("/reviews/", "nobody")
         self.assertIn("No reviews yet. Start one from a finished prediction set, or ask an admin.", nobody)
-        self.assertIn('href="/reviews/start"', nobody)
+        self.assertIn('href="/reviews/start/"', nobody)
 
     def test_admin_sees_the_audit_as_counts_only(self):
         st, _, text = self.get("/reviews/?show=all&status=any", "admin")

@@ -33,7 +33,8 @@ MAX_DEPTH = 4
 MAX_JSON_BYTES = 1_000_000  # review_package.json and friends are tiny; a larger file is skipped, not parsed
 SCAN_TTL = 15.0  # seconds a scan_packages result is reused (admin polls, label pages)
 SKIP_DIRS = ("pred_", "_", ".", "SANDBOX")  # "." = .building_* (a build in progress), .meta_locks (reviewers lock)
-BLIND_KINDS = ("compare",)  # who decided what is never shown for these (a compare without purpose "revise" is blind)
+BLIND_KINDS = ("compare",)
+BUILDING = ".building"  # <review root>/.building/<name>/: the portal's build of <name> is in progress (review_build.py)  # who decided what is never shown for these (a compare without purpose "revise" is blind)
 SKIP_KINDS = ("part", "prediction")
 
 _cache: dict = {}
@@ -231,7 +232,9 @@ def package_progress(pkg_dir) -> dict | None:
 
 def scan_packages(root, records) -> list:
     """Lab labeling and compare packages under the review root (never pred_*, parts, sandboxes, work folders or
-    dot-folders such as .building_*; who / via are None on a blind compare package (is_blind)):
+    dot-folders such as .building/, nor a folder the portal is still building (no review_package.json yet and a
+    .building/<name> status folder; older build_review_package.py packages never have the file and stay listed);
+    who / via are None on a blind compare package (is_blind)):
     [{id, title, kind, cards, decided, images, reviewed, last, who, via, status, applied_by (lv id or None),
     base_lv, waiting (decisions not applied yet, 0 when applied)}]; status ready / in_progress / applied."""
     if root is None:
@@ -263,10 +266,22 @@ def applied_map(records) -> dict:
     return applied
 
 
-def is_blind(meta) -> bool:
-    """A blind package (an audit): a compare package whose purpose is not "revise". Who decided what is never shown."""
+def is_blind(meta, pkg_dir=None) -> bool:
+    """A blind package (an audit): any compare package except a label set revision, which is purpose "revise" in its
+    own review_package.json AND has no _work_<name> folder beside it (pkg_dir given; an existence check only, the
+    folder is never opened). Who decided what is never shown on a blind package."""
     meta = _dict(meta)
-    return meta.get("kind") in BLIND_KINDS and meta.get("purpose") != "revise"
+    if meta.get("kind") not in BLIND_KINDS:
+        return False
+    if meta.get("purpose") != "revise":
+        return True
+    if pkg_dir is None:
+        return False
+    pkg_dir = Path(pkg_dir)
+    try:
+        return (pkg_dir.parent / f"_work_{pkg_dir.name}").exists()
+    except OSError:
+        return True                                     # can't tell: treat as blind
 
 
 def _scan_packages(root, records) -> list:
@@ -280,14 +295,17 @@ def _scan_packages(root, records) -> list:
         prog = package_progress(d)
         if prog is None:
             continue
-        meta = {**_dict(_dict(records.get("review_package")).get(d.name)), **_dict(read_json(d / "review_package.json"))}
+        own = read_json(d / "review_package.json")
+        if not isinstance(own, dict) and (Path(root) / BUILDING / d.name).exists():
+            continue                                    # the portal is building it (review_package.json comes last)
+        meta = {**_dict(_dict(records.get("review_package")).get(d.name)), **_dict(own)}
         if meta.get("kind") in SKIP_KINDS or meta.get("parent"):
             continue
         base_lv = lv_from_path(meta.get("base")) or lv_from_path(prog["source"])
         by = applied.get(d.name)
         has_edits = prog["last"] is not None
         status = "applied" if by else ("in_progress" if has_edits and prog["decided"] else "ready")
-        blind = is_blind(meta)
+        blind = is_blind(_dict(own), d) if isinstance(own, dict) else is_blind(meta, d)
         out.append({"id": d.name, "title": package_title(records, d.name, meta), "kind": meta.get("kind") or "review",
                     **{k: prog[k] for k in ("cards", "decided", "images", "reviewed", "last")},
                     "who": None if blind else prog["who"], "via": None if blind else prog["via"],

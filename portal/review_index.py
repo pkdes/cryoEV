@@ -119,11 +119,13 @@ def _same(a: Path, b: Path | None) -> bool:
         return str(a).lower() == str(b).lower()
 
 
-def kind_of(pkg_id: str, meta: dict) -> str:
-    """prediction (pred_*); audit (a compare package that is not purpose "revise": blind); else label_review."""
+def kind_of(pkg_id: str, meta: dict, pkg_dir=None) -> str:
+    """prediction (pred_*); audit (a blind compare package: titles.is_blind, i.e. any compare package except one with
+    purpose "revise" and no _work_<name> folder); else label_review."""
+    from portal import titles as TT
     if pkg_id.startswith("pred_") or meta.get("kind") == "prediction":
         return "prediction"
-    if meta.get("kind") == "compare" and meta.get("purpose") != "revise":
+    if TT.is_blind(meta, pkg_dir):
         return "audit"
     return "label_review"
 
@@ -209,7 +211,7 @@ def _row(d: Path, meta: dict, *, user, records, applied, proot, core: bool, with
     pid = d.name
     me = user.get("id") if isinstance(user, dict) else None
     is_admin = isinstance(user, dict) and user.get("role") == "admin"
-    kind = kind_of(pid, meta)
+    kind = kind_of(pid, meta, d)
     blind = kind == "audit"
     owner = _str(meta.get("owner"))
     revs = [r for r in meta["reviewers"] if isinstance(r, str)] if isinstance(meta.get("reviewers"), list) else []

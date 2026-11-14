@@ -210,6 +210,36 @@ class ListTests(World):
         self.assertEqual([r["id"] for r in need], [PRED_A, PRED_B])        # newest activity first; applied not needed
         self.assertEqual(RI.needs_you([]), [])
 
+    def test_revise_with_a_work_folder_is_an_audit(self):
+        self.assertEqual(self.rows(user("bas"))[REV_LAB]["kind"], "label_review")
+        (self.root / f"_work_{REV_LAB}").mkdir()                            # B4's rule: purpose revise AND no _work_
+        r = self.rows(user("bas"))[REV_LAB]
+        self.assertEqual((r["kind"], r["blind"], r["owner"], r["reviewers"]), ("audit", True, None, []))
+        meta = json.loads((self.audit2 / "review_package.json").read_text())
+        self.assertNotIn("purpose", meta)                                   # no purpose at all: an audit
+        self.assertEqual(self.rows(user("audowner"))[AUDIT2]["kind"], "audit")
+
+    def test_package_being_built_is_skipped(self):
+        """A portal build writes data.js, images and .review_key before review_package.json: not listed yet."""
+        d = self.root / "pred_ps_20261112_fffff6"
+        make_fixture.build(d)
+        (d / ".review_key").write_text("k" * 20, encoding="utf-8")
+        lab = self.root / "lab_revise_building_20261113"
+        make_fixture.build(lab)
+        (lab / ".review_key").write_text("k" * 20, encoding="utf-8")
+        (self.root / ".building" / lab.name).mkdir(parents=True)          # review_build.py's status folder
+        (self.root / ".building" / lab.name / "status.json").write_text("{}", encoding="utf-8")
+        every = self.rows(user("adm", "admin"), show_all=True)
+        self.assertNotIn(d.name, every)
+        self.assertNotIn(lab.name, every)
+        scanned = {p["id"] for p in TT.scan_packages(self.root, {})}
+        self.assertNotIn(lab.name, scanned)
+        self.assertNotIn(".building", scanned)
+        self.assertIn(AUDIT2, scanned)                                      # control: a built one is listed
+        TT._cache.clear()
+        shutil.rmtree(self.root / ".building")                             # an older build_review_package.py folder
+        self.assertIn(lab.name, {p["id"] for p in TT.scan_packages(self.root, {})})   # (no json ever) stays listed
+
     def test_titles_and_made_from(self):
         (self.cfg.predict_root / PRED_A[5:]).mkdir(parents=True)
         (self.cfg.predict_root / PRED_A[5:] / "request.json").write_text(json.dumps(
