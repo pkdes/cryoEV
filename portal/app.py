@@ -1181,7 +1181,7 @@ def render_strip(rows, current_id, groups) -> str:
         t, d = max(0, cur["cards"]), max(0, cur["decided"])
         prog = (f'<span class="cj-rs-prog"><progress max="{max(t, 1)}" value="{min(d, max(t, 1))}" '
                 f'aria-hidden="true"></progress><b>{d}</b><span class="cj-rs-of">&#160;of&#160;</span><b>{t}</b>'
-                '<span class="cj-rs-of">&#160;cards</span></span>')        # nbsp: flex items drop plain spaces
+                f'<span class="cj-rs-of">&#160;card{"" if t == 1 else "s"}</span></span>')   # nbsp: flex drops spaces
     return ('<nav class="cj-rstrip" id="cj-rstrip" aria-label="Switch review">'
             '<a class="cj-rs-back" href="/reviews/" title="All reviews"><span aria-hidden="true">←</span>'
             '<span class="cj-rs-long"> All reviews</span></a>'

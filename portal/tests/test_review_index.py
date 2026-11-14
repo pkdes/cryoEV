@@ -250,6 +250,35 @@ class ListTests(World):
         self.assertEqual(adm["made_from"], "Blind comparison · 4 images")
         self.assertEqual(RI._blind_title(None), "Blind audit")
 
+    def test_one_card_is_singular(self):
+        """fixer 15: "1 card", "0 of 1 card", "1 image"; plurals otherwise (control)."""
+        from portal import app as APP
+        r = dict(self.rows(user("bas"))[PRED_A], cards=1, decided=0, mode="cards")
+        self.assertIn("0 of 1 card<", REV._bar(r))
+        self.assertIn("Quick check · 1 card open", REV._card(r, "bas"))
+        self.assertIn("0 of 2 cards<", REV._bar(dict(r, cards=2)))                        # control
+        self.assertIn("Quick check · 2 cards open", REV._card(dict(r, cards=2), "bas"))
+        strip = APP.render_strip([r], PRED_A, RI.switcher_groups([r], PRED_A))
+        self.assertIn("&#160;card</span>", strip)
+        self.assertNotIn("&#160;cards</span>", strip)
+        self.assertIn("&#160;cards</span>", APP.render_strip([dict(r, cards=3)], PRED_A,
+                                                             RI.switcher_groups([dict(r, cards=3)], PRED_A)))
+        panel = REV.render_panel(PRED_A, r, {"owner": "bas", "reviewers": []}, ["bas", "other"], "", panel_dir=self.pred_a)
+        self.assertIn("0 of 1 card<", panel)
+        self.assertEqual((RI._images(1), RI._images(4), RI._images(None)), ("1 image", "4 images", ""))
+        self.assertIn("1 image", REV.made_from({"kind": "prediction", "model": "v5", "n_images": 1}))
+
+    def test_start_page_primary_link_beats_the_shell_link_colour(self):
+        """fixer 13: the progress page's Continue link is an <a class="cj-rs-btn cj-rs-primary">; .cj-page a
+        (0,1,1) beat .cj-rs-primary (0,1,0), so its text was blue on blue. The rule must be a.cj-rs-btn.cj-rs-primary."""
+        from portal.modules import reviewstart as RS
+        import re
+        rule = re.search(r"([^{}]*)\{background:var\(--acc\);color:#fff\}", RS.CSS)
+        self.assertIsNotNone(rule)
+        self.assertIn("a.cj-rs-btn.cj-rs-primary", [x.strip() for x in rule.group(1).split(",")])
+        self.assertIn('<a class="cj-rs-btn cj-rs-primary"', RS.render_progress(
+            {"name": "lab_audit_lv_20990101_0101_20990101_0000_aaaa", "phase": "done", "purpose": "audit"}))
+
     def test_package_being_built_is_skipped(self):
         """A portal build writes data.js, images and .review_key before review_package.json: not listed yet."""
         d = self.root / "pred_ps_20261112_fffff6"

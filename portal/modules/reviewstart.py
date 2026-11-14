@@ -50,7 +50,7 @@ CSS = """<style>
 .cj-rs{max-width:960px;display:flex;flex-direction:column;gap:18px}
 .cj-rs-back{font-size:.85rem;text-decoration:none}
 .cj-rs-kinds{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:10px}
-.cj-rs-kind{display:flex;flex-direction:column;gap:3px;padding:12px 14px;border:1px solid var(--line);border-radius:var(--cj-r);
+.cj-rs-kind,a.cj-rs-kind{display:flex;flex-direction:column;gap:3px;padding:12px 14px;border:1px solid var(--line);border-radius:var(--cj-r);
   background:var(--card);color:var(--fg);text-decoration:none}
 .cj-rs-kind:hover{border-color:var(--acc)}
 .cj-rs-kind b{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
@@ -79,7 +79,7 @@ CSS = """<style>
 .cj-rs-acts{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 .cj-rs-btn{padding:7px 14px;border-radius:6px;border:1px solid var(--acc);background:var(--card);color:var(--acc);font:inherit;
   font-size:.85rem;font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}
-.cj-rs-primary{background:var(--acc);color:#fff}
+.cj-rs-primary,a.cj-rs-btn.cj-rs-primary{background:var(--acc);color:#fff}  /* a.: beats the shell's .cj-page a */
 .cj-rs-btn[disabled]{opacity:.5;cursor:not-allowed}
 .cj-rs-note{padding:10px 12px;border-radius:6px;border:1px solid var(--line);background:var(--accbg);font-size:.85rem}
 .cj-rs-err{background:var(--warnbg);color:var(--warn)}

@@ -227,7 +227,7 @@ def made_from(meta: dict) -> str:
         b = _folder_name(cb.get("weights")) if isinstance(cb, dict) else ""
         out.append(f"{a or 'labels'} vs {b or 'a model'}")
     if isinstance(meta.get("n_images"), int):
-        out.append(f"{meta['n_images']} images")
+        out.append(f"{meta['n_images']} image{'' if meta['n_images'] == 1 else 's'}")
     return " · ".join(out)
 
 
@@ -470,6 +470,11 @@ def _when(epoch, built=False) -> str:
     return f"{'built ' if built else ''}{day} {dt.strftime('%H:%M')}"
 
 
+def cards_text(n) -> str:
+    """"1 card", "0 cards", "12 cards"."""
+    return f"{n} card{'' if n == 1 else 's'}"
+
+
 def _bar(r) -> str:
     if r.get("cards") is None:
         return '<span class="cj-rv-prog">—</span>'
@@ -477,7 +482,7 @@ def _bar(r) -> str:
     pct = 0 if not t else max(1.5 if d else 0, round(1000 * d / t) / 10)
     return (f'<span class="cj-rv-bar-wrap"><span class="cj-rv-bar" role="progressbar" aria-valuemin="0" '
             f'aria-valuemax="{t}" aria-valuenow="{d}" aria-label="cards decided"><span style="width:{pct}%"></span>'
-            f'</span><span class="cj-rv-prog">{d} of {t} cards</span></span>')
+            f'</span><span class="cj-rv-prog">{d} of {cards_text(t)}</span></span>')
 
 
 def _chip(kind) -> str:
@@ -506,7 +511,7 @@ def _card(r, me) -> str:
         who = f"{r['owner']}'s · you were added" if r.get("owner") else "You were added"
     open_cards = (r["cards"] - (r["decided"] or 0)) if r.get("cards") else 0
     where = "/review/ in " if r["open_url"] == "/review/" else ""
-    opens = (f"opens {where}Quick check · {open_cards} cards open" if r["mode"] == "cards"
+    opens = (f"opens {where}Quick check · {cards_text(open_cards)} open" if r["mode"] == "cards"
              else f"opens {where}the Editor · no open cards")
     tag = '<span class="cj-rv-tag">blind</span>' if blind else ""
     last = "—" if blind else _when(r["last"], built=r["status"] == "not_started")
@@ -658,7 +663,7 @@ def render_panel(pkg_id, row, meta, roster, token_html, error="", panel_dir=None
     revs = [r for r in meta["reviewers"] if isinstance(r, str)] if isinstance(meta.get("reviewers"), list) else []
     kind = RI.kind_of(pkg_id, meta, panel_dir)
     title = (row or {}).get("title") or pkg_id
-    prog = (f'<span class="cj-rv-prog">{row.get("decided") or 0} of {row["cards"]} cards</span>'
+    prog = (f'<span class="cj-rv-prog">{row.get("decided") or 0} of {cards_text(row["cards"])}</span>'
             if row and row.get("cards") is not None else "")
     act = f"{PREFIX}/{esc(pkg_id)}/reviewers"
     chips = "".join(

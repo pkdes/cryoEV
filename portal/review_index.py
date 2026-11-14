@@ -158,6 +158,10 @@ def _title(pkg_id, meta, kind, records, req) -> str:
     return t[len("Audit: "):] if kind == "audit" and t.startswith("Audit: ") else t
 
 
+def _images(n) -> str:
+    return "" if n is None else f"{n} image{'' if n == 1 else 's'}"
+
+
 def _blind_title(built) -> str:
     """A non-admin's audit title: "Blind audit · 12 Nov 2026" (its built date), never a set name or id."""
     try:
@@ -173,10 +177,10 @@ def _made_from(meta, kind, req) -> str:
         else None
     if kind == "audit":         # every viewer: the image count only, never which sets are compared (an admin's TITLE
                                 # names them: _title; a non-admin's is _blind_title)
-        return " · ".join(x for x in ("Blind comparison", f"{n} images" if n is not None else "") if x)
+        return " · ".join(x for x in ("Blind comparison", _images(n)) if x)
     if kind == "label_review" and meta.get("kind") == "compare":
         a, b = _compare_sides(meta)
-        return " · ".join(x for x in (f"{b} vs {a}", f"{n} images" if n is not None else "") if x)
+        return " · ".join(x for x in (f"{b} vs {a}", _images(n)) if x)
     out = REV.made_from(meta)
     src = (req or {}).get("source") if isinstance((req or {}).get("source"), dict) else {}
     sess = _str(src.get("session")) if src.get("kind") != "upload" else None
