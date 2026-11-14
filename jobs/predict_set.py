@@ -823,7 +823,9 @@ SOURCE_FILES = "source_files.csv"                # <ps>/adopted/source_files.csv
 RUN_FILES = ("run_manifest.json", "data/D1_particles.csv", "data/D2_images.csv")
 ADOPT_IMAGE_EXT = (".png", ".jpg", ".jpeg")
 ADOPT_MAX_DET = 300                              # the poster run's infer.py (max_det=300)
-RUN_IMAGE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,120}\Z")   # a run image id: it names a file
+RUN_IMAGE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+ -]{0,200}\Z")  # a run image id: it names a file (no
+#                                     separators, no ':', no leading dot; '..' refused separately; the poster's ids hold
+#                                     '+', '.', '-' and spaces)
 PARTICLE_COLUMNS = ["image", "run_image_id", "particle_id", "line", "cls", "conf", "area_px", "run_area_px",
                     "area_match"]
 
@@ -960,6 +962,9 @@ def adopt_plan(run_dir, model, images, sets=None) -> dict:
     for r in sorted(d2, key=lambda r: (sets.index(r["set"]), r["image_id"])):
         k = (r["set"], r["image_id"])
         txt = run_dir / "data" / "pa" / run_short(r["set"]) / f"{r['image_id']}.txt"
+        if not _inside(txt, run_dir / "data" / "pa"):          # belt and braces: never outside the run's pa/
+            problems.append(f"{r['set']} {r['image_id']}: its predictions path leaves the run folder")
+            continue
         if not txt.is_file():
             problems.append(f"{r['set']} {r['image_id']}: no predictions file {txt.name}")
             continue

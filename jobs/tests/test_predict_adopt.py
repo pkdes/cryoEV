@@ -172,6 +172,28 @@ class Adopt(unittest.TestCase):
         with self.assertRaises(P.PredictSetError) as cm:
             self.adopt()
         self.assertIn("not plain names", str(cm.exception))
+        for bad in ("a/b", "a\\b","C:x", ".hidden", "x..y"):
+            self.assertFalse(P.RUN_IMAGE_ID_RE.match(bad) and ".." not in bad, bad)
+
+    def test_poster_style_image_ids_accepted(self):
+        """The real poster run's ids hold '+', '.', '-' and must adopt (dry run, every particle area matching)."""
+        real = "HEK_pll+__raw_images__20230920_G9__20230920_Sima_Grid_9_View_1.11_HEK_PLL_-11K"
+        self.assertTrue(P.RUN_IMAGE_ID_RE.match(real))
+        d2 = rcsv(self.run / "data" / "D2_images.csv")
+        d1 = rcsv(self.run / "data" / "D1_particles.csv")
+        pa = self.run / "data" / "pa" / "SetA"
+        (pa / "a.txt").rename(pa / f"{real}.txt")
+        (self.imgs / "a.png").rename(self.imgs / f"{real}.png")
+        for r in d2 + d1:
+            if r["image_id"] == "a":
+                r["image_id"] = real
+        for r in d2:
+            if r["file"] == "a.png":
+                r["file"] = f"{real}.png"
+        self._csv(self.run / "data" / "D2_images.csv", d2)
+        self._csv(self.run / "data" / "D1_particles.csv", d1)
+        s = self.adopt()
+        self.assertEqual((s["n_images"], s["n_particles"], s["n_area_match"]), (2, 6, 6))
 
     def test_refusals(self):
         # a run particle whose area doesn't match: reported by the dry run, refused by --do
