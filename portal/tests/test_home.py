@@ -7,6 +7,7 @@ jobs/tests/jobtest.py, as registry/tests does), module cards from modules.json, 
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import unittest
@@ -227,7 +228,7 @@ class Home(unittest.TestCase):
 
 class ReviewPackageDefault(unittest.TestCase):
     def test_from_registry(self):
-        """The registry's newest open revise job, when the services config can't be read (a missing file here; the
+        """The registry's ONE open revise job on 8766, when the services config can't be read (a missing file here; the
         services config's own pick: portal/tests/test_review_strip.py ReviewPackagePin)."""
         env = T.Env()
         nosvc = mock.patch.dict(os.environ, {"CRYOEV_SERVICES_CONFIG": str(env.tmp / "no_services.json")})
@@ -243,6 +244,13 @@ class ReviewPackageDefault(unittest.TestCase):
                     {"id": "job_20261101_done", "type": "revise", "port": 8766, "status": "done", "package": "old"},
                     {"id": "job_20261102_sbx", "type": "revise", "port": 8765, "status": "ready", "package": "old"}]
             pkgs = [{"id": "old", "path": str(pk_old)}, {"id": "new", "path": str(pk_new)}]
+            T.TK.write_registry(reg, {ent: [{"schema": f"{ent}/1", **r} for r in rows]
+                                      for ent, rows in (("job", jobs), ("review_package", pkgs))}, samples=False)
+            with self.assertLogs("cj", "WARNING"):                     # two open on 8766: no guess (round 13)
+                self.assertIsNone(APP.registry_review_package(reg))
+            jobs = [j for j in jobs if j["id"] != "job_20260924_old"]  # the one open job on 8766 left
+            shutil.rmtree(reg)
+            (reg / "live").mkdir(parents=True)
             T.TK.write_registry(reg, {ent: [{"schema": f"{ent}/1", **r} for r in rows]
                                       for ent, rows in (("job", jobs), ("review_package", pkgs))}, samples=False)
             pkg = APP.registry_review_package(reg)

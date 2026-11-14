@@ -49,7 +49,9 @@ class BadPath(ValueError):
 
 
 def clean_subpath(raw: str) -> str:
-    """The path after /review, as sent (e.g. "/api/edits"). Raises BadPath for traversal or odd characters."""
+    """The path after /review, as sent (e.g. "/api/edits"). Raises BadPath for traversal or odd characters, and for
+    ";" (raw or encoded): the review servers' urlparse drops ";params", so "api/edits;x" would be api/edits upstream
+    while a portal check saw another path (round 13)."""
     if not raw.startswith("/"):
         raise BadPath("no leading slash")
     dec = raw
@@ -63,6 +65,8 @@ def clean_subpath(raw: str) -> str:
     for s in (raw, dec):
         if "\\" in s or any(ord(c) < 0x20 or ord(c) == 0x7F for c in s):
             raise BadPath("backslash or control character")
+        if ";" in s:
+            raise BadPath("semicolon (path parameters)")
     segs = dec.split("/")[1:]
     for i, seg in enumerate(segs):
         if seg in (".", ".."):

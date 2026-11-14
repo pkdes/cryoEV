@@ -19,6 +19,7 @@ Never the real services config, registry or review root.
 """
 import json
 import os
+import shutil
 import sys
 import threading
 import time
@@ -269,6 +270,36 @@ class StripThroughThePortal(unittest.TestCase):
         finally:
             release.set()
 
+    def test_hung_lists_hold_the_slots_and_later_shells_answer_at_once(self):
+        """QC r13 #3: at most 2 strips build at once; with both stuck, the next shell pages get no strip right away and
+        list_reviews is not even called (no queue, no thread pile-up). Freed slots come back."""
+        release, entered = threading.Event(), []
+
+        def hung(*a, **k):
+            entered.append(1)
+            release.wait(10)
+            return list(self.rows)
+        try:
+            with mock.patch.object(RI, "list_reviews", hung):
+                for _ in range(2):                                       # both slots taken, each past its budget
+                    st, _, body = self.req("adv", "GET", f"/review/{REVISE}/")
+                    self.assertEqual((st, "cj-rstrip" in body), (200, False))
+                self.assertEqual(len(entered), 2)
+                for _ in range(3):
+                    t0 = time.monotonic()
+                    st, _, body = self.req("adv", "GET", f"/review/{REVISE}/")
+                    self.assertLess(time.monotonic() - t0, 0.2)         # no budget wait: refused at once
+                    self.assertEqual((st, "cj-rstrip" in body), (200, False))
+                self.assertEqual(len(entered), 2)                        # never called while no slot is free
+        finally:
+            release.set()
+        for _ in range(50):                                              # the hung builds end and give their slots back
+            if "cj-rstrip" in self.req("adv", "GET", f"/review/{REVISE}/")[2]:
+                break
+            time.sleep(0.1)
+        else:
+            self.fail("the strip never came back after the hung lists ended")
+
     def test_unknown_id_is_404_without_building(self):
         self.assertEqual(self.req("basic", "GET", f"/review/{REVISE}/")[0], 200)     # a listed reviewer: opens
         n = len(self.calls)
@@ -279,13 +310,20 @@ class StripThroughThePortal(unittest.TestCase):
     def test_audit_owner_cannot_decide(self):
         n = len(self.up.seen)
         for method, path in (("PUT", "api/edits?f=a.png"), ("POST", "api/group?who=x"), ("PUT", "api/edits/"),
-                             ("PUT", "api/%65dits?f=a.png"), ("PUT", "API/Edits"), ("POST", "api/%2567roup")):
+                             ("PUT", "api/%65dits?f=a.png"), ("PUT", "API/Edits"), ("POST", "api/%2567roup"),
+                             # QC r13 #1: urlparse upstream drops ";params" -> these ARE api/edits / api/group there
+                             ("PUT", "api/edits;x?f=a.png"), ("PUT", "api/edits%3Bx?f=a.png"), ("POST", "api/group;"),
+                             ("PUT", "api/edits%253Bx"), ("POST", "api/group;?who=x"),
+                             # an allowlist: every other write too, whatever the path
+                             ("PUT", "api/claim"), ("DELETE", "api/edits"),
+                             ("POST", "api/anything"), ("POST", "")):
             with self.subTest(method=method, path=path):
                 st, hd, body = self.req("adv", method, f"/review/{AUDIT}/app/{path}", body=b"{}",
                                         headers={"Content-Type": "application/json"})
                 self.assertEqual(st, 403)
                 self.assertIn("application/json", T.hget(hd, "content-type"))
                 self.assertIn("can't decide its cards", json.loads(body)["error"])
+        self.assertEqual(self.req("adv", "PATCH", f"/review/{AUDIT}/app/api/edits", b"{}")[0], 405)  # no such method
         self.assertEqual(len(self.up.seen), n)                           # nothing reached the multi server
 
     def test_audit_owner_reads_and_others_write(self):
@@ -295,7 +333,23 @@ class StripThroughThePortal(unittest.TestCase):
         self.assertEqual(self.req("basic", "PUT", f"/review/{AUDIT}/app/api/edits?f=a.png", b"{}")[0], 200)  # reviewer
         self.assertEqual(self.req("adv", "PUT", f"/review/{REVISE}/app/api/edits?f=a.png", b"{}")[0], 200)  # revise
         self.assertEqual(self.req("adv", "POST", f"/review/{REVISE}/app/api/group", b"{}")[0], 200)
-        self.assertEqual(len(self.up.seen), n + 5)
+        self.assertEqual(self.req("adv", "POST", f"/review/{AUDIT}/app/api/claim?c=a.png%7Cp0&who=x", b"{}")[0], 200)
+        self.assertEqual(self.req("adv", "HEAD", f"/review/{AUDIT}/app/api/edits")[0], 200)
+        self.assertEqual(len(self.up.seen), n + 7)
+
+    def test_semicolon_paths_never_reach_upstream(self):
+        """proxy.clean_subpath refuses ";" raw or encoded (400) for everyone: a reviewer, a revise owner."""
+        n = len(self.up.seen)
+        for who, pid in (("basic", AUDIT), ("adv", REVISE)):
+            for path in ("api/edits;x?f=a.png", "api/edits%3Bx", "api/group;", "api/edits%253Bx"):
+                with self.subTest(who=who, path=path):
+                    self.assertEqual(self.req(who, "PUT", f"/review/{pid}/app/{path}", b"{}")[0], 400)
+        self.assertEqual(len(self.up.seen), n)
+        from portal import proxy as P
+        for raw in ("/api/edits;x", "/api/edits%3Bx", "/api/edits%3bx", "/api/group;", "/x/%253B"):
+            with self.subTest(raw=raw), self.assertRaises(P.BadPath):
+                P.clean_subpath(raw)
+        self.assertEqual(P.clean_subpath("/api/edits"), "/api/edits")                # control
 
     def test_audit_owner_rule(self):
         u = {"id": "u-adv", "role": "admin"}
@@ -335,13 +389,38 @@ class ReviewPackagePin(unittest.TestCase):
     def pick(self, environ=None):
         return APP.registry_review_package(self.env.registry, environ=self.envd if environ is None else environ)
 
+    def jobs(self, *which):
+        """The registry with open revise jobs on 8766 for `which` ("audit", "newer"), plus done / other-port ones."""
+        jobs = [{"id": f"job_2026111{i}_{w}", "type": "revise", "port": 8766, "status": "in_progress", "package": w}
+                for i, w in enumerate(which)]
+        jobs += [{"id": "job_20261101_done", "type": "revise", "port": 8766, "status": "done", "package": "newer"},
+                 {"id": "job_20261102_sbx", "type": "revise", "port": 8765, "status": "ready", "package": "newer"}]
+        pkgs = [{"id": "audit", "path": str(self.audit)}, {"id": "newer", "path": str(self.newer)}]
+        shutil.rmtree(self.env.registry)
+        (self.env.registry / "live").mkdir(parents=True)
+        T.TK.write_registry(self.env.registry, {ent: [{"schema": f"{ent}/1", **r} for r in rows]
+                                                for ent, rows in (("job", jobs), ("review_package", pkgs))}, samples=False)
+
     def test_configured_package_beats_a_newer_lab_revise_job(self):
         self.assertEqual(self.pick(), self.audit)
         self.assertEqual(APP.read_review_key(self.pick()), "audit-key")
-        # control: without a readable config the registry's newest job wins (the hijack this guards against)
-        self.assertEqual(self.pick({"CRYOEV_SERVICES_CONFIG": str(self.env.tmp / "missing.json")}), self.newer)
+        self.jobs("newer")                                              # even the registry's only open job: config wins
+        self.assertEqual(self.pick(), self.audit)
+
+    def test_unreadable_config_never_picks_among_several_jobs(self):
+        """QC r13 #4: without a readable config the registry counts only when exactly one revise job is open on 8766
+        (the old newest-wins pick is what let a new lab_ package take /review/ over)."""
+        missing = {"CRYOEV_SERVICES_CONFIG": str(self.env.tmp / "missing.json")}
+        with self.assertLogs("cj", "WARNING") as logs:
+            self.assertIsNone(self.pick(missing))                      # audit + newer open: no guess
+        self.assertIn("2 open revise jobs", " ".join(logs.output))
+        self.jobs("audit")
+        self.assertEqual(self.pick(missing), self.audit)
+        self.jobs()
+        self.assertIsNone(self.pick(missing))
 
     def test_unreadable_configs_fall_back_to_the_registry(self):
+        self.jobs("newer")
         for text in ("{broken", "[]", "{}", '{"services": []}', '{"services": [{"argv": "not a list"}]}',
                      '{"services": [{"argv": ["review_server.py", "--port", "8766"]}]}'):    # 8766, no package
             with self.subTest(text=text):
