@@ -191,6 +191,38 @@ class Purpose(CompareKnownAnswer):
         self.assertNotIn("built_by", self.meta(out))
         self.assertNotIn("built_by", self.data(out))
 
+    def test_force_rebuild_keeps_built_by(self):
+        out, _, _ = self.run_build("lab_keep", built_by="portal")
+        out, _, _ = self.run_build("lab_keep", force=True)                   # no --built-by: carried over
+        self.assertEqual((self.meta(out)["built_by"], self.data(out)["built_by"]), ("portal", "portal"))
+        (out / "review_package.json").unlink()                                # only data.js says so: still kept
+        out, _, _ = self.run_build("lab_keep", force=True)
+        self.assertEqual(self.meta(out)["built_by"], "portal")
+        out, _, _ = self.run_build("lab_keep", force=True, built_by="none")  # explicit override: dropped
+        self.assertNotIn("built_by", self.meta(out))
+        self.assertNotIn("built_by", self.data(out))
+        out, _, _ = self.run_build("lab_cli2")                                 # control: a CLI package stays CLI
+        out, _, _ = self.run_build("lab_cli2", force=True)
+        self.assertNotIn("built_by", self.meta(out))
+
+    def test_atomic_write_retries_permission_error(self):
+        real, calls = CP.os.replace, []
+
+        def flaky(a, b):
+            calls.append(1)
+            if len(calls) < 3:
+                raise PermissionError("held by a reader")
+            return real(a, b)
+
+        p = self.t / "x.json"
+        with mock.patch.object(CP.os, "replace", flaky), mock.patch.object(CP.time, "sleep"):
+            CP.write_json_atomic(p, {"a": 1})
+        self.assertEqual((len(calls), json.loads(p.read_text(encoding="utf-8"))), (3, {"a": 1}))
+        with mock.patch.object(CP.os, "replace", side_effect=PermissionError("held")), \
+                mock.patch.object(CP.time, "sleep"), self.assertRaises(PermissionError):
+            CP.write_json_atomic(self.t / "y.json", {"a": 2})
+        self.assertEqual([q.name for q in self.t.glob(".y.json*")], [])     # no temp file left behind
+
     def test_cli_flags(self):
         argv = ["compare_package.py", "--labels", "l.json", "--images-root", "i", "--owner", "o", "--out", "x"]
         for extra, want in (([], ("audit", None, None, None)),

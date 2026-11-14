@@ -37,7 +37,8 @@ Purpose (round 13, --purpose, default audit so earlier command lines are unchang
           a successful build, so no _work_<name> folder ever exists for it.
 Both: an existing <out> or _work_<name> folder is refused (a crash leftover is never reused; --force rebuilds in
 place as before, the portal never passes it); a failed build removes the folders it made; review_package.json is
-written last, atomically (temp file + os.replace); --built-by portal (the portal's builder) adds built_by "portal"
+written last, atomically (temp file + os.replace, retried on PermissionError); --built-by portal (the portal's
+builder; a --force rebuild keeps an existing package's built_by unless --built-by says otherwise) adds built_by "portal"
 to it and to data.js, so the registry importer leaves the package to the portal. The answer key's path is never
 printed. Progress markers "[phase] predicting" / "[phase] writing" go to stdout (the portal's progress page).
 """
@@ -52,6 +53,7 @@ import secrets
 import shutil
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -94,11 +96,36 @@ def inside(path, folder) -> bool:
         return False
 
 
-def write_json_atomic(path: Path, obj) -> None:
-    """A temp file next to it + os.replace: a reader sees no file or the whole new one, never half of it."""
+def write_json_atomic(path: Path, obj, tries=6) -> None:
+    """A temp file next to it + os.replace: a reader sees no file or the whole new one, never half of it. The replace
+    is retried on PermissionError (a reader, antivirus or indexer can hold the target for a moment on Windows), as
+    jobs/predict_set.write_json_atomic does."""
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(obj, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    for i in range(tries):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if i == tries - 1:
+                tmp.unlink(missing_ok=True)
+                raise
+            time.sleep(0.1 * 2 ** i)
+
+
+def existing_built_by(out: Path):
+    """The built_by of a package already in `out` (its review_package.json, else its data.js), or None."""
+    try:
+        meta = json.loads((out / "review_package.json").read_text(encoding="utf-8"))
+        if isinstance(meta, dict) and meta.get("built_by"):
+            return meta["built_by"]
+    except (OSError, ValueError):
+        pass
+    try:
+        d = json.loads((out / "data.js").read_text(encoding="utf-8").split("=", 1)[1].strip().rstrip(";"))
+        return d.get("built_by") if isinstance(d, dict) else None
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 def parse_where(items):
@@ -357,6 +384,11 @@ def plan(args):
     out, name = args.out, args.out.name
     audit_work = out.parent / f"_work_{name}"
     force = getattr(args, "force", False)
+    built_by = getattr(args, "built_by", None)
+    if force and out.exists() and built_by is None:     # a rebuild keeps who built it unless told otherwise
+        args.built_by = existing_built_by(out)
+    elif built_by == "none":                            # explicit: no marker
+        args.built_by = None
     if out.exists() and not force:
         has_edits = any((out / "edits").glob("*.json"))
         raise SystemExit(f"{out} already exists" + (" and has review edits" if has_edits else "")
@@ -634,7 +666,12 @@ def edits_sha256(edits_dir: Path) -> str:
     return h.hexdigest()
 
 
-def main():
+def main(argv=None):
+    build(parser().parse_args(argv))
+
+
+def parser() -> argparse.ArgumentParser:
+    """The command line (the portal's runner parses its argv with this too, then calls build() in process)."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--labels", type=Path, required=True, help="Set A: COCO label set (the base decisions apply to)")
     ap.add_argument("--images-root", type=Path, action="append", required=True, help="Folder(s) holding the images")
@@ -664,7 +701,8 @@ def main():
                          "revise: 0 only)")
     ap.add_argument("--work-dir", type=Path, help="--purpose revise: the scratch folder (outside the review root, "
                                                    "must not exist; deleted after a successful build)")
-    ap.add_argument("--built-by", choices=("portal",), help=argparse.SUPPRESS)  # the portal's builder only
+    ap.add_argument("--built-by", choices=("portal", "none"), help=argparse.SUPPRESS)  # the portal's builder; with
+    # --force an existing package's built_by is kept unless this says otherwise ("none" drops it)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--owner", required=True)
     ap.add_argument("--reviewer", action="append", help="Extra people who may open it (portal ids)")
@@ -674,7 +712,7 @@ def main():
     ap.add_argument("--quality", type=int, default=72)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--force", action="store_true", help="Rebuild into an existing <out> (even one with decisions)")
-    build(ap.parse_args())
+    return ap
 
 
 if __name__ == "__main__":
