@@ -7,7 +7,8 @@ class mapping of a new version) and the registry line + definition path that --d
 --do: one label_schema/1 line in <registry>/label_schema.jsonl, with the definition written once to
 <registry>/defs/label_schema/<id>.json under the registry lock (store.append(files=...)). Registering the same id
 again with identical content is refused as already registered; with other content it is refused (a new version
-needs a new id with supersedes + class_mapping).
+needs a new id with supersedes + class_mapping). A file using a built-in's id (labels/schemas/<id>.json) whose content
+differs from the built-in is refused too (the built-in would win every load anyway).
 """
 from __future__ import annotations
 
@@ -42,6 +43,15 @@ def run_register(a) -> int:
     rel = next(iter(files))
 
     def problem():
+        bi = S.BUILTIN_DIR / f"{doc['id']}.json"
+        if bi.is_file():                    # a built-in id: only that very definition may be registered under it
+            try:
+                same_bi = S.canonical_bytes(S.read_file(bi)) == files[rel]
+            except S.SchemaError:
+                same_bi = False
+            if not same_bi:
+                return (f"{doc['id']} is a built-in id (labels/schemas/{doc['id']}.json) and this file's content "
+                        "differs: give it a new id")
         cur = reg.current("label_schema", root).get(doc["id"])
         defp = Path(root) / rel
         if cur is not None or defp.exists():

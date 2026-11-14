@@ -142,6 +142,37 @@ class Adopt(unittest.TestCase):
         plan = OS.plan(ps, items, "ls_lamellarity_v1", image_col="image_id", particle_col="particle_id")
         self.assertEqual(plan["keys"], [("0001", 3), ("0002", 2)])
 
+    def test_second_adopt_needs_again(self):
+        """QC 14: the same run files adopted twice are refused unless again=True (--again)."""
+        first = self.adopt(dry=False)
+        before = snapshot(self.root) | {f"reg/{k}": v for k, v in snapshot(self.reg).items()}
+        for dry in (True, False):
+            with self.assertRaises(P.PredictSetError) as cm:
+                self.adopt(dry=dry)
+            self.assertIn("already adopted", str(cm.exception))
+            self.assertIn(first.name, str(cm.exception))
+        self.assertEqual(snapshot(self.root) | {f"reg/{k}": v for k, v in snapshot(self.reg).items()}, before)
+        second = self.adopt(dry=False, again=True)
+        self.assertNotEqual(second, first)
+
+    def test_root_or_registry_inside_run_refused(self):
+        """QC 14: --root / --registry inside --from are refused before anything is read or written."""
+        run_before = snapshot(self.run)
+        for kw in ({"root": self.run / "out"}, {"registry_root": self.run / "reg"}, {"root": self.run}):
+            with self.assertRaises(P.PredictSetError) as cm:
+                self.adopt(dry=False, **kw)
+            self.assertIn("inside --from", str(cm.exception))
+        self.assertEqual(snapshot(self.run), run_before)
+
+    def test_bad_image_id_refused(self):
+        """QC 14: a D2 image id that is not a plain name never becomes a path."""
+        d2 = rcsv(self.run / "data" / "D2_images.csv")
+        d2[0]["image_id"] = "../../evil"
+        self._csv(self.run / "data" / "D2_images.csv", d2)
+        with self.assertRaises(P.PredictSetError) as cm:
+            self.adopt()
+        self.assertIn("not plain names", str(cm.exception))
+
     def test_refusals(self):
         # a run particle whose area doesn't match: reported by the dry run, refused by --do
         d1 = rcsv(self.run / "data" / "D1_particles.csv")

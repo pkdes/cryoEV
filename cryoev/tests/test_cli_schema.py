@@ -38,6 +38,23 @@ class SchemaRegister(F.Platform):
         self.assertIn("already registered (same content)", out)
         self.assertEqual(self.snapshot(), before)
 
+    def test_builtin_id_other_content_refused(self):
+        """QC 13: a file with a built-in's id but other content is refused (dry run and --do), nothing written."""
+        doc = json.loads(LAM.read_text(encoding="utf-8"))
+        doc["description"] = "a changed copy"
+        bad = self.tmp / "ls_lamellarity_v1.json"
+        bad.write_text(json.dumps(doc), encoding="utf-8")
+        before = self.snapshot()
+        rc, out, err = self.cli("schema", "register", bad)
+        self.assertEqual(rc, 2)
+        self.assertIn("built-in id", out)
+        self.assertEqual(self.snapshot(), before)
+        rc, out, err = self.cli("schema", "register", bad, "--do", "--who", "pujan")
+        self.assertEqual(rc, 2)
+        self.assertIn("built-in id", err + out)
+        self.assertFalse((self.reg / "label_schema.jsonl").exists())
+        self.assertFalse((self.reg / "defs" / "label_schema").exists())
+
     def test_invalid_refused(self):
         doc = json.loads(LAM.read_text(encoding="utf-8"))
         doc["object_attrs"][3]["key"] = "i"                      # reserved by the object card

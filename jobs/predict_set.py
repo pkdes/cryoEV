@@ -726,6 +726,8 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
                 "record": {k: v for k, v in rec.items() if k not in ("id", "path", "logged", "created")}}
     # ---- id + record, validated before anything is written; the id is reserved by its .incoming folder
     with locked(reg / REGISTRY_LOCK):
+        if not again and adopted_before(reg, list_sha):          # re-checked under the lock (a racing adopt)
+            raise PredictSetError("refused: this run was just adopted; pass --again to adopt it once more")
         taken = set(regm.current("prediction_set", reg))
         for _ in range(50):
             ps_id = f"ps_{day}_{secrets.token_hex(3)}"
@@ -821,6 +823,7 @@ SOURCE_FILES = "source_files.csv"                # <ps>/adopted/source_files.csv
 RUN_FILES = ("run_manifest.json", "data/D1_particles.csv", "data/D2_images.csv")
 ADOPT_IMAGE_EXT = (".png", ".jpg", ".jpeg")
 ADOPT_MAX_DET = 300                              # the poster run's infer.py (max_det=300)
+RUN_IMAGE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,120}\Z")   # a run image id: it names a file
 PARTICLE_COLUMNS = ["image", "run_image_id", "particle_id", "line", "cls", "conf", "area_px", "run_area_px",
                     "area_match"]
 
@@ -919,6 +922,10 @@ def adopt_plan(run_dir, model, images, sets=None) -> dict:
         raise PredictSetError("refused:" + _list(problems))
     d2 = [r for r in _read_csv_rows(run_dir / "data" / "D2_images.csv")
           if r.get("set") in sets and r.get("width_px") and r.get("file") not in excl.get(r.get("set"), set())]
+    bad_ids = [str(r.get("image_id")) for r in d2
+               if not RUN_IMAGE_ID_RE.match(str(r.get("image_id") or "")) or ".." in str(r.get("image_id"))]
+    if bad_ids:                                  # checked before any path is built from them
+        raise PredictSetError(f"refused: D2_images.csv image ids that are not plain names: {bad_ids[:5]}")
     d1 = {}
     for r in _read_csv_rows(run_dir / "data" / "D1_particles.csv"):
         if r.get("set") in sets:
@@ -1008,13 +1015,34 @@ def adopt_file_list(P) -> tuple:
     return out, hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _inside(p: Path, parent: Path) -> bool:
+    try:
+        Path(p).resolve().relative_to(Path(parent).resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def adopted_before(reg: Path, list_sha: str) -> list:
+    """Ids of registered prediction sets adopted from the same files (source.sha256 == list_sha)."""
+    regm = registry_module()
+    out = []
+    for pid, rec in regm.current("prediction_set", reg).items():
+        src = rec.get("source") if isinstance(rec, dict) else None
+        if isinstance(src, dict) and src.get("kind") == "adopted" and src.get("sha256") == list_sha:
+            out.append(pid)
+    return sorted(out)
+
+
 def adopt(run_dir, model, images, name, owner, nm_confirmed_by, sets=None, root=None, registry_root=None,
-          dry_run=True, via=None):
+          dry_run=True, via=None, again=False):
     """Register an outside prediction run (e.g. the poster run) as an ordinary prediction set (status done), read
     only on the source: its images are copied (md5 checked) from --images, its prediction files byte-copied to
     p/<model>/predictions/<nnnn>.txt, and <ps>/adopted/ gets particle_lines.csv (run particle id -> line, each
     checked against the run's own mask area) and source_files.csv. source = {kind: adopted, path, run, sha256 of
-    the file list}. dry_run (default): every check and the plan; nothing written. -> plan dict or the new folder."""
+    the file list}. dry_run (default): every check and the plan; nothing written. -> plan dict or the new folder.
+    Refused: --root or --registry inside the run folder (read only means nothing is written there); a run whose file
+    list (source.sha256) is already registered as an adopted set, unless again=True (--again)."""
     set_name = clean_name(name)
     problems = []
     if not owner or not PERSON_RE.match(str(owner)):
@@ -1027,6 +1055,10 @@ def adopt(run_dir, model, images, name, owner, nm_confirmed_by, sets=None, root=
     guard = protected_problem(root)
     if guard:
         problems.append(f"--root refused: {guard}")
+    reg = Path(registry_root) if registry_root else config.registry_root()
+    for flag, d in (("--root", root), ("--registry", reg)):
+        if _inside(d, run_dir):
+            problems.append(f"{flag} is inside --from: the run folder is read only")
     if problems:
         raise PredictSetError("refused:" + _list(problems))
     P = adopt_plan(run_dir, model, images, sets)
@@ -1036,7 +1068,10 @@ def adopt(run_dir, model, images, name, owner, nm_confirmed_by, sets=None, root=
     by_set = {}
     for r in P["rows"]:
         by_set[r["set"]] = by_set.get(r["set"], 0) + 1
-    reg = Path(registry_root) if registry_root else config.registry_root()
+    prior = adopted_before(reg, list_sha) if reg.is_dir() else []
+    if prior and not again:
+        raise PredictSetError(f"refused: this run (the same files, sha256 {list_sha[:12]}) is already adopted as "
+                              f"{', '.join(prior)}; pass --again to adopt it once more")
     source = {"kind": "adopted", "path": str(P["run_dir"].resolve()), "run": str(P["run_id"]), "sha256": list_sha}
     summary = {"run": str(P["run_id"]), "model": model, "n_images": len(P["rows"]), "by_set": by_set,
                "n_particles": n_part, "n_area_match": n_match, "files_sha256": list_sha, "n_files": len(files),
@@ -1180,6 +1215,7 @@ def build_parser(allow_abbrev=True) -> argparse.ArgumentParser:
     d.add_argument("--sets", help="comma-separated run set labels (default: every application set)")
     d.add_argument("--registry", type=Path, help="registry folder (default <CryoAI-laptop>/registry)")
     d.add_argument("--root", type=Path, help=f"where sets live (default <CryoAI-laptop>/{PREDICT_DIR})")
+    d.add_argument("--again", action="store_true", help="adopt a run whose files are already adopted once more")
     d.add_argument("--do", action="store_true", help="adopt it (default: a dry run that writes nothing)")
     ap.adopt = d
     return ap
@@ -1230,7 +1266,7 @@ def _adopt_main(a, via, actor) -> int:
         owner = a.owner or actor.who(None, None)
         res = adopt(a.from_run, a.model, a.images, a.name, owner, a.nm_confirmed_by or owner,
                     sets=[x.strip() for x in a.sets.split(",") if x.strip()] if a.sets else None, root=a.root,
-                    registry_root=a.registry, dry_run=not a.do, via=via)
+                    registry_root=a.registry, dry_run=not a.do, via=via, again=a.again)
     except (PredictSetError, config.ConfigError, OSError, actor.ActorError) as e:
         print(f"[predict_set] {e}", file=sys.stderr)
         return 2
