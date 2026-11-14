@@ -150,7 +150,7 @@ class BuildTests(Tmp):
         self.assertEqual(sorted(data["categories"]), sorted(["EV", "Low conf EV", "MV", "inner", "Incomplete",
                                                              "Overlapping", "VLDL", "non-EV"]))  # no "(new class)"
         self.assertEqual(data["cand_conf"], 0.25)
-        self.assertEqual([p.name for p in self.root.iterdir()], [PKG])  # no .building_ / .old_ folder left
+        self.assertEqual([p.name for p in self.root.iterdir() if p.name != pp.META_LOCK_DIR], [PKG])  # no .building_ / .old_ folder left
         self.assertEqual([im["split"] for im in data["images"]], ["S1", "S1", "S2"])
         self.assertEqual((pkg / "index.html").read_bytes(), (REPO / "annotation" / "review_tool" / "index.html").read_bytes())
         for im in data["images"]:
@@ -187,10 +187,49 @@ class BuildTests(Tmp):
         again = json.loads((pkg / pp.RECORD).read_text(encoding="utf-8"))
         self.assertEqual(again["reviewers"], ["alyssia", "au1"])
         self.assertEqual(check_record(again, load_schemas()), [])
-        self.assertEqual([p.name for p in self.root.iterdir()], [PKG])
+        self.assertEqual([p.name for p in self.root.iterdir() if p.name != pp.META_LOCK_DIR], [PKG])
         (pkg / pp.RECORD).write_text("{not json", encoding="utf-8")       # unreadable: rebuilt without reviewers
         self.build()
         self.assertNotIn("reviewers", json.loads((pkg / pp.RECORD).read_text(encoding="utf-8")))
+
+    def test_rebuild_waits_for_the_reviewers_lock(self):
+        """The rebuild reads reviewers and swaps the folder under <root>/.meta_locks/<pkg>.lock (the Reviews hub's
+        reviewers write takes the same OS lock): a held lock refuses cleanly after lock_wait, the old package and
+        its reviewers untouched; reviewers written while the lock was held survive the next rebuild."""
+        from data_utils.oslock import acquire_lock
+        pkg = self.build()
+        rec = json.loads((pkg / pp.RECORD).read_text(encoding="utf-8"))
+        before = tree_digest(pkg)
+        (self.root / pp.META_LOCK_DIR).mkdir(exist_ok=True)
+        held = acquire_lock(self.root / pp.META_LOCK_DIR / f"{PKG}.lock")
+        self.assertIsNotNone(held)
+        try:
+            rec["reviewers"] = ["alyssia"]                         # the hub's write, done under the lock
+            (pkg / pp.RECORD).write_text(json.dumps(rec), encoding="utf-8")
+            before = tree_digest(pkg)
+            t0 = time.monotonic()
+            with self.assertRaises(TimeoutError):
+                self.build(lock_wait=1.0)
+            self.assertGreaterEqual(time.monotonic() - t0, 0.9)    # it waited, then refused
+            self.assertLess(time.monotonic() - t0, 30)
+        finally:
+            held.close()
+        self.assertEqual(tree_digest(pkg), before)                 # the old package untouched
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), [pp.META_LOCK_DIR, PKG])   # no temp left
+        released = threading.Event()
+        held = acquire_lock(self.root / pp.META_LOCK_DIR / f"{PKG}.lock")
+
+        def release():
+            time.sleep(1.0)
+            held.close()
+            released.set()
+        threading.Thread(target=release, daemon=True).start()
+        self.build(lock_wait=10.0)                                 # waits for the holder, then rebuilds
+        self.assertTrue(released.is_set())
+        self.assertEqual(json.loads((pkg / pp.RECORD).read_text(encoding="utf-8"))["reviewers"], ["alyssia"])
+        lk = acquire_lock(self.root / pp.META_LOCK_DIR / f"{PKG}.lock")   # the rebuild let go of it
+        self.assertIsNotNone(lk)
+        lk.close()
 
     def test_owner_override_and_refusals(self):
         self.assertEqual(pp.read_datajs(self.build(owner="au1"))["owner"], "au1")
@@ -202,7 +241,7 @@ class BuildTests(Tmp):
         (miss / "p" / MODEL / "predictions" / "0002.txt").unlink()
         with self.assertRaises(FileNotFoundError):
             pp.build(miss, self.root)
-        self.assertEqual([p.name for p in self.root.iterdir()], [PKG])  # a failed build leaves nothing behind
+        self.assertEqual([p.name for p in self.root.iterdir() if p.name != pp.META_LOCK_DIR], [PKG])  # a failed build leaves nothing behind
         for i, (image, file) in enumerate((("0001", "images/0001.tif"), ("0001", "../0001.png"), ("0001", "images/0002.png"),
                                            ("x001", "images/x001.png"), ("0001", "C:/images/0001.png"))):
             bad = copy_ps(self.tmp / f"csv{i}")

@@ -42,7 +42,8 @@ How the contract is filled (B2):
     viewer may see: a link that `hidden` says is private is never followed or named. A dataset is a root, labelled
     "<id> (dataset)". A cycle picks the member with the smallest id, so every set of the cycle lands in one group.
     With hidden=None the walk is not taken at all (fail closed: the set's own name). session / model keys also pass
-    through hidden ("Not visible to you" if it ever says so). samples are cached by images.csv path + mtime + size.
+    through hidden ("Not visible to you" if it ever says so; with hidden=None, any value that looks like a ps_ /
+    pred_ id is hidden). samples are cached by images.csv path + mtime + size.
   - Rows other than prediction sets (the hub's label reviews, audits) may have facets {}: apply / group then read the
     row's own owner / via / created (or last) / model / n_images fields, and samples [].
   - status filter: "any" keeps all; "open" keeps every status not in CLOSED ("finished", "applied"); any other value
@@ -257,9 +258,16 @@ def hidden_for(cfg, user, can_see):
     return lambda kind, rid: REC.ref_hidden(recs, viewer, rid, kind)
 
 
+PRIVATE_RE = re.compile(r"(^|[^A-Za-z0-9])(ps_\d{8}_[0-9a-f]{6}|pred_[A-Za-z0-9_.-]+)", re.I)
+
+
 def _checked(hidden, kind, value):
-    if value is None or hidden is None:
+    """value, or HIDDEN_LABEL when the viewer's hidden(kind, value) says so. Without a hidden callable (fail closed):
+    HIDDEN_LABEL for anything that looks like a private id (a ps_ prediction set or a pred_ package)."""
+    if value is None:
         return value
+    if hidden is None:
+        return HIDDEN_LABEL if PRIVATE_RE.search(str(value)) else value
     try:
         return HIDDEN_LABEL if hidden(kind, value) else value
     except Exception:                          # noqa: BLE001

@@ -58,6 +58,8 @@ OWNER_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 IMAGE_RE = re.compile(r"^\d{4,}$")                                 # server-made names: <nnnn>
 FILE_RE = re.compile(r"^images/(\d{4,})\.(png|jpg|jpeg)$")
 DEFAULT_SPOT = 10
+META_LOCK_DIR = ".meta_locks"      # = portal/modules/reviews.py LOCK_DIR (the reviewers write)
+META_LOCK_WAIT_S = 5.0
 SPOT_MODES = {
     "representative": "uniform random per sample, proportional to sample size, >= 1 per sample when n >= samples; "
                       "n < samples: n samples at random, one image each",
@@ -136,13 +138,15 @@ def _has_edits(pkg: Path) -> bool:
     return (pkg / "edits").is_dir() and any((pkg / "edits").glob("*.json"))
 
 
-def build(ps_dir, review_root, owner=None, width=1440, quality=72) -> Path:
+def build(ps_dir, review_root, owner=None, width=1440, quality=72, lock_wait=META_LOCK_WAIT_S) -> Path:
     """<review_root>/pred_<ps>/ from one prediction set. Returns the package folder.
 
     Built in a temp folder (.building_*, never served) and renamed into place when complete, so the multi server
     never sees half a package. Rebuilding keeps the .review_key and the `reviewers` list of review_package.json
     (round 13: the Reviews hub assigns them); a package that already has saved edits is refused (its label ids are
-    what the edits point at)."""
+    what the edits point at). The reviewers are read and the folder swapped under the OS lock
+    <review_root>/.meta_locks/<pkg>.lock (the Reviews hub's reviewers write takes it too); a lock still held after
+    lock_wait seconds raises TimeoutError and leaves the old package as it was."""
     req, ps_id, model, rows, pred_dir = _ps_inputs(ps_dir)
     owner = owner or req.get("owner")
     if not OWNER_RE.match(owner or ""):
@@ -156,22 +160,42 @@ def build(ps_dir, review_root, owner=None, width=1440, quality=72) -> Path:
     try:
         _build_into(tmp, final, Path(ps_dir), req, ps_id, model, rows, pred_dir, owner, width, quality,
                     old_key or secrets.token_urlsafe(18))
-        keep_reviewers(final, tmp)  # read as late as possible: the Reviews hub may have just assigned someone
-        if final.exists():
-            gone = Path(review_root) / f".old_{pid}_{secrets.token_hex(4)}"
-            final.rename(gone)
-            if _has_edits(gone):  # an edit was saved since the check above: keep that package
-                gone.rename(final)
-                raise FileExistsError(f"{final} has saved edits: not rebuilt")
-            tmp.rename(final)
+        # the Reviews hub's reviewers POST takes the same OS lock: no assignment is lost between the read and the swap
+        lock = meta_lock(review_root, pid, lock_wait)
+        gone = None
+        try:
+            keep_reviewers(final, tmp)
+            if final.exists():
+                gone = Path(review_root) / f".old_{pid}_{secrets.token_hex(4)}"
+                final.rename(gone)
+                if _has_edits(gone):  # an edit was saved since the check above: keep that package
+                    gone.rename(final)
+                    raise FileExistsError(f"{final} has saved edits: not rebuilt")
+                tmp.rename(final)
+            else:
+                tmp.rename(final)
+        finally:
+            lock.close()
+        if gone is not None:
             shutil.rmtree(gone, ignore_errors=True)
-        else:
-            tmp.rename(final)
     finally:
         if tmp.exists():
             shutil.rmtree(tmp, ignore_errors=True)
     print(f"[OK] {pid} -> {final}")
     return final
+
+
+def meta_lock(review_root, pid: str, wait: float):
+    """The OS lock <review_root>/.meta_locks/<pid>.lock (data_utils.oslock, the same file as the Reviews hub's
+    reviewers write) -> an open handle (close() releases it). TimeoutError when another holder keeps it > wait s."""
+    from data_utils.oslock import acquire_lock
+    locks = Path(review_root) / META_LOCK_DIR
+    locks.mkdir(exist_ok=True)
+    lk = acquire_lock(locks / f"{pid}.lock", wait=wait)
+    if lk is None:
+        raise TimeoutError(f"{pid}: its reviewers are being changed (lock held over {wait:g} s); not rebuilt, "
+                           "try again")
+    return lk
 
 
 def old_reviewers(final: Path) -> list:

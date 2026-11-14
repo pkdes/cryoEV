@@ -171,6 +171,20 @@ class Facets(Base):
         d, req = make_set(self.root, "ps_20261111_00000b", name="B", parents=[("prediction_set", "ps_20261110_00000a")])
         self.assertEqual(L.facets(d, req)["source"], "B")
 
+    def test_hidden_none_hides_private_looking_keys(self):
+        d, req = make_set(self.root, "ps_20261110_00000a", session="ps_20261109_abcdef", model="pred_ps_20261109_abcdef")
+        f = L.facets(d, req)
+        self.assertEqual((f["session"], f["model"]), (L.HIDDEN_LABEL, L.HIDDEN_LABEL))
+        self.assertNotIn("abcdef", json.dumps([f["session"], f["model"]]))   # (source = the set's own name)
+        d, req = make_set(self.root, "ps_20261110_00000b", session="20261106-2", model="v5_evnonev_y8m_20261029")
+        f = L.facets(d, req)                                                      # control: ordinary keys shown
+        self.assertEqual((f["session"], f["model"]), ("20261106-2", "v5_evnonev_y8m_20261029"))
+        for v in ("ps_20261110_abcdef", "PRED_x", "see pred_ps_1", "x/ps_20261110_abcdef"):
+            self.assertEqual(L._checked(None, "session", v), L.HIDDEN_LABEL, v)
+        for v in ("20261106", "v5", "upload · 2026-11-13", "caps_20261110_abcdefx"):
+            self.assertEqual(L._checked(None, "session", v), v, v)
+        self.assertEqual(L._checked(lambda k, i: False, "session", "ps_20261110_abcdef"), "ps_20261110_abcdef")
+
     def test_a_broken_hidden_check_fails_closed(self):
         make_set(self.root, "ps_20261110_00000a", name="A")
         d, req = make_set(self.root, "ps_20261111_00000b", name="B", parents=[("prediction_set", "ps_20261110_00000a")],
