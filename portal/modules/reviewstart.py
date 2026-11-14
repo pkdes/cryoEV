@@ -62,7 +62,9 @@ CSS = """<style>
 .cj-rs-back{font-size:.85rem;text-decoration:none}
 .cj-rs-kinds{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:10px}
 .cj-rs-kind,a.cj-rs-kind{display:flex;flex-direction:column;gap:3px;padding:12px 14px;border:1px solid var(--line);border-radius:var(--cj-r);
-  background:var(--card);color:var(--fg);text-decoration:none}
+  background:var(--card);color:var(--fg);text-decoration:none;min-width:0}
+.cj-rs-kind>span{white-space:normal;overflow-wrap:anywhere}
+.cj-rs-kinds{min-width:0;max-width:100%}
 .cj-rs-kind:hover{border-color:var(--acc)}
 .cj-rs-kind b{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .cj-rs-chip{display:inline-flex;padding:0 7px;border-radius:4px;font-size:.72rem;font-weight:600;border:1px solid var(--line)}
