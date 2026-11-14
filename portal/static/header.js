@@ -37,7 +37,7 @@
   }
   function activeId(mods) {
     var a = document.body && document.body.dataset.active;
-    if (a) return a;
+    if (a) return a === 'review' ? 'reviews' : a;     // the review shell (any package) sits under Reviews (round 13)
     var p = location.pathname, best = null, len = -1;
     (mods || []).forEach(function (m) {
       var r = m.route;

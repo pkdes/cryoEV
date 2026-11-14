@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -35,8 +36,14 @@ class Manifests(unittest.TestCase):
         for i in on:                                                         # anything on has a real route
             self.assertTrue(by[i]["route"] or by[i].get("external"), i)
         self.assertEqual([by[i]["name"] for i in ids if by[i].get("nav")],     # the nav, in order
-                         ["Home", "Data", "Jobs", "Gallery", "Predict", "Label review", "Results", "My reviews", "Train", "Admin", "Sandbox"])
+                         ["Home", "Data", "Jobs", "Gallery", "Predict", "Results", "Reviews", "Train", "Admin"])
         self.assertFalse(by["history"]["nav"])                               # History: hidden "classic" page
+        # round 13: one "Reviews" entry; Label review (/review/) and Sandbox are off the nav, but still on: their
+        # Gate rules and old bookmarks keep working
+        self.assertFalse(by["review"]["nav"])
+        self.assertFalse(by["sandbox"]["nav"])
+        self.assertEqual(by["reviews"]["label"], "eVHarmony")
+        self.assertNotIn("label", by["review"])
         self.assertEqual((by["home"]["route"], by["history"]["route"], by["review"]["route"]), ("/", "/history/", "/review/"))
         for m in mods:
             self.assertTrue(set(m["roles"]) <= {"admin", "advanced", "basic"}, m["id"])
@@ -155,18 +162,17 @@ class Home(unittest.TestCase):
         self.assertIn('id="cj-classic"', page)                               # History: only the footer link
         self.assertIn('href="/history/"', page)
         self.assertNotIn('data-id="history"', page)
-        self.assertIn('href="/review/"', page)
+        self.assertNotIn('href="/review/"', page)                            # round 13: under Reviews now
+        self.assertIn('<a class="cj-mod cj-mod-review" data-id="reviews" href="/reviews/">', page)
         self.assertIn('<span class="cj-evh">eVHarmony</span>', page)
-        self.assertEqual(page.count("cj-evh"), 1)                            # the gradient label: Review card only
-        self.assertIn('href="http://127.0.0.1:8765/"', page)                 # sandbox: its own (local) address
+        self.assertEqual(page.count("cj-evh"), 1)                            # the gradient label: Reviews card only
+        self.assertNotIn('href="http://127.0.0.1:8765/"', page)              # sandbox: off the home cards
         mods = json.loads((PORTAL / "modules.json").read_text(encoding="utf-8"))["modules"]
         coming = sum(1 for m in mods if m.get("nav") and m["status"] != "on" and "admin" in m["roles"])
         self.assertEqual(page.count('class="cj-mod off"'), coming)
         self.assertEqual(page.count(">coming<"), coming)
         order = re.findall(r'class="cj-mod[^"]*" data-id="([a-z]+)"', page)
-        self.assertEqual(order, ["data", "jobs", "gallery", "predict", "review", "results", "reviews", "train", "admin", "sandbox"])
-        page = self.home("box.example.ts.net:8446")
-        self.assertIn('href="https://box.example.ts.net:8443/"', page)
+        self.assertEqual(order, ["data", "jobs", "gallery", "predict", "results", "reviews", "train", "admin"])
 
     def test_roles_see_their_modules_only(self):
         keys = {r: A.add_key(self.env.roster, f"user-{r}", r) for r in ("advanced", "basic")}
@@ -221,7 +227,11 @@ class Home(unittest.TestCase):
 
 class ReviewPackageDefault(unittest.TestCase):
     def test_from_registry(self):
+        """The registry's newest open revise job, when the services config can't be read (a missing file here; the
+        services config's own pick: portal/tests/test_review_strip.py ReviewPackagePin)."""
         env = T.Env()
+        nosvc = mock.patch.dict(os.environ, {"CRYOEV_SERVICES_CONFIG": str(env.tmp / "no_services.json")})
+        nosvc.start()
         try:
             reg = env.registry
             pk_old, pk_new = env.tmp / "pkg_old", env.tmp / "pkg_new"
@@ -241,6 +251,7 @@ class ReviewPackageDefault(unittest.TestCase):
             self.assertIsNone(APP.registry_review_package(env.tmp / "nowhere"))
             self.assertIsNone(APP.read_review_key(env.tmp / "nowhere"))
         finally:
+            nosvc.stop()
             env.cleanup()
 
 

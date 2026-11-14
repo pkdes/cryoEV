@@ -41,10 +41,10 @@ def _on(role):
     return [m["name"] for m in _MODS if m.get("nav") and m["status"] == "on" and role in m["roles"]]
 
 
-NAV = {"admin": (["Home", "Data", "Jobs", "Gallery", "Predict", "Label review", "Results", "My reviews", "Train", "Admin", "Sandbox"], _on("admin")),
-       "advanced": (["Home", "Data", "Jobs", "Gallery", "Predict", "Results", "My reviews", "Train"], _on("advanced")),
-       "basic": (["Home", "Predict", "Results", "My reviews"], _on("basic"))}
-CARDS = {"admin": ["data", "jobs", "gallery", "predict", "review", "results", "reviews", "train", "admin", "sandbox"],
+NAV = {"admin": (["Home", "Data", "Jobs", "Gallery", "Predict", "Results", "Reviews", "Train", "Admin"], _on("admin")),
+       "advanced": (["Home", "Data", "Jobs", "Gallery", "Predict", "Results", "Reviews", "Train"], _on("advanced")),
+       "basic": (["Home", "Predict", "Results", "Reviews"], _on("basic"))}
+CARDS = {"admin": ["data", "jobs", "gallery", "predict", "results", "reviews", "train", "admin"],
          "advanced": ["data", "jobs", "gallery", "predict", "results", "reviews", "train"],
          "basic": ["predict", "results", "reviews"]}
 TOKENS = {"light": {"bg": "rgb(243, 245, 247)", "card": "rgb(255, 255, 255)", "hist_bg": "rgb(250, 250, 249)"},
@@ -231,11 +231,9 @@ class Shell(unittest.TestCase):
                     self.assertFalse(any("stale-key-55" in u for u in tool))                 # k never reaches it
                     page.wait_for_function("!location.search.includes('k=')")               # mirrored: k gone
                     self.assertEqual(page.url, self.p.origin + "/review/?mode=cards")
-                    g = page.evaluate("""() => { const f = document.getElementById('cj-review-frame').getBoundingClientRect(),
-                        b = document.getElementById('cj-bar').getBoundingClientRect();
-                        return {ft: f.top, fb: f.bottom, fw: f.width, bb: b.bottom, ih: innerHeight, iw: innerWidth,
-                                sh: document.documentElement.scrollHeight, sw: document.documentElement.scrollWidth}; }""")
-                    self.assertEqual(g["ft"], g["bb"])                                       # right under the bar
+                    g = self.frame_box(page)
+                    self.assertFalse(g["strip"])                         # /review/: no strip (CJ_REVIEW_STRIP_CORE off)
+                    self.assertEqual(g["ft"], g["sb"] if g["strip"] else g["bb"])            # right under the bar
                     self.assertEqual((g["fb"], g["fw"]), (g["ih"], g["iw"]))                 # fills the rest
                     self.assertLessEqual((g["sh"], g["sw"]), (g["ih"], g["iw"]))             # no page scroll
                     page.screenshot(path=str(self.shots / f"shell_review_frame_{width}.png"))
@@ -258,6 +256,65 @@ class Shell(unittest.TestCase):
                     self.clean(rec)
             finally:
                 ctx.close()
+
+    def frame_box(self, page):
+        """The frame's, the bar's and the switcher strip's boxes (strip: None when the page has none)."""
+        return page.evaluate("""() => { const f = document.getElementById('cj-review-frame').getBoundingClientRect(),
+            b = document.getElementById('cj-bar').getBoundingClientRect(), se = document.getElementById('cj-rstrip'),
+            s = se ? se.getBoundingClientRect() : null;
+            return {ft: f.top, fb: f.bottom, fw: f.width, bb: b.bottom, ih: innerHeight, iw: innerWidth,
+                    strip: !!se, st: s && s.top, sb: s && s.bottom, sh_: s && s.height, sl: s && s.left, swd: s && s.width,
+                    sh: document.documentElement.scrollHeight, sw: document.documentElement.scrollWidth}; }""")
+
+    def test_review_frame_with_strip(self):
+        """Round 13: with the switcher strip (here on /review/ with CJ_REVIEW_STRIP_CORE on, rows from a fake
+        review_index): bar, then the strip (one row, full width, also at 390 px), then the frame filling the rest; no
+        page scroll. The open dropdown floats over the frame (the frame doesn't move) and stays inside the window."""
+        from unittest import mock
+        from portal import app as APP
+        from portal import review_index as RI
+        rows = [{"id": f"lab_strip_{i}", "kind": ("prediction", "label_review", "audit")[i % 3],
+                 "title": f"Fixture review number {i} with a fairly long name to ellipsize", "cards": 40 + i,
+                 "decided": i, "go_url": f"/reviews/go/lab_strip_{i}", "needs_you": i < 3, "status": "in_progress",
+                 "blind": i % 3 == 2} for i in range(7)]
+
+        def groups(rs, cur, per_group=8):
+            return [("Needs you", [r for r in rs if r["needs_you"]]),
+                    ("Prediction", [r for r in rs if not r["needs_you"] and r["kind"] == "prediction"]),
+                    ("Label sets", [r for r in rs if not r["needs_you"] and r["kind"] == "label_review"])]
+        with mock.patch.dict(os.environ, {APP.STRIP_CORE_ENV: "on"}),                 mock.patch.object(RI, "list_reviews", lambda *a, **k: rows),                 mock.patch.object(RI, "switcher_groups", groups):
+            for width in (390, 1280):
+                for scheme in ("light", "dark"):
+                    ctx, page, rec = self.session(width, scheme)
+                    try:
+                        with self.subTest(width=width, scheme=scheme):
+                            page.goto(self.p.origin + "/review/?mode=cards")
+                            page.wait_for_load_state("networkidle")
+                            page.wait_for_selector("#cj-bar .cj-nav a")
+                            g = self.frame_box(page)
+                            self.assertTrue(g["strip"])
+                            self.assertEqual(g["st"], g["bb"])                       # the strip right under the bar
+                            self.assertEqual((g["sl"], g["swd"]), (0, g["iw"]))      # full width
+                            self.assertLessEqual(g["sh_"], 44 if width == 390 else 48)   # one compact row
+                            self.assertEqual(g["ft"], g["sb"])                       # the frame right under the strip
+                            self.assertEqual((g["fb"], g["fw"]), (g["ih"], g["iw"]))  # fills the rest
+                            self.assertLessEqual((g["sh"], g["sw"]), (g["ih"], g["iw"]))   # no page scroll
+                            page.click("#cj-rstrip summary")
+                            m = page.evaluate("""() => { const r = document.querySelector('#cj-rstrip .cj-rs-menu')
+                                .getBoundingClientRect(); return {l: r.left, r: r.right, t: r.top, h: r.height}; }""")
+                            self.assertGreater(m["h"], 50)
+                            self.assertGreaterEqual(m["l"], 0)
+                            self.assertLessEqual(m["r"], g["iw"])
+                            self.assertGreater(m["t"], g["st"])                      # under the strip's top...
+                            self.assertGreater(m["t"] + m["h"], g["sb"] + 50)        # ...and over the frame
+                            g2 = self.frame_box(page)
+                            self.assertEqual((g2["ft"], g2["fb"]), (g["ft"], g["fb"]))   # the frame didn't move
+                            self.assertLessEqual(g2["sw"], g2["iw"], "horizontal scroll")
+                            self.assertEqual(page.locator("#cj-rstrip a.cj-rs-item").count(), 6)   # audit 5: no group
+                            page.screenshot(path=str(self.shots / f"shell_review_strip_{width}_{scheme}.png"))
+                            self.clean(rec)
+                    finally:
+                        ctx.close()
 
     def test_review_frame_never_leaves_the_origin(self):
         """"/.//evil.example/x" is a same-origin URL whose path starts with "//": navigating to that PATH would go to
@@ -363,7 +420,7 @@ class Shell(unittest.TestCase):
                         getComputedStyle(document.body).getPropertyValue('--hot').trim()]""")
                     self.assertEqual(css[:2], [want["bg"], want["card"]])
                     self.assertEqual(css[2], "#c0135a" if scheme == "light" else "#ff5c9b")
-                    # the gradient label: Review card only, text painted by the gradient
+                    # the gradient label: Reviews card only, text painted by the gradient
                     self.assertEqual(page.locator(".cj-evh").count(), 1)
                     self.assertEqual(page.locator(".cj-mod-review .cj-evh").text_content(), "eVHarmony")
                     clip = page.evaluate("getComputedStyle(document.querySelector('.cj-evh')).backgroundClip")

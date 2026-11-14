@@ -45,7 +45,7 @@ PAGES = (("home", "/", "#cj-bar .cj-nav a"), ("history", "/history/history.html"
 _MODS = __import__("json").loads((__import__("pathlib").Path(__file__).resolve().parents[1] / "modules.json")
                                  .read_text(encoding="utf-8"))["modules"]
 NAV_LINKS = [m["name"] for m in _MODS if m.get("nav") and m["status"] == "on" and "admin" in m["roles"]]  # admin, on
-NAV_ALL = ["Home", "Data", "Jobs", "Gallery", "Predict", "Label review", "Results", "My reviews", "Train", "Admin", "Sandbox"]   # + greyed "coming"
+NAV_ALL = ["Home", "Data", "Jobs", "Gallery", "Predict", "Results", "Reviews", "Train", "Admin"]   # + greyed "coming"
 
 
 @browser
@@ -115,10 +115,9 @@ class Pages(unittest.TestCase):
                                 self.assertEqual(nav, NAV_LINKS)
                                 nav = page.eval_on_selector_all("#cj-bar .cj-nav > *", "a => a.map(x => x.textContent)")
                                 self.assertEqual(nav, NAV_ALL)
-                                self.assertEqual(page.get_attribute('#cj-bar a[data-id="review"] .cj-dot', "class"),
-                                                 "cj-dot up")
-                                self.assertEqual(page.get_attribute('#cj-bar a[data-id="sandbox"] .cj-dot', "class"),
-                                                 "cj-dot down")
+                                # round 13: Label review and Sandbox are off the nav (one "Reviews" entry)
+                                self.assertEqual(page.locator('#cj-bar a[data-id="review"]').count(), 0)
+                                self.assertEqual(page.locator('#cj-bar a[data-id="sandbox"]').count(), 0)
                                 self.assertEqual(page.text_content("#cj-bar .cj-user .cj-nm > span"), T.USER)
                                 self.assertEqual(page.locator(".cj-mod.off").count(),
                                                  sum(1 for m in _MODS if m.get("nav") and m["status"] != "on"
@@ -131,7 +130,7 @@ class Pages(unittest.TestCase):
                             if name == "review":                                # the tool, framed under the bar
                                 self.assertTrue(page.locator("#cj-bar").is_visible())
                                 self.assertEqual(page.get_attribute("#cj-bar .cj-nav a[aria-current=page]", "data-id"),
-                                                 "review")
+                                                 "reviews")                     # the shell sits under Reviews
                                 self.assertTrue(any(u.endswith("/review/app/api/edits") for u in rec["requests"]))
                                 frame = page.frame_locator("#cj-review-frame")
                                 self.assertEqual(frame.locator("#cj-bar").count(), 0)   # the tool keeps its own look
