@@ -31,7 +31,8 @@ Eligible (all of):
   - at least one image marked reviewed (the apply is reviewed-only);
   - not named by any annotation/review_server.py `--package` in the services config (read-only: env
     CRYOEV_SERVICES_CONFIG, else ~/.cryoev/services.json; an unreadable config makes nothing eligible);
-  - not a prediction package (pred_*: never scanned).
+  - not a prediction package (pred_*: never scanned) and not an object set (round 14: kind "objects" in its
+    review_package.json, the registry or its data.js; excluded entirely, like a compare package).
 Excluded ENTIRELY (not even listed): compare packages and any package with a <review root>/_work_<pkg> folder (a blind
 audit's answer key; only its existence is checked, it is never listed or read). The one compare exception (round 13):
 a label-set revision, i.e. kind "compare" with purpose "revise" in the package's OWN review_package.json (never the
@@ -216,6 +217,8 @@ def packages(cfg, records, served, served_problem=None) -> list:
         pkg = p["id"]
         if pkg.startswith("pred_") or not PKG_RE.fullmatch(pkg):
             continue
+        if p["kind"] == "objects" or is_object_set(root, pkg):   # round 14: attribute answers, never label edits
+            continue
         if has_work(root, pkg):                          # a blind audit's answer key: exists() only, never read
             continue
         if p["kind"] == "compare" and not is_revise(root, pkg):
@@ -307,12 +310,25 @@ def unbacked_compare(root, pkg) -> bool:
         return True
 
 
+def is_object_set(root, pkg) -> bool:
+    """A round-14 object set (contract C4): a pred_obj_* name, review_package.json kind "objects", or data.js kind
+    "objects". Never applied: its decisions are attribute answers (a:...), not label edits. Any error: True."""
+    try:
+        if str(pkg).startswith("pred_obj_"):
+            return True
+        if TT._dict(TT.read_json(Path(root) / pkg / "review_package.json")).get("kind") == "objects":
+            return True
+        return datajs_marks(Path(root) / pkg)[0] == "objects"
+    except Exception:
+        return True
+
+
 def excluded(cfg, pkg, records=None) -> bool:
     """Serve-time re-check: a _work_ folder, a compare package (its review_package.json or registry record) that
-    is not a revise (is_revise), or one whose data.js says compare / portal-built without its own json
-    (unbacked_compare)."""
+    is not a revise (is_revise), one whose data.js says compare / portal-built without its own json
+    (unbacked_compare), or an object set (is_object_set, round 14)."""
     root = RES.review_root(cfg)
-    if has_work(root, pkg) or unbacked_compare(root, pkg):
+    if has_work(root, pkg) or unbacked_compare(root, pkg) or is_object_set(root, pkg):
         return True
     try:
         meta = {**TT._dict(TT._dict(TT._dict(records).get("review_package")).get(pkg)),

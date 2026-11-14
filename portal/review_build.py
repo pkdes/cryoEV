@@ -1023,3 +1023,148 @@ def register(spec, meta):
         if line["id"] in store.current("review_package", Path(reg)):
             return None
         return store.append(line, Path(reg), via=None)
+
+
+# ---------------------------------------------------------------- object sets (round 14, contract C4)
+# Start a review -> Object set (admin): an items CSV (one row per object), a label schema, the prediction set the
+# objects come from, the CSV columns to hide from reviewers (blind), the outlines on the cards and the reviewers.
+# start_objects() checks everything, saves the CSV under <portal state>/review_build/objects/<stamp>/items.csv (never
+# under the review root), then calls annotation/object_set.build (B3) IN this process, one build at a time
+# (<review root>/.building/objects.lock). That build writes the package (pred_obj_<slug>_<4hex>, shuffled items,
+# opaque ids, items.json server-only) and its registry line; the portal never reads the blind values back.
+OBJ_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.()+-]{0,59}\Z")
+OBJ_SCHEMA_RE = re.compile(r"^ls_[a-z0-9][a-z0-9_]{0,60}_v\d{1,4}\Z")
+OBJ_PS_RE = re.compile(r"^ps_\d{8}_[0-9a-f]{6}\Z")
+OBJ_COL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.+-]{0,63}\Z")
+OBJ_ID_RE = re.compile(r"^pred_obj_[A-Za-z0-9][A-Za-z0-9_.-]{0,110}\Z")
+OUTLINE_MODES = ("target", "target+contained")
+ITEMS_MAX_BYTES = 2_000_000
+ITEMS_MAX_ROWS = 5000
+ITEMS_MAX_COLS = 80
+# columns that name the object (shown to reviewers as the item's image / object; never offered for blinding)
+OBJ_KEY_COLS = ("id", "item", "image", "image_id", "stem", "obj", "pkg_key", "line", "particle_id", "crop")
+OBJ_LOCK = "objects.lock"
+OBJ_SUB = "objects"
+_PATHISH = re.compile(r"[A-Za-z]:[\\/]\S*|(?:/[^\s/]+){2,}")
+
+
+def parse_items_csv(data: bytes) -> dict:
+    """{"columns": [...], "rows": n, "blindable": [non-key columns]} of an items CSV, or BuildError. UTF-8 (a BOM is
+    fine), a header row of plain column names, 1..ITEMS_MAX_ROWS rows, an image column."""
+    if not isinstance(data, (bytes, bytearray)) or not bytes(data).strip():
+        raise BuildError("the items CSV is empty")
+    if len(data) > ITEMS_MAX_BYTES:
+        raise BuildError(f"the items CSV is larger than {ITEMS_MAX_BYTES // 1_000_000} MB")
+    try:
+        text = bytes(data).decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise BuildError("the items CSV is not UTF-8 text") from None
+    try:
+        rows = list(csv.reader(text.splitlines()))
+    except csv.Error:
+        raise BuildError("the items CSV could not be read") from None
+    rows = [r for r in rows if any(c.strip() for c in r)]
+    if len(rows) < 2:
+        raise BuildError("the items CSV needs a header row and at least one item")
+    cols = [c.strip() for c in rows[0]]
+    if len(cols) > ITEMS_MAX_COLS or any(not OBJ_COL_RE.match(c) for c in cols) or len(set(cols)) != len(cols):
+        raise BuildError("the items CSV's header must be plain, distinct column names")
+    if len(rows) - 1 > ITEMS_MAX_ROWS:
+        raise BuildError(f"the items CSV has more than {ITEMS_MAX_ROWS} items")
+    if not any(c.lower() in ("image", "image_id", "stem") for c in cols):
+        raise BuildError("the items CSV needs an image column (image or image_id)")
+    return {"columns": cols, "rows": len(rows) - 1, "blindable": [c for c in cols if c.lower() not in OBJ_KEY_COLS]}
+
+
+def object_slug(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")[:32].strip("_")
+    return slug or "set"
+
+
+def schema_choices(cfg) -> list:
+    """[{id, name, version}] of the registered / shipped label schemas (portal/modules/data/labelmeta.py)."""
+    from portal.modules.data import labelmeta as LM
+    out = []
+    for sid, s in LM.list_schemas(registry_root(cfg)).items():
+        v = s.get("version")
+        out.append({"id": sid, "name": str(s.get("name") or sid),
+                    "version": v if isinstance(v, int) and not isinstance(v, bool) else None})
+    return out
+
+
+def ps_choices(cfg) -> list:
+    """[{id, name, images}] of finished prediction sets (newest first) an object set can be built from (admin)."""
+    from portal import names
+    from portal.predict_parts import sets as SETS
+    out = []
+    for d, req, st in SETS.list_sets(cfg, {"id": None, "role": "admin"}, lambda u, owner: True):
+        if st.get("state") != "done" or not OBJ_PS_RE.match(d.name):
+            continue
+        n = st.get("n_total")
+        out.append({"id": d.name, "name": names.display_name(req) or d.name,
+                    "images": n if isinstance(n, int) else None})
+    return out
+
+
+def _object_set_build(**kw):
+    """annotation/object_set.build (B3, contract C4). Keyword arguments: items (Path of the CSV), schema (label
+    schema id), ps (prediction set id), predict_root, review_root, registry (or None), blind_cols, outline_mode,
+    reviewers, owner, name (slug), title (as typed), built_by "portal". Returns the package id, its folder, or a dict
+    with "id"."""
+    from annotation import object_set as OS
+    return OS.build(**kw)
+
+
+def start_objects(cfg, owner, *, name, schema, ps, items_csv: bytes, blind_cols=(), outline_mode="target",
+                  reviewers=(), roster_ids=None, schemas=None, sets=None, build=None, now=None) -> str:
+    """Check, then build an object set in this process. -> the package id. Raises BuildError (nothing built)."""
+    if not isinstance(owner, str) or not PID_RE.match(owner):
+        raise BuildError("your portal id can't own a review package")
+    if not isinstance(name, str) or not OBJ_NAME_RE.match(name.strip()):
+        raise BuildError("give the set a name (letters, digits, spaces, at most 60)")
+    schemas = schema_choices(cfg) if schemas is None else schemas
+    if not isinstance(schema, str) or not OBJ_SCHEMA_RE.match(schema) or schema not in {s["id"] for s in schemas}:
+        raise BuildError("pick a registered label schema")
+    sets = ps_choices(cfg) if sets is None else sets
+    if not isinstance(ps, str) or not OBJ_PS_RE.match(ps) or ps not in {s["id"] for s in sets}:
+        raise BuildError("pick a finished prediction set")
+    if outline_mode not in OUTLINE_MODES:
+        raise BuildError("pick which outlines the cards show")
+    info = parse_items_csv(items_csv)
+    blind = list(dict.fromkeys(str(c) for c in blind_cols or ()))
+    if any(c not in info["blindable"] for c in blind):
+        raise BuildError("only the CSV's own non-key columns can be hidden")
+    revs = list(dict.fromkeys(str(r) for r in reviewers or ()))
+    if len(revs) > MAX_REVIEWERS or any(not PID_RE.match(r) for r in revs):
+        raise BuildError(f"reviewers must be portal ids (at most {MAX_REVIEWERS})")
+    if roster_ids is not None and any(r not in roster_ids for r in revs):
+        raise BuildError("reviewers must be people from the roster")
+    rr = review_root(cfg)
+    if rr is None or not Path(rr).is_dir():
+        raise BuildError("the review folder is not configured on this portal")
+    bdir = building_dir(rr)
+    bdir.mkdir(exist_ok=True)
+    lock = acquire_lock(bdir / OBJ_LOCK, 2.0)
+    if lock is None:
+        raise BuildError("another object set is being built; one at a time")
+    try:
+        stamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(2)
+        sdir = state_root(cfg) / OBJ_SUB / stamp
+        sdir.mkdir(parents=True)
+        items = sdir / "items.csv"
+        items.write_bytes(bytes(items_csv))
+        got = (build or _object_set_build)(
+            items=items, schema=schema, ps=ps, predict_root=predict_root(cfg), review_root=Path(rr),
+            registry=registry_root(cfg), blind_cols=blind, outline_mode=outline_mode, reviewers=revs, owner=owner,
+            name=object_slug(name), title=name.strip(), built_by="portal")
+    except BuildError:
+        raise
+    except Exception as e:                              # noqa: BLE001  the builder's refusal: its first line, no paths
+        first = (str(e).strip().splitlines() or [type(e).__name__])[0][:200]
+        raise BuildError(f"the object set was not built ({_PATHISH.sub('…', first)})") from None
+    finally:
+        lock.close()
+    pid = got.get("id") if isinstance(got, dict) else Path(got).name if isinstance(got, Path) else got
+    if not isinstance(pid, str) or not OBJ_ID_RE.match(pid):
+        raise BuildError("the object set was built but its id could not be read")
+    return pid

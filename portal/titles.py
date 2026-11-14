@@ -35,7 +35,7 @@ SCAN_TTL = 15.0  # seconds a scan_packages result is reused (admin polls, label 
 SKIP_DIRS = ("pred_", "_", ".", "SANDBOX")  # "." = .building_* (a build in progress), .meta_locks (reviewers lock)
 BLIND_KINDS = ("compare",)  # who decided what is never shown for these (is_blind: a revise compare with no _work_ isn't)
 BUILDING = ".building"  # <review root>/.building/<name>/: the portal's build of <name> is in progress (review_build.py)
-SKIP_KINDS = ("part", "prediction")
+SKIP_KINDS = ("part", "prediction", "objects")  # objects: round 14 object sets (pred_obj_*: also under SKIP_DIRS)
 
 _cache: dict = {}
 _lock = threading.Lock()

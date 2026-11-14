@@ -15,6 +15,11 @@ Reviews module (CryoEV portal, all roles; round 13, the Reviews hub): every revi
                                          review_package.json (OS lock <review root>/.meta_locks/<id>.lock, re-read, temp
                                          file + os.replace), one audit line "reviewers changed" {added, removed}, 303 to
                                          the hub with a flash. Self-logged: portal/app.py SELF_LOGGED.
+    GET  /reviews/<id>/export.csv        an object set's answers (round 14, contract C4: annotation/object_set.export,
+    GET  /reviews/<id>/export.json       csv / COCO with attributes): admins and the set's maker; anyone who may open it
+                                         only once the set is closed (closed: true, or a registry status past review).
+                                         The same 404 as the hub otherwise; never with an agent token. One audit line
+                                         "object set exported" {format}.
 
 Rules:
   - Access = may_open(): review_package.json `owner` via ctx.can_see (admins all, others their own), or the person's
@@ -27,6 +32,8 @@ Rules:
     config's single-package review_server.py packages, $CJ_REVIEW_EXCLUDE) plus this portal's own real-review package
     (cfg.review_package). The same serving() gates /review/<id>/ in portal/app.py.
   - Audits (blind compare packages) show counts only: no owner, reviewers, who decided or decoy counts.
+  - Object sets (round 14, pred_obj_*): their own kind tab ("Object sets", shown when there is one); progress =
+    items on which every assigned reviewer has set every required attribute (object_progress).
   - Cards = card_progress(): the Quick check queue as the tool builds it in its default mode (flagged objects):
     predictions flagged u at or above data.js cand_conf (0.35 without it), labels flagged u. Decided = the card's own
     decision is set (not a September seed), or its image is rejected. Cached per package by data.js and the edits
@@ -52,7 +59,7 @@ from urllib.parse import parse_qs, quote
 
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
-from starlette.responses import RedirectResponse
+from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
 
 from portal.modules import results as RES
@@ -157,14 +164,122 @@ def _decided(edit, keys) -> int:
     return n
 
 
+# ---------------------------------------------------------------- object sets (round 14, contracts C3 / C4)
+_objcards: dict = {}
+OBJECTS_PREFIX = "pred_obj_"
+
+
+def object_items(data: dict):
+    """(items, required attribute ids) of an object set's data.js: items = [(image file, package object key)], in
+    data.js order; None when it is not an object set. An item whose image is not in data.js images is left out."""
+    if not isinstance(data, dict) or data.get("kind") != "objects" or not isinstance(data.get("items"), list):
+        return None
+    files = {}
+    for im in data.get("images") or []:
+        if isinstance(im, dict) and isinstance(im.get("file"), str):
+            files[im["file"]] = im["file"]
+            files.setdefault(re.sub(r"\.(png|jpe?g|tiff?)$", "", im["file"], flags=re.I), im["file"])
+    items = []
+    for it in data["items"]:
+        if isinstance(it, dict) and isinstance(it.get("obj"), str) and files.get(str(it.get("image"))):
+            items.append((files[str(it["image"])], it["obj"]))
+    schema = data.get("schema") if isinstance(data.get("schema"), dict) else {}
+    req = [a["id"] for a in schema.get("object_attrs") or []
+           if isinstance(a, dict) and isinstance(a.get("id"), str) and a.get("required") is True]
+    return items, req
+
+
+def _attr_answers(dec) -> dict:
+    """{(object key, attribute id): {reviewer id}} for every a:<obj>:<attr>@<rid> decision with a value."""
+    out: dict = {}
+    for k, d in (dec or {}).items():
+        if not isinstance(k, str) or not k.startswith("a:") or "@" not in k:
+            continue
+        v = d.get("v") if isinstance(d, dict) else d
+        if v is None or v == "" or (isinstance(d, dict) and d.get("seed")):
+            continue
+        body, rid = k[2:].rsplit("@", 1)
+        obj, _, attr = body.rpartition(":")
+        if obj and attr and rid:
+            out.setdefault((obj, attr), set()).add(rid)
+    return out
+
+
+def object_progress(pkg: Path, items, required, reviewers) -> tuple:
+    """(items done, items) of an object set: done = every reviewer has set every required attribute (with no
+    required attribute: any attribute). Reviewers = review_package.json `reviewers`; with none assigned, everyone who
+    has answered anything in the set (so a set nobody has touched is 0 done)."""
+    recs: dict = {}
+    for file in {f for f, _ in items}:
+        rec = _read_json(Path(pkg) / "edits" / f"{file}.json")
+        edit = rec.get("edit") if isinstance(rec, dict) else None
+        recs[file] = _attr_answers(edit.get("dec") if isinstance(edit, dict) else None)
+    who = set(r for r in reviewers if isinstance(r, str) and r)
+    if not who:
+        who = {rid for ans in recs.values() for rids in ans.values() for rid in rids}
+    if not who:
+        return 0, len(items)
+    done = 0
+    for file, obj in items:
+        ans = recs.get(file) or {}
+        if required:
+            ok = all(who <= ans.get((obj, a), set()) for a in required)
+        else:
+            ok = all(any(r in rids for (o, _), rids in ans.items() if o == obj) for r in who)
+        done += ok
+    return done, len(items)
+
+
+def _object_card_progress(pkg: Path, dsig, esig) -> tuple | None:
+    """card_progress for an object set (None when the package is not one). Cached by data.js, edits and
+    review_package.json (its reviewers)."""
+    try:
+        m = (pkg / "review_package.json").stat()
+        msig = (m.st_mtime_ns, m.st_size)
+    except OSError:
+        msig = None
+    key = str(pkg)
+    with _lock:
+        hit = _objcards.get(key)
+    if hit and hit[0] == (dsig, esig, msig):
+        return hit[1]
+    if hit and hit[0][0] == dsig and hit[2] is None:
+        return None                                      # known not to be an object set (this data.js)
+    parsed = hit[2] if hit and hit[0][0] == dsig else None
+    if parsed is None:
+        try:
+            data = json.loads((pkg / "data.js").read_text(encoding="utf-8").split("=", 1)[1].strip().rstrip(";"))
+        except (OSError, ValueError, IndexError):
+            data = None
+        parsed = object_items(data)
+    if parsed is None:
+        with _lock:
+            _objcards[key] = ((dsig, esig, msig), None, None)
+        return None
+    meta = _read_json(pkg / "review_package.json")
+    revs = meta.get("reviewers") if isinstance(meta, dict) and isinstance(meta.get("reviewers"), list) else []
+    got = object_progress(pkg, parsed[0], parsed[1], revs)
+    with _lock:
+        _objcards[key] = ((dsig, esig, msig), got, parsed)
+    return got
+
+
 def card_progress(pkg: Path) -> tuple:
     """(cards decided, cards in all) for a package, or (None, None) when its data.js can't be read. Cached by the
-    data.js and edits folder mtimes."""
+    data.js and edits folder mtimes. An object set (round 14): (items done by every reviewer, items)."""
     pkg = Path(pkg)
     try:
         st = (pkg / "data.js").stat()
     except OSError:
         return None, None
+    if pkg.name.startswith(OBJECTS_PREFIX):            # contract C4: every object set is pred_obj_<slug>_<4hex>
+        try:
+            esig0 = (pkg / "edits").stat().st_mtime_ns
+        except OSError:
+            esig0 = None
+        got = _object_card_progress(pkg, (st.st_mtime_ns, st.st_size), esig0)
+        if got is not None:
+            return got
     try:
         esig = (pkg / "edits").stat().st_mtime_ns
     except OSError:
@@ -392,6 +507,7 @@ STYLE = """<style>
 .cj-rv-k-prediction{color:var(--acc);background:var(--accbg)}
 .cj-rv-k-label_review{color:var(--prod);background:var(--prodbg)}
 .cj-rv-k-audit{color:var(--warn);background:var(--warnbg)}
+.cj-rv-k-objects{color:#7c3aed;background:color-mix(in srgb,#7c3aed 12%,transparent)}
 .cj-rv-tag{padding:0 6px;border-radius:4px;font-size:.72rem;font-weight:600;border:1px dashed var(--mut);color:var(--mut)}
 .cj-rv-lab{padding:0 6px;border-radius:4px;font-size:.72rem;font-weight:600;color:var(--warn);background:var(--warnbg)}
 .cj-rv-via{align-self:flex-start;padding:0 6px;border-radius:999px;font-size:.72rem;color:var(--prod);background:var(--prodbg)}
@@ -453,8 +569,8 @@ HUB_EMPTY = "No reviews yet. Start one from a finished prediction set, or ask an
 STATUS_FILTER = (("open", "Open (hides finished and applied)"), ("any", "Any, including finished"),
                  ("not_started", "Not started"), ("in_progress", "In progress"), ("finished", "Finished"),
                  ("applied", "Applied"))
-TABS = (("all", "All"), ("prediction", "Prediction"), ("label_review", "Label sets"), ("audit", "Audits"),
-        ("sandbox", "Practice"))
+TABS = (("all", "All"), ("prediction", "Prediction"), ("objects", "Object sets"), ("label_review", "Label sets"),
+        ("audit", "Audits"), ("sandbox", "Practice"))
 NEEDS_FIRST = 4
 NEVER_GROUPED = {"audit": "Blind audit (never grouped)", "sandbox": "Practice sandbox (never grouped)"}
 
@@ -470,9 +586,10 @@ def _when(epoch, built=False) -> str:
     return f"{'built ' if built else ''}{day} {dt.strftime('%H:%M')}"
 
 
-def cards_text(n) -> str:
-    """"1 card", "0 cards", "12 cards"."""
-    return f"{n} card{'' if n == 1 else 's'}"
+def cards_text(n, kind=None) -> str:
+    """"1 card", "0 cards", "12 cards"; an object set counts items ("1 item", "155 items")."""
+    word = "item" if kind == "objects" else "card"
+    return f"{n} {word}{'' if n == 1 else 's'}"
 
 
 def _bar(r) -> str:
@@ -481,8 +598,9 @@ def _bar(r) -> str:
     d, t = r.get("decided") or 0, r["cards"]
     pct = 0 if not t else max(1.5 if d else 0, round(1000 * d / t) / 10)
     return (f'<span class="cj-rv-bar-wrap"><span class="cj-rv-bar" role="progressbar" aria-valuemin="0" '
-            f'aria-valuemax="{t}" aria-valuenow="{d}" aria-label="cards decided"><span style="width:{pct}%"></span>'
-            f'</span><span class="cj-rv-prog">{d} of {cards_text(t)}</span></span>')
+            f'aria-valuemax="{t}" aria-valuenow="{d}" aria-label="{"items done by every reviewer" if r.get("kind") == "objects" else "cards decided"}">'
+            f'<span style="width:{pct}%"></span></span><span class="cj-rv-prog">{d} of {cards_text(t, r.get("kind"))}'
+            f'</span></span>')
 
 
 def _chip(kind) -> str:
@@ -511,8 +629,11 @@ def _card(r, me) -> str:
         who = f"{r['owner']}'s · you were added" if r.get("owner") else "You were added"
     open_cards = (r["cards"] - (r["decided"] or 0)) if r.get("cards") else 0
     where = "/review/ in " if r["open_url"] == "/review/" else ""
-    opens = (f"opens {where}Quick check · {cards_text(open_cards)} open" if r["mode"] == "cards"
-             else f"opens {where}the Editor · no open cards")
+    if r["kind"] == "objects":
+        opens = f"opens the object cards · {cards_text(open_cards, 'objects')} not done by everyone"
+    else:
+        opens = (f"opens {where}Quick check · {cards_text(open_cards)} open" if r["mode"] == "cards"
+                 else f"opens {where}the Editor · no open cards")
     tag = '<span class="cj-rv-tag">blind</span>' if blind else ""
     last = "—" if blind else _when(r["last"], built=r["status"] == "not_started")
     return (f'<article class="cj-rv-card"><div class="cj-rv-line">{_chip(r["kind"])}{tag}'
@@ -536,6 +657,8 @@ def _row_html(r) -> str:
     via = (f'<span class="cj-rv-via">{esc(r["via"])} for {esc(r["owner"])}</span>'
            if r.get("via") and r.get("owner") and not blind else "")
     assign = f'<a href="{PREFIX}/{esc(r["id"])}/reviewers">Assign</a>' if r.get("can_assign") else ""
+    if kind == "objects" and r.get("can_assign"):       # owner or admin: the maker's export (blind columns joined)
+        assign += f' <a href="{PREFIX}/{esc(r["id"])}/export.csv">Export CSV</a>'
     last = "—" if blind or kind == "sandbox" else _when(r["last"], built=r["status"] == "not_started")
     label = "Open /review/" if r["open_url"] == "/review/" else ("Open ↗" if kind == "sandbox" else "Open")
     return (f'<div class="cj-rv-row"><div class="cj-rv-c1"><div class="cj-rv-line">{_chip(kind)}'
@@ -606,7 +729,7 @@ def render_hub(rows, *, user, params, flash_html="") -> str:
     counts = {k: (len(rows) if k == "all" else sum(1 for r in rows if r["kind"] == k)) for k, _ in TABS}
     tabs = []
     for k, label in TABS:
-        if k in ("audit", "sandbox") and not counts[k]:
+        if k in ("audit", "sandbox", "objects") and not counts[k]:
             continue                                     # no trace of a kind this viewer has none of
         cur = ' aria-current="page"' if k == (kind or "all") else ""
         tabs.append(f'<a href="{esc(_link(base_q, (("show", show), ("kind", "" if k == "all" else k))))}"{cur}>'
@@ -663,7 +786,7 @@ def render_panel(pkg_id, row, meta, roster, token_html, error="", panel_dir=None
     revs = [r for r in meta["reviewers"] if isinstance(r, str)] if isinstance(meta.get("reviewers"), list) else []
     kind = RI.kind_of(pkg_id, meta, panel_dir)
     title = (row or {}).get("title") or pkg_id
-    prog = (f'<span class="cj-rv-prog">{row.get("decided") or 0} of {cards_text(row["cards"])}</span>'
+    prog = (f'<span class="cj-rv-prog">{row.get("decided") or 0} of {cards_text(row["cards"], kind)}</span>'
             if row and row.get("cards") is not None else "")
     act = f"{PREFIX}/{esc(pkg_id)}/reviewers"
     chips = "".join(
@@ -695,6 +818,39 @@ def render_panel(pkg_id, row, meta, roster, token_html, error="", panel_dir=None
             f'it under Needs your review. At most {MAX_REVIEWERS}.</p>{note}</div>'
             f'<div style="display:flex;justify-content:flex-end"><a class="cj-rv-btn2" href="{PREFIX}/">Back to reviews</a>'
             '</div></section></div>')
+
+
+# ---------------------------------------------------------------- object set export (round 14, C4 / C7)
+EXPORT_FORMATS = {"csv": ("csv", "text/csv; charset=utf-8"), "json": ("coco", "application/json")}
+CLOSED_STATUSES = ("reviewed", "applied", "superseded", "abandoned")
+
+
+def object_set_closed(meta: dict, reg: dict | None) -> bool:
+    """A set is closed when its own review_package.json says closed: true, or its registry line has an explicit
+    status (status_by) past review. Open otherwise (the blind columns stay with admins and the maker)."""
+    if isinstance(meta, dict) and meta.get("closed") is True:
+        return True
+    return isinstance(reg, dict) and isinstance(reg.get("status_by"), str) and bool(reg["status_by"])         and reg.get("status") in CLOSED_STATUSES
+
+
+def may_export(user: dict, meta: dict, closed: bool, can_see) -> bool:
+    """Admins and the set's maker (owner) always; anyone who may open the set only once it is closed."""
+    if not isinstance(user, dict) or not user.get("id") or not isinstance(meta, dict):
+        return False
+    if user.get("role") == "admin" or (isinstance(meta.get("owner"), str) and meta["owner"] == user["id"]):
+        return True
+    return closed and may_open(user, meta, can_see)
+
+
+def export_object_set(pkg: Path, fmt: str) -> bytes:
+    """B3's exporter (annotation/object_set.export, contract C4) -> the file's bytes. fmt "csv" | "coco"."""
+    from annotation import object_set as OS
+    out = OS.export(Path(pkg), fmt=fmt)
+    if isinstance(out, (str, Path)) and Path(str(out)).suffix and Path(str(out)).is_file():
+        return Path(str(out)).read_bytes()
+    if isinstance(out, (dict, list)):
+        return json.dumps(out, ensure_ascii=False).encode("utf-8")
+    return out.encode("utf-8") if isinstance(out, str) else bytes(out)
 
 
 def routes(ctx) -> list:
@@ -816,7 +972,46 @@ def routes(ctx) -> list:
                 break
         return await run_in_threadpool(reviewers_change, request, bytes(buf), too_big, ctype)
 
+    def export_hit(request):
+        """(package folder, review_package.json) of an object set this viewer may export, else None. Resolved like
+        resolve() (served prefixes, excluded names, a key, never the core package), then kind objects, then
+        may_export (admin or maker; others only once the set is closed)."""
+        from annotation import multi_review_server as MRS
+        from portal import app as APP
+        prefixes, excluded = serving(ctx.cfg)
+        hit = APP.pred_package(RES.review_root(ctx.cfg), request.path_params.get("pkg_id", ""), prefixes)
+        if hit is None or not MRS.package_key(hit[0]) or hit[0].name.lower() in excluded                 or RI._same(hit[0], RI.core_dir(ctx.cfg)) or RI.kind_of(hit[0].name, hit[1], hit[0]) != "objects":
+            return None
+        reg = (RI._records(ctx.cfg).get("review_package") or {}).get(hit[0].name)
+        closed = object_set_closed(hit[1], reg)
+        return hit if may_export(ctx.user(request), hit[1], closed, ctx.can_see) else None
+
+    def export_run(request, ext):
+        hit = export_hit(request)
+        if hit is None:
+            return missing(request)
+        if request.scope.get("cj_auth") == "bearer":    # never an agent token: the blind columns are in the file
+            return show(request, "Export", '<p class="cj-card">Not with an agent token.</p>', 403)
+        fmt, ctype = EXPORT_FORMATS[ext]
+        try:
+            body = export_object_set(hit[0], fmt)
+        except Exception as e:                          # noqa: BLE001  B3's exporter refused or is missing
+            return show(request, "Export", f'<p class="cj-card">The export could not be made ({esc(type(e).__name__)}).'
+                        f'</p><p><a href="{PREFIX}/">All reviews</a></p>', 500)
+        PA.event(ctx.cfg.state_dir, request, "object set exported", hit[0].name, {"format": fmt})
+        return Response(body, media_type=ctype, headers={
+            "Content-Disposition": f'attachment; filename="{hit[0].name}.{ext}"', "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff"})
+
+    async def export_csv(request: Request):
+        return await run_in_threadpool(export_run, request, "csv")
+
+    async def export_json(request: Request):
+        return await run_in_threadpool(export_run, request, "json")
+
     return [Route(PREFIX + "/", index, methods=["GET"]),
             Route(PREFIX + "/go/{pkg_id}", go, methods=["GET"]),
+            Route(PREFIX + "/{pkg_id}/export.csv", export_csv, methods=["GET"]),
+            Route(PREFIX + "/{pkg_id}/export.json", export_json, methods=["GET"]),
             Route(PREFIX + "/{pkg_id}/reviewers", reviewers_get, methods=["GET"]),
             Route(PREFIX + "/{pkg_id}/reviewers", reviewers_post, methods=["POST"])]

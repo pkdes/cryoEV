@@ -302,10 +302,18 @@ def build_model(current: dict, history: dict, stats: dict, sources, changes=None
         rs = sorted((k for k in roots if k.split("|", 1)[0] in ents), key=sort_key)
         if rs:
             sections.append({"title": title, "nodes": [node(k) for k in rs]})
+    # round 14: label schemas (contract C2) get their own open section, each version under the one it supersedes
+    schemas = sorted((k for k in current if k.startswith("label_schema|")), key=sort_key)
+    if schemas:
+        def schema_node(k, seen):
+            kids = [c for c in schemas if c not in seen and find("label_schema", current[c].get("supersedes")) == k]
+            return {"k": k, "c": [schema_node(c, seen | {c}) for c in kids]}
+        tops = [k for k in schemas if not find("label_schema", current[k].get("supersedes"))] or schemas[:1]
+        sections.append({"title": "Label schemas", "nodes": [schema_node(k, {k}) for k in tops]})
     other: dict[str, list[str]] = {}
     for key in current:
         ent = key.split("|", 1)[0]
-        if ent not in TREE_ENTITIES:
+        if ent not in TREE_ENTITIES and ent != "label_schema":
             other.setdefault(ent, []).append(key)
     for ent in sorted(other):
         sections.append({"title": f"Other: {ent}", "nodes": [{"k": k, "c": []} for k in sorted(other[ent])],
@@ -329,6 +337,15 @@ def build_model(current: dict, history: dict, stats: dict, sources, changes=None
                     links.append(["superseded by (derived)", tk])
         for c in children.get(key, []):
             links.append([f"child {c.split('|', 1)[0]}", c])
+        if ent == "review_package":                    # round 14: an object set's label schema (the line's own
+            ls = rec.get("label_schema")               # `schema` is its record tag, so the id is read from these)
+            ls = ls if isinstance(ls, str) else rec.get("schema") if str(rec.get("schema", "")).startswith("ls_") else None
+            if find("label_schema", ls):
+                links.append(["label schema", find("label_schema", ls)])
+        if ent == "label_schema":
+            for k2, r2 in current.items():
+                if k2.startswith("review_package|") and (r2.get("label_schema") == rec["id"] or r2.get("schema") == rec["id"]):
+                    links.append(["used by (object set)", k2])
         hist = []
         for line in history[key]:
             via = line_via(line, status=True)

@@ -14,6 +14,13 @@ a label-set build. The logic lives in portal/review_build.py; this module holds 
                                   303 to the progress page; a refusal page (400/403/409) otherwise. One audit line
                                   "review build started" (purpose, label set, B, number of reviewers; never decoy
                                   numbers)
+    POST /reviews/start/objects   (d) Object set (round 14, admin, form token + Origin, never bearer): multipart
+                                  name, schema, items (CSV, at most 2 MB), ps, blind (repeatable; set by the
+                                  page's small script from the CSV's header, all ticked; without it every non-key
+                                  column is hidden), outline (target | target+contained), reviewer (repeatable)
+                                  -> review_build.start_objects -> annotation/object_set.build (in a worker
+                                  thread) -> 303 to /reviews/?kind=objects with a flash. One audit line "object set
+                                  built" (counts only)
     GET  /reviews/start/<name>    the progress page (admin; any other id or person: 404): the allowlisted phases
                                   from <review root>/.building/<name>/status.json, reloading itself every few
                                   seconds (meta refresh) until done or failed; Continue opens /reviews/go/<name>
@@ -27,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import html
+import json
 import secrets
 from urllib.parse import parse_qs, quote, urlencode
 
@@ -43,6 +51,7 @@ from portal.modules import admin as AD
 PREFIX = "/reviews/start"
 ROLES = ("admin", "advanced", "basic")
 MAX_FORM = 4096
+OBJ_FORM_EXTRA = 64 * 1024              # the object set form's other fields and multipart framing, beyond the CSV
 REFRESH_S = 4
 esc = html.escape
 
@@ -58,6 +67,8 @@ CSS = """<style>
 .cj-rs-chip-pred{color:var(--acc);background:var(--accbg)}
 .cj-rs-chip-lab{color:var(--prod);background:var(--prodbg)}
 .cj-rs-chip-aud{color:var(--warn);background:var(--warnbg)}
+.cj-rs-chip-obj{color:#7c3aed;background:color-mix(in srgb,#7c3aed 12%,transparent)}
+.cj-rs-grid input[type=file]{font:inherit;font-size:.85rem}
 .cj-rs-adm{font-family:var(--cj-mono);font-size:.7rem;color:var(--mut);border:1px solid var(--line);border-radius:4px;padding:0 5px}
 .cj-rs-sec{background:var(--card);border:1px solid var(--line);border-radius:var(--cj-r);padding:16px;display:flex;
   flex-direction:column;gap:12px;scroll-margin-top:calc(var(--cj-bar-h) + 8px)}
@@ -126,7 +137,8 @@ def roster_ids(roster) -> list:
 
 # ---------------------------------------------------------------- HTML
 def chip(kind) -> str:
-    text, cls = {"pred": ("Prediction", "pred"), "lab": ("Label set", "lab"), "aud": ("Audit", "aud")}[kind]
+    text, cls = {"pred": ("Prediction", "pred"), "lab": ("Label set", "lab"), "aud": ("Audit", "aud"),
+                 "obj": ("Object set", "obj")}[kind]
     return f'<span class="cj-rs-chip cj-rs-chip-{cls}">{text}</span>'
 
 
@@ -140,7 +152,10 @@ def render_kinds(admin) -> str:
                    "new label set."),
                   ("#rs-audit", f"Blind audit {chip('aud')}{adm}",
                    "Reviewers decide cards without knowing which side made them. Decoys check attention. Counts only "
-                   "until it ends.")]
+                   "until it ends."),
+                  ("#rs-objects", f"Object set {chip('obj')}{adm}",
+                   "A list of objects (a CSV) with a label schema's questions on each card. Measured columns can stay "
+                   "hidden from reviewers until it is closed.")]
     return ('<nav class="cj-rs-kinds" aria-label="What do you want to review?">'
             + "".join(f'<a class="cj-rs-kind" href="{h}"><b>{t}</b><span class="cj-mut">{esc(d)}</span></a>'
                       for h, t, d in cards) + "</nav>")
@@ -246,6 +261,73 @@ def render_form(purpose, tok, sets, models, lv, b, cov, roster, me, busy) -> str
             f'{"Create review" if purpose == "revise" else "Create audit"}</button>{why}</div></form></section>')
 
 
+# ---------------------------------------------------------------- (d) Object set (round 14, admin; contract C4)
+OBJ_SCRIPT = """<script>
+(() => {  // the items CSV's columns as "Hide from reviewers" boxes (all on); without this script every non-key column is hidden
+  const f = document.getElementById("rs-obj-items"), box = document.getElementById("rs-obj-blind"),
+        ui = document.getElementById("rs-obj-blind-ui"), KEYS = %s;
+  if (!f || !box || !ui) return;
+  f.addEventListener("change", async () => {
+    box.textContent = ""; ui.value = "";
+    const file = f.files && f.files[0]; if (!file) return;
+    const head = (await file.slice(0, 65536).text()).replace(/^\\ufeff/, "").split(/\\r?\\n/)[0] || "";
+    const cols = head.split(",").map(c => c.trim().replace(/^"|"$/g, "")).filter(Boolean);
+    const blind = cols.filter(c => !KEYS.includes(c.toLowerCase()));
+    if (!blind.length) { box.textContent = "No columns to hide besides the object's own."; ui.value = "1"; return; }
+    for (const c of blind) {
+      const l = document.createElement("label"), cb = document.createElement("input");
+      cb.type = "checkbox"; cb.name = "blind"; cb.value = c; cb.checked = true;
+      l.append(cb, " " + c); box.append(l);
+    }
+    ui.value = "1";
+  });
+})();
+</script>"""
+
+
+def render_objects_form(tok, schemas, sets, roster, me, error="") -> str:
+    """(d) Object set: name, label schema, items CSV, the prediction set the objects come from, the columns to hide,
+    the outlines on the cards, reviewers. One multipart POST to /reviews/start/objects (admin)."""
+    def s_label(s):
+        return f'{s["name"]}' + (f' v{s["version"]}' if s.get("version") else "") + f' · {s["id"]}'
+
+    def p_label(p):
+        return f'{p["name"]} · {p["id"]}' + (f' · {p["images"]} img' if p.get("images") is not None else "")
+    s_opts = "".join(f'<option value="{esc(s["id"])}">{esc(s_label(s))}</option>' for s in schemas)
+    p_opts = "".join(f'<option value="{esc(p["id"])}">{esc(p_label(p))}</option>' for p in sets)
+    boxes = "".join(f'<label><input type="checkbox" name="reviewer" value="{esc(p)}"> {esc(p)}</label>' for p in roster)
+    err = f'<p class="cj-rs-note cj-rs-err" role="alert">{esc(error)}</p>' if error else ""
+    dis = "" if schemas and sets else " disabled"
+    why = ("" if schemas and sets else '<span class="cj-mut">' + (
+        "No label schema is registered yet (cryoev schema register)." if not schemas else
+        "No finished prediction set to take the objects from.") + "</span>")
+    return (f'<section class="cj-rs-sec" id="rs-objects" aria-labelledby="rs-objects-h"><div><h2 id="rs-objects-h">'
+            f'Object set</h2><span class="cj-mut">One card per listed object: reviewers answer the label schema\'s '
+            f'questions about it. Admin only.</span></div>{err}'
+            f'<form method="post" action="{PREFIX}/objects" enctype="multipart/form-data">{AD.hidden_token(tok)}'
+            '<input type="hidden" name="blind_ui" id="rs-obj-blind-ui" value="">'
+            '<div class="cj-rs-grid">'
+            '<label>Name<input name="name" maxlength="60" required placeholder="Lamellarity check 1" '
+            'style="padding:7px 8px;border:1px solid var(--line);border-radius:6px;background:var(--card);'
+            'color:var(--fg);font:inherit;font-size:.85rem"></label>'
+            f'<label>Label schema<select name="schema" required>{s_opts}</select></label>'
+            '<label>Items CSV<input type="file" name="items" id="rs-obj-items" accept=".csv,text/csv" required></label>'
+            f'<label>Objects come from<select name="ps" required>{p_opts}</select></label></div>'
+            '<fieldset class="cj-rs-field" style="border:0;margin:0;padding:0"><legend>Hide from reviewers (blind)'
+            '</legend><div class="cj-rs-revs" id="rs-obj-blind"><span class="cj-mut">Pick the CSV: its columns '
+            'show here, all ticked.</span></div><noscript><span class="cj-mut">Without JavaScript every column '
+            'except the object\'s own (image, line, id) is hidden.</span></noscript></fieldset>'
+            '<fieldset class="cj-rs-field" style="border:0;margin:0;padding:0"><legend>Outlines on cards</legend>'
+            '<div class="cj-rs-revs"><label><input type="radio" name="outline" value="target" checked> Target EV only'
+            '</label><label><input type="radio" name="outline" value="target+contained"> Target + contained '
+            '<span class="cj-mut">(shows what is inside, so it hints at the counts)</span></label></div></fieldset>'
+            f'<fieldset class="cj-rs-field" style="border:0;margin:0;padding:0"><legend>Reviewers</legend>'
+            f'<div class="cj-rs-revs">{boxes or "No one is on the roster."}</div></fieldset>'
+            f'<div class="cj-rs-acts"><button class="cj-rs-btn cj-rs-primary" type="submit"{dis}>Create object set'
+            f'</button>{why}<span class="cj-mut">Order shuffled. Exports are for you and admins until the set is '
+            f'closed.</span></div></form>{OBJ_SCRIPT % json.dumps(list(RB.OBJ_KEY_COLS))}</section>')
+
+
 def render_start(user, pred_rows, admin_parts) -> str:
     admin = user.get("role") == "admin"
     out = ['<div class="cj-rs">', CSS, '<a class="cj-rs-back" href="/reviews/">&larr; Reviews</a>',
@@ -323,6 +405,23 @@ def parse_b(text) -> dict | None:
     return None
 
 
+async def read_objects_form(form):
+    """(fields, CSV bytes, None), or (None, None, (refusal text, status)). Text fields only as text; one file."""
+    def one(k):
+        v = form.get(k)
+        return v if isinstance(v, str) else ""
+    up = form.get("items")
+    if up is None or isinstance(up, str):
+        return None, None, ("Pick the items CSV.", 400)
+    data = await up.read(RB.ITEMS_MAX_BYTES + 1)
+    if len(data) > RB.ITEMS_MAX_BYTES:
+        return None, None, ("The items CSV may be up to 2 MB.", 413)
+    fields = {k: one(k) for k in ("t", "name", "schema", "ps", "outline", "blind_ui")}
+    fields["reviewer"] = [v for v in form.getlist("reviewer") if isinstance(v, str)]
+    fields["blind"] = [v for v in form.getlist("blind") if isinstance(v, str)]
+    return fields, data, None
+
+
 # ---------------------------------------------------------------- routes
 def routes(ctx) -> list:
     from portal import auth as A
@@ -361,6 +460,7 @@ def routes(ctx) -> list:
         ids = roster_ids(roster) if roster else []
         forms = [render_picker(sets, lv, cov)] + [render_form(p, tok, sets, models, lv, b, cov, ids, me, bool(active))
                                                   for p in RB.PURPOSES]
+        forms.append(render_objects_form(tok, RB.schema_choices(ctx.cfg), RB.ps_choices(ctx.cfg), ids, me))
         return {"forms": forms, "active": active}
 
     def start_page(request: Request):
@@ -404,6 +504,61 @@ def routes(ctx) -> list:
                  {"purpose": purpose, "lv": lv, "b": f'{b["kind"]}:{b["id"]}', "reviewers": len(reviewers)})
         return RedirectResponse(f"{PREFIX}/{quote(name)}", status_code=303)
 
+    async def objects(request: Request):
+        """POST /reviews/start/objects (admin, never bearer): the multipart form of (d), at most RB.ITEMS_MAX_BYTES of
+        CSV. Builds the object set in a worker thread (RB.start_objects -> annotation/object_set.build), then one
+        audit line "object set built" (schema, prediction set, item / blind column / reviewer COUNTS, never a value)
+        and 303 to the Reviews hub's Object sets tab with a flash. A refusal page (400/403/409/413) otherwise."""
+        if not is_admin(request):
+            return refuse(request, "Only admins can build object sets.", 403)
+        ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if ctype != "multipart/form-data":
+            return refuse(request, "Send the form from the Start a review page.", 400)
+        try:
+            size = int(request.headers.get("content-length") or "0")
+        except ValueError:
+            size = 0
+        if size <= 0 or size > RB.ITEMS_MAX_BYTES + OBJ_FORM_EXTRA:
+            return refuse(request, "That upload is too large (the items CSV may be up to 2 MB)." if size > 0
+                          else "Send the form from the Start a review page.", 413 if size > 0 else 400)
+        try:
+            form = await request.form(max_files=1, max_fields=40 + RB.MAX_REVIEWERS + RB.ITEMS_MAX_COLS)
+        except Exception:                               # noqa: BLE001  malformed multipart / too many parts
+            return refuse(request, "That form could not be read.", 400)
+        try:
+            got = await read_objects_form(form)
+        finally:
+            await form.close()                          # the spooled upload: closed on every path
+        fields, data, refusal = got
+        if refusal:
+            return refuse(request, *refusal)
+        if not hmac.compare_digest(fields["t"].encode(), token(request).encode()):
+            return refuse(request, "This form has expired. Reload the page and try again.", 403)
+        reviewers, blind_ui, blind = fields["reviewer"], fields["blind_ui"] == "1", fields["blind"]
+        user = ctx.user(request)
+        name, schema, ps, outline = fields["name"], fields["schema"], fields["ps"], fields["outline"] or "target"
+
+        def build():                                    # the roster read, the CSV check and the build: off the loop
+            if not blind_ui:                            # no script ran: hide every non-key column (the safe default)
+                cols = RB.parse_items_csv(data)["blindable"]
+            else:
+                cols = blind
+            ids = set(roster_ids(roster)) if roster else set()
+            pid = RB.start_objects(ctx.cfg, user.get("id"), name=name, schema=schema, ps=ps, items_csv=data,
+                                   blind_cols=cols, outline_mode=outline, reviewers=reviewers, roster_ids=ids)
+            return pid, len(cols), RB.parse_items_csv(data)["rows"]
+
+        try:
+            pid, n_blind, n_items = await run_in_threadpool(build)
+        except RB.BuildError as e:
+            busy = "one at a time" in str(e)
+            return refuse(request, f"Not built: {e}.", 409 if busy else 400)
+        PA.event(ctx.cfg.state_dir, request, "object set built", pid,
+                 {"schema": schema, "ps": ps, "items": n_items, "blind_cols": n_blind, "reviewers": len(reviewers),
+                  "outline_mode": outline})
+        tok = AD.flash_put(AD.binding(request), f"Object set {name.strip()} built: {n_items} items. Order shuffled.")
+        return RedirectResponse(f"/reviews/?kind=objects&f={quote(tok)}", status_code=303)
+
     def progress(request: Request):
         name = request.path_params["name"]
         st = RB.read_status(RB.review_root(ctx.cfg), name) if is_admin(request) else None
@@ -414,6 +569,7 @@ def routes(ctx) -> list:
 
     return [Route(PREFIX + "/", start_page, methods=["GET"]),
             Route(PREFIX + "/build", build, methods=["POST"]),
+            Route(PREFIX + "/objects", objects, methods=["POST"]),
             Route(PREFIX + "/{name}", progress, methods=["GET"])]
 
 

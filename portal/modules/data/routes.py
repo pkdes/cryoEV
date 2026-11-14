@@ -19,6 +19,7 @@ from portal.modules.data.records import (
     read_registry, _registry_cache, rows_for, search, thumb_version, upload_roots, with_disk_packages)
 from portal.modules.data.details import detail, make_thumb, thumbnail_sources
 from portal.modules.data.lineage import lineage_tree
+from portal.modules.data import labelpages as LP
 from portal.modules.data.graphs import (
     SCRIPT, graph_focus_key, history_registry, item_graph, lab_graph, source_focus, source_graph)
 from portal.modules.data.render import (
@@ -186,6 +187,30 @@ def routes(ctx) -> list:
         g = lab_graph(records, viewer, root, focus)
         return ctx.json(item_graph(g) if request.query_params.get("scope") == "item" else g)
 
+    def classmap_list(request: Request):
+        from portal.modules.data import labelmeta as LM
+        return html_page(request, "Class maps", LP.render_classmap_list(LM.list_classmaps()))
+
+    def classmap_page(request: Request):
+        records, error, viewer = state(request)
+        d = LP.classmap_detail(records, request.path_params["cm"])
+        if d is None:
+            return missing(request, "That class map")
+        name = str(d["cm"].get("name") or d["id"])
+        return html_page(request, f"Class map · {name}", LP.render_classmap(d))
+
+    def schema_list(request: Request):
+        from portal.modules.data import labelmeta as LM
+        return html_page(request, "Label schemas", LP.render_schema_list(LM.list_schemas(getattr(ctx.cfg, "registry", None))))
+
+    def schema_page(request: Request):
+        records, error, viewer = state(request)
+        d = LP.schema_detail(records, viewer, getattr(ctx.cfg, "registry", None), request.path_params["schema"])
+        if d is None:
+            return missing(request, "That label schema")
+        name = str(d["schema"].get("name") or d["id"])
+        return html_page(request, f"Label schema · {name}", LP.render_schema(d))
+
     def script(request: Request):
         r = Response(SCRIPT.read_bytes(), media_type="text/javascript; charset=utf-8")
         r.headers["Cache-Control"] = "no-cache"
@@ -196,6 +221,10 @@ def routes(ctx) -> list:
              Route(PREFIX + "/lineage/graph", graph_page, methods=["GET"]),
              Route(PREFIX + "/api/lineage/graph", api_graph, methods=["GET"]),   # before /api/{kind}/{eid}
              Route(PREFIX + "/data.js", script, methods=["GET"])]
+    found += [Route(PREFIX + "/classmap/", classmap_list, methods=["GET"]),          # round 14 (C1 / C2), read only
+              Route(PREFIX + "/classmap/{cm}", classmap_page, methods=["GET"]),
+              Route(PREFIX + "/schema/", schema_list, methods=["GET"]),
+              Route(PREFIX + "/schema/{schema}", schema_page, methods=["GET"])]
     found += [Route(PREFIX + "/", index, methods=["GET"]),
              Route(PREFIX + "/search", find, methods=["GET"]),
              Route(PREFIX + "/list/{kind}", listing, methods=["GET"])]
