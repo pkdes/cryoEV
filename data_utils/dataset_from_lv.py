@@ -651,19 +651,20 @@ def preview(lv, split_from, export_only=None, scheme="ev", class_map=None, allow
     for a in lv_coco["annotations"]:
         anns_by_image[a["image_id"]].append(a)
     stats, label_files, image_files = {}, {}, []
-    with use_tables(tables) as names, tempfile.TemporaryDirectory(prefix="dataset_from_lv_preview_") as tmp:
-        names = list(names)
+    names = list(tables[1])
+    # explicit tables, not prepare's globals: a preview never waits for (or disturbs) a build running in this process
+    with tempfile.TemporaryDirectory(prefix="dataset_from_lv_preview_") as tmp:
         for split in export_splits(export_dir):
             coco_path = Path(tmp) / f"{split}.coco.json"
             coco_path.write_text(json.dumps(split_coco(lv_coco, per_split.get(split, []), anns_by_image,
                                                       cocos[split])), encoding="utf-8")
             dst = YOLO_SPLIT[split]
             s = prep.convert_split(coco_path, export_dir / split, Path(tmp) / "images" / dst,
-                                   Path(tmp) / "labels" / dst, dry_run=True)
+                                   Path(tmp) / "labels" / dst, dry_run=True, tables=tables)
             stats[split] = s
             label_files.update({f"labels/{dst}/{n}": t.encode("utf-8") for n, t in s["label_texts"].items()})
             image_files += [f"images/{dst}/{n}" for n in s["image_names"]]
-        yaml_text = prep.dataset_yaml_text(Path(tmp) / "preview", has_test="test" in stats)
+        yaml_text = prep.dataset_yaml_text(Path(tmp) / "preview", has_test="test" in stats, class_names=names)
     class_counts = {}
     for split, s in stats.items():
         c = Counter()

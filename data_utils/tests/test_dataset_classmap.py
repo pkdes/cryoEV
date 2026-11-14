@@ -99,6 +99,26 @@ class TestPreview(F.Fixture):
                 self.assertEqual(pv["labels_sha"], CM.labels_sha(out / "ds"), (kw, eo))
 
 
+    def test_preview_does_not_wait_for_a_running_build(self):
+        import threading
+        held, release = threading.Event(), threading.Event()
+
+        def build_running():                    # what a build does: prepare's globals swapped, lock held
+            with D.use_tables(D.prep.CLASS_SCHEMES["ev"]):
+                held.set()
+                release.wait(30)
+        t = threading.Thread(target=build_running)
+        t.start()
+        try:
+            self.assertTrue(held.wait(10))
+            pv = D.preview(str(self.base_lv), str(self.export), "drop", class_map="cm_ev_nonev_v1")
+            self.assertEqual(pv["classes"], ["EV", "non-EV"])
+            self.assertEqual(pv["class_counts"]["train"], {"EV": 4, "non-EV": 1})
+        finally:
+            release.set()
+            t.join(10)
+
+
 class TestDerive(F.Fixture):
     def setUp(self):
         super().setUp()
