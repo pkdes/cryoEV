@@ -62,7 +62,7 @@ Retry-After over it; one open agent upload and the active-set cap for every agen
 
 Defaults: --registry = data_utils.config.registry_root(); --review-package = the --package of the review_server.py
 service with --port 8766 in the services config (registry_review_package; only when that config can't be read, the
-newest open revise job on port 8766 in the registry), with a WARNING at start when the package in use isn't that
+one open revise job on port 8766 in the registry, never a pick among several), with a WARNING at start when the package in use isn't that
 one; roster and state dir under %USERPROFILE%\\.cryoev (portal/auth.py).
 uvicorn runs with its access log OFF and proxy headers OFF; the app writes its own access log with `k` redacted.
 
@@ -93,7 +93,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import unquote, unquote_plus, urlsplit
+from urllib.parse import unquote, unquote_plus, urlparse, urlsplit
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -193,9 +193,10 @@ STRIP_PER_GROUP = 8
 STRIP_KIND = {"prediction": "Prediction", "label_review": "Label set", "audit": "Audit", "sandbox": "Practice"}
 STRIP_STATUS = {"finished": "Finished", "applied": "Applied"}      # shown on a dropdown item; open ones need no chip
 _STRIP_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="cj-strip")
-# ---- the audit owner can't decide cards (round 13): writes to these tool paths are refused for the owner of a compare
-# package whose review_package.json has no purpose "revise" (a blind audit); reads stay allowed
-DECIDE_PATHS = frozenset({"api/edits", "api/group"})
+_STRIP_SLOTS = threading.BoundedSemaphore(2)   # strips building at once; none free = no strip, at once (never queued)
+# ---- the audit owner can't decide cards (round 13): the owner of a compare package whose review_package.json has no
+# purpose "revise" (a blind audit) may only read, and claim a card; every other write to the tool is refused
+AUDIT_OWNER_WRITES = frozenset({("POST", "api/claim")})   # the ONLY writes an audit owner may make (an allowlist)
 AUDIT_OWNER_REFUSED = ("You made this blind audit, so you can't decide its cards: the reviewers do. "
                        "You can still look at it.")
 PUBLIC_PORTS = {"", "443", "8443", "8445", "8446"}   # tailscale serve's https ports (links use https there)
@@ -511,9 +512,9 @@ def same_package(a, b) -> bool:
 def registry_review_package(registry: Path | None, port: int = REVIEW_PORT, environ=None) -> Path | None:
     """The real review package. First the services config: the review_server.py service with `--port <port>` -> its
     --package (services_review_package); a readable config is the answer, also when it has no such service (None).
-    Only when the config can't be read: the newest open revise job on `port` in the registry -> its review_package
-    path, read through registry.store's current(); None when anything is missing. A newer lab_ package with its own
-    revise job can never take /review/ over while the services config names the package."""
+    Only when the config can't be read: the ONE open revise job on `port` in the registry -> its review_package path,
+    read through registry.store's current(); None (and a warning) when there are several, None when anything is
+    missing. A newer lab_ package with its own revise job can never take /review/ over."""
     pkg, readable = services_review_package(port, environ)
     if readable:
         return pkg
@@ -526,12 +527,14 @@ def registry_review_package(registry: Path | None, port: int = REVIEW_PORT, envi
     except Exception as e:          # an unreadable registry must not stop the portal
         log.warning("registry not readable for the review package: %s", e)
         return None
-    open_jobs = sorted((j for j in jobs.values() if j.get("type") == "revise" and j.get("port") == port
-                        and j.get("status") not in ("done", "cancelled") and j.get("package") in pkgs),
-                       key=lambda j: j["id"])
-    if not open_jobs:
+    open_jobs = [j for j in jobs.values() if j.get("type") == "revise" and j.get("port") == port
+                 and j.get("status") not in ("done", "cancelled") and j.get("package") in pkgs]
+    if len(open_jobs) != 1:                         # none, or several: never guess which package /review/ is
+        if open_jobs:
+            log.warning("/review/ package: the services config can't be read and the registry has %d open revise jobs "
+                        "on port %d; none is used (start the portal with --review-package)", len(open_jobs), port)
         return None
-    path = pkgs[open_jobs[-1]["package"]].get("path")
+    path = pkgs[open_jobs[0]["package"]].get("path")
     return Path(path) if path else None
 
 
@@ -1198,14 +1201,22 @@ def build_strip(cfg, user: dict, current_id, access_mode: bool = False) -> str:
 
 async def review_strip(cfg, request: Request, current_id, budget_s: float | None = None) -> str:
     """The strip for this request, built in _STRIP_POOL within STRIP_BUDGET_S; "" on any error or timeout (logged
-    without details). Never blocks the event loop; a strip still queued at the timeout is cancelled."""
+    without details). Never blocks the event loop. At most 2 build at once (_STRIP_SLOTS, taken without waiting): a
+    build that runs past its budget keeps its slot until it ends, so hung lists can't pile up threads."""
     user = request.scope.get("cj_user")
     if not user:
         return ""
-    loop = asyncio.get_running_loop()
-    fut = loop.run_in_executor(_STRIP_POOL, build_strip, cfg, user, current_id, getattr(cfg, "auth", "key") == "access")
+    if not _STRIP_SLOTS.acquire(blocking=False):    # both slots held (e.g. a hung list): no strip, no waiting
+        log.warning("review strip: no free slot, page shown without it")
+        return ""
     try:
-        return await asyncio.wait_for(fut, STRIP_BUDGET_S if budget_s is None else budget_s)
+        cf = _STRIP_POOL.submit(build_strip, cfg, user, current_id, getattr(cfg, "auth", "key") == "access")
+    except Exception:                               # noqa: BLE001  (e.g. the pool shut down)
+        _STRIP_SLOTS.release()
+        return ""
+    cf.add_done_callback(lambda _f: _STRIP_SLOTS.release())   # once per acquire: done, failed or cancelled
+    try:
+        return await asyncio.wait_for(asyncio.wrap_future(cf), STRIP_BUDGET_S if budget_s is None else budget_s)
     except asyncio.TimeoutError:
         log.warning("review strip: over its %g s budget, page shown without it", STRIP_BUDGET_S if budget_s is None
                     else budget_s)
@@ -1311,18 +1322,24 @@ def audit_owner(user, meta) -> bool:
     return isinstance(owner, str) and bool(owner) and owner == uid
 
 
-def decides_cards(request: Request) -> bool:
-    """A write (PUT / POST / DELETE / PATCH) to one of DECIDE_PATHS under the tool (its path parameter, fully
-    percent-decoded as proxy.clean_subpath does, slashes trimmed, case folded)."""
-    if request.method not in UNSAFE:
-        return False
+def tool_api_path(request: Request) -> str:
+    """The tool path as the review server routes it: the path parameter fully percent-decoded (as proxy.clean_subpath
+    does), then urlparse's path (it drops ";params", as review_server.py does), slashes trimmed, case folded."""
     p = str(request.path_params.get("path") or "")
     for _ in range(4):
         q = unquote(p)
         if q == p:
             break
         p = q
-    return p.strip("/").lower() in DECIDE_PATHS
+    return urlparse("/" + p).path.strip("/").lower()
+
+
+def audit_owner_refused(request: Request) -> bool:
+    """A write the audit owner may not make: every unsafe method (PUT / POST / DELETE / PATCH) on the tool except the
+    AUDIT_OWNER_WRITES allowlist (POST api/claim). Reads (GET / HEAD) are never refused."""
+    if request.method not in UNSAFE:
+        return False
+    return (request.method, tool_api_path(request)) not in AUDIT_OWNER_WRITES
 
 
 def pred_mount(proxy: P.ReviewProxy, root: Path | None, title: str = "Review", review_package: Path | None = None,
@@ -1335,8 +1352,8 @@ def pred_mount(proxy: P.ReviewProxy, root: Path | None, title: str = "Review", r
     Who: portal.modules.reviews.may_open: the owner (ctx.can_see: admins all, others their own) or a listed reviewer.
     Only what the multi server serves (portal.modules.reviews.serving: its prefixes and excluded packages, plus this
     portal's real-review package). Unknown, malformed, not yours, not served or excluded: one 404 page.
-    A blind audit's owner (audit_owner) gets 403 JSON on card decisions (decides_cards: PUT api/edits, POST
-    api/group); every read goes on. `strip`: an async (request, pkg id) -> the switcher strip's HTML, or None."""
+    A blind audit's owner (audit_owner) gets 403 JSON on every write but POST api/claim (audit_owner_refused, an
+    allowlist); every read goes on. `strip`: an async (request, pkg id) -> the switcher strip's HTML, or None."""
 
     def lookup(request: Request):
         from portal.modules.reviews import may_open, serving
@@ -1366,7 +1383,7 @@ def pred_mount(proxy: P.ReviewProxy, root: Path | None, title: str = "Review", r
         pid, pkg, meta = lookup(request)
         if pid is None:
             return missing()
-        if decides_cards(request) and audit_owner(request.scope.get("cj_user"), meta):
+        if audit_owner_refused(request) and audit_owner(request.scope.get("cj_user"), meta):
             return M.no_store(JSONResponse({"error": AUDIT_OWNER_REFUSED}, status_code=403))
         base = f"{REVIEW_BASE}/{pid}"
         if wants_shell(request, base):
