@@ -546,6 +546,8 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
                 os.replace(tmp, target)
                 if attr_new:
                     append_attr_log(edits_dir, file, attr_new, merged, cur)
+            if schema is not None:  # rater independence (QC 8): the reply holds only the requester's own answers
+                merged = own_attrs_only(merged, trusted_identity(self))
             return self._json(200, {"edit": merged})
 
         def do_POST(self):

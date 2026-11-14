@@ -50,6 +50,7 @@ import re
 import secrets
 import shutil
 import sys
+import unicodedata
 from pathlib import Path
 
 import numpy as np
@@ -317,13 +318,25 @@ def build(ps_dir, items_csv, schema, review_root, image_col="image", line_col=No
 
 
 def _norm_value(v) -> str:
-    """A value as compared for the blind rule: numbers by value (1.4724 == "1.47240"), text stripped."""
+    """A value as compared for the blind rule: numbers by value (1.4724 == "1.47240"), text stripped, NFC and
+    case-folded ("HEK" == "hek")."""
     t = str(v).strip()
     try:
         f = float(t)
     except ValueError:
-        return t
-    return repr(f) if f == f and abs(f) != float("inf") else t
+        return unicodedata.normalize("NFC", t).casefold()
+    return repr(f) if f == f and abs(f) != float("inf") else unicodedata.normalize("NFC", t).casefold()
+
+
+SUBSTR_MIN = 4                        # a blind text value this long may not appear inside any shown text
+
+
+def _is_num(t: str) -> bool:
+    try:
+        float(t)
+        return True
+    except ValueError:
+        return False
 
 
 def _leaves(x, out: set):
@@ -359,9 +372,12 @@ def check_blind_shown(pkg, P):
     if not P["blind"]:
         return
     shown = shown_values(pkg)
+    texts = [x for x in shown if not _is_num(x)]
     bad = []
     for c in P["blind"]:
-        hit = sorted(({_norm_value(r.get(c) or "") for r in P["rows"]} - {""}) & shown)
+        vals = {_norm_value(r.get(c) or "") for r in P["rows"]} - {""}
+        hit = sorted(vals & shown) or sorted(v for v in vals if len(v) >= SUBSTR_MIN and not _is_num(v)
+                                              and any(v in t for t in texts))
         if hit:
             bad.append(f"blind column {c!r} holds values the page or its image info shows anyway (e.g. {hit[0]!r}): "
                        "not blind; drop it from --blind-cols")

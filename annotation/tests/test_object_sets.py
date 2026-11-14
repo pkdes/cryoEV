@@ -249,6 +249,13 @@ class AttrServer(unittest.TestCase):
         self.assertEqual(keys("au1"), {f"a:{o}:inner@au1"})
         self.assertEqual(keys("au2"), {f"a:{o}:inner@au2"})
         self.assertEqual(keys(None), set())
+        # the PUT reply too: au2's save answers only au2's attribute decisions; no identity, none at all
+        _, body = put(self.srv, "0003.png", {f"a:{o}:membranes@au2": dec("3", "au2")})
+        self.assertEqual({k for k in body["edit"]["dec"] if k.startswith("a:")},
+                         {f"a:{o}:inner@au2", f"a:{o}:membranes@au2"})
+        _, body, _ = self.srv.request("PUT", "/api/edits?f=0003.png", {"t": 1, "dec": {"i:note": dec("x", "x")}},
+                                      who=None)
+        self.assertEqual({k for k in body["edit"]["dec"] if k.startswith("a:")}, set())
         # the admin export (the files) still has both
         tab = OS.table(self.srv.pkg)
         row = next(r for r in tab["rows"] if r["obj"] == o and r["image"] == "0003")
@@ -501,7 +508,8 @@ class ObjectSet(unittest.TestCase):
         refused after the build, numbers compared by value; nothing is left in the review root."""
         ps = golden_ps(self.tmp)
         (self.tmp / "review").mkdir()
-        for n, val in enumerate(("1.4724", "1.47240", "golden")):
+        for n, val in enumerate(("1.4724", "1.47240", "golden", "GOLDEN", "Golden", "0001.PNG",
+                                 "olden_00")):          # QC C: case, NFC, and a substring of a shown name
             src = items_csv(self.tmp / f"b{n}.csv", [("0001", 0, 1, val)])
             with self.assertRaises(OS.ObjectSetError) as cm, contextlib.redirect_stdout(io.StringIO()):
                 OS.build(ps, src, "ls_lamellarity_v1", self.tmp / "review", line_col="line", blind_cols=("secret",),
