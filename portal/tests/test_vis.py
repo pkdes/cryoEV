@@ -312,8 +312,10 @@ class JobsTests(Base):
         self.assertEqual(sorted(by), ["lab_compare_x", "lab_pkg_applied", "lab_pkg_ready"])
         self.assertNotIn("pred_ps_20261101_aaaaaa", json.dumps(adm["pkgs"]))
         c = by["lab_compare_x"]
-        self.assertEqual((c["decided"], c["cards"], c["reviewed"], c["images"], c["who"], c["status"]),
-                         (2, 4, 1, 2, "bob", "in_progress"))
+        self.assertEqual((c["decided"], c["cards"], c["reviewed"], c["images"], c["who"], c["via"], c["status"]),
+                         (2, 4, 1, 2, None, None, "in_progress"))     # round 13: no who / via on a compare
+        self.assertNotIn("bob", json.dumps(adm["pkgs"]))
+        self.assertEqual(by["lab_pkg_applied"]["who"], "alice")       # control: a lab labeling package keeps who
         self.assertEqual(by["lab_pkg_applied"]["applied_by"], LV)
         rendered = J.render(adm)
         html = rendered["finished"] + rendered["review"]                # in review moved up; applied stays below
@@ -325,6 +327,8 @@ class JobsTests(Base):
         self.assertIn(f"/data/labels/{LV}", html)
         self.assertNotIn("SECRET", html)
         self.assertNotIn("pred_ps_20261101_aaaaaa", html)
+        self.assertNotIn("bob", "".join(rendered.values()))           # who decided the compare's cards: never
+        self.assertIn("by alice", rendered["finished"])                # control
 
     def test_render_escapes(self):
         row = {"id": XSS, "title": XSS, "kind": "review", "cards": 1, "decided": 0, "images": 1, "reviewed": 0,

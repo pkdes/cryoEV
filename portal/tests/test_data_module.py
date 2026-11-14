@@ -457,8 +457,9 @@ class Privacy(Base):
 
     def test_open_in_review_link_only_for_allowed(self):
         t = main_html(self.page("/data/images/pred_ps_20261105_dddddd", "advanced"))
-        self.assertIn('href="/review/pred_ps_20261105_dddddd/"', t)
+        self.assertIn('href="/reviews/go/pred_ps_20261105_dddddd"', t)          # r13: through the hub's go
         self.assertNotIn("/review/", main_html(self.page("/data/images/pkg_ok")))
+        self.assertNotIn("/reviews/go/", main_html(self.page("/data/images/pkg_ok")))
 
     def test_owned_review_package(self):
         self.assertEqual(self.get("/data/images/pkg_owned", "advanced")[0], 404)

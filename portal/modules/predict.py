@@ -26,7 +26,8 @@ Predict module (CryoEV portal, journey J1): a person runs the production model o
     POST /predict/convert/<id>/details    owner / admin: the upload's Session details (portal/upload_sessions.py);
                                             the raw form's "Sample on each grid" becomes input/sample_key.csv
     GET  /predict/<ps>/                   the set: status (auto-refresh), Review / Results, spot-check list
-    POST /predict/<ps>/review             build the prediction review package in a thread (if missing)
+    POST /predict/<ps>/review             build the prediction review package in a thread (if missing); 303 to
+                                          /reviews/go/pred_<ps> when it exists (round 13)
     POST /predict/<ps>/results            compute results/results.json in a thread (if missing or older than edits)
     POST /predict/<ps>/start              start the laptop run again (failed, or no heartbeat for STALE_S)
     GET  /predict/api/mine                {"schema": "cj_predict_mine/1", "items": [...]}: Home's "My results"
@@ -335,7 +336,8 @@ def routes(ctx) -> list:
                 ensure_watcher(cfg)
         except Exception as e:                       # noqa: BLE001 - the list still shows
             print(f"[predict] kick: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-        return ctx.page(request, "Predict", page_mine(cfg, ctx.user(request), ctx.can_see), active="predict")
+        return ctx.page(request, "Predict", page_mine(cfg, ctx.user(request), ctx.can_see, request.query_params),
+                        active="predict")
 
     def new(request: Request):
         return ctx.page(request, "New analysis", page_new(cfg, ctx.user(request), ctx.can_see), active="predict")
@@ -619,7 +621,7 @@ def routes(ctx) -> list:
             if kind == "review":
                 pkg = SETS.package_dir(cfg, ps)
                 if pkg is not None:
-                    return RedirectResponse(f"/review/{pkg.name}/", status_code=303)
+                    return RedirectResponse(PAGES.review_go(pkg.name), status_code=303)
                 start_task("review", ps, lambda: build_review(cfg, d))
             else:
                 res, pkg = results_file(d), SETS.package_dir(cfg, ps)

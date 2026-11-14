@@ -210,8 +210,8 @@ def href_for(kind, id_, rec_type=None):
         return f"/data/labels/{q}"
     if kind in ("training", "run"):
         return "/train/"
-    if kind == "review_package":
-        return f"/review/{q}/app/" if id_.startswith("pred_") else "/reviews/"
+    if kind == "review_package":            # round 13: the hub's go route picks Quick check or the Editor
+        return f"/reviews/go/{q}" if id_.startswith(("pred_", "lab_")) else "/reviews/"
     if kind == "job":
         return {"train": "/train/", "predict": "/predict/", "eval": "/train/"}.get(rec_type, "/reviews/")
     return None
@@ -573,6 +573,12 @@ def summary(cfg, user: dict, can_see, now=None) -> dict:
                        "review_open": len(review), "finished": len(finished)}}
 
 
+def is_blind(p: dict) -> bool:
+    """A compare package (any purpose) or an audit: its decisions' who / via stay off the board."""
+    meta = p.get("meta") if isinstance(p.get("meta"), dict) else {}
+    return p.get("kind") == "compare" or meta.get("kind") == "compare" or meta.get("purpose") == "audit"
+
+
 def review_packages(cfg) -> list:
     """Admin only: lab labeling and compare packages under the review root with live progress (cards decided / total,
     images reviewed / total, last edit and by whom, ready / in progress / applied). Computed on view by portal.titles
@@ -588,10 +594,12 @@ def review_packages(cfg) -> list:
     rows = []
     for p in TT.scan_packages(root, records):
         last = p["last"]
+        blind = is_blind(p)                     # round 13: who decided what is never shown on a compare / audit
         rows.append({"id": p["id"], "title": p["title"], "kind": p["kind"], "cards": p["cards"],
                      "decided": p["decided"], "images": p["images"], "reviewed": p["reviewed"],
                      "last": NM.when(datetime.fromtimestamp(last).isoformat()) if last else None, "_ts": last or 0,
-                     "who": p["who"], "via": p.get("via"), "status": p["status"], "applied_by": p["applied_by"]})
+                     "who": None if blind else p["who"], "via": None if blind else p.get("via"),
+                     "status": p["status"], "applied_by": p["applied_by"]})
     rows.sort(key=lambda r: (r["status"] == "applied", -r["_ts"], r["id"]))
     for r in rows:
         del r["_ts"]
@@ -728,7 +736,8 @@ def build_flow(cfg, user, admin, can_see, live, queues, running, queue, review, 
                          (f"{r['decided']} of {r['cards']} cards decided",
                           f"{r['reviewed']} of {r['images']} images reviewed",
                           f"last edit {r['last']}" if r["last"] else "no edits yet"),
-                         link="Open review", who=r.get("who"), via=r.get("via"),
+                         link="Open review", who=None if r.get("kind") == "compare" else r.get("who"),
+                         via=None if r.get("kind") == "compare" else r.get("via"),
                          prog=(r["decided"], r["cards"]), chip_=label, tone=tone))
     for x in review:
         if x["type"] in GPU_TYPES:

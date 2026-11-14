@@ -363,10 +363,13 @@ class SessionFlow(Base):
         self.assertEqual(len((self.env.registry / "review_package.jsonl").read_text(encoding="utf-8").splitlines()),
                          1)
         page = self.page(f"/predict/{ps}/", "basic")
-        self.assertIn(f'href="/review/pred_{ps}/"', page)
-        self.assertRegex(page, rf'href="/review/pred_{ps}/\?img=000[123]\.png"')
+        self.assertIn(f'href="/reviews/go/pred_{ps}"', page)                    # r13: the hub's go route
+        self.assertRegex(page, rf'href="/review/pred_{ps}/\?img=000[123]\.png"')    # deep links stay direct
         st, h, _ = self.post(f"/predict/{ps}/review", {}, "basic")
-        self.assertEqual((st, T.hget(h, "location")), (303, f"/review/pred_{ps}/"))
+        self.assertEqual((st, T.hget(h, "location")), (303, f"/reviews/go/pred_{ps}"))
+        mine = self.page("/predict/", "basic")                                      # My analyses: the list's link
+        self.assertIn(f'href="/reviews/go/pred_{ps}"', mine)
+        self.assertNotIn(f'href="/review/pred_{ps}/"', mine)
         # Results: computed in a thread; known answer = the golden fixture's expected counts (no edits)
         st, h, _ = self.post(f"/predict/{ps}/results", {}, "basic")
         self.assertEqual(st, 303)
@@ -384,7 +387,7 @@ class SessionFlow(Base):
         self.assertIn(f'href="/results/{ps}/"', page)
         api = json.loads(self.get(f"/predict/api/set/{ps}?html=1", "basic")[2])
         self.assertEqual((api["state"], api["live"], api["review_href"], api["results_href"]),
-                         ("done", False, f"/review/pred_{ps}/", f"/results/{ps}/"))
+                         ("done", False, f"/reviews/go/pred_{ps}", f"/results/{ps}/"))
         self.assertEqual(set(api["html"]), {"status", "actions"})
 
     def test_nm_confirmation_required(self):

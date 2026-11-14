@@ -13,6 +13,7 @@ from pathlib import Path
 
 from jobs import predict_set as PS
 from portal import predict_sources as PSRC
+from portal import listing as LS
 from portal import names as NM
 
 from portal.predict_parts.common import (NM_FROM_MANIFEST, NM_HINT, NM_TOLERANCE, NO_MODEL, RAW_ID_RE, RAW_ROLES,
@@ -53,6 +54,13 @@ def set_title(req: dict, srcs, admin=False) -> str:
     return NM.display_name(req, session_label(req, srcs, admin))
 
 
+def review_go(pkg_id: str) -> str:
+    """Every link into a review package goes through the Reviews hub's /reviews/go/<pkg> (round 13: it picks Quick
+    check or the Editor and checks access). Deep links to one image (?img=) stay direct."""
+    from urllib.parse import quote
+    return f"/reviews/go/{quote(pkg_id, safe='')}"
+
+
 def status_html(view: dict) -> str:
     bar = ""
     if view["progress"]:
@@ -77,7 +85,7 @@ def actions_html(cfg, d: Path, req: dict, st: dict, admin: bool, rows) -> str:
     t_rev, t_res = task("review", ps), task("results", ps)
     # Review
     if pkg is not None:
-        rev = (f'<a class="cj-predict-btn cj-predict-primary" href="/review/{esc(pkg.name)}/">Review</a>'
+        rev = (f'<a class="cj-predict-btn cj-predict-primary" href="{esc(review_go(pkg.name))}">Review</a>'
                f'<p class="cj-mut">Check the model’s outlines and fix mistakes. Start with the suggested '
                f'images below.</p>')
         if admin and t_rev and t_rev["state"] == "failed":     # e.g. built, but the registry line failed
@@ -141,7 +149,7 @@ def set_view(cfg, user, d: Path, req: dict, with_html: bool) -> dict:
     pkg, res = SETS.package_dir(cfg, ps), results_file(d)
     out = {"schema": SCHEMA_SET, "ps": ps, "state": view["state"], "label": view["label"], "detail": view["detail"],
            "n_done": view["n_done"], "n_total": view["n_total"], "live": (not view["final"]) or busy,
-           "review_href": f"/review/{pkg.name}/" if pkg else None,
+           "review_href": review_go(pkg.name) if pkg else None,
            "results_href": f"/results/{ps}/" if res else None}
     if with_html:
         rows = images_rows(d)
@@ -159,34 +167,51 @@ def item_of(cfg, user, d: Path, req: dict, st: dict, srcs) -> dict:
             "created": req.get("created"), "owner": req.get("owner"), "model": req.get("model"),
             "source": source_text(req, srcs, admin=user.get("role") == "admin"), "state": view["state"], "label": view["label"],
             "n_done": view["n_done"], "n_total": view["n_total"],
-            "review_href": f"/review/{pkg.name}/" if pkg else None,
+            "review_href": review_go(pkg.name) if pkg else None,
             "results_href": f"/results/{ps}/" if results_file(d) else None}
 
 
-def mine_html(items, admin) -> str:
-    if not items:
+MINE_FILTER = [("done", "Done"), ("running", "Running"), ("queued", "Waiting to start"), ("failed", "Failed")]
+MINE_TONE = {"done": "ok", "running": "run", "failed": "warn"}
+
+
+def mine_row(it: dict, req: dict, f: dict) -> dict:
+    """One portal.listing row for My analyses, from item_of's dict and the set's facets."""
+    tone = MINE_TONE.get(it["state"], "wait")
+    prog = (f'<span class="cj-mut cj-predict-prog">{int(it["n_done"] or 0)} of {int(it["n_total"] or 0)} '
+            f'images</span>' if it["state"] == "running" else "")
+    links = "".join(f'<a href="{esc(h)}">{t}</a>' for h, t in ((it["review_href"], "Review"),
+                                                                (it["results_href"], "Results")) if h)
+    return {"id": it["ps"], "title": it["title"], "href": it["href"], "open_href": it["href"],
+            "title_class": "cj-predict-ttl", "row_class": "cj-predict-item", "owner": it["owner"],
+            "via": req.get("owner_via"), "model": it["model"],
+            "n_images": it["n_total"] if isinstance(it["n_total"], int) else None, "samples": f["samples"],
+            "created": f["created"], "status": it["state"] or "unknown", "status_html": chip(it["label"], tone) + prog,
+            "actions_html": f'<span class="cj-predict-links">{links}</span>' if links else "", "facets": f}
+
+
+def mine_html(rows, admin, query=None) -> str:
+    """My analyses (All analyses for an admin): portal.listing's filter / sort / group form and list, the same row
+    path as Results."""
+    if not rows:
         return '<p class="cj-mut">No analyses yet. Start one with “New analysis”.</p>'
-    li = []
-    for it in items:
-        tone = {"done": "ok", "running": "run", "failed": "warn"}.get(it["state"], "wait")
-        prog = f'{int(it["n_done"] or 0)} of {int(it["n_total"] or 0)} images' if it["state"] == "running" \
-            else f'{int(it["n_total"] or 0)} images'
-        who = f' · {esc(it["owner"])}' if admin else ""
-        links = "".join(f'<a href="{esc(h)}">{t}</a>' for h, t in ((it["review_href"], "Review"),
-                                                                    (it["results_href"], "Results")) if h)
-        li.append(f'<li class="cj-card cj-predict-item"><div class="cj-predict-top">'
-                  f'<a class="cj-predict-ttl" href="{esc(it["href"])}">{esc(it["title"])}</a>'
-                  f'{chip(it["label"], tone)}</div>'
-                  f'<p class="cj-mut">{esc(it["source"] + " · " + when(it["created"]) + " · ") if it.get("named") else ""}'
-                  f'{esc(prog)}{who}</p>'
-                  + (f'<p class="cj-predict-links">{links}</p>' if links else "") + '</li>')
-    return f'<ul class="cj-predict-items">{"".join(li)}</ul>'
+    q = LS.parse_query(query or {})
+    people, models, _n = LS.choices(rows)
+    shown = LS.apply(rows, q)
+    return (LS.STYLE + LS.controls_html(q, action="/predict/", people=people if len(people) > 1 else [],
+                                        models=models if len(models) > 1 or q.model != "any" else [],
+                                        statuses=MINE_FILTER)
+            + LS.rows_html(LS.group(shown, q.group), q.group, shown=len(shown), total=len(rows),
+                           empty_text="No analyses match these filters."))
 
 
-def page_mine(cfg, user, can_see) -> str:
+def page_mine(cfg, user, can_see, query=None) -> str:
     admin = user.get("role") == "admin"
     srcs, _ = sources_safe(cfg, user, can_see)
-    items = [item_of(cfg, user, d, req, st, srcs) for d, req, st in list_sets(cfg, user, can_see)]
+    sets = list_sets(cfg, user, can_see)
+    hidden = LS.hidden_for(cfg, user, can_see) if sets else None
+    rows = [mine_row(item_of(cfg, user, d, req, st, srcs), req, LS.facets(d, req, hidden=hidden))
+            for d, req, st in sets]
     convs = list_conversions(cfg, user, can_see)
     conv = ""
     if convs or user.get("role") in RAW_ROLES:
@@ -195,7 +220,7 @@ def page_mine(cfg, user, can_see) -> str:
     return wrap(f'<div class="cj-predict"><div class="cj-predict-head"><div><h1>Predict</h1>'
                 f'<p class="cj-mut">Count and size the EVs in your images with the lab’s model.</p></div>'
                 f'<a class="cj-predict-btn cj-predict-primary" href="/predict/new/">New analysis</a></div>'
-                f'<h2 class="cj-sec">{"All analyses" if admin else "My analyses"}</h2>{mine_html(items, admin)}'
+                f'<h2 class="cj-sec">{"All analyses" if admin else "My analyses"}</h2>{mine_html(rows, admin, query)}'
                 f'{conv}</div>')
 
 

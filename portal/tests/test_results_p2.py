@@ -124,13 +124,14 @@ class CountedAndUnsure(P2):
         self.assertIn(f"{total} unsure outline{'s' if total != 1 else ''} not checked yet.", m.group(0))
         self.assertNotIn("Review these images", m.group(0))     # the honesty banner already has that button
         self.assertEqual(page.count("Review these images"), 1)
-        self.assertEqual(page.count(f'href="/review/pred_{FRESH}/"'), 1)
+        self.assertEqual(page.count(f'href="/reviews/go/pred_{FRESH}"'), 1)      # r13: through the hub's go
 
     def test_nudge_without_package_has_no_dead_link(self):
         page = self.page(M.NOEDIT, "owner")               # no review package for this set
         m = re.search(r'id="cj-results-nudge".*?</div>', page, re.S)
         self.assertIsNotNone(m)
         self.assertNotIn("/review/", m.group(0))
+        self.assertNotIn("/reviews/go/", m.group(0))
 
     def test_no_nudge_when_nothing_is_open(self):
         page = self.page(NOEV, "owner")
@@ -186,7 +187,7 @@ class UpdateButton(P2):
 
     def test_index_card_still_links_and_shows_out_of_date(self):
         idx = self.get("/results/", "owner")[2].decode()
-        card = re.search(r'<li class="cj-card cj-results-set">((?:(?!</li>).)*%s(?:(?!</li>).)*)</li>' % STALE,
+        card = re.search(r'<li class="cj-list-row cj-results-set"[^>]*>((?:(?!</li>).)*%s(?:(?!</li>).)*)</li>' % STALE,
                          idx, re.S).group(1)
         self.assertIn(f'href="/results/{STALE}/"', card)
         self.assertIn("Out of date", card)

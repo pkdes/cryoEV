@@ -122,6 +122,11 @@ def image_rows(page: str) -> dict:
     return out
 
 
+def index_row(page: str, ps_id: str) -> str:
+    """One row of the Results list (round 13: portal.listing rows, the status chip in its own column)."""
+    return re.search(r'<li class="cj-list-row cj-results-set" data-id="%s">(.*?)</li>' % ps_id, page, re.S).group(1)
+
+
 def html_unescape(page: str) -> str:
     import html
     return html.unescape(page)
@@ -247,6 +252,7 @@ class Golden(Base):
         self.assertIn(f'href="/predict/{NOEDIT}/"', page)
         self.assertIn("Spot-check a suggested subset", page)
         self.assertNotIn("/review/pred_", page)                     # no review package: no review link
+        self.assertNotIn("/reviews/go/", page)
         self.assertIn(' nm</text>', page)                           # units on the chart ticks
         self.assertNotIn('id="cj-results-refused"', page)
 
@@ -359,10 +365,10 @@ class Golden(Base):
         os.utime(edit, (done - 300, done - 300))                  # control: edits older than the results
         page = self.page(ps_id)
         self.assertNotIn('id="cj-results-stale"', page)
-        self.assertIn(f'href="/review/pred_{ps_id}/"', page)      # package exists: "Review these images"
+        self.assertIn(f'href="/reviews/go/pred_{ps_id}"', page)   # package exists: "Review these images" (r13 go)
         self.assertIn("Review these images", page)
         self.assertFalse(self.status(ps_id)["out_of_date"])
-        self.assertNotIn("Out of date", self.get("/results/", "owner")[2].decode())
+        self.assertNotIn("Out of date", index_row(self.get("/results/", "owner")[2].decode(), ps_id))
 
         os.utime(edit, (done + 120, done + 120))                  # an edit after the results were written
         page = self.page(ps_id)
@@ -372,7 +378,7 @@ class Golden(Base):
         self.assertIn("Update results now", page)
         self.assertTrue(self.status(ps_id)["out_of_date"])
         idx = self.get("/results/", "owner")[2].decode()
-        card = re.search(r'href="/results/%s/">(.*?)</a>' % ps_id, idx, re.S).group(1)
+        card = index_row(idx, ps_id)                              # r13: the status is its own column
         self.assertIn("Out of date", card)
 
         compute_and_write(d)                                      # computed again: current
@@ -636,8 +642,7 @@ class Compute(Base):
 
         (pkg / "edits" / "0001.png.json").unlink()                # an edit removed after the computation
         self.assertIn("These results count review edits that have since been removed.", self.page(ps_id, "owner"))
-        card = re.search(r'href="/results/%s/">(.*?)</a>' % ps_id, self.get("/results/", "owner")[2].decode(),
-                         re.S).group(1)
+        card = index_row(self.get("/results/", "owner")[2].decode(), ps_id)
         self.assertIn("Out of date", card)
 
     def test_failed_recompute_keeps_earlier_results(self):

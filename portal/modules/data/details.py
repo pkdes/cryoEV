@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import re
 import threading
 from pathlib import Path
 from urllib.parse import quote
@@ -17,7 +18,7 @@ from portal import upload_sessions as US
 from portal.modules.data.records import (
     PAGE_N, PREDICTION_PACKAGE_ID, PREFIX, SCHEMA, SET_KIND_NAMES, STRIP_N, THUMB_MAX_PIXELS, THUMB_PX, cached,
     class_mapping, class_names, _decoders, _dict, entity_href, _files_cache, format_number, image_count_of,
-    label_title, _list, magnification_text, metric_name, _number, package_images_for, plural, ref_hidden,
+    label_title, _list, magnification_text, metric_name, _number, package_images_for, package_meta, plural, ref_hidden,
     review_folder, review_note, session_files, session_images, session_tags, set_images, set_is_visible, set_title,
     short_date, slot_sort_key, split_counts, status_tags, status_word, _text, thumb_version, upload_images,
     visible_set, _when, who_label, _actor_module)
@@ -336,6 +337,18 @@ def derived_from(records, viewer, provenance) -> list:
     return out
 
 
+LAB_PACKAGE_ID = re.compile(r"^lab_[A-Za-z0-9][A-Za-z0-9_.-]{0,120}$")
+
+
+def disk_reviewers(records, package_id):
+    """Reviewers from the package's own review_package.json (round 13: the Reviews hub writes them there; the
+    registry line is not updated). None on an audit (a compare package not built to revise), like the hub."""
+    meta = _dict(package_meta(records, package_id))
+    if meta.get("kind") == "compare" and meta.get("purpose") != "revise":
+        return None
+    return ", ".join(str(r) for r in _list(meta.get("reviewers")) if _text(r)) or None
+
+
 def detail_images(records, entity, record, viewer, page) -> dict:
     set_id = record["id"]
     model, source = _text(record.get("model")), _dict(record.get("source"))
@@ -360,18 +373,18 @@ def detail_images(records, entity, record, viewer, page) -> dict:
         field("Source", (f"session {source['session']}" if source.get("session") else _text(source.get("kind")))
               if source else None,
               entity_href("session", source["session"]) if source.get("session") in records["session"] else None),
-        field("Reviewers", ", ".join(map(str, _list(record.get("reviewers"))))),
+        field("Reviewers", disk_reviewers(records, set_id) if entity == "review_package" else None),
         field("Edits recorded", str(record["n_edit_records"]) if record.get("n_edit_records") is not None else None),
         field("Starts from", hide_private(records, viewer, _text(record.get("base"))
                                           or _text(record.get("derived_from")), record.get("base_kind"))),
         field("Splits", split_counts(record)), field("Classes", class_names(record)),
         field("Review package", package_shown,
               entity_href("images", package_shown) if package_shown in records["review_package"] else None))
-    open_review = None
-    if entity == "review_package" and PREDICTION_PACKAGE_ID.match(set_id):
-        open_review = f"/review/{quote(set_id, safe='')}/"
+    open_review = None                          # round 13: through the Reviews hub's go route (it checks access)
+    if entity == "review_package" and (PREDICTION_PACKAGE_ID.match(set_id) or LAB_PACKAGE_ID.match(set_id)):
+        open_review = f"/reviews/go/{quote(set_id, safe='')}"
     elif package_shown and PREDICTION_PACKAGE_ID.match(package_shown):
-        open_review = f"/review/{quote(package_shown, safe='')}/"
+        open_review = f"/reviews/go/{quote(package_shown, safe='')}"
     detail = make_detail("images", set_id, set_title(records, entity, record), [(SET_KIND_NAMES[entity], "acc")], fields,
                          set_kind=entity, review_url=open_review)
     if entity == "roboflow_export":

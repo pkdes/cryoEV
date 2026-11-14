@@ -3,7 +3,8 @@ Results module (CryoEV portal): EV counts, sizes and multilayer % for one predic
 Reads the cached <CryoAI-laptop>/predict/<ps_id>/results/results.json (BUILD_CONTRACTS.md section 4, results/1);
 when it is missing, a button computes it in a worker thread (results.compute_and_write) and the page polls.
 
-    GET  /results/                         my analyses: every prediction set the viewer may see
+    GET  /results/                         my analyses: every prediction set the viewer may see (?person=&agents=
+                                           &from=&to=&model=&status=&q=&sort=&group=, portal/listing.py)
     GET  /results/<ps_id>/                 the results page (or the compute button / progress)
     POST /results/<ps_id>/compute          start (or redo) the computation in a thread; 303 back to the page
     GET  /results/<ps_id>/api/status       {"state": none|queued|running|ready|error|waiting, ...} for the poll
@@ -33,8 +34,12 @@ Rules:
   - Downloads: a CSV newer than results.json (a write in progress or interrupted) is not served: 404 "compute
     again".
   - Images of a refused sample are listed muted, "Not counted (sample refused)".
-  - Links: the spot-check subset at /predict/<ps_id>/; "Review these images" at /review/pred_<ps_id>/ when the
-    package exists (the shell checks the owner there).
+  - Links: the spot-check subset at /predict/<ps_id>/; "Review these images" at /reviews/go/pred_<ps_id> (round 13:
+    the Reviews hub picks Quick check or the Editor and checks access) when the package exists.
+  - The index (round 13, #22): the viewer's sets as one portal.listing list: filters (person when more than one,
+    include agent-made, dates, model, status, search), sort (newest / name / size) and Group by (none / person /
+    imaging session / source images / model / sample) from a plain GET form, state in the URL. Same sets as before
+    (list_sets + can_see); facets keys pass through records.ref_hidden.
   - Standalone CSV downloads start with # provenance lines; the zip (tables + README.txt) is the recommended one.
   - The set folder is resolved and must still be <predict root>/<ps_id> (a junction or link out of it = 404).
   - A refused sample (nm/px spread over 1 %, mixed tile size, no confirmed nm/px) is a notice with the reason; the
@@ -75,6 +80,7 @@ from starlette.requests import Request
 from starlette.responses import PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Route
 
+from portal import listing as LS
 from portal import names as NM
 
 PREFIX = "/results"
@@ -197,6 +203,12 @@ def _write_review_read(ps: dict, computed, read_at: float, edits: list) -> None:
     tmp = p.with_name(p.name + ".tmp")
     tmp.write_text(json.dumps({"computed": computed, "read_at": read_at, "edits": edits}), encoding="utf-8")
     tmp.replace(p)
+
+
+def review_go(ps_id: str) -> str:
+    """Every link into a review package goes through the Reviews hub's /reviews/go/<pkg> (Quick check or Editor)."""
+    from urllib.parse import quote
+    return f"/reviews/go/{quote('pred_' + ps_id, safe='')}"
 
 
 def _read_json(p: Path):
@@ -570,7 +582,7 @@ def honesty(res: dict, ps_id: str, spot_n, has_pkg: bool) -> str:
              + esc(f"Spot-check the {spot_n} suggested images" if spot_n else "Spot-check a suggested subset")
              + "</a>"]
     if has_pkg:
-        links.append(f'<a class="cj-results-btn cj-results-btn-s" href="/review/pred_{esc(ps_id)}/">'
+        links.append(f'<a class="cj-results-btn cj-results-btn-s" href="{esc(review_go(ps_id))}">'
                      f'{esc("Review these images")}</a>')
     if n == 0:
         return ""
@@ -697,7 +709,7 @@ def unsure_banner(cfg, res: dict, ps: dict, st: dict) -> str:
     # the honesty banner already carries "Review these images" while some image is not Reviewed: no second button
     already = bool(imgs) and not all(i.get("reviewed") for i in imgs) and has_pkg
     link = ("" if already or not has_pkg else
-            f'<a class="cj-results-btn cj-results-btn-s" href="/review/pred_{esc(ps_id)}/">'
+            f'<a class="cj-results-btn cj-results-btn-s" href="{esc(review_go(ps_id))}">'
             f'{esc("Review these images")}</a>')
     return ('<div class="cj-results-banner cj-results-b-part" role="status" id="cj-results-nudge">'
             f'<p><b>{esc(plural(n, "unsure outline") + " not checked yet.")}</b> '
@@ -1007,36 +1019,59 @@ def list_sets(cfg, user: dict, can_see) -> list:
     return out
 
 
-def render_index(cfg, user: dict, can_see) -> str:
+# index status: status_doc state (+ out of date) -> (filter token, label, chip tone)
+INDEX_STATUS = {"ready": ("ready", "Results ready", "ok"), "out_of_date": ("out_of_date", "Out of date", "warn"),
+                "none": ("none", "Not computed yet", "model"), "queued": ("computing", "Computing", "edit"),
+                "running": ("computing", "Computing", "edit"), "error": ("error", "Computing failed", "warn"),
+                "waiting": ("waiting", "Model still running", "model"),
+                "failed": ("model_failed", "Model failed", "warn")}
+INDEX_FILTER = [("ready", "Results ready"), ("out_of_date", "Out of date"), ("none", "Not computed yet"),
+                ("computing", "Computing"), ("error", "Computing failed"), ("waiting", "Model still running"),
+                ("model_failed", "Model failed")]
+
+
+def index_row(cfg, ps: dict, hidden) -> dict:
+    """One list row (portal.listing's row shape) for a set the viewer may see."""
+    st = status_doc(cfg, ps)
+    s = ps["status"] or {}
+    req = ps["request"]
+    key = st["state"]
+    if key == "ready" and st["out_of_date"]:
+        key = "out_of_date"
+    elif key == "waiting" and s.get("state") == "failed":
+        key = "failed"
+    token, label, tone = INDEX_STATUS.get(key, ("unknown", "?", "model"))
+    n = s.get("n_total")
+    f = LS.facets(ps["dir"], req, hidden=hidden)
+    # an Update form when out of date: a form is never inside a link
+    update = compute_form(ps["id"], "Update", primary=False) if key == "out_of_date" else ""
+    href = f"/results/{ps['id']}/"
+    return {"id": ps["id"], "title": NM.display_name(req), "href": href, "open_href": href,
+            "title_class": "cj-results-set-t", "row_class": "cj-results-set", "owner": req.get("owner"),
+            "via": req.get("owner_via"), "model": req.get("model"), "n_images": n if isinstance(n, int) else None,
+            "samples": f["samples"], "created": f["created"], "status": token, "status_html": chip(label, tone),
+            "actions_html": update, "facets": f}
+
+
+def render_index(cfg, user: dict, can_see, query=None) -> str:
+    """The Results list: the viewer's sets (list_sets, can_see) as portal.listing rows, filtered / sorted / grouped
+    from the GET query (state in the URL)."""
     sets = list_sets(cfg, user, can_see)
     out = ['<h1>Results</h1>', f'<p class="cj-mut">{esc("Counts, sizes and multilayer % for each analysis.")}</p>']
     if not sets:
         out.append(f'<p class="cj-card cj-results-empty">{esc("No analyses yet. Run a model in Predict first.")}</p>')
         return "".join(out)
-    items = []
-    for ps in sets:
-        st = status_doc(cfg, ps)
-        s = ps["status"] or {}
-        n = s.get("n_total")
-        word = {"ready": ("Results ready", "ok"), "none": ("Not computed yet", "model"),
-                "queued": ("Computing", "edit"), "running": ("Computing", "edit"),
-                "error": ("Computing failed", "warn"),
-                "waiting": ("Model failed" if s.get("state") == "failed" else "Model still running", "model")}
-        label, tone = word.get(st["state"], ("?", "model"))
-        if st["state"] == "ready" and st["out_of_date"]:
-            label, tone = "Out of date", "warn"
-        meta = " · ".join(v for v in (when(ps["request"].get("created")) if ps["request"].get("created") else None,
-                                      plural(int(n), "image") if isinstance(n, int) else None,
-                                      f"model {ps['request'].get('model')}") if v)
-        # a title link + meta (+ an Update form when out of date): a form is not allowed inside a link
-        update = (compute_form(ps["id"], "Update", primary=False)
-                  if st["state"] == "ready" and st["out_of_date"] else "")
-        items.append(f'<li class="cj-card cj-results-set">'
-                     f'<a class="cj-results-set-t" href="/results/{esc(ps["id"])}/">'
-                     f'<b class="cj-wrap">{esc(NM.display_name(ps["request"]))}</b>{chip(label, tone)}</a>'
-                     f'<span class="cj-mut cj-results-psid cj-wrap">{esc(ps["id"])}</span>'
-                     f'<span class="cj-mut">{esc(meta)}</span>{update}</li>')
-    out.append(f'<ul class="cj-results-sets">{"".join(items)}</ul>')
+    hidden = LS.hidden_for(cfg, user, can_see)
+    rows = [index_row(cfg, ps, hidden) for ps in sets]
+    q = LS.parse_query(query or {})
+    people, models, _n = LS.choices(rows)
+    shown = LS.apply(rows, q)
+    out.append(LS.STYLE)
+    out.append(LS.controls_html(q, action="/results/", people=people if len(people) > 1 else [],
+                                models=models if len(models) > 1 or q.model != "any" else [],
+                                statuses=INDEX_FILTER))
+    out.append(LS.rows_html(LS.group(shown, q.group), q.group, shown=len(shown), total=len(rows),
+                            empty_text="No analyses match these filters."))
     return "".join(out)
 
 
@@ -1612,7 +1647,7 @@ def routes(ctx) -> list:
         return load_set(ctx.cfg, request.path_params["ps"], ctx.user(request), ctx.can_see)
 
     def index(request: Request):                # sync handlers: Starlette runs them in a worker thread
-        body = render_index(ctx.cfg, ctx.user(request), ctx.can_see)
+        body = render_index(ctx.cfg, ctx.user(request), ctx.can_see, request.query_params)
         return ctx.page(request, "Results", page_body(body), active="results")
 
     def show(request: Request):

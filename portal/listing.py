@@ -629,7 +629,7 @@ STYLE = """<style>
 .cj-list-count{margin:4px 0}
 .cj-list{background:var(--card);border:1px solid var(--line);border-radius:var(--cj-r);overflow:hidden}
 .cj-list-rows{list-style:none;margin:0;padding:0}
-.cj-list-head,.cj-list-row{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;padding:10px 14px}
+.cj-list-head,.cj-list-row{display:flex;flex-direction:row;flex-wrap:wrap;gap:6px 12px;align-items:center;padding:10px 14px}
 .cj-list-head{background:var(--bg);border-bottom:1px solid var(--line);font-size:.72rem;font-weight:600;
   letter-spacing:.04em;text-transform:uppercase;color:var(--mut)}
 .cj-list-row{border-bottom:1px solid var(--line)}

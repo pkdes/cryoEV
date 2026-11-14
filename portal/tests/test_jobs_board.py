@@ -166,8 +166,10 @@ class Board(unittest.TestCase):
         self.assertEqual(J.href_for("label_set", LV), f"/data/labels/{LV}")
         self.assertEqual(J.href_for("training", "job_1"), "/train/")
         self.assertEqual(J.href_for("run", "r1"), "/train/")
-        self.assertEqual(J.href_for("review_package", PKG), f"/review/{PKG}/app/")
-        self.assertEqual(J.href_for("review_package", "lab_compare_x"), "/reviews/")
+        self.assertEqual(J.href_for("review_package", PKG), f"/reviews/go/{PKG}")          # r13: the hub's go
+        self.assertEqual(J.href_for("review_package", "lab_compare_x"), "/reviews/go/lab_compare_x")
+        self.assertEqual(J.href_for("review_package", "prelipo_v5"), "/reviews/")
+        self.assertEqual(J.href_for("review_package", "lab_a/b"), "/reviews/go/lab_a%2Fb")
         self.assertEqual(J.href_for("dataset", "a b/c"), "/data/dataset/a%20b%2Fc")      # quoted
         for bad in (None, "", 5):
             self.assertIsNone(J.href_for("dataset", bad))
