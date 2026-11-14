@@ -361,7 +361,10 @@ def reviewed_polygons(pkg_dir, write=True) -> dict:
     (i:reject; such an image has n_candidates_open 0) and note (i:note); per object (edited / reviewed images)
     low_conf (true: its t: tag, or the Low conf EV class, review_server.is_low_conf) and note (its t: note).
     Round 12, additive: per image reject_scope ("sample" | "montage") when a group action rejected it; top level
-    sample_groups (sample_groups()) when the package has group notes or group rejects."""
+    sample_groups (sample_groups()) when the package has group notes or group rejects.
+    Round 14, additive: per object key, its package object key (review_server.object_key: g<label id>, p<k> for an
+    accepted candidate, n<uid> for a drawn outline), so results/compute.py fills objects.csv pkg_key / line for
+    reshaped and drawn outlines too."""
     pkg = Path(pkg_dir)
     meta, data = _read_json(pkg / META), read_datajs(pkg)
     by_file = {i["file"]: i for i in data["images"]}
@@ -378,7 +381,8 @@ def reviewed_polygons(pkg_dir, write=True) -> dict:
             out["images"][image] = _image_flags({"reviewed": False, "edited": False, "reviewed_by": [],
                                                  "n_candidates_open": len(im["pr"]), "objects": [
                 {"cls": m["cls"], "poly": _ring_px(lab[m["id"]]["p"], w, h), "conf": m["conf"], "source": "model",
-                 "reviewer_label": None, "reviewer_class": None} for m in info["labels"]]}, flags)
+                 "reviewer_label": None, "reviewer_class": None, "key": f"g{m['id']}"} for m in info["labels"]]},
+                flags)
             continue
         dec = rs._migrate(edit)["dec"]
         objs = []
@@ -395,7 +399,7 @@ def reviewed_polygons(pkg_dir, write=True) -> dict:
             obj = {"cls": (1 if rc == "nonEV" else 0) if rc else (model_cls if model_cls is not None else 0),
                    "poly": _ring_px(g["p"], w, h), "conf": c_conf,
                    "source": "model" if orig is not None and g["p"] == orig else "human",
-                   "reviewer_label": g["c"], "reviewer_class": rc}
+                   "reviewer_label": g["c"], "reviewer_class": rc, "key": rs.object_key(g)}
             tag_v, note = rs.tag_of(dec, rs.object_key(g))
             if rs.is_low_conf(g["c"], tag_v):
                 obj["low_conf"] = True

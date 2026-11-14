@@ -390,6 +390,15 @@ class ReviewThroughHttpTests(ServerCase):
         self.assertEqual({i: v["edited"] for i, v in got["images"].items()}, {"0001": False, "0002": True, "0003": False})
         self.assertEqual(sorted(o["reviewer_label"] for o in got["images"]["0002"]["objects"]),
                          ["EV", "MV", "non-EV", "non-EV"])
+        # round 14 (item 20): every object carries its package object key; the kept / reclassed labels keep g<id>,
+        # the deleted one is gone
+        keys = [o["key"] for o in got["images"]["0002"]["objects"]]
+        self.assertTrue(all(isinstance(k, str) and k[0] in "gpn" for k in keys), keys)
+        self.assertIn(f"g{f}", keys)
+        self.assertNotIn(f"g{g}", keys)
+        meta = json.loads((self.pkg / pp.META).read_text(encoding="utf-8"))
+        self.assertEqual([o["key"] for o in got["images"]["0001"]["objects"]],
+                         [f"g{m['id']}" for m in meta["images"]["0001"]["labels"]])
         # package B is untouched by A's review
         self.assertFalse(any(v["reviewed"] for v in pp.reviewed_polygons(self.pkg_b)["images"].values()))
 
