@@ -175,6 +175,23 @@ class BuildTests(Tmp):
         with self.assertRaises(FileExistsError):
             self.build()
 
+    def test_rebuild_keeps_reviewers(self):
+        """Round 13: the Reviews hub writes `reviewers` into review_package.json; a rebuild keeps them (portal ids
+        only, de-duplicated), still a valid registry record, and a first build has none."""
+        pkg = self.build()
+        rec = json.loads((pkg / pp.RECORD).read_text(encoding="utf-8"))
+        self.assertNotIn("reviewers", rec)
+        rec["reviewers"] = ["alyssia", "au1", "alyssia", "Bad Id", 5]
+        (pkg / pp.RECORD).write_text(json.dumps(rec), encoding="utf-8")
+        self.build()
+        again = json.loads((pkg / pp.RECORD).read_text(encoding="utf-8"))
+        self.assertEqual(again["reviewers"], ["alyssia", "au1"])
+        self.assertEqual(check_record(again, load_schemas()), [])
+        self.assertEqual([p.name for p in self.root.iterdir()], [PKG])
+        (pkg / pp.RECORD).write_text("{not json", encoding="utf-8")       # unreadable: rebuilt without reviewers
+        self.build()
+        self.assertNotIn("reviewers", json.loads((pkg / pp.RECORD).read_text(encoding="utf-8")))
+
     def test_owner_override_and_refusals(self):
         self.assertEqual(pp.read_datajs(self.build(owner="au1"))["owner"], "au1")
         with self.assertRaises(ValueError):

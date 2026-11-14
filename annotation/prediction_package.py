@@ -140,8 +140,9 @@ def build(ps_dir, review_root, owner=None, width=1440, quality=72) -> Path:
     """<review_root>/pred_<ps>/ from one prediction set. Returns the package folder.
 
     Built in a temp folder (.building_*, never served) and renamed into place when complete, so the multi server
-    never sees half a package. Rebuilding keeps the .review_key; a package that already has saved edits is refused
-    (its label ids are what the edits point at)."""
+    never sees half a package. Rebuilding keeps the .review_key and the `reviewers` list of review_package.json
+    (round 13: the Reviews hub assigns them); a package that already has saved edits is refused (its label ids are
+    what the edits point at)."""
     req, ps_id, model, rows, pred_dir = _ps_inputs(ps_dir)
     owner = owner or req.get("owner")
     if not OWNER_RE.match(owner or ""):
@@ -155,6 +156,7 @@ def build(ps_dir, review_root, owner=None, width=1440, quality=72) -> Path:
     try:
         _build_into(tmp, final, Path(ps_dir), req, ps_id, model, rows, pred_dir, owner, width, quality,
                     old_key or secrets.token_urlsafe(18))
+        keep_reviewers(final, tmp)  # read as late as possible: the Reviews hub may have just assigned someone
         if final.exists():
             gone = Path(review_root) / f".old_{pid}_{secrets.token_hex(4)}"
             final.rename(gone)
@@ -170,6 +172,26 @@ def build(ps_dir, review_root, owner=None, width=1440, quality=72) -> Path:
             shutil.rmtree(tmp, ignore_errors=True)
     print(f"[OK] {pid} -> {final}")
     return final
+
+
+def old_reviewers(final: Path) -> list:
+    """The `reviewers` of an existing package's review_package.json (portal ids only), [] when none or unreadable."""
+    try:
+        doc = _read_json(Path(final) / RECORD) if (Path(final) / RECORD).is_file() else {}
+    except (OSError, ValueError):
+        return []
+    revs = doc.get("reviewers") if isinstance(doc, dict) else None
+    return list(dict.fromkeys(r for r in revs if isinstance(r, str) and OWNER_RE.match(r)))         if isinstance(revs, list) else []
+
+
+def keep_reviewers(final: Path, tmp: Path) -> None:
+    """Carry the old package's reviewers into the freshly built one (its review_package.json, still unserved)."""
+    revs = old_reviewers(final)
+    if not revs:
+        return
+    rec = _read_json(Path(tmp) / RECORD)
+    rec["reviewers"] = revs
+    _write_json(Path(tmp) / RECORD, rec)
 
 
 def _build_into(out, final, ps_dir, req, ps_id, model, rows, pred_dir, owner, width, quality, key):
