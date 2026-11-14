@@ -12,7 +12,8 @@
    "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
   },
   "path": {
-   "type": "string"
+   "type": "string",
+   "description": "The package folder. Absent on portal-built lines (round 13: the folder is <review root>/<id>; the line is allowlisted)"
   },
   "kind": {
    "type": "string",
@@ -21,8 +22,21 @@
     "sandbox",
     "control",
     "part",
-    "prediction"
+    "prediction",
+    "compare"
    ]
+  },
+  "purpose": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "enum": [
+    "revise",
+    "audit",
+    null
+   ],
+   "description": "kind=compare: revise (no decoys, can be applied) or audit (blind)"
   },
   "parent": {
    "type": [
@@ -33,14 +47,15 @@
   },
   "base": {
    "type": "string",
-   "description": "Base pull id (roboflow_pull_*) or, for older packages, an export id; for kind=prediction the prediction_set id (ps_*)"
+   "description": "Base pull id (roboflow_pull_*) or, for older packages, an export id; for kind=prediction the prediction_set id (ps_*); for base_kind=label_version (portal-built compare packages) the label version id (lv_*)"
   },
   "base_kind": {
    "type": "string",
    "enum": [
     "pull",
     "export",
-    "prediction_set"
+    "prediction_set",
+    "label_version"
    ]
   },
   "model": {
@@ -89,6 +104,25 @@
     "string",
     "null"
    ]
+  },
+  "built_by": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "enum": [
+    "portal",
+    null
+   ],
+   "description": "portal = built by portal/review_build.py, which writes this line itself; the importer skips such packages entirely"
+  },
+  "b_label_version": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^lv_\\d{8}_\\d{4}$",
+   "description": "kind=compare against a second label set: its id"
   },
   "reviewers": {
    "type": "array",
@@ -170,7 +204,6 @@
   "schema",
   "id",
   "logged",
-  "path",
   "kind",
   "base",
   "base_kind",

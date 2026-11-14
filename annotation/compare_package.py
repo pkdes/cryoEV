@@ -26,6 +26,21 @@ read_compare_package() / strip_decoys() turn decisions into audit counts and dro
 Writes <out>/{index.html, data.js, images/, review_package.json (kind "compare"), .review_key}.
 --reuse-key <dir> copies another package's .review_key (e.g. to serve from a review slot whose key the
 portal already holds). The key is never printed.
+
+Purpose (round 13, --purpose, default audit so earlier command lines are unchanged):
+  audit   a blind audit: decoys (default 0.10), the answer key and every count that could reveal the decoys (the
+          real FP/FN card counts, the decoy counts) only in <out>/../_work_<name>/decoys.json; review_package.json
+          has no "cards". The owner can never be one of its --reviewer people.
+  revise  a label-set revision that apply_review_edits.py / the portal's Apply can merge back: no decoys (--decoys
+          other than 0 is refused), purpose "revise" in review_package.json, and the scratch folder (staged images,
+          predictions) OUTSIDE the review root: --work-dir (must not exist yet), else a temp folder; deleted after
+          a successful build, so no _work_<name> folder ever exists for it.
+Both: an existing <out> or _work_<name> folder is refused (a crash leftover is never reused; --force rebuilds in
+place as before, the portal never passes it); a failed build removes the folders it made; review_package.json is
+written last, atomically (temp file + os.replace, retried on PermissionError); --built-by portal (the portal's
+builder; a --force rebuild keeps an existing package's built_by unless --built-by says otherwise) adds built_by "portal"
+to it and to data.js, so the registry importer leaves the package to the portal. The answer key's path is never
+printed. Progress markers "[phase] predicting" / "[phase] writing" go to stdout (the portal's progress page).
 """
 import argparse
 import csv
@@ -33,9 +48,12 @@ import json
 import math
 import random
 import re
+import os
 import secrets
 import shutil
 import sys
+import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -51,17 +69,63 @@ TOOL = "annotation/compare_package.py"
 EV_GROUP = "ev_type"
 DECOY_MARGIN = 1.5  # reject decoys keep this many radii away from every A and B object
 REVIEWER_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")  # a portal id: the portal opens the package for these (reviewers)
+PURPOSES = ("audit", "revise")
+AUDIT_DECOYS = 0.10        # an audit's default decoy fraction; a revise has none
 
 
-def check_reviewers(reviewers) -> list:
+def check_reviewers(reviewers, owner=None, purpose="audit") -> list:
     """--reviewer values, each a portal id (REVIEWER_RE); anything else stops the build before any work, since the
-    portal would never match it and the person could not open the package."""
+    portal would never match it and the person could not open the package. An audit's owner is never one of them
+    (they would decide cards on their own audit)."""
     out = list(reviewers or [])
     for r in out:
         if not isinstance(r, str) or not REVIEWER_RE.match(r):
             raise SystemExit(f"--reviewer {r!r} is not a portal id: a lower-case letter, then up to 31 of a-z 0-9 _ - "
                              "(the id the person signs in to the portal with, e.g. --reviewer au1)")
+    if purpose == "audit" and owner and owner in out:
+        raise SystemExit(f"--reviewer {owner!r} is the audit's --owner: an audit's owner can't review it")
     return out
+
+
+def inside(path, folder) -> bool:
+    """path is folder or below it (both resolved)."""
+    try:
+        Path(path).resolve().relative_to(Path(folder).resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def write_json_atomic(path: Path, obj, tries=6) -> None:
+    """A temp file next to it + os.replace: a reader sees no file or the whole new one, never half of it. The replace
+    is retried on PermissionError (a reader, antivirus or indexer can hold the target for a moment on Windows), as
+    jobs/predict_set.write_json_atomic does."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(obj, indent=1), encoding="utf-8")
+    for i in range(tries):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if i == tries - 1:
+                tmp.unlink(missing_ok=True)
+                raise
+            time.sleep(0.1 * 2 ** i)
+
+
+def existing_built_by(out: Path):
+    """The built_by of a package already in `out` (its review_package.json, else its data.js), or None."""
+    try:
+        meta = json.loads((out / "review_package.json").read_text(encoding="utf-8"))
+        if isinstance(meta, dict) and meta.get("built_by"):
+            return meta["built_by"]
+    except (OSError, ValueError):
+        pass
+    try:
+        d = json.loads((out / "data.js").read_text(encoding="utf-8").split("=", 1)[1].strip().rstrip(";"))
+        return d.get("built_by") if isinstance(d, dict) else None
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 def parse_where(items):
@@ -302,20 +366,82 @@ def add_model_cards(rec, pr_other, name, conf, ref_conf, w, h, groups, dedup_iou
     return n_fn, n_fp, merged, skipped
 
 
+def plan(args):
+    """Check the purpose, decoys, reviewers and folders before any work. -> (purpose, decoys, work folder or None
+    for a new temp folder, is the work folder scratch). Raises SystemExit; nothing is written."""
+    purpose = getattr(args, "purpose", None) or "audit"
+    if purpose not in PURPOSES:
+        raise SystemExit(f"--purpose {purpose!r}: expected one of {', '.join(PURPOSES)}")
+    decoys = getattr(args, "decoys", None)
+    if purpose == "revise":
+        if decoys not in (None, 0, 0.0):
+            raise SystemExit("--purpose revise has no decoys (its decisions are applied to the label set): "
+                             "leave --decoys out or pass --decoys 0")
+        decoys = 0.0
+    elif decoys is None:
+        decoys = AUDIT_DECOYS
+    args.reviewer = check_reviewers(args.reviewer, getattr(args, "owner", None), purpose)
+    out, name = args.out, args.out.name
+    audit_work = out.parent / f"_work_{name}"
+    force = getattr(args, "force", False)
+    built_by = getattr(args, "built_by", None)
+    if force and out.exists() and built_by is None:     # a rebuild keeps who built it unless told otherwise
+        args.built_by = existing_built_by(out)
+    elif built_by == "none":                            # explicit: no marker
+        args.built_by = None
+    if out.exists() and not force:
+        has_edits = any((out / "edits").glob("*.json"))
+        raise SystemExit(f"{out} already exists" + (" and has review edits" if has_edits else "")
+                         + ": build into a new folder (a folder left by a crash is never reused), or pass --force")
+    if audit_work.exists() and (purpose == "revise" or not force):
+        raise SystemExit(f"a _work_ folder for {name} already exists next to it: build under a new name"
+                         + ("" if purpose == "revise" else " (or pass --force)"))
+    if purpose != "revise":
+        return purpose, decoys, audit_work, False
+    wd = getattr(args, "work_dir", None)
+    if not wd:
+        return purpose, decoys, None, True                      # a temp folder, made when the build starts
+    wd = Path(wd)
+    if inside(wd, out.parent):
+        raise SystemExit("--work-dir must be outside the review root (a revise package has no work folder there)")
+    if wd.exists():
+        raise SystemExit("--work-dir already exists: give a new folder (a folder left by a crash is never reused)")
+    return purpose, decoys, wd, True
+
+
 def build(args):
-    args.reviewer = check_reviewers(args.reviewer)
-    if any((args.out / "edits").glob("*.json")) and not args.force:
-        raise SystemExit(f"{args.out} already has review edits: a rebuild would point them at different objects. "
-                         "Build into a new folder, or pass --force.")
+    purpose, decoys, work, scratch = plan(args)
+    made = []                                           # folders this run made: removed again if it fails
+    if not args.out.exists():
+        made.append(args.out)
+    if work is None:
+        work = Path(tempfile.mkdtemp(prefix=f"cmp_{args.out.name[:40]}_"))
+        made.append(work)
+    elif not work.exists():
+        made.append(work)
+    try:
+        out = _build(args, purpose, decoys, work)
+    except BaseException:
+        for d in made:
+            shutil.rmtree(d, ignore_errors=True)
+        raise
+    if scratch:                                         # a revise keeps nothing outside its package
+        shutil.rmtree(work, ignore_errors=True)
+    return out, work
+
+
+def _build(args, purpose, decoys, work):
     coco = json.loads(args.labels.read_text(encoding="utf-8"))
     groups = B.load_class_groups(args.class_groups)
     name = args.out.name
-    work = args.out.parent / f"_work_{name}"
     work.mkdir(parents=True, exist_ok=True)
     stems = select_stems(args.select_csv, parse_where(args.where))
     flat, staged, missing = stage_images(coco, args.images_root, stems, work)
     print(f"[images] {len(staged)} staged" + (f", {len(missing)} selected but not found: {missing[:5]}" if missing else ""))
+    if not staged:
+        raise SystemExit("no images of the label set found under --images-root: nothing to build")
     if args.b_model:
+        print("[phase] predicting", flush=True)
         pred_dir = predict_cached(args.b_model, flat, work / "preds", staged, args)
         b_desc = {"kind": "model", "weights": str(args.b_model), "imgsz": args.imgsz, "nms": args.nms,
                   "max_det": args.max_det, "conf_floor": 0.25}
@@ -367,7 +493,7 @@ def build(args):
     real = {"fp": sum(r["fp"] for r in images), "fn": sum(r["fg"] for r in images)}
     real_by = {r["file"]: (r["fp"], r["fg"], r["split"]) for r in images}
     rng = random.Random(args.seed)
-    key = add_decoys(images, groups, args.decoys, rng, args.flag_conf)
+    key = add_decoys(images, groups, decoys, rng, args.flag_conf)
     found_by = []
     for r in images:
         r["fg"] = sum(1 for g in r["gt"] if g.get("u"))
@@ -385,6 +511,7 @@ def build(args):
     images.sort(key=lambda r: -(r["fg"] + r["fp"]))
 
     out = args.out
+    print("[phase] writing", flush=True)
     (out / "images").mkdir(parents=True, exist_ok=True)
     from PIL import Image
     for r in images:
@@ -400,6 +527,9 @@ def build(args):
             "class_groups": {k: groups[k] for k in ("file", "groups", "model_classes")}}
     if getattr(args, "source_title", None):  # the label set's name on the page's "Working on" bar (else its folder)
         data["source_title"] = args.source_title
+    built_by = getattr(args, "built_by", None)
+    if built_by:                             # the importer leaves a portal-built package alone, even mid-build
+        data["built_by"] = built_by
     B.write_packages(out, data, 0, zip_it=False)
     if args.index_html:
         shutil.copy(args.index_html, out / "index.html")
@@ -409,28 +539,38 @@ def build(args):
     elif not key_file.exists():
         key_file.write_text(secrets.token_urlsafe(24), encoding="utf-8")
     n_dec = {"accept": sum(k["kind"] == "accept" for k in key), "reject": sum(k["kind"] == "reject" for k in key)}
-    (out / "review_package.json").write_text(json.dumps({
-        "schema": "review_package/1", "id": name, "logged": built, "recorded_by": TOOL, "path": str(out.resolve()),
-        "kind": "compare", "compare": {"a": {"kind": "labels", "coco": str(args.labels)}, "b": b_desc,
-                                       "flag_conf": args.flag_conf, "label": args.b_label},
-        "base": str(args.labels), "base_kind": "label_version", "n_images": len(images), "built": built,
-        "tool": TOOL, "status": "built", "owner": args.owner, "reviewers": args.reviewer or [],
-        "cards": {"fp": real["fp"], "fn": real["fn"], "decoys": n_dec}}, indent=1), encoding="utf-8")
     if extras:
         (work / "cards_models.json").write_text(json.dumps({"package": name, "union": union, "cards": found_by},
                                                            indent=1), encoding="utf-8")
         print(f"[union] extra models add FN {union['fn']}, FP {union['fp']}; merged with a reference card "
               f"{union['merged']}; not carded (reference matched a label) {union['skipped']}")
-    (work / "decoys.json").write_text(json.dumps({"package": name, "seed": args.seed, "decoys": key}, indent=1),
+    # the answer key, and every count that could give the decoys away (real cards = shown cards - decoys)
+    (work / "decoys.json").write_text(json.dumps({"package": name, "seed": args.seed, "decoys": key,
+                                                  "counts": {"real": real, "decoys": n_dec}}, indent=1),
                                       encoding="utf-8")
     with open(work / "cards_per_image.csv", "w", newline="", encoding="utf-8") as fh:
         wr = csv.writer(fh)
         wr.writerow(["file", "split", "fp_cards", "fn_cards"])
         for f, (a, b, s) in sorted(real_by.items()):
             wr.writerow([f, s, a, b])
-    print(f"[OK] {name}: {len(images)} images; real cards FP {real['fp']} + FN {real['fn']}; "
-          f"decoys accept {n_dec['accept']} + reject {n_dec['reject']}; key -> {work / 'decoys.json'}")
-    return out, work
+    meta = {"schema": "review_package/1", "id": name, "logged": built, "recorded_by": TOOL, "path": str(out.resolve()),
+            "kind": "compare", "purpose": purpose,
+            "compare": {"a": {"kind": "labels", "coco": str(args.labels)}, "b": b_desc,
+                        "flag_conf": args.flag_conf, "label": args.b_label},
+            "base": str(args.labels), "base_kind": "label_version", "n_images": len(images), "built": built,
+            "tool": TOOL, "status": "built", "owner": args.owner, "reviewers": args.reviewer or []}
+    if purpose == "revise":                  # no decoys: the real counts give nothing away
+        meta["cards"] = {"fp": real["fp"], "fn": real["fn"]}
+    if built_by:
+        meta["built_by"] = built_by
+    write_json_atomic(out / "review_package.json", meta)      # last: a package without it is unfinished
+    if purpose == "revise":
+        print(f"[OK] {name}: {len(images)} images; cards FP {real['fp']} + FN {real['fn']} (no decoys)")
+    else:
+        shown = sum(r["fg"] + r["fp"] for r in images)
+        print(f"[OK] {name}: {len(images)} images; {shown} cards with decoys mixed in "
+              "(the answer key and its counts stay in the work folder)")
+    return out
 
 
 def read_compare_package(pkg: Path, work: Path):
@@ -526,7 +666,12 @@ def edits_sha256(edits_dir: Path) -> str:
     return h.hexdigest()
 
 
-def main():
+def main(argv=None):
+    build(parser().parse_args(argv))
+
+
+def parser() -> argparse.ArgumentParser:
+    """The command line (the portal's runner parses its argv with this too, then calls build() in process)."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--labels", type=Path, required=True, help="Set A: COCO label set (the base decisions apply to)")
     ap.add_argument("--images-root", type=Path, action="append", required=True, help="Folder(s) holding the images")
@@ -548,7 +693,16 @@ def main():
     ap.add_argument("--pred-classes", default="EV,non-EV")
     ap.add_argument("--class-groups", type=Path, default=B.CLASS_GROUPS)
     ap.add_argument("--flag-conf", type=float, default=0.55)
-    ap.add_argument("--decoys", type=float, default=0.10, help="Decoy cards as a fraction of real cards (0 = none)")
+    ap.add_argument("--purpose", choices=PURPOSES, default="audit",
+                    help="audit (default): blind, with decoys; revise: no decoys, scratch outside the review root, "
+                         "can be applied to the label set")
+    ap.add_argument("--decoys", type=float, default=None,
+                    help=f"Decoy cards as a fraction of real cards (0 = none; audit default {AUDIT_DECOYS}, "
+                         "revise: 0 only)")
+    ap.add_argument("--work-dir", type=Path, help="--purpose revise: the scratch folder (outside the review root, "
+                                                   "must not exist; deleted after a successful build)")
+    ap.add_argument("--built-by", choices=("portal", "none"), help=argparse.SUPPRESS)  # the portal's builder; with
+    # --force an existing package's built_by is kept unless this says otherwise ("none" drops it)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--owner", required=True)
     ap.add_argument("--reviewer", action="append", help="Extra people who may open it (portal ids)")
@@ -557,8 +711,8 @@ def main():
     ap.add_argument("--width", type=int, default=1440)
     ap.add_argument("--quality", type=int, default=72)
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--force", action="store_true", help="Rebuild even though <out>/edits/ has decisions")
-    build(ap.parse_args())
+    ap.add_argument("--force", action="store_true", help="Rebuild into an existing <out> (even one with decisions)")
+    return ap
 
 
 if __name__ == "__main__":

@@ -78,8 +78,11 @@ class CompareKnownAnswer(unittest.TestCase):
         self.assertEqual([g["id"] for g in fn], [12])                 # Low conf EV (13) is not a card
         self.assertEqual(len(im["pr"]), 4)                             # every B object is still shown
         meta = json.loads((out / "review_package.json").read_text(encoding="utf-8"))
-        self.assertEqual((meta["kind"], meta["cards"]["fp"], meta["cards"]["fn"]), ("compare", 1, 1))
-        self.assertEqual(json.loads((work / "decoys.json").read_text(encoding="utf-8"))["decoys"], [])
+        self.assertEqual((meta["kind"], meta["purpose"]), ("compare", "audit"))
+        self.assertNotIn("cards", meta)               # round 13: an audit's counts stay in its work folder
+        key = json.loads((work / "decoys.json").read_text(encoding="utf-8"))
+        self.assertEqual(key["decoys"], [])
+        self.assertEqual(key["counts"]["real"], {"fp": 1, "fn": 1})
         self.assertTrue((out / ".review_key").read_text(encoding="utf-8").strip())
 
     def test_decoys_known_answer_and_key_not_served(self):

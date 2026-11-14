@@ -8,6 +8,11 @@ Each portal/modules/<id>.py defines:
 
 `load(ctx)` imports every module file, checks the declarations, adds the PREFIX -> PREFIX/ redirect, and returns
 (routes, rules) where rules = [(prefix, roles), ...] longest prefix first, for the Gate.
+
+A nested PREFIX (round 13: "/reviews/start", portal/modules/reviewstart.py) is one more segment under another
+module's PREFIX; that module must be loaded too, the nested ROLES must be a subset of the parent's, and no parent
+route may equal or start with the nested PREFIX. Its routes come first, so the parent's patterns (e.g. /reviews/{id})
+never shadow it; its own ROLES decide under it (the Gate's longest prefix wins).
 """
 from __future__ import annotations
 
@@ -24,7 +29,7 @@ from starlette.routing import Route
 
 HERE = Path(__file__).resolve().parent
 TEMPLATES = HERE.parent / "templates"
-PREFIX_RE = re.compile(r"^/[a-z][a-z0-9-]*$")
+PREFIX_RE = re.compile(r"^/[a-z][a-z0-9-]*(?:/[a-z][a-z0-9-]*)?$")   # one segment, or one nested under a module's
 # /api stays free: the agent API (round 10) opens existing routes (portal/app.py BEARER_ROUTES), no module owns /api
 RESERVED = {"/", "/login", "/healthz", "/cj", "/history", "/review", "/api"}
 
@@ -77,11 +82,11 @@ def discover() -> list:
 def load(ctx: Ctx, names=None):
     """-> (routes, rules). Raises ValueError on a bad declaration (fail loudly at start, not at request time)."""
     from portal import auth as A
-    routes, rules, seen = [], [], set()
+    routes, rules, seen, nested = [], [], set(), []
     for name in (discover() if names is None else names):
         mod = importlib.import_module(f"portal.modules.{name}")
         prefix, roles = getattr(mod, "PREFIX", None), tuple(getattr(mod, "ROLES", ()) or ())
-        if not isinstance(prefix, str) or not PREFIX_RE.match(prefix) or prefix in RESERVED or prefix in seen:
+        if not isinstance(prefix, str) or not PREFIX_RE.match(prefix) or prefix in RESERVED or prefix in seen                 or "/" + prefix.split("/")[1] in RESERVED:
             raise ValueError(f"portal module {name}: bad or duplicate PREFIX {prefix!r}")
         if not roles or any(r not in A.ROLES for r in roles):
             raise ValueError(f"portal module {name}: ROLES must be a non-empty subset of {A.ROLES}")
@@ -90,9 +95,24 @@ def load(ctx: Ctx, names=None):
             if not (r.path == prefix + "/" or r.path.startswith(prefix + "/")):
                 raise ValueError(f"portal module {name}: route {r.path} is outside {prefix}/")
         seen.add(prefix)
-        routes.append(Route(prefix, _redirect(prefix + "/"), methods=["GET"]))
-        routes.extend(mod_routes)
+        own = [Route(prefix, _redirect(prefix + "/"), methods=["GET"])] + mod_routes
+        if prefix.count("/") > 1:
+            nested.append((name, prefix, roles, own))
+        else:
+            routes.extend(own)
         rules.append((prefix, roles))
+    by_prefix = dict(rules)
+    for name, prefix, roles, own in reversed(nested):
+        parent = "/" + prefix.split("/")[1]
+        if parent not in seen:
+            raise ValueError(f"portal module {name}: nested PREFIX {prefix!r} needs the module that owns its parent")
+        if not set(roles) <= set(by_prefix[parent]):     # never opens a door the parent module keeps shut
+            raise ValueError(f"portal module {name}: nested PREFIX {prefix!r} ROLES must be within {parent}'s")
+        clash = [r.path for r in routes if getattr(r, "path", "") == prefix or
+                 getattr(r, "path", "").startswith(prefix + "/")]
+        if clash:                                         # the parent may not already route into the nested space
+            raise ValueError(f"portal module {name}: {parent}'s routes {clash} fall inside nested PREFIX {prefix!r}")
+        routes[:0] = own                                 # before every one-segment module's routes
     rules.sort(key=lambda pr: -len(pr[0]))
     return routes, rules
 
