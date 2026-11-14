@@ -367,7 +367,7 @@ STYLE = """<style>
 .cj-rv h2{margin:0;font-size:1.3rem}
 .cj-rv-head{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;flex-wrap:wrap}
 .cj-rv-head p{margin:6px 0 0}
-.cj-rv-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:6px;background:var(--acc);
+.cj-rv a.cj-rv-btn,.cj-rv-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:6px;background:var(--acc);
   border:1px solid var(--acc);color:var(--card);font-weight:600;text-decoration:none;white-space:nowrap}
 .cj-rv-btn2{display:inline-flex;align-items:center;gap:4px;padding:5px 10px;border-radius:6px;border:1px solid var(--line);
   background:var(--card);color:var(--acc);font-weight:600;font-size:.85rem;text-decoration:none;white-space:nowrap}
