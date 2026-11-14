@@ -50,6 +50,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, quote
 
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import RedirectResponse
 from starlette.routing import Route
@@ -256,14 +257,13 @@ def served_packages(cfg, user: dict, can_see) -> list:
     out = []
     for d in dirs:
         # only what the Open link can open: the same checks as app.pred_package and the review server
-        if not PRED_ID_RE.match(d.name) or d.name.lower() in excluded or MRS.package_dir(Path(root), d.name, prefixes) is None                 or not MRS.package_key(d):
+        if not PRED_ID_RE.match(d.name) or d.name.lower() in excluded \
+                or MRS.package_dir(Path(root), d.name, prefixes) is None or not MRS.package_key(d):
             continue
         meta = _read_json(d / "review_package.json")
         if isinstance(meta, dict) and may_open(user, meta, can_see):
             out.append((d, meta))
     return out
-
-
 
 
 # ---------------------------------------------------------------- reviewers (owner or admin; review_package.json)
@@ -282,15 +282,22 @@ class ReviewersError(Exception):
         self.busy = busy
 
 
+def reviewer_ids(people) -> list:
+    """The one reviewer rule (this hub's Assign panel and Start a review): roster ids, not revoked, with a known
+    role. people = auth.Roster.people()."""
+    from portal import auth as A
+    return sorted(pid for pid, p in (people or {}).items()
+                  if isinstance(pid, str) and isinstance(p, dict) and not p.get("revoked") and p.get("role") in A.ROLES)
+
+
 def roster_ids(roster_path) -> list:
-    """Portal ids a reviewer may be: on the roster, not revoked, with a known role."""
+    """Portal ids a reviewer may be (reviewer_ids) from the roster file; [] when it can't be read."""
     from portal import auth as A
     try:
         people = A.Roster(roster_path).people() if roster_path else {}
     except Exception:                                   # noqa: BLE001  unreadable roster: nobody
         people = {}
-    return sorted(pid for pid, p in people.items()
-                  if isinstance(pid, str) and isinstance(p, dict) and not p.get("revoked") and p.get("role") in A.ROLES)
+    return reviewer_ids(people)
 
 
 def _replace(tmp: Path, dest: Path, retry_s: float = REPLACE_RETRY_S) -> None:
@@ -337,10 +344,10 @@ def write_reviewers(root, pkg: Path, add=(), remove=(), *, allowed=None, lock_wa
             raise ReviewersError("The audit's owner can't be a reviewer on it.")
         new = [r for r in old if r not in remove]
         new += [a for a in add if a not in new]
-        if len(new) > MAX_REVIEWERS:
-            raise ReviewersError(f"A review can have at most {MAX_REVIEWERS} reviewers.")
         added = [a for a in new if a not in old]
         removed = [r for r in old if r not in new]
+        if added and len(new) > MAX_REVIEWERS:      # the cap stops adding only: an over-cap list can still be trimmed
+            raise ReviewersError(f"A review can have at most {MAX_REVIEWERS} reviewers.")
         if not added and not removed:
             return [], []
         meta["reviewers"] = new
@@ -756,22 +763,21 @@ def routes(ctx) -> list:
         hit = resolve(request)
         return missing(request) if hit is None else panel(request, hit)
 
-    async def reviewers_post(request: Request):
+    def reviewers_change(request, body, too_big, ctype):
+        """The reviewers POST after its body is read: everything that touches files (resolve, the meta lock wait and
+        os.replace retries in write_reviewers, the panel, the hub rows for the flash) runs here, in a worker thread
+        (reviewers_post), never on the event loop."""
         hit = resolve(request)
         if hit is None:
             return missing(request)
         if request.scope.get("cj_auth") == "bearer":    # never an agent token (the Gate opens none of these to one)
             return panel(request, hit, "Not with an agent token.", 403)
-        ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
-        buf = bytearray()
-        async for chunk in request.stream():
-            buf += chunk
-            if len(buf) > MAX_FORM:
-                return panel(request, hit, "That form is too large.", 413)
+        if too_big:
+            return panel(request, hit, "That form is too large.", 413)
         if ctype != "application/x-www-form-urlencoded":
             return panel(request, hit, "Send the form from this page.", 415)
         try:
-            form = parse_qs(bytes(buf).decode("utf-8"), max_num_fields=50)
+            form = parse_qs(body.decode("utf-8"), max_num_fields=50)
         except (UnicodeDecodeError, ValueError):
             return panel(request, hit, "That form could not be read.", 400)
         if not hmac.compare_digest((form.get("t") or [""])[0].encode(), token(request).encode()):
@@ -793,6 +799,17 @@ def routes(ctx) -> list:
                                     (f"removed {', '.join(removed)}" if removed else "")) if x) or "no change"
         tok = AD.flash_put(AD.binding(request), f"Reviewers for {(row or {}).get('title') or pid}: {what}.")
         return RedirectResponse(f"{PREFIX}/?f={quote(tok)}", status_code=303)
+
+    async def reviewers_post(request: Request):
+        """Only the body read (at most MAX_FORM bytes) is async; the rest is one sync call in the threadpool."""
+        ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        buf, too_big = bytearray(), False
+        async for chunk in request.stream():
+            buf += chunk
+            if len(buf) > MAX_FORM:
+                too_big = True
+                break
+        return await run_in_threadpool(reviewers_change, request, bytes(buf), too_big, ctype)
 
     return [Route(PREFIX + "/", index, methods=["GET"]),
             Route(PREFIX + "/go/{pkg_id}", go, methods=["GET"]),

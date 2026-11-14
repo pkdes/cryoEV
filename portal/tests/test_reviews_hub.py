@@ -348,6 +348,70 @@ class Hub(unittest.TestCase):
         self.assertEqual(st, 400)
         self.assertIn("at most 5", text)
 
+    def test_over_cap_list_can_be_trimmed(self):
+        """fixer 6: the cap stops adding only: a list already over it (cap lowered) can still lose people."""
+        path = f"/reviews/{PA_}/reviewers"
+        st, _, _ = self.post(path, "admin", [("add", p) for p in ("other", "nobody", "audowner", "adv")])
+        self.assertEqual(st, 303)
+        with mock.patch.object(REV, "MAX_REVIEWERS", 2):
+            st, _, _ = self.post(path, "admin", [("remove", "adv")])
+            self.assertEqual(st, 303)
+            self.assertEqual(self.meta(self.pa)["reviewers"], ["other", "nobody", "audowner"])   # 3 > 2: still trimmed
+            st, _, text = self.post(path, "admin", [("remove", "audowner"), ("add", "tester")])  # control: adding
+            self.assertEqual(st, 400)
+            self.assertIn("at most 2", text)
+        self.assertEqual(self.meta(self.pa)["reviewers"], ["other", "nobody", "audowner"])
+
+    def test_pending_post_never_blocks_the_event_loop(self):
+        """fixer 1: a reviewers POST waiting on the meta lock (held by another thread) runs in the threadpool:
+        /healthz answers fast meanwhile. Control: the POST really was waiting (busy 409 after the lock wait)."""
+        import threading
+        from data_utils.oslock import acquire_lock
+        path = f"/reviews/{PA_}/reviewers"
+        st, _, page = self.get(path, "bas")
+        tok = TOKEN_RE.search(page).group(1)
+        locks = self.review / REV.LOCK_DIR
+        locks.mkdir(exist_ok=True)
+        held = []
+        got = threading.Event()
+        release = threading.Event()
+
+        def holder():
+            held.append(acquire_lock(locks / f"{PA_}.lock", wait=5))
+            got.set()
+            release.wait(10)
+            held[0].close()
+
+        threading.Thread(target=holder, daemon=True).start()
+        self.assertTrue(got.wait(5) and held[0] is not None)
+        out = {}
+
+        def poster():
+            hdr = {**T.cookie(self.tok["bas"]), "Content-Type": FORM, "Origin": self.p.origin}
+            t0 = time.monotonic()
+            out["st"] = T.request(self.p.port, "POST", path, hdr, urlencode([("t", tok), ("add", "other")]).encode())[0]
+            out["s"] = time.monotonic() - t0
+
+        th = threading.Thread(target=poster, daemon=True)
+        try:
+            th.start()
+            time.sleep(0.3)                                       # the POST is now in its lock wait (2 s)
+            slow = []
+            for _ in range(5):
+                t0 = time.monotonic()
+                st, _, _ = T.request(self.p.port, "GET", "/healthz")
+                slow.append(time.monotonic() - t0)
+                self.assertEqual(st, 200)
+                time.sleep(0.1)
+            self.assertTrue(th.is_alive(), "the POST should still be waiting on the lock")
+            self.assertLess(max(slow), 0.25, slow)
+            th.join(10)
+        finally:
+            release.set()
+        self.assertEqual(out["st"], 409)                          # control: it waited for the lock and gave up
+        self.assertGreaterEqual(out["s"], REV.LOCK_WAIT_S - 0.1)
+        self.assertNotIn("reviewers", self.meta(self.pa))
+
 
 if __name__ == "__main__":
     unittest.main()

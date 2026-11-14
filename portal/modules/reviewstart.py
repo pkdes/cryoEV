@@ -115,13 +115,13 @@ def finished_without_package(cfg, user) -> list:
 
 
 def roster_ids(roster) -> list:
-    """Portal ids of the people who can sign in (key or access mode), sorted."""
-    from portal import auth as A
+    """Portal ids a reviewer may be, sorted: the hub's one rule (reviews.reviewer_ids: not revoked, a known role)."""
+    from portal.modules import reviews as REV
     try:
         people = roster.people()
-    except Exception:
+    except Exception:                                   # noqa: BLE001  unreadable roster: nobody
         return []
-    return sorted(pid for pid, p in people.items() if A.Roster.usable(p) or A.Roster.usable_access(p))
+    return REV.reviewer_ids(people)
 
 
 # ---------------------------------------------------------------- HTML
@@ -390,10 +390,13 @@ def routes(ctx) -> list:
         purpose, lv, b = one("purpose"), one("lv"), parse_b(one("b"))
         reviewers = f.get("reviewer") or []
         user = ctx.user(request)
-        ids = set(roster_ids(roster)) if roster else set()
+
+        def start():                                    # the roster read and the build start: off the event loop
+            ids = set(roster_ids(roster)) if roster else set()
+            return RB.start(ctx.cfg, user.get("id"), purpose, lv, b, reviewers, roster_ids=ids)
+
         try:
-            name = await run_in_threadpool(RB.start, ctx.cfg, user.get("id"), purpose, lv, b, reviewers,
-                                           roster_ids=ids)
+            name = await run_in_threadpool(start)
         except RB.BuildError as e:
             busy = "one at a time" in str(e) or "starting" in str(e)
             return refuse(request, f"Not started: {e}.", 409 if busy else 400)

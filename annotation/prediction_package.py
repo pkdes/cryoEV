@@ -55,6 +55,9 @@ RECORD = "review_package.json"
 PS_RE = re.compile(r"^ps_\d{8}_[0-9a-f]{6}$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_]*$")
 OWNER_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+# A portal roster id (a reviewer the hub's Assign panel can add, e.g. "j.doe"): a copy of portal/auth.py ID_RE, used
+# with fullmatch. annotation never imports portal, so keep the two in step by hand.
+REVIEWER_ID_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,39}")
 IMAGE_RE = re.compile(r"^\d{4,}$")                                 # server-made names: <nnnn>
 FILE_RE = re.compile(r"^images/(\d{4,})\.(png|jpg|jpeg)$")
 DEFAULT_SPOT = 10
@@ -205,7 +208,9 @@ def old_reviewers(final: Path) -> list:
     except (OSError, ValueError):
         return []
     revs = doc.get("reviewers") if isinstance(doc, dict) else None
-    return list(dict.fromkeys(r for r in revs if isinstance(r, str) and OWNER_RE.match(r)))         if isinstance(revs, list) else []
+    if not isinstance(revs, list):
+        return []
+    return list(dict.fromkeys(r for r in revs if isinstance(r, str) and REVIEWER_ID_RE.fullmatch(r)))
 
 
 def keep_reviewers(final: Path, tmp: Path) -> None:

@@ -181,11 +181,11 @@ class BuildTests(Tmp):
         pkg = self.build()
         rec = json.loads((pkg / pp.RECORD).read_text(encoding="utf-8"))
         self.assertNotIn("reviewers", rec)
-        rec["reviewers"] = ["alyssia", "au1", "alyssia", "Bad Id", 5]
+        rec["reviewers"] = ["alyssia", "au1", "j.doe", "1st-x", "alyssia", "Bad Id", "J.Doe", ".x", 5]
         (pkg / pp.RECORD).write_text(json.dumps(rec), encoding="utf-8")
         self.build()
         again = json.loads((pkg / pp.RECORD).read_text(encoding="utf-8"))
-        self.assertEqual(again["reviewers"], ["alyssia", "au1"])
+        self.assertEqual(again["reviewers"], ["alyssia", "au1", "j.doe", "1st-x"])   # the roster id rule (auth.ID_RE)
         self.assertEqual(check_record(again, load_schemas()), [])
         self.assertEqual([p.name for p in self.root.iterdir() if p.name != pp.META_LOCK_DIR], [PKG])
         (pkg / pp.RECORD).write_text("{not json", encoding="utf-8")       # unreadable: rebuilt without reviewers

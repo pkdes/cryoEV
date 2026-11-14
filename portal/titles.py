@@ -33,8 +33,8 @@ MAX_DEPTH = 4
 MAX_JSON_BYTES = 1_000_000  # review_package.json and friends are tiny; a larger file is skipped, not parsed
 SCAN_TTL = 15.0  # seconds a scan_packages result is reused (admin polls, label pages)
 SKIP_DIRS = ("pred_", "_", ".", "SANDBOX")  # "." = .building_* (a build in progress), .meta_locks (reviewers lock)
-BLIND_KINDS = ("compare",)
-BUILDING = ".building"  # <review root>/.building/<name>/: the portal's build of <name> is in progress (review_build.py)  # who decided what is never shown for these (a compare without purpose "revise" is blind)
+BLIND_KINDS = ("compare",)  # who decided what is never shown for these (is_blind: a revise compare with no _work_ isn't)
+BUILDING = ".building"  # <review root>/.building/<name>/: the portal's build of <name> is in progress (review_build.py)
 SKIP_KINDS = ("part", "prediction")
 
 _cache: dict = {}

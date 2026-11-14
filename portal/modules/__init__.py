@@ -86,7 +86,8 @@ def load(ctx: Ctx, names=None):
     for name in (discover() if names is None else names):
         mod = importlib.import_module(f"portal.modules.{name}")
         prefix, roles = getattr(mod, "PREFIX", None), tuple(getattr(mod, "ROLES", ()) or ())
-        if not isinstance(prefix, str) or not PREFIX_RE.match(prefix) or prefix in RESERVED or prefix in seen                 or "/" + prefix.split("/")[1] in RESERVED:
+        if not isinstance(prefix, str) or not PREFIX_RE.match(prefix) or prefix in RESERVED or prefix in seen \
+                or "/" + prefix.split("/")[1] in RESERVED:
             raise ValueError(f"portal module {name}: bad or duplicate PREFIX {prefix!r}")
         if not roles or any(r not in A.ROLES for r in roles):
             raise ValueError(f"portal module {name}: ROLES must be a non-empty subset of {A.ROLES}")

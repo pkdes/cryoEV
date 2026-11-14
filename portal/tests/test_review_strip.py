@@ -166,7 +166,8 @@ class StripThroughThePortal(unittest.TestCase):
         self.rows = [row(AUDIT, kind="audit", title="Audit fixture", needs_you=True),
                      row(REVISE, title="Revise fixture"), row(CORE, kind="audit", title="Core audit", open_url="/review/")]
 
-        def fake_list(cfg, user, can_see, *, show_all=False, access_mode=False):
+        def fake_list(cfg, user, can_see, *, show_all=False, access_mode=False, with_facets=True):
+            self.assertFalse(with_facets)                       # fixer 7: the strip never computes facets
             self.calls.append((user.get("id"), show_all, access_mode))
             return list(self.rows)
         for name, fn in (("list_reviews", fake_list), ("switcher_groups", groups_of)):

@@ -128,7 +128,8 @@
    "type": "array",
    "items": {
     "type": "string",
-    "pattern": "^[a-z0-9_]+$"
+    "pattern": "^[a-z0-9][a-z0-9_.-]{0,39}$",
+    "description": "portal roster ids (portal/auth.py ID_RE), e.g. j.doe"
    },
    "uniqueItems": true
   },

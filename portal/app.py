@@ -1196,7 +1196,7 @@ def build_strip(cfg, user: dict, current_id, access_mode: bool = False) -> str:
     switcher groups, render_strip. Raises on any error (review_strip turns that into no strip)."""
     from portal import review_index as RI       # looked up per call: B1's module, and the tests' fakes
     rows = RI.list_reviews(cfg, user, M.Ctx.can_see, show_all=(user or {}).get("role") == "admin",
-                           access_mode=access_mode)
+                           access_mode=access_mode, with_facets=False)       # the strip never shows facets
     groups = RI.switcher_groups(rows, current_id, per_group=STRIP_PER_GROUP)
     return render_strip(rows, current_id, groups)
 
