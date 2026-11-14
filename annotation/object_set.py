@@ -18,7 +18,8 @@ build is a dry run (checks, then the plan) unless --do; the registry line is wri
 explicit --registry. Built in a temp folder (.building_*) and renamed into place, so a half-built set is never served.
 
 The package (a prediction package restricted to the listed objects; served as pred_ by multi_review_server):
-  data.js        D.kind = "objects", D.schema (labels/schemas.to_page), D.outline_mode, D.items = [{id, image, obj,
+  data.js        D.kind = "objects", D.title (the maker's name for the set), D.blind (true when columns are hidden:
+                 a flag only, never their names or values), D.schema (labels/schemas.to_page), D.outline_mode, D.items = [{id, image, obj,
                  crop[, also]}] in a seeded shuffled order: id an opaque 5-hex id, image the data.js image stem
                  (<nnnn>), obj the object's package key (g<id>), crop [x0, y0, x1, y1] normalized to the image,
                  also (target+contained only) the keys of the objects inside the target. D.images carry only the
@@ -28,7 +29,10 @@ The package (a prediction package restricted to the listed objects; served as pr
   prediction_package.json, labels.coco.json, review_package.json (last: "complete"), .review_key, images/
 Blind rule: data.js, the images and every HTTP response hold no items CSV value except the item's id, image, obj
 and crop. A blind column may not be the image / line / particle column, and may not hold a value the page or
-/api/meta shows anyway (a sample label, an image's file or original name): refused at build.
+/api/meta shows anyway (a sample label, an image's file or original name): refused at build, before (the plan)
+and after the package is written (check_blind_shown: every leaf of review_meta.package_meta and data.js's split,
+file names and classes, numbers compared by value).
+Export CSV cells starting with = + - @ tab CR or ' get a leading ' (spreadsheet formulas); import_csv drops it.
 
 Object key (contract C5): (image, 0-based line index in the prediction .txt, counting every line, blank ones too).
 --particle-col maps a poster particle_id to its line through <ps>/adopted/particle_lines.csv (written by
@@ -70,6 +74,8 @@ CONTAIN = 0.99                    # target+contained: >= 99 % of the object's pi
 CROP_PAD, CROP_MIN_1440 = 1.6, 60  # crop side = 1.6 x the target's longer side, >= 60 px at 1440 wide (poster)
 MAX_ITEMS = 2000
 COL_MAX = 64
+TITLE_MAX = 60
+CSV_RISKY = ("=", "+", "-", "@", "\t", "\r", "'")   # a cell starting with one gets a ' (spreadsheet formulas)
 PARTICLES_CSV = Path("adopted") / "particle_lines.csv"   # jobs/predict_set.py adopt
 
 
@@ -272,8 +278,9 @@ def plan(ps_dir, items_csv, schema, image_col="image", line_col=None, particle_c
 
 def build(ps_dir, items_csv, schema, review_root, image_col="image", line_col=None, particle_col=None,
           blind_cols=(), outline_mode="target", slug=None, seed=None, owner=None, reviewers=(),
-          registry_root=None, width=1440, quality=72, built_by="cli") -> Path:
-    """Build the object set (module doc) under review_root. -> its folder. Registering is separate (register())."""
+          registry_root=None, width=1440, quality=72, built_by="cli", title=None) -> Path:
+    """Build the object set (module doc) under review_root. -> its folder. Registering is separate (register()).
+    title: the set's name as its maker typed it (data.js D.title and the record's title; default the slug)."""
     P = plan(ps_dir, items_csv, schema, image_col, line_col, particle_col, blind_cols, outline_mode, registry_root)
     owner = owner or P["req"].get("owner")
     if not pp.OWNER_RE.match(owner or ""):
@@ -286,6 +293,7 @@ def build(ps_dir, items_csv, schema, review_root, image_col="image", line_col=No
     if not SLUG_RE.match(slug):
         raise ObjectSetError(f"slug {slug!r} must match {SLUG_RE.pattern}")
     seed = secrets.randbits(32) if seed is None else int(seed)
+    title = " ".join(str(title if title is not None else slug).split())[:TITLE_MAX] or slug
     review_root = Path(review_root)
     for _ in range(50):
         pid = f"{PREFIX}{slug}_{secrets.token_hex(2)}"
@@ -296,7 +304,8 @@ def build(ps_dir, items_csv, schema, review_root, image_col="image", line_col=No
     final = review_root / pid
     tmp = review_root / f".building_{pid}_{secrets.token_hex(4)}"
     try:
-        _build_into(tmp, final, P, owner, revs, seed, width, quality, built_by)
+        _build_into(tmp, final, P, owner, revs, seed, width, quality, built_by, title)
+        check_blind_shown(tmp, P)
         if final.exists():
             raise FileExistsError(f"{final} appeared during the build")
         tmp.rename(final)
@@ -307,7 +316,60 @@ def build(ps_dir, items_csv, schema, review_root, image_col="image", line_col=No
     return final
 
 
-def _build_into(out, final, P, owner, reviewers, seed, width, quality, built_by):
+def _norm_value(v) -> str:
+    """A value as compared for the blind rule: numbers by value (1.4724 == "1.47240"), text stripped."""
+    t = str(v).strip()
+    try:
+        f = float(t)
+    except ValueError:
+        return t
+    return repr(f) if f == f and abs(f) != float("inf") else t
+
+
+def _leaves(x, out: set):
+    if isinstance(x, dict):
+        for v in x.values():
+            _leaves(v, out)
+    elif isinstance(x, (list, tuple)):
+        for v in x:
+            _leaves(v, out)
+    elif isinstance(x, bool) or x is None:
+        return
+    elif isinstance(x, (str, int, float)):
+        t = _norm_value(x)
+        if t:
+            out.add(t)
+
+
+def shown_values(pkg) -> set:
+    """Every value the page or /api/meta shows for a built package: each leaf of review_meta.package_meta (session,
+    nm/px, sample, original names...) and data.js's per-image strings (split, file name and stem, gt classes)."""
+    from annotation import review_meta
+    out = set()
+    _leaves(review_meta.package_meta(Path(pkg)), out)
+    data = om.read_datajs(pkg)
+    for im in data.get("images") or []:
+        _leaves([im.get("split"), im.get("file"), Path(str(im.get("file") or "")).stem], out)
+        _leaves([g.get("c") for g in im.get("gt") or []], out)
+    return out
+
+
+def check_blind_shown(pkg, P):
+    """Refuse (ObjectSetError) a blind column holding a value the built package shows anyway (shown_values)."""
+    if not P["blind"]:
+        return
+    shown = shown_values(pkg)
+    bad = []
+    for c in P["blind"]:
+        hit = sorted(({_norm_value(r.get(c) or "") for r in P["rows"]} - {""}) & shown)
+        if hit:
+            bad.append(f"blind column {c!r} holds values the page or its image info shows anyway (e.g. {hit[0]!r}): "
+                       "not blind; drop it from --blind-cols")
+    if bad:
+        raise ObjectSetError("refused:\n  - " + "\n  - ".join(bad))
+
+
+def _build_into(out, final, P, owner, reviewers, seed, width, quality, built_by, title=None):
     (out / "images").mkdir(parents=True)
     doc, mode = P["schema"], P["outline_mode"]
     print(f"[steps] object set: {len(P['keys'])} objects on {len(P['by_image'])} images; schema {doc['id']}; "
@@ -380,7 +442,7 @@ def _build_into(out, final, P, owner, reviewers, seed, width, quality, built_by)
     data = {"id": pid, "kind": "objects", "prediction_set": P["ps_id"], "model": P["model"], "owner": owner,
             "source": f"prediction_set:{P['ps_id']}", "run": P["model"], "created": built,
             "categories": pp.PRED_CLASSES + pp.EXTRA_CLASSES, "schema": S.to_page(doc), "outline_mode": mode,
-            "items": pub, "images": images}
+            "title": title or pid, "blind": bool(P["blind"]), "items": pub, "images": images}
     brp.write_packages(out, data, part_size=0, zip_it=False)
     (out / SCHEMA_FILE).write_bytes(S.canonical_bytes(doc))
     pp._write_json(out / ITEMS, {
@@ -405,7 +467,8 @@ def registry_record(pkg, data, built, doc, P, owner, reviewers, built_by="cli") 
             "base_kind": "prediction_set", "model": P["model"], "run": None, "label_schema": doc["id"],
             "n_items": len(data["items"]), "n_images": len(data["images"]), "blind_cols": list(P["blind"]),
             "outline_mode": P["outline_mode"], "reviewers": list(reviewers), "owner": owner, "built_by": built_by,
-            "built": built, "tool": TOOL, "status": "built", "prediction_set": P["ps_id"]}
+            "built": built, "tool": TOOL, "status": "built", "prediction_set": P["ps_id"],
+            "title": data.get("title") or data["id"]}
 
 
 def register(pkg, registry_root) -> dict:
@@ -493,21 +556,34 @@ def table(pkg) -> dict:
     return {"columns": cols, "rows": rows, "schema": doc}
 
 
+def _cell(v) -> str:
+    """A CSV cell: a value starting with a formula character (CSV_RISKY) gets a leading ' (import_csv drops it)."""
+    t = _enc(v)
+    return "'" + t if t.startswith(CSV_RISKY) else t
+
+
+def _uncell(t: str) -> str:
+    return t[1:] if t.startswith("'") else t
+
+
 def to_csv(tab: dict) -> str:
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
-    w.writerow(tab["columns"])
+    w.writerow([_cell(c) for c in tab["columns"]])
     for r in tab["rows"]:
-        w.writerow([_enc(r.get(c)) for c in tab["columns"]])
+        w.writerow([_cell(r.get(c)) for c in tab["columns"]])
     return buf.getvalue()
 
 
-def import_csv(path_or_text, schema: dict) -> dict:
+def import_csv(path_or_text, schema: dict, items: dict | None = None) -> dict:
     """An exported CSV -> the same table (typed values), checked against the schema: the attribute columns'
-    values, agree_* (true / false / empty), schema_id and version. Raises ObjectSetError."""
+    values, agree_* (true / false / empty), schema_id and version; with items (the set's items.json) each row's
+    item id must be one of the set's, with its own image, obj and line. Raises ObjectSetError."""
     text = Path(path_or_text).read_text(encoding="utf-8-sig") if isinstance(path_or_text, Path) else path_or_text
     rd = csv.reader(io.StringIO(text))
     cols = next(rd, None)
+    cols = [_uncell(c) for c in cols] if cols else cols
+    known = {it["id"]: it for it in (items or {}).get("items") or []} if items is not None else None
     if not cols or cols[:4] != ["item", "image", "obj", "line"]:
         raise ObjectSetError("not an object set export (first columns item, image, obj, line)")
     attr = {a["id"]: a for a in schema.get("object_attrs") or []}
@@ -516,7 +592,7 @@ def import_csv(path_or_text, schema: dict) -> dict:
         if len(vals) != len(cols):
             raise ObjectSetError(f"row {n}: {len(vals)} values for {len(cols)} columns")
         r = {}
-        for c, v in zip(cols, vals):
+        for c, v in zip(cols, map(_uncell, vals)):
             if c == "line" or c in ("last_t", "history_n", "schema_version"):
                 r[c] = int(v) if v != "" else None
             elif c.startswith("agree_") and c[6:] in attr:
@@ -528,6 +604,13 @@ def import_csv(path_or_text, schema: dict) -> dict:
         if r.get("schema_id") != schema.get("id") or r.get("schema_version") != schema.get("version"):
             raise ObjectSetError(f"row {n}: schema {r.get('schema_id')} v{r.get('schema_version')} is not "
                                  f"{schema.get('id')} v{schema.get('version')}")
+        if known is not None:
+            it = known.get(r.get("item"))
+            if it is None:
+                raise ObjectSetError(f"row {n}: item {r.get('item')!r} is not in this set")
+            if (r.get("image"), r.get("obj"), r.get("line")) != (it["image"], it["obj"], it["line"]):
+                raise ObjectSetError(f"row {n}: item {r['item']} is not image {r.get('image')!r}, object "
+                                     f"{r.get('obj')!r}, line {r.get('line')!r} in this set")
         rows.append(r)
     return {"columns": cols, "rows": rows, "schema": schema}
 
@@ -572,6 +655,7 @@ def main(argv=None):
     b.add_argument("--blind-cols", default="", help="comma-separated items CSV columns kept off the page")
     b.add_argument("--outline-mode", choices=OUTLINE_MODES, default="target")
     b.add_argument("--slug")
+    b.add_argument("--title", help="the set's name as shown on the page (default: the slug)")
     b.add_argument("--seed", type=int)
     b.add_argument("--owner")
     b.add_argument("--reviewers", default="", help="comma-separated portal ids")
@@ -605,7 +689,7 @@ def main(argv=None):
                 from data_utils import config
                 a.review_root = config.laptop_root() / "review"
             pkg = build(a.ps, a.items, a.schema, a.review_root, a.image_col, a.line_col, a.particle_col, blind,
-                        a.outline_mode, a.slug, a.seed, a.owner, revs, a.registry)
+                        a.outline_mode, a.slug, a.seed, a.owner, revs, a.registry, title=a.title)
             if a.register:
                 register(pkg, a.registry)
                 print(f"[OK] registered {pkg.name} in {a.registry}")
@@ -617,7 +701,7 @@ def main(argv=None):
                 a.coco.write_text(json.dumps(coco(a.pkg)), encoding="utf-8")
                 print(f"[OK] {a.coco}")
         else:
-            tab = import_csv(a.csv, read_schema(a.pkg))
+            tab = import_csv(a.csv, read_schema(a.pkg), read_items(a.pkg))
             print(f"[OK] {a.csv}: {len(tab['rows'])} items, schema {tab['schema']['id']} v{tab['schema']['version']}")
     except (ObjectSetError, ValueError, OSError, S.SchemaError) as ex:
         print(f"[object_set] {ex}", file=sys.stderr)

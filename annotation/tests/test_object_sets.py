@@ -496,6 +496,66 @@ class ObjectSet(unittest.TestCase):
             OS.plan(ps, items_csv(self.tmp / "ok.csv", [("0001", 0, 1, 2)]), "ls_legacy_v1", line_col="line")
         self.assertEqual(list((self.tmp / GOLDEN.name).rglob("adopted")), [])
 
+    def test_blind_values_shown_by_meta_refused(self):
+        """QC 7: a blind column whose values the built package shows anyway (review_meta: nm/px, session) is
+        refused after the build, numbers compared by value; nothing is left in the review root."""
+        ps = golden_ps(self.tmp)
+        (self.tmp / "review").mkdir()
+        for n, val in enumerate(("1.4724", "1.47240", "golden")):
+            src = items_csv(self.tmp / f"b{n}.csv", [("0001", 0, 1, val)])
+            with self.assertRaises(OS.ObjectSetError) as cm, contextlib.redirect_stdout(io.StringIO()):
+                OS.build(ps, src, "ls_lamellarity_v1", self.tmp / "review", line_col="line", blind_cols=("secret",),
+                         seed=1, owner="pujan")
+            self.assertIn("shows anyway", str(cm.exception))
+        self.assertEqual(list((self.tmp / "review").iterdir()), [])
+        # control: a value nothing shows builds
+        src = items_csv(self.tmp / "ok.csv", [("0001", 0, 1, "4.25")])
+        with contextlib.redirect_stdout(io.StringIO()):
+            OS.build(ps, src, "ls_lamellarity_v1", self.tmp / "review", line_col="line", blind_cols=("secret",),
+                     seed=1, owner="pujan")
+
+    def test_title_and_blind_flag(self):
+        """QC 4: data.js carries D.title (the maker's name) and D.blind (a flag, never the column names); the record
+        carries the title."""
+        pkg = build_set(self.tmp)
+        d = load_data(pkg)
+        self.assertIs(d["blind"], True)
+        self.assertEqual(d["title"], "lamellarity")
+        self.assertNotIn("blind_cols", d)
+        self.assertNotIn(b"gap_nm", (pkg / "data.js").read_bytes())
+        ps = self.tmp / GOLDEN.name
+        src = items_csv(self.tmp / "t.csv", [("0001", 0, 1, 2)])
+        with contextlib.redirect_stdout(io.StringIO()):
+            pkg2 = OS.build(ps, src, "ls_lamellarity_v1", self.tmp / "review", line_col="line", seed=2,
+                            owner="pujan", slug="lam", title="Lamellarity  check (Nov)")
+        d2 = load_data(pkg2)
+        self.assertEqual((d2["title"], d2["blind"]), ("Lamellarity check (Nov)", False))
+        rec = json.loads((pkg2 / pp.RECORD).read_text(encoding="utf-8"))
+        self.assertEqual(rec["title"], "Lamellarity check (Nov)")
+
+    def test_csv_formula_cells_and_item_cross_check(self):
+        """QC 12: formula-looking cells get a leading '; import_csv drops it and checks item/image/obj/line."""
+        pkg = build_set(self.tmp, rows=[(i, ln, "-5", "=HYPERLINK(1)") for i, ln in ALL10])
+        tab = OS.table(pkg)
+        r0 = tab["rows"][0]
+        r0["note@au1"] = "@cmd"
+        tab["columns"].insert(4, "note@au1")
+        text = OS.to_csv(tab)
+        self.assertIn(",'-5,'=HYPERLINK(1)", text)
+        self.assertIn(",'@cmd,", text)
+        self.assertNotIn(",=HYPERLINK", text)
+        items = OS.read_items(pkg)
+        back = OS.import_csv(text, OS.read_schema(pkg), items)
+        self.assertEqual(back["rows"][0]["secret"], "=HYPERLINK(1)")
+        self.assertEqual(back["rows"][0]["note@au1"], "@cmd")
+        self.assertEqual(OS.to_csv(back), text)
+        other = next(it for it in items["items"] if it["id"] != r0["item"])
+        for bad in (text.replace(r0["item"], "fffff", 1),                                       # not an item
+                    text.replace(f'{r0["item"]},{r0["image"]},{r0["obj"]}',
+                                 f'{r0["item"]},{r0["image"]},{other["obj"] if other["obj"] != r0["obj"] else "g99"}', 1)):
+            with self.assertRaises(OS.ObjectSetError):
+                OS.import_csv(bad, OS.read_schema(pkg), items)
+
     def test_cli_dry_run_writes_nothing(self):
         ps = golden_ps(self.tmp)
         src = items_csv(self.tmp / "items.csv", [("0001", 0, 1, 2)])

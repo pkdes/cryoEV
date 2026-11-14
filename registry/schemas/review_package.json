@@ -242,5 +242,29 @@
   "built",
   "status"
  ],
- "additionalProperties": true
+ "additionalProperties": true,
+ "allOf": [
+  {
+   "if": {
+    "properties": {
+     "built_by": {
+      "const": "cli"
+     }
+    },
+    "required": [
+     "built_by"
+    ]
+   },
+   "then": {
+    "properties": {
+     "kind": {
+      "const": "objects"
+     }
+    },
+    "required": [
+     "kind"
+    ]
+   }
+  }
+ ]
 }

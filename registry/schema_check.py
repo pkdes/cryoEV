@@ -11,7 +11,7 @@ from pathlib import Path
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 ANNOTATIONS = {"$schema", "$id", "title", "description"}
 SUPPORTED = ANNOTATIONS | {"type", "properties", "required", "additionalProperties", "items", "enum", "const",
-                           "pattern", "minimum", "uniqueItems", "maxLength", "maxItems", "minProperties"}
+                           "pattern", "minimum", "uniqueItems", "maxLength", "maxItems", "minProperties", "allOf", "if", "then"}
 TYPES = {"string": str, "integer": int, "number": (int, float), "boolean": bool, "object": dict,
          "array": list, "null": type(None)}
 
@@ -66,6 +66,10 @@ def errors(value, schema, path="$"):
                 out.append(f"{path}: unexpected field '{k}'")
             elif isinstance(extra, dict):
                 out += errors(v, extra, f"{path}.{k}")
+    for n, sub in enumerate(schema.get("allOf") or []):
+        out += errors(value, sub, path)
+    if "if" in schema and "then" in schema and not errors(value, schema["if"], path):
+        out += errors(value, schema["then"], path)
     if isinstance(value, list):
         if "items" in schema:
             for n, v in enumerate(value):
@@ -84,9 +88,11 @@ def walk(schema, path="$"):
         raise UnsupportedKeyword(f"{path}: unsupported keyword(s) {sorted(bad)}")
     for k, sub in (schema.get("properties") or {}).items():
         walk(sub, f"{path}.{k}")
-    for key in ("items", "additionalProperties"):
+    for key in ("items", "additionalProperties", "if", "then"):
         if isinstance(schema.get(key), dict):
             walk(schema[key], f"{path}[{key}]")
+    for n, sub in enumerate(schema.get("allOf") or []):
+        walk(sub, f"{path}.allOf[{n}]")
 
 
 def load_schemas(schema_dir=SCHEMA_DIR):
