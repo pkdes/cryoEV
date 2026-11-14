@@ -9,7 +9,8 @@ and B1's hub call it):
         Every row is filtered through reviews.may_open BEFORE it is built, and built from this field allowlist only
         (never review_package.json "meta", "cards", "path", decoy counts, or who/via on audits):
           id          package folder name ("sandbox" for the practice sandbox)
-          kind        "prediction" | "label_review" | "audit" | "sandbox"
+          kind        "prediction" | "objects" | "label_review" | "audit" | "sandbox"  (objects: round 14, an object
+                      set, pred_obj_* / review_package.json kind "objects"; its cards / decided are items)
           title       readable name
           made_from   short text ("v5 F5 · 677 images · Session 20261106-2")
           owner       portal id, or None on audits and the sandbox
@@ -54,11 +55,12 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-KINDS = ("prediction", "label_review", "audit", "sandbox")
+KINDS = ("prediction", "objects", "label_review", "audit", "sandbox")
 STATUSES = ("not_started", "in_progress", "finished", "applied")
-KIND_NAMES = {"prediction": "Prediction", "label_review": "Label set", "audit": "Audit", "sandbox": "Practice"}
-KIND_GROUPS = {"prediction": "Prediction reviews", "label_review": "Label set reviews", "audit": "Blind audits",
-               "sandbox": "Practice"}
+KIND_NAMES = {"prediction": "Prediction", "objects": "Object set", "label_review": "Label set", "audit": "Audit",
+              "sandbox": "Practice"}
+KIND_GROUPS = {"prediction": "Prediction reviews", "objects": "Object sets", "label_review": "Label set reviews",
+               "audit": "Blind audits", "sandbox": "Practice"}
 STATUS_NAMES = {"not_started": "Not started", "in_progress": "In progress", "finished": "Finished",
                 "applied": "Applied"}
 SANDBOX_ID = "sandbox"
@@ -68,6 +70,7 @@ REGISTRY_STATUS = {"built": "not_started", "in_review": "in_progress", "reviewed
 FIELDS = ("id", "kind", "title", "made_from", "owner", "reviewers", "role", "status", "cards", "decided", "n_images",
           "last", "open_url", "go_url", "mode", "needs_you", "can_assign", "blind", "via", "facets")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+OBJECTS_PREFIX = "pred_obj_"   # contract C4: an object set's folder (served like any pred_ package)
 
 
 def _read_json(p: Path):
@@ -120,9 +123,12 @@ def _same(a: Path, b: Path | None) -> bool:
 
 
 def kind_of(pkg_id: str, meta: dict, pkg_dir=None) -> str:
-    """prediction (pred_*); audit (a blind compare package: titles.is_blind, i.e. any compare package except one with
-    purpose "revise" and no _work_<name> folder); else label_review."""
+    """objects (round 14: review_package.json kind "objects", or a pred_obj_* folder); prediction (pred_*); audit (a
+    blind compare package: titles.is_blind, i.e. any compare package except one with purpose "revise" and no
+    _work_<name> folder); else label_review."""
     from portal import titles as TT
+    if meta.get("kind") == "objects" or pkg_id.startswith(OBJECTS_PREFIX):
+        return "objects"
     if pkg_id.startswith("pred_") or meta.get("kind") == "prediction":
         return "prediction"
     if TT.is_blind(meta, pkg_dir):
@@ -151,6 +157,8 @@ def _title(pkg_id, meta, kind, records, req) -> str:
             return name
     if _str(meta.get("title")):
         return meta["title"].strip()
+    if kind == "objects":
+        return _str(meta.get("name")) or f"Object set {pkg_id[len(OBJECTS_PREFIX):] or pkg_id}"
     if kind == "label_review" and meta.get("kind") == "compare":
         a, b = _compare_sides(meta)
         return f"Revise {a} against {b}"
@@ -181,12 +189,30 @@ def _made_from(meta, kind, req) -> str:
     if kind == "label_review" and meta.get("kind") == "compare":
         a, b = _compare_sides(meta)
         return " · ".join(x for x in (f"{b} vs {a}", _images(n)) if x)
+    if kind == "objects":                               # "Object set · ls_lamellarity_v1 · 155 items" (never blind values)
+        return objects_made_from(meta)
     out = REV.made_from(meta)
     src = (req or {}).get("source") if isinstance((req or {}).get("source"), dict) else {}
     sess = _str(src.get("session")) if src.get("kind") != "upload" else None
     if kind == "prediction" and sess:
         out = " · ".join(x for x in (out, f"Session {sess}") if x)
     return out
+
+
+def schema_of(meta) -> str | None:
+    """An object set's label schema id: `label_schema`, else `schema` when it names a schema (ls_...), never the
+    registry line's own "review_package/1" tag."""
+    for k in ("label_schema", "schema"):
+        v = _str(meta.get(k)) if isinstance(meta, dict) else None
+        if v and v.startswith("ls_"):
+            return v
+    return None
+
+
+def objects_made_from(meta) -> str:
+    n = meta.get("n_items") if isinstance(meta.get("n_items"), int) and not isinstance(meta.get("n_items"), bool) else None
+    items = None if n is None else f"{n} item{'' if n == 1 else 's'}"
+    return " · ".join(x for x in ("Object set", schema_of(meta), items) if x)
 
 
 def _status(pkg_id, records, applied, decided, cards, last_edit) -> str:

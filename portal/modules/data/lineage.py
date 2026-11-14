@@ -26,7 +26,7 @@ KIND_TO_NODE = {"session": "session", "grid": "grid", "images": "images", "label
                 "model": "model"}
 STEP_NAMES = {"model": "Model", "run": "Training run", "dataset": "Dataset", "label": "Label version",
               "export": "Roboflow export", "pull": "Roboflow download", "images": "Image set", "grid": "Grid",
-              "session": "Imaging session", "source": "Source", "hidden": "Step"}
+              "session": "Imaging session", "source": "Source", "hidden": "Step", "schema": "Label schema"}
 NODE_THUMB_KIND = {"session": "session", "grid": "grid", "images": "images", "label": "labels", "dataset": "dataset"}
 HINT_TO_NODE = {"roboflow_export": "export", "export": "export", "label_version": "label", "lv": "label",
                 "pull": "pull", "review_package": "images", "package": "images", "prediction_set": "images",
@@ -272,6 +272,21 @@ class Lineage:
             return self.walk(spec[1], spec[2], path, depth, spec[3] if len(spec) > 3 else None)
         if spec[0] == "more":
             return self.node("source", None, "more", f"and {spec[1]} more {spec[2]}", note=None)
+        if spec[0] == "schema":                             # round 14: an object set's label schema (a leaf)
+            from portal.modules.data import labelmeta as LM
+            from portal.modules.data.labelpages import schema_href
+            sid = spec[1]
+            sch = LM.load_schema(sid, getattr(self.viewer.cfg, "registry", None) if self.viewer.cfg else None)
+            if not sch:
+                return self.node("schema", None, "unknown", sid, note="This label schema is not registered.",
+                                 chips=[("Unknown", "warn")], recorded=sid)
+            v = sch.get("version")
+            return self.node("schema", sid, title=str(sch.get("name") or sid), url=schema_href(sid),
+                             chips=[(f"v{v}", "acc")] if isinstance(v, int) and not isinstance(v, bool) else [],
+                             fields=present(field("Made by", _text(sch.get("maker"))),
+                                            field("Attributes", ", ".join(str(_dict(a).get("label") or _dict(a).get("id"))
+                                                                          for a in _list(sch.get("object_attrs"))
+                                                                          if _dict(a).get("id")) or None)))
         if spec[0] == "untraced":                           # listed images no image record places in a session
             n = spec[1]
             return self.node("session", None, "unknown", "Session unknown", images=n,
@@ -540,6 +555,11 @@ class Lineage:
                     seen.add(ref_id)
                     specs.append(ref_spec(self.records, self.viewer, ref_id, hint))
             specs += input_specs(self.records, self.viewer, rec, seen)
+            if entity == "review_package" and rec.get("kind") == "objects":     # round 14: its label schema
+                from portal.modules.data.labelpages import object_set_schema
+                sid = object_set_schema(rec)
+                if sid:
+                    specs.append(("schema", sid))
             if not specs:
                 specs = [unknown_spec("source", "The registry does not say what this package was made from.")]
         model, n = _text(rec.get("model")), image_count_of(rec)
@@ -549,7 +569,15 @@ class Lineage:
             field("Created", short_date(_when(rec))),
             field("Model", model, self.link("model", model) if model else None),
             field("Folder", _text(rec.get("path")) if self.admin and entity == "review_package" else None))
+        if entity == "review_package" and rec.get("kind") == "objects":         # round 14: who answers it
+            revs = [r for r in _list(rec.get("reviewers")) if isinstance(r, str)]
+            n_items = rec.get("n_items")
+            fields += present(field("Items", str(n_items) if isinstance(n_items, int) and not isinstance(n_items, bool)
+                                    else None),
+                              field("Reviewers", ", ".join(revs) or None))
         chips = [(SET_KIND_NAMES[entity], "acc")]
+        if entity == "review_package" and rec.get("kind") == "objects":
+            chips.append(("Object set", ""))
         if entity == "prediction_set":
             chips.append(("Labels: automatic", ""))
         elif entity == "review_package":            # #16: a review sits between label sets until it is applied

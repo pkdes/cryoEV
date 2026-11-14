@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-13.1";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-14.1";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const h = document.querySelector("header"), inPortal = /^\/review\//.test(location.pathname), v = document.createElement("span");
   v.id = "pageVer"; v.style.cssText = "font-size:11px;color:var(--mute);white-space:nowrap"; v.textContent = "Review page " + PAGE_VERSION;
@@ -283,6 +283,54 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #grpDlg .row button{min-height:44px;font-size:15px;padding:4px 16px}
 #grpOk.danger{background:#dc2626;border-color:#dc2626;color:#fff}
 #grpErr{color:var(--warn)}
+/* ===== OBJECT SET CARD (round 14, D.kind "objects"): its own view (#obj); no other view uses these rules ===== */
+#obj{position:fixed;inset:0;z-index:15;display:flex;flex-direction:column;background:var(--bg);overflow:hidden;padding:env(safe-area-inset-top,0px) 0 env(safe-area-inset-bottom,0px)}
+#obj[hidden],#oBlind[hidden],#oKeys[hidden],#oOff[hidden]{display:none}
+#obj .otbar{display:flex;align-items:center;gap:8px;padding:8px 12px 4px}
+#obj .otbar .round{width:38px;height:38px;font-size:17px;flex:none}
+#oPos{font-weight:700;font-size:15px;font-variant-numeric:tabular-nums;white-space:nowrap}
+#oItem{font:12px ui-monospace,monospace;color:var(--mute);border:1px solid var(--line);border-radius:8px;padding:1px 7px;white-space:nowrap}
+#oTitle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center;font-weight:600}
+#oWho{max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#oBar{height:6px;margin:2px 12px 6px;border-radius:3px;background:var(--line);overflow:hidden;flex:none}
+#oBar>i{display:block;height:100%;width:0;background:var(--acc)}
+#oBlind{margin:0 12px 6px;padding:6px 10px;border-radius:8px;background:#fef3c7;color:#78350f;border:1px solid #f59e0b;font-weight:600;font-size:12.5px;flex:none}
+@media (prefers-color-scheme:dark){#oBlind{background:#3b2a06;color:#fcd34d}}
+#oMain{flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;overflow:auto;padding:0 12px 10px}
+#oCard{position:relative;flex:none;height:min(48vh,420px);border-radius:16px;overflow:hidden;background:#000;box-shadow:0 6px 24px rgba(0,0,0,.35)}
+#oCard canvas{display:block;width:100%;height:100%}
+#oOutl{position:absolute;left:10px;top:10px;border-radius:14px;padding:4px 11px;font-size:12.5px;font-weight:600;background:rgba(0,0,0,.6);color:#fff;border:1px solid rgba(255,255,255,.35)}
+#oOutl.off{background:#fff;color:#000;border-color:#fff}
+#oAttrs{display:flex;flex-direction:column;gap:14px;min-width:0}
+#oAttrs .oRow h3{margin:0 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute);display:flex;gap:8px;align-items:baseline}
+#oAttrs .oRow h3 .req{text-transform:none;letter-spacing:0;font-weight:500;color:var(--warn)}
+#oAttrs .oRow h3 .req.ok{color:#16a34a}
+#oAttrs .oBtns{display:flex;flex-wrap:wrap;gap:7px}
+#oAttrs .oBtns button{min-height:46px;min-width:52px;padding:6px 13px;border-radius:10px;font-size:14.5px;font-weight:600;touch-action:manipulation}
+#oAttrs .oBtns button.on{background:var(--acc);border-color:var(--acc);color:#fff}
+#oAttrs kbd{font:11px ui-monospace,monospace;opacity:.75;margin-left:7px;border:1px solid currentColor;border-radius:4px;padding:0 4px}
+#oAttrs .oNote{display:flex;gap:6px}
+#oAttrs .oNote input{flex:1;min-width:0;min-height:44px;font:inherit;font-size:15px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+#oOff{color:var(--warn);font-size:12.5px}
+#oFoot{display:flex;align-items:center;gap:10px;padding:8px 12px 10px;border-top:1px solid var(--line);background:var(--panel);flex:none}
+#oFoot button{min-height:46px;border-radius:23px;padding:0 18px;font-size:15px;font-weight:600;touch-action:manipulation}
+#oNext.on{background:var(--acc);border-color:var(--acc);color:#fff}
+#oSaved{flex:1;text-align:center;font-weight:600;color:var(--mute)}
+#oSaved[data-state="saved"]{color:#16a34a}
+#oKeys{text-align:center;font-size:11.5px;color:var(--mute);padding:0 12px 8px;background:var(--panel);flex:none}
+@media (hover:none) and (pointer:coarse){#oKeys{display:none!important}}
+#oList{position:fixed;left:0;top:0;bottom:0;z-index:30;width:min(300px,85vw);display:none;flex-direction:column;background:var(--panel);border-right:1px solid var(--line);box-shadow:0 0 24px rgba(0,0,0,.45)}
+#oList.show{display:flex}
+#oList .tlh{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--mute);border-bottom:1px solid var(--line)}
+#oItems{flex:1;min-height:0;overflow:auto;padding:6px;display:flex;flex-direction:column;gap:4px}
+#oItems button{display:flex;justify-content:space-between;gap:8px;text-align:left;padding:7px 10px;border-radius:8px;min-height:40px;flex:none}
+#oItems .st{font-size:11.5px;color:var(--mute)}#oItems .done .st{color:#16a34a}
+#oItems .cur{border-color:var(--acc);background:color-mix(in srgb,var(--acc) 16%,var(--panel))}
+@media (min-width:901px){
+  #oMain{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(330px,1fr);grid-template-rows:minmax(0,1fr);overflow:hidden;padding-top:4px}
+  #oCard{height:auto;min-height:320px}
+  #oAttrs{overflow:auto;padding-right:4px}
+}
 </style>
 </head>
 <body>
@@ -421,6 +469,25 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
   </div>
   <div id="triKeys" hidden></div>
 </section>
+<!-- ===== OBJECT SET CARD (round 14, D.kind "objects"): shown instead of the Editor and the cards; see the script block ===== -->
+<section id="obj" aria-label="Object set" hidden>
+  <nav id="oList" aria-label="Items"><div class="tlh"><span>Items: click one to go to it</span><button id="oListX" title="Close the list">✕</button></div><div id="oItems"></div></nav>
+  <div class="otbar">
+    <button id="oListBtn" class="round" title="All items">☰</button>
+    <span id="oPos"></span><span id="oItem"></span>
+    <span id="oTitle"></span>
+    <span id="oSync" class="badge">local only</span>
+    <button id="oWho" class="badge" title="Your reviewer name">👤</button>
+  </div>
+  <div id="oBar" role="progressbar" aria-label="items done by you" aria-valuemin="0"><i></i></div>
+  <div id="oBlind" role="note" hidden>Blind set · measured sizes and gaps are hidden until it's closed</div>
+  <div id="oMain">
+    <div id="oCard"><canvas id="ocv"></canvas><button id="oOutl" title="Show / hide the outline (i)">Outlines on · i</button></div>
+    <div id="oAttrs"></div>
+  </div>
+  <div id="oFoot"><button id="oPrev" title="Previous item (←)">← back</button><span id="oSaved" role="status"></span><button id="oNext" title="Next item (→)">next →</button></div>
+  <div id="oKeys">← → move · Enter = next unlabelled · Backspace = undo · i = outline on/off</div>
+</section>
 <div id="imgDlg" role="dialog" aria-modal="true" aria-labelledby="imgDlgTitle" hidden>
   <div class="box">
     <h2 id="imgDlgTitle">Image</h2>
@@ -468,10 +535,23 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 const D = window.REVIEW_DATA;
 if (!D) { document.body.innerHTML = '<p style="padding:20px">data.js is missing. Keep index.html, data.js and images/ together in one folder.</p>'; return; }
 // Classes are the Roboflow project's names, in hotkey order 1-8; any other class in data.js comes after.
-const CLASS_ORDER = ["EV", "Low conf EV", "MV", "inner", "Incomplete", "Overlapping", "VLDL", "non-EV"];
+// Round 14: a package with a label schema (D.schema, labels/schemas/*.json) takes its classes, colours and keys from
+// it, in the schema's order. Without D.schema every line below gives exactly the old values (the legacy path).
+const SCHEMA = D.schema && typeof D.schema === "object" && !Array.isArray(D.schema) ? D.schema : null;
+const COLOR_OK = v => typeof v === "string" && /^#[0-9a-fA-F]{6}$/.test(v);  // a schema colour goes into a style: checked
+const SCHEMA_CLASSES = SCHEMA && Array.isArray(SCHEMA.classes) ? SCHEMA.classes.filter(c => c && typeof c.name === "string" && c.name.trim()) : [];
+const CLASS_ORDER = SCHEMA_CLASSES.length ? [...new Set(SCHEMA_CLASSES.map(c => c.name))]
+  : ["EV", "Low conf EV", "MV", "inner", "Incomplete", "Overlapping", "VLDL", "non-EV"];
 const CATS = [...CLASS_ORDER, ...(D.categories || []).filter(c => !CLASS_ORDER.includes(c) && c !== "items-nfaR")];
 const CLASS_COLOR = {"EV": "#4ade80", "Low conf EV": "#a78bfa", "MV": "#f87171", "inner": "#f472b6", "Incomplete": "#fb923c",
   "Overlapping": "#60a5fa", "VLDL": "#d4a373", "non-EV": "#e5e7eb"};
+for (const c of SCHEMA_CLASSES) if (COLOR_OK(c.color)) CLASS_COLOR[c.name] = c.color;
+// Class hotkeys: the schema's own keys when it gives every class one (single characters), else 1-9 by position.
+const SCHEMA_KEYS = SCHEMA_CLASSES.length && SCHEMA_CLASSES.every(c => typeof c.key === "string" && c.key.length === 1)
+  ? Object.fromEntries(SCHEMA_CLASSES.map(c => [c.key, c.name])) : null;
+const catForKey = k => SCHEMA_KEYS ? (Object.prototype.hasOwnProperty.call(SCHEMA_KEYS, k) ? SCHEMA_KEYS[k] : undefined)
+  : /^[1-9]$/.test(k) ? CATS[+k - 1] : undefined;
+const catKey = (c, k) => SCHEMA_KEYS ? (Object.keys(SCHEMA_KEYS).find(x => SCHEMA_KEYS[x] === c) || "") : k < 9 ? String(k + 1) : "";
 const EXTRA_COLORS = ["#34d399", "#fde68a", "#93c5fd", "#fca5a5"];
 const catColor = c => CLASS_COLOR[c] || EXTRA_COLORS[Math.max(0, CATS.indexOf(c)) % EXTRA_COLORS.length];
 // Offered but missing from this package's categories: marked, since a COCO export must add the category.
@@ -500,6 +580,7 @@ if (typeof D.cand_conf === "number" && isFinite(D.cand_conf)) {
 // Prediction packages: the Labels layer is what Results counts and the Predictions layer is the unsure candidates.
 // Words for them live in PW (the labeling package keeps the old ones); applyPredictionWording() sets the static text once.
 const isPredPkg = D.kind === "prediction";
+let OBJ = null;  // round 14: the object set card view (D.kind "objects", the OBJECT SET CARD block below); null on every other package
 const pctOf = (v, d) => Math.round((typeof v === "number" && isFinite(v) ? v : d) * 100) + "%";
 const PW = isPredPkg ? {lab: "counted", pr: "unsure", prFlag: "unsure outline", run: "Model", fg: "counted outlines with no unsure match", fp: "unsure outlines with no counted outline", fx: "class disagreements with the model", flc: "Low conf EV outlines with no match", noMatch: "no counted outline matches it", sel: "unsure outline", dropLab: "counted outline"}
   : {lab: "labels", pr: "predictions", prFlag: "prediction", run: "Predictions", fg: "labels with no prediction", fp: "predictions with no label", fx: "class disagreements with the model", flc: "Low conf EV labels with no match", noMatch: "no label matches it", sel: "prediction", dropLab: "label"};
@@ -758,7 +839,7 @@ const snapOf = e => JSON.stringify({gt: e.gt, gtT: e.gtT, dec: e.dec});
 function restoreSnap(im, snap) {  // undo: revert only entries this tab wrote since the snapshot; others' newer ones stay
   const s = JSON.parse(snap), e = ensureEdit(im);
   for (const k of Object.keys(e.dec)) {
-    if (k.startsWith("i:")) continue;  // the image's reject / note are never part of an object step: set in their own dialog
+    if (k.startsWith("i:") || k.startsWith("a:")) continue;  // the image's reject / note, and attribute decisions (a:, round 14 C3), are never part of an object step
     const cur = e.dec[k], was = s.dec && s.dec[k];
     if ((was && cur.t === was.t) || !mine.has(im.file + "\n" + k + "\n" + cur.t)) continue;
     if (was) setDec(e, k, was.v, was.p, was.note);
@@ -957,7 +1038,7 @@ let hover = null;
 const statusOf = im => {  // rejected (i:reject) first; an image note alone (i:note) doesn't make an image edited
   const e = edits[im.file];
   if (rejectOf(im.file)) return "rejected";
-  return e && e.reviewed ? "reviewed" : e && (e.modified || Object.entries(e.dec || {}).some(([k, d]) => d.v && !k.startsWith("i:"))) ? "edited" : "unreviewed";
+  return e && e.reviewed ? "reviewed" : e && (e.modified || Object.entries(e.dec || {}).some(([k, d]) => d.v && !k.startsWith("i:") && !k.startsWith("a:"))) ? "edited" : "unreviewed";
 };
 const FLAG_COUNTS = [["fg", FLAG.gu, PW.fg], ["fp", FLAG.pu, PW.fp], ["fx", FLAG.x, PW.fx], ["flc", FLAG.lc, PW.flc]];
 const flagRank = im => (im.fg || 0) + (im.fp || 0) + (im.fx || 0);  // flc is shown, but doesn't rank (spec)
@@ -1026,7 +1107,7 @@ function renderSide() {
     box.innerHTML = `<div>Label <b style="color:${catColor(a.c)}">${esc(a.c)}</b>${a.id == null ? " (new)" : ""}${flagText(a, false)}</div>` +
       (sd ? `<div class="sept" title="${esc(sd)}">Sept: carried from the September review</div>` : "");
     const s = document.createElement("select");
-    CATS.forEach((c, k) => { const o = new Option(`${k+1}. ${c}${c === "Low conf EV" && capOn("t") ? " (= EV + Low conf)" : ""}`, c); o.selected = c === a.c; s.add(o); });
+    CATS.forEach((c, k) => { const o = new Option(`${catKey(c, k) ? catKey(c, k) + ". " : ""}${c}${c === "Low conf EV" && capOn("t") ? " (= EV + Low conf)" : ""}`, c); o.selected = c === a.c; s.add(o); });
     s.onchange = () => setCat(s.value);
     const del = document.createElement("button"); del.textContent = "Delete label"; del.onclick = deleteSel;
     const rd = document.createElement("button"); rd.id = "redrawBtn"; rd.textContent = "Redraw outline (E)"; rd.title = "Trace a new outline for this label (keeps its class and id)";
@@ -1072,7 +1153,7 @@ function renderSide() {
   }
 }
 function legend() {
-  $("legend").innerHTML = CATS.map((c, k) => `<div${isNewCls(c) ? ` class="newcls" title="${NEW_TIP}"` : ""}><span style="background:${catColor(c)}"></span>${k < 9 ? k + 1 + ". " : ""}${esc(c)}${isNewCls(c) ? " (new class)" : ""}</div>`).join("");
+  $("legend").innerHTML = CATS.map((c, k) => `<div${isNewCls(c) ? ` class="newcls" title="${NEW_TIP}"` : ""}><span style="background:${catColor(c)}"></span>${catKey(c, k) ? esc(catKey(c, k)) + ". " : ""}${esc(c)}${isNewCls(c) ? " (new class)" : ""}</div>`).join("");
   const sw = st => `<span class="sw"><i style="border-top:${st}"></i></span>`;
   $("flagLegend").innerHTML = [
     [sw("1.5px dashed #22d3ee"), PW.prFlag],
@@ -1092,7 +1173,7 @@ function renderChips() {
   const bar = $("chipBar"), selG = selObj();
   bar.innerHTML = "";
   CATS.forEach((c, k) => {
-    const b = document.createElement("button"); b.textContent = (k < 9 ? k + 1 + " " : "") + c;
+    const b = document.createElement("button"); b.textContent = (catKey(c, k) ? catKey(c, k) + " " : "") + c;
     b.style.color = catColor(c); b.className = [c === curCls ? "on" : "", isNewCls(c) ? "newcls" : ""].join(" ").trim();
     if (selG && selG.c === c) b.style.background = "rgba(255,255,255,.18)";
     b.title = (sel ? `Reclass the selection as ${c}` : `New shapes: ${c}`) + (isNewCls(c) ? ` · ${NEW_TIP}` : "")
@@ -1685,6 +1766,7 @@ document.addEventListener("keydown", ev => {
   if (!$("imgDlg").hidden) { if (ev.key === "Escape") closeImg(); return; }  // the image's reject / note: no hotkeys
   if (!$("grpDlg").hidden) { if (ev.key === "Escape") closeGroup(); return; }  // a sample / montage action: no hotkeys
   if (!$("setPop").hidden) { if (ev.key === "Escape") $("setPop").hidden = true; return; }  // settings open: no hotkeys
+  if (OBJ) return OBJ.key(ev);  // an object set: its own keys (the OBJECT SET CARD block)
   if (!$("tri").hidden) return triKey(ev);
   if (ev.target.tagName === "SELECT" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "INPUT" && ev.target.type !== "checkbox" && ev.target.type !== "range") return;
   const k = ev.key;
@@ -1706,7 +1788,7 @@ document.addEventListener("keydown", ev => {
   else if (k === "t" || k === "T") { $("showPr").checked = !$("showPr").checked; draw(); }
   else if (k === "h" || k === "H") { const on = !($("showGt").checked || $("showPr").checked); $("showGt").checked = on; $("showPr").checked = on; draw(); }
   else if ((k === "z" || k === "Z") && !ev.shiftKey) { if (mode === "tap" && draft && draft.length) { draft.splice(-2, 2); renderSide(); draw(); } else undo(); }
-  else if (/^[1-9]$/.test(k) && CATS[+k - 1]) setCat(CATS[+k - 1]);
+  else if (catForKey(k)) setCat(catForKey(k));
 });
 $("prev").onclick = () => step(-1); $("next").onclick = () => step(1);
 $("mSel").onclick = () => setMode("select"); $("mDraw").onclick = () => setMode("draw"); $("mTap").onclick = () => setMode("tap");
@@ -2046,7 +2128,7 @@ function triRender() {
     CATS.forEach((cl, k) => {
       const b = document.createElement("button"); b.style.setProperty("--c", catColor(cl));
       b.className = [cl === g.c ? "cur" : "", isNewCls(cl) ? "newcls" : ""].join(" ").trim(); if (isNewCls(cl)) b.title = NEW_TIP;
-      b.innerHTML = `${k < 9 ? k + 1 + ". " : ""}${esc(cl)}` + (pm && pm.c === cl && cl !== g.c ? "<small>model</small>" : cl === g.c ? "<small>now</small>" : "");
+      b.innerHTML = `${catKey(cl, k) ? esc(catKey(cl, k)) + ". " : ""}${esc(cl)}` + (pm && pm.c === cl && cl !== g.c ? "<small>model</small>" : cl === g.c ? "<small>now</small>" : "");
       b.onclick = () => pick(act, cl, cl === g.c ? `kept ${cl}` : `now ${cl}`);
       $("triCls").appendChild(b);
     });
@@ -2523,8 +2605,8 @@ function triKey(ev) {
   }
   if (ev.key === "e" || ev.key === "E") return startAdjust();
   const k = ev.key, c = tri.queue[tri.pos], cm = clsMode();
-  if (/^[1-9]$/.test(k) && CATS[+k - 1] && c) {
-    const cl = CATS[+k - 1];
+  if (catForKey(k) && c) {
+    const cl = catForKey(k);
     pick(c.kind === "p" ? "add" : "keep", cl, c.kind === "p" ? `added as ${cl}` : `now ${cl}`);
   }
   else if (ev.ctrlKey || ev.metaKey) return;  // leave Ctrl+A / Ctrl+X to the browser
@@ -2692,6 +2774,7 @@ function syncBadge(err) {
   b.style.color = err ? "var(--warn)" : dirty.size ? "" : "#16a34a";
   $("sync2").textContent = b.textContent; $("sync2").style.color = b.style.color;
   savedState();
+  if (OBJ) OBJ.saved();
 }
 function scheduleSync(ms = 800) { if (!server) return; clearTimeout(syncTimer); syncTimer = setTimeout(sync, ms); syncBadge(); }
 // Entries saved without a name (older versions allowed it) that the server doesn't have yet: they are this browser's,
@@ -2734,6 +2817,7 @@ async function pull() {  // bring in other reviewers' decisions (and who is look
   for (const [file, l] of Object.entries(edits))
     if (!(file in remote) && (l.modified || l.reviewed || Object.keys(l.dec || {}).length)) dirty.add(file);
   persist();
+  if (OBJ) return OBJ.render();  // an object set: only its card view is on screen
   if (!$("tri").hidden && !g0 && !tri.busy) { if (!leaveTaken() && triSig() !== tri.sig) triRender(); }  // re-render only on a change
   else if ($("tri").hidden) { renderList(); renderImgBox(); renderGroupBox(); draw(); }
 }
@@ -2748,6 +2832,7 @@ async function loadCaps() {
   applyCaps();
 }
 function applyCaps() {
+  if (OBJ) return OBJ.render();  // an object set: the Editor and cards are never shown
   $("helpL").hidden = !capOn("t"); $("helpI").hidden = !capOn("i");
   $("fStat").querySelector('option[value="rejected"]').hidden = !capOn("i");
   legend(); renderList(); renderSide(); draw();
@@ -2759,7 +2844,7 @@ async function connect() {
   catch (e) { syncBadge(); }
 }
 setInterval(async () => {  // claims: cards poll; the Editor renews its claim on the open image and shows others' in the queue
-  if (!server) return;
+  if (!server || OBJ) return;  // an object set claims nothing (its 20 s pull below still runs)
   if (!$("tri").hidden) { try { await pull(); } catch (e) {} return; }  // cards: claims and decisions, so taken / decided cards are left
   const was = JSON.stringify(claims);
   await (Date.now() - claimT > 40000 ? postClaim(curImg().file + "|editor") : pullClaims());
@@ -2768,19 +2853,272 @@ setInterval(async () => {  // claims: cards poll; the Editor renews its claim on
 setInterval(() => { if (server) pull().then(() => { if (dirty.size) sync(); }).catch(() => syncBadge(true)); }, 20000);
 window.addEventListener("online", () => scheduleSync(100));
 
+// ======================================================================================================================
+// OBJECT SET CARD (round 14, contracts C2-C4): one block, so it can move to its own file later. Runs only when
+// D.kind === "objects" (annotation/object_set.py); every other package never reaches it (OBJ stays null).
+//   D.schema.object_attrs  the attribute rows (choice / ordinal = buttons with key hints, bool = toggle, text = note)
+//   D.items                [{id (opaque), image (stem), obj (package object key g<id> / p<k>), crop [x0,y0,x1,y1]}]
+//   D.blind_cols / D.blind when set: the amber blind banner (the hidden values are never in data.js)
+//   D.outline_mode         "target" (default: only the item's own outline) or "target+contained"
+// Every tap saves at once: a decision a:<obj>:<attr>@<me> on the item's image record (the server overwrites @<rid>
+// from the signed-in identity). Attribute keys never count as object edits (statusOf, restoreSnap). Only this
+// reviewer's own answers are read back; others' are never shown. Saving needs the server's "a" cap (/api/ping).
+// Every schema text goes in with textContent; schema keys are matched as plain strings.
+// ======================================================================================================================
+function makeObjectView() {
+  const ATTR_KINDS = ["choice", "ordinal", "bool", "text"], RESERVED = ["ArrowLeft", "ArrowRight", "Enter", "Backspace", "i"];
+  const txt = (v, max = 40) => String(v == null ? "" : v).slice(0, max);
+  const okKey = k => typeof k === "string" && k.length === 1 && !RESERVED.includes(k) && k !== "I";
+  const attrs = (SCHEMA && Array.isArray(SCHEMA.object_attrs) ? SCHEMA.object_attrs : [])
+    .filter(a => a && typeof a.id === "string" && /^[a-z][a-z0-9_]{0,15}$/.test(a.id) && a.id !== "class" && ATTR_KINDS.includes(a.kind))
+    .map(a => ({id: a.id, label: txt(a.label || a.id), kind: a.kind, required: a.required === true,
+      key: okKey(a.key) ? a.key : "",
+      max: Math.min(300, Number.isInteger(a.max) && a.max > 0 ? a.max : 300),
+      options: (Array.isArray(a.options) ? a.options : []).filter(o => o && (typeof o.v === "string" || typeof o.v === "number"))
+        .map(o => ({v: String(o.v), label: txt(o.label != null ? o.label : o.v), key: okKey(o.key) ? o.key : ""}))}));
+  const keymap = {};  // key -> {a, o?}; the first claim wins (labels/schemas.py refuses duplicates anyway)
+  for (const a of attrs) {
+    if ((a.kind === "bool" || a.kind === "text") && a.key && !keymap[a.key]) keymap[a.key] = {a};
+    if (a.kind === "choice" || a.kind === "ordinal") for (const o of a.options) if (o.key && !keymap[o.key]) keymap[o.key] = {a, o};
+  }
+  const required = attrs.filter(a => a.required);
+  const byStem = new Map();
+  for (const im of D.images || []) { byStem.set(im.file, im); byStem.set(stemOf(im.file), im); }
+  const items = (Array.isArray(D.items) ? D.items : []).filter(it => it && typeof it.id === "string" && byStem.has(String(it.image)));
+  const blind = (Array.isArray(D.blind_cols) && D.blind_cols.length > 0) || D.blind === true;
+  const contained = D.outline_mode === "target+contained";
+  const POS_KEY = KEY + ":objpos";
+  const st = {pos: 0, outlines: true, img: null, imgSrc: "", ready: false, undo: []};
+  const imOf = it => byStem.get(String(it.image));
+  const can = () => capOn("a") && server;
+  const akey = (it, a) => `a:${it.obj}:${a.id}@${me()}`;
+  const mineOf = (it, a) => { const d = me() ? decOf(imOf(it).file, akey(it, a)) : null; return d && d.v != null && d.v !== "" ? d.v : null; };
+  const isDone = it => required.length ? required.every(a => mineOf(it, a) != null) : attrs.some(a => mineOf(it, a) != null);
+  const nDone = () => items.filter(isDone).length;
+  const ringsOf = (im, key) => {  // the package object's outline (normalized rings): g<id> = a counted label, p<k> = unsure
+    if (/^g\d+$/.test(key)) { const g = (im.gt || []).find(x => String(x.id) === key.slice(1)); return g ? g.p : null; }
+    if (/^p\d+$/.test(key)) { const p = (im.pr || [])[+key.slice(1)]; return p ? p.p : null; }
+    return null;
+  };
+  function cropOf(it, im, ring) {  // normalized [x0, y0, x1, y1]: the item's crop (normalized, or pixels), else 3x the outline
+    const c = Array.isArray(it.crop) && it.crop.length === 4 && it.crop.every(v => typeof v === "number" && isFinite(v)) ? it.crop : null;
+    if (c && c[2] > c[0] && c[3] > c[1]) {
+      if (Math.max(...c) <= 1.5) return c;
+      const w = im.w || (st.img && st.img.naturalWidth) || 1, h = im.h || (st.img && st.img.naturalHeight) || 1;
+      return [c[0] / w, c[1] / h, c[2] / w, c[3] / h];
+    }
+    if (!ring) return [0, 0, 1, 1];
+    const [x0, y0, x1, y1] = ringBox(ring), mx = (x0 + x1) / 2, my = (y0 + y1) / 2, r = Math.max(x1 - x0, y1 - y0) * 1.5;
+    return [mx - r, my - r, mx + r, my + r];
+  }
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const cv = $("ocv"), cx = cv.getContext("2d");
+
+  function draw() {
+    const it = items[st.pos], b = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    cv.width = Math.max(1, Math.round(b.width * dpr)); cv.height = Math.max(1, Math.round(b.height * dpr));
+    cx.setTransform(dpr, 0, 0, dpr, 0, 0); cx.fillStyle = "#000"; cx.fillRect(0, 0, b.width, b.height);
+    if (!it) return;
+    const im = imOf(it);
+    if (st.imgSrc !== im.src) {
+      st.imgSrc = im.src; st.ready = false; st.img = new Image();
+      st.img.onload = () => { st.ready = true; draw(); };
+      st.img.src = im.src;
+      const nx = items[st.pos + 1]; if (nx) (new Image()).src = imOf(nx).src;
+    }
+    if (!st.ready) return;
+    const Wi = st.img.naturalWidth, Hi = st.img.naturalHeight, rings = ringsOf(im, String(it.obj)), ring = rings && rings[0];
+    const [x0, y0, x1, y1] = cropOf(it, im, ring), cw = (x1 - x0) * Wi, ch = (y1 - y0) * Hi;
+    const s = Math.min(b.width / cw, b.height / ch), ox = (b.width - cw * s) / 2 - x0 * Wi * s, oy = (b.height - ch * s) / 2 - y0 * Hi * s;
+    cx.imageSmoothingEnabled = true; cx.drawImage(st.img, ox, oy, Wi * s, Hi * s);
+    if (!st.outlines || !rings) return;
+    const path = rg => { cx.beginPath(); for (let k = 0; k < rg.length; k += 2) { const X = rg[k] * Wi * s + ox, Y = rg[k + 1] * Hi * s + oy; k ? cx.lineTo(X, Y) : cx.moveTo(X, Y); } cx.closePath(); };
+    if (contained && ring) {  // other objects of this image whose centre is inside the target: drawn thinner, green
+      const others = [...(im.gt || []).map(g => ["g" + g.id, g.p]), ...(im.pr || []).map((p, k) => ["p" + k, p.p])];
+      cx.strokeStyle = "#4ade80"; cx.lineWidth = 1.6;
+      for (const [k, ps] of others) {
+        if (k === String(it.obj) || !Array.isArray(ps) || !ps[0]) continue;
+        const r0 = ps[0]; let mx = 0, my = 0; for (let j = 0; j < r0.length; j += 2) { mx += r0[j]; my += r0[j + 1]; }
+        mx /= r0.length / 2; my /= r0.length / 2;
+        if (pip(mx, my, ring)) for (const rg of ps) { path(rg); cx.stroke(); }
+      }
+    }
+    cx.strokeStyle = "#38bdf8"; cx.lineWidth = 2.2;
+    for (const rg of rings) { path(rg); cx.stroke(); }
+  }
+
+  function setAttr(it, a, v) {  // one tap = one saved decision; the same choice again clears it
+    if (!it || !can()) return;
+    if (!needWho(() => setAttr(it, a, v))) return;
+    const im = imOf(it), e = ensureEdit(im), k = akey(it, a), prev = e.dec[k] ? clone(e.dec[k]) : null;
+    let nv = v;
+    if (a.kind === "text") { nv = String(v == null ? "" : v).trim().slice(0, a.max); if (!nv) nv = null; }
+    else if (a.kind === "bool") nv = v ? true : false;
+    else if (mineOf(it, a) === v) nv = null;
+    if ((prev ? prev.v : null) === nv) return;
+    setDec(e, k, nv);
+    st.undo.push({file: im.file, key: k, prev, t: e.dec[k].t, pos: st.pos});
+    if (st.undo.length > 200) st.undo.shift();
+    touch(im.file); render();
+  }
+  function undo() {  // Backspace: the last attribute this tab set, unless it changed since
+    const u = st.undo.pop(); if (!u) return;
+    const e = edits[u.file], d = e && e.dec[u.key];
+    if (!d || d.t !== u.t) return render();
+    setDec(e, u.key, u.prev ? u.prev.v : null); touch(u.file);
+    st.pos = u.pos; render();
+  }
+  function go(n) {
+    if (!items.length) return;
+    st.pos = Math.max(0, Math.min(items.length - 1, n));
+    try { localStorage.setItem(POS_KEY, items[st.pos].id); } catch (e) {}
+    render();
+  }
+  function nextOpen() {  // Enter: the next item this reviewer hasn't finished (wrapping), else stay
+    for (let k = 1; k <= items.length; k++) { const n = (st.pos + k) % items.length; if (!isDone(items[n])) return go(n); }
+    render();
+  }
+
+  function rowFor(it, a, on) {
+    const row = el("div", "oRow"), h = el("h3"); h.dataset.attr = a.id;
+    h.append(el("span", null, a.label));
+    if (a.required) { const ok = mineOf(it, a) != null; h.append(el("span", "req" + (ok ? " ok" : ""), ok ? "✓" : "required")); }
+    row.append(h);
+    if (a.kind === "text") {
+      const box = el("div", "oNote"), inp = el("input");
+      inp.type = "text"; inp.maxLength = a.max; inp.dataset.attr = a.id; inp.disabled = !on;
+      inp.placeholder = a.key ? `${a.label} (${a.key}; Enter saves)` : `${a.label} (Enter saves)`;
+      const cur = mineOf(it, a); inp.value = cur == null ? "" : String(cur);
+      inp.onchange = () => setAttr(it, a, inp.value);
+      inp.onkeydown = ev => {
+        if (ev.key === "Enter") { ev.preventDefault(); inp.blur(); }
+        else if (ev.key === "Escape") { const c = mineOf(it, a); inp.value = c == null ? "" : String(c); inp.blur(); }
+        ev.stopPropagation();
+      };
+      box.append(inp); row.append(box); return row;
+    }
+    const btns = el("div", "oBtns");
+    const add = (label, key, isOn, fn) => {
+      const b = el("button", isOn ? "on" : ""); b.type = "button"; b.disabled = !on; b.setAttribute("aria-pressed", isOn ? "true" : "false");
+      b.append(document.createTextNode(label)); if (key) b.append(el("kbd", null, key));
+      b.onclick = fn; btns.append(b);
+    };
+    if (a.kind === "bool") { const v = mineOf(it, a) === true; add(v ? `${a.label}: yes` : a.label, a.key, v, () => setAttr(it, a, !v)); }
+    else for (const o of a.options) add(o.label, o.key, mineOf(it, a) === o.v, () => setAttr(it, a, o.v));
+    row.append(btns); return row;
+  }
+
+  function saved() {
+    const it = items[st.pos], s = $("oSaved"); if (!s) return;
+    const f = it && imOf(it).file;
+    s.textContent = !server ? "Saved in this browser only" : f && dirty.has(f) ? "Saving…" : "Saved ✓";
+    s.dataset.state = !server ? "local" : f && dirty.has(f) ? "pending" : "saved";
+    $("oSync").textContent = $("sync").textContent; $("oSync").style.color = $("sync").style.color;
+  }
+  function renderList() {
+    const box = $("oItems"); box.textContent = "";
+    items.forEach((it, n) => {
+      const d = isDone(it), set = attrs.filter(a => mineOf(it, a) != null).length;
+      const b = el("button", [n === st.pos ? "cur" : "", d ? "done" : ""].join(" ").trim()); b.type = "button"; b.dataset.n = n;
+      b.append(el("span", null, `${n + 1}. item ${txt(it.id, 12)}`), el("span", "st", d ? "done ✓" : set ? `${set} of ${attrs.length}` : "—"));
+      box.append(b);
+    });
+  }
+  function render() {
+    const it = items[st.pos], on = can(), f = document.activeElement;
+    const typing = !!(f && f.tagName === "INPUT" && f.closest && f.closest("#oAttrs"));
+    const n = items.length, done = nDone();
+    $("oPos").textContent = n ? `${st.pos + 1} / ${n}` : "0 / 0";
+    $("oItem").textContent = it ? "item " + txt(it.id, 12) : "";
+    $("oItem").title = "Items have opaque ids; the order is shuffled";
+    $("oTitle").textContent = PKG_TITLE;
+    $("oBar").firstElementChild.style.width = (n ? 100 * done / n : 0) + "%";
+    $("oBar").setAttribute("aria-valuemax", String(n)); $("oBar").setAttribute("aria-valuenow", String(done));
+    $("oBar").title = `${done} of ${n} done by you`;
+    $("oWho").textContent = "👤 " + (me() ? dispName(me()) : "set name");
+    $("oOutl").textContent = st.outlines ? "Outlines on · i" : "Outlines off · i"; $("oOutl").classList.toggle("off", !st.outlines);
+    $("oPrev").disabled = st.pos <= 0; $("oNext").disabled = st.pos >= n - 1;
+    $("oNext").classList.toggle("on", !!it && isDone(it));
+    const box = $("oAttrs");
+    if (typing && it) {  // typing a note: leave the rows alone (a pull mid-typing must not wipe it); only the marks
+      for (const h of box.querySelectorAll("h3[data-attr]")) {
+        const a = attrs.find(x => x.id === h.dataset.attr), r = h.querySelector(".req");
+        if (a && r) { const ok = mineOf(it, a) != null; r.textContent = ok ? "✓" : "required"; r.className = "req" + (ok ? " ok" : ""); }
+      }
+    } else {
+      box.textContent = "";
+      if (!it) box.append(el("p", null, "This object set has no items."));
+      else {
+        if (!on) { const p = el("p", null, server ? "This review server can't save attributes yet (no “a” in its /api/ping caps). Nothing is saved."
+          : "Open this set from the review server to answer: attributes save only there."); p.id = "oOff"; box.append(p); }
+        for (const a of attrs) box.append(rowFor(it, a, on));
+        if (!attrs.length) box.append(el("p", null, "This set's label schema has no object attributes."));
+      }
+    }
+    if ($("oList").classList.contains("show")) renderList();
+    saved(); draw();
+  }
+  function key(ev) {
+    if (ev.target.tagName === "INPUT" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "SELECT") return;
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    const k = ev.key, it = items[st.pos];
+    if (k === "ArrowRight") { ev.preventDefault(); go(st.pos + 1); }
+    else if (k === "ArrowLeft") { ev.preventDefault(); go(st.pos - 1); }
+    else if (k === "Enter") { ev.preventDefault(); nextOpen(); }
+    else if (k === "Backspace") { ev.preventDefault(); undo(); }
+    else if (k === "i" || k === "I") { st.outlines = !st.outlines; render(); }
+    else if (k === "Escape") $("oList").classList.remove("show");
+    else {
+      const hit = Object.prototype.hasOwnProperty.call(keymap, k) ? keymap[k] : null;
+      if (!hit || !it) return;
+      ev.preventDefault();
+      if (hit.a.kind === "text") { const inp = [...$("oAttrs").querySelectorAll("input[data-attr]")].find(x => x.dataset.attr === hit.a.id); if (inp && !inp.disabled) inp.focus(); }
+      else if (hit.a.kind === "bool") setAttr(it, hit.a, mineOf(it, hit.a) !== true);
+      else setAttr(it, hit.a, hit.o.v);
+    }
+  }
+  async function connectObjects() {
+    if (!location.protocol.startsWith("http")) return render();
+    try { await pull(); await loadCaps(); server = true; syncBadge(); sync(); } catch (e) { syncBadge(); }
+    render();
+  }
+  function start() {
+    $("app").style.display = "none"; $("tri").hidden = true; $("obj").hidden = false;
+    document.title = PKG_TITLE;
+    $("oBlind").hidden = !blind;
+    let want = null; try { want = localStorage.getItem(POS_KEY); } catch (e) {}
+    const at = want ? items.findIndex(it => it.id === want) : -1;
+    st.pos = at >= 0 ? at : Math.max(0, items.findIndex(it => !isDone(it)));
+    $("oPrev").onclick = () => go(st.pos - 1); $("oNext").onclick = () => go(st.pos + 1);
+    $("oOutl").onclick = () => { st.outlines = !st.outlines; render(); };
+    $("oWho").onclick = () => openWho();
+    $("oListBtn").onclick = () => { $("oList").classList.toggle("show"); renderList(); };
+    $("oListX").onclick = () => $("oList").classList.remove("show");
+    $("oItems").onclick = ev => { const b = ev.target.closest("button[data-n]"); if (b) { go(+b.dataset.n); $("oList").classList.remove("show"); } };
+    window.addEventListener("resize", draw);
+    render(); connectObjects();
+  }
+  return {start, render, key, saved, go, state: () => ({pos: st.pos, n: items.length, done: nDone(), outlines: st.outlines, can: can(),
+    item: items[st.pos] ? {...items[st.pos]} : null, attrs: attrs.map(a => a.id), keys: Object.keys(keymap), blind, contained,
+    mine: items[st.pos] ? Object.fromEntries(attrs.map(a => [a.id, mineOf(items[st.pos], a)])) : {}, undo: st.undo.length})};
+}
+if (D.kind === "objects") OBJ = makeObjectView();
+// ===================================================== end OBJECT SET CARD =====================================================
+
 if (!window.ResizeObserver) window.addEventListener("resize", resize);  // else the observer below covers it
 // The stage is the grid's 1fr row under a header that can wrap (the where bar, a narrow window, a sandbox bar): a
 // change in its height alone is no window resize, so the canvas's backing store follows the stage's own box.
 if (window.ResizeObserver) new ResizeObserver(() => resize()).observe(stage);
 const deep = parseDeep();
-renderWhere(); applyPredictionWording(); legend(); renderList(); resize(); if (deep) openDeep(deep); else go(order.length ? order[0] : 0); hint(); connect();
+if (OBJ) OBJ.start();  // an object set opens on its card view, never the Editor
+else { renderWhere(); applyPredictionWording(); legend(); renderList(); resize(); if (deep) openDeep(deep); else go(order.length ? order[0] : 0); hint(); connect(); }
 peopleP = loadPeople(); peopleP.then(() => { if (!me()) openWho(); });  // asked once; the name is then remembered
 let startMode = null; try { startMode = localStorage.getItem("cryoev-review:mode"); } catch (e) {}
 { const m = new URLSearchParams(location.search).get("mode");  // a link with &mode=classes|cards|editor picks the view
   if (m === "classes" || m === "cls" || m === "cards") startMode = "tri"; else if (m === "editor") startMode = "editor"; }
 if (deep) startMode = "editor";  // a deep link always opens the Editor on its object
-if (startMode === "tri" || (!startMode && window.matchMedia("(max-width: 700px)").matches)) openTri();
-window.__review = {D, CATS, effGt, gtOf, mergeEdit, pull, materialize, edits: () => edits, caps: () => [...caps], openImg, statusOf,
+if (!OBJ && (startMode === "tri" || (!startMode && window.matchMedia("(max-width: 700px)").matches))) openTri();
+window.__review = {D, CATS, obj: () => OBJ && OBJ.state(), effGt, gtOf, mergeEdit, pull, materialize, edits: () => edits, caps: () => [...caps], openImg, statusOf,
   meta: () => meta, groups: () => groups, openGroup, stepSample, loadMeta, triGo: n => { tri.pos = n; tri.zoom = 0; tri.picked = null; triRender(); }, render: () => { renderList(); renderSide(); draw(); if (!$("tri").hidden) triRender(); }, state: () => ({mode, sel, curCls, redrawKey, cur, vsel: [...vSel()], order, view: {...view}, W, H, imgReady, server, dirty: dirty.size,
   who: me(), tri: {mode: tri.mode, pos: tri.pos, queue: tri.queue, ready: tri.ready, picked: tri.picked || null, zoom: tri.zoom, wk: tri.wt ? tri.wt.k : 1, xfs: tri.xf ? tri.xf.s : 0, hist: (tri.hist || []).length,
   histIds: (tri.hist || []).slice(), busy: !!tri.busy, xf: tri.xf ? {...tri.xf} : null,

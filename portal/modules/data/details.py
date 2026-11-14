@@ -22,6 +22,7 @@ from portal.modules.data.records import (
     review_folder, review_note, session_files, session_images, session_tags, set_images, set_is_visible, set_title,
     short_date, slot_sort_key, split_counts, status_tags, status_word, _text, thumb_version, upload_images,
     visible_set, _when, who_label, _actor_module)
+from portal.modules.data.labelpages import classmap_href, object_set_schema, schema_href
 
 
 # ---------------------------------------------------------------- detail dicts (one source for page and API)
@@ -338,6 +339,7 @@ def derived_from(records, viewer, provenance) -> list:
 
 
 LAB_PACKAGE_ID = re.compile(r"^lab_[A-Za-z0-9][A-Za-z0-9_.-]{0,120}$")
+OBJECT_SET_ID = re.compile(r"^pred_obj_[A-Za-z0-9][A-Za-z0-9_.-]{0,110}$")   # round 14, contract C4
 
 
 def disk_reviewers(records, package_id):
@@ -384,12 +386,26 @@ def detail_images(records, entity, record, viewer, page) -> dict:
         field("Splits", split_counts(record)), field("Classes", class_names(record)),
         field("Review package", package_shown,
               entity_href("images", package_shown) if package_shown in records["review_package"] else None))
+    chips = [(SET_KIND_NAMES[entity], "acc")]
+    is_objects = entity == "review_package" and record.get("kind") == "objects"
+    if is_objects:                              # round 14: an object set (contract C4): its schema, items, outlines
+        sid = object_set_schema(record)
+        n_items = record.get("n_items")
+        fields[1:1] = present(
+            field("Label schema", sid, schema_href(sid) if sid else None),
+            field("Items", str(n_items) if isinstance(n_items, int) and not isinstance(n_items, bool) else None),
+            field("Outlines on cards", {"target": "target object only", "target+contained":
+                                        "target object and the objects inside it"}.get(record.get("outline_mode"))),
+            field("Blind", "yes: measured columns hidden from reviewers until it is closed"
+                  if _list(record.get("blind_cols")) else None))
+        chips.append(("Object set", ""))
     open_review = None                          # round 13: through the Reviews hub's go route (it checks access)
-    if entity == "review_package" and (PREDICTION_PACKAGE_ID.match(set_id) or LAB_PACKAGE_ID.match(set_id)):
+    if entity == "review_package" and (PREDICTION_PACKAGE_ID.match(set_id) or LAB_PACKAGE_ID.match(set_id)
+                                       or (is_objects and OBJECT_SET_ID.match(set_id))):
         open_review = f"/reviews/go/{quote(set_id, safe='')}"
     elif package_shown and PREDICTION_PACKAGE_ID.match(package_shown):
         open_review = f"/reviews/go/{quote(package_shown, safe='')}"
-    detail = make_detail("images", set_id, set_title(records, entity, record), [(SET_KIND_NAMES[entity], "acc")], fields,
+    detail = make_detail("images", set_id, set_title(records, entity, record), chips, fields,
                          set_kind=entity, review_url=open_review)
     if entity == "roboflow_export":
         detail["note"] = "Thumbnails are not shown for Roboflow exports."
@@ -473,6 +489,8 @@ def detail_dataset(records, record, viewer, page) -> dict:
         field("Status", status_word(record["status"]) if _text(record.get("status")) else None),
         field("Created", short_date(_when(record))), field("Splits (images)", split_counts(record)),
         field("Classes", class_names(record)),
+        field("Class map", _text(record.get("class_map_id")),                 # round 14: built with --class-map
+              classmap_href(record["class_map_id"]) if _text(record.get("class_map_id")) else None),
         field("Label version", label, entity_href("labels", label) if label in records["label_version"] else None),
         field("Source", ("Not visible to you" if source_hidden else source_id or _text(source.get("kind")))
               if source else None,
