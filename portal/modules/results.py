@@ -798,6 +798,9 @@ def sample_table(res: dict) -> str:
             + "".join(f'<p class="cj-mut cj-results-note">{esc(n)}</p>' for n in notes))
 
 
+LEFT_TH = ' class="cj-results-l"'      # #80e: headers of left-aligned (text) columns
+
+
 def image_table(res: dict) -> str:
     imgs = res["images"]
     if not imgs:
@@ -811,7 +814,8 @@ def image_table(res: dict) -> str:
                     f'<td class="cj-results-l">{esc(str(i.get("sample_label")))}</td><td>{image_chip(i, counted)}</td>'
                     f'<td>{esc(fint(i.get("ev")))}</td><td>{esc(fint(i.get("multilayer")))}</td>'
                     f'<td>{esc(fint(i.get("inner")))}</td><td>{esc(fint(i.get("nonev")))}</td></tr>')
-    th = "".join(f'<th scope="col">{esc(h)}</th>' for h in head)
+    # #80e: a header sits on the same side as its cells (the Sample cells are left-aligned text)
+    th = "".join(f'<th scope="col"{LEFT_TH if h == "Sample" else ""}>{esc(h)}</th>' for h in head)
     return (f'<details class="cj-results-det" id="cj-results-images"><summary>{esc(f"Per image ({len(imgs)})")}'
             f'</summary><div class="cj-results-wrap"><table class="cj-results-tab cj-results-img">'
             f'<thead><tr>{th}</tr></thead><tbody>{"".join(rows)}</tbody></table></div></details>')
@@ -1013,8 +1017,9 @@ def steps_panel(cfg, ps: dict, res: dict, user: dict, busy: bool) -> str:
                         f'<td data-label="Summary" class="cj-results-l">{esc(str(summ))}</td></tr>')
         out.append(f'<p class="cj-mut">{esc("Recipe: " + recipe_text(doc) + (" (default)" if doc.get("default") else ""))}</p>')
         out.append('<div class="cj-results-wrap"><table class="cj-results-tab cj-results-stack" id="cj-results-steptab">'
-                   '<thead><tr><th scope="col">Step</th><th scope="col">Settings</th><th scope="col">Adds per object</th>'
-                   f'<th scope="col">Summary</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>')
+                   '<thead><tr><th scope="col">Step</th><th scope="col" class="cj-results-l">Settings</th>'
+                   '<th scope="col" class="cj-results-l">Adds per object</th>'
+                   f'<th scope="col" class="cj-results-l">Summary</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>')
         n = doc.get("n_objects")
         if may_get_objects(cfg, ps, user):
             out.append(f'<p class="cj-results-dlmain"><a class="cj-results-btn" id="cj-results-objects" '
@@ -1051,8 +1056,8 @@ def recipe_form(ps_id: str, doc) -> str:
 
 
 def parse_recipe_form(values) -> list:
-    """['nesting:1', ...] from the form -> a recipe (DEFAULT_RECIPE + the chosen optional steps, in STEPS order).
-    ValueError on anything that is not a known optional step."""
+    """['nesting:1', ...] from the form -> a recipe (DEFAULT_RECIPE + the chosen optional steps and the steps they
+    need, in STEPS order: nesting_tree adds nesting v1). ValueError on anything that is not a known optional step."""
     ST = _steps_mod()
     chosen = set()
     for v in values:
@@ -1060,6 +1065,7 @@ def parse_recipe_form(values) -> list:
         if not ver.isdigit() or (name, int(ver)) not in ST.STEPS or name in ST.REQUIRED:
             raise ValueError(f"unknown step {v!r}")
         chosen.add((name, int(ver)))
+    chosen = set(ST.with_needs(chosen)) - {tuple(e) for e in ST.DEFAULT_RECIPE}
     recipe = [tuple(e) for e in ST.DEFAULT_RECIPE] + [k for k in ST.STEPS if k in chosen]
     ST.validate_recipe(recipe)
     return recipe
