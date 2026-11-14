@@ -65,7 +65,8 @@ the admin export reads the files. The history logs a key only when its saved ent
 Round 15 (contract K3, additive: a one-object set behaves exactly as before): in a whole-tree set (data.js mode
 "tree") an item's accepted objects are its nodes; an attribute's applies_to ("root" = node n 1, "child" = the others,
 absent / "all" = every node) is checked against the node (400 otherwise). #80g: when review_package.json has
-closed: true (read per request), every PUT carrying an a: / i:a: key is answered 409 {"error": "set closed"}.
+closed: true (read per request), every PUT carrying a new (pending) a: / i:a: decision is answered 409
+{"error": "set closed"} (a body that only echoes saved copies still saves its other keys: the echoes are dropped).
 
 Usage:
   python annotation/review_server.py --package "../CryoAI/annotation review/cryoai_v4_review"
@@ -568,10 +569,10 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
                         d["who"] = who
             attr_new = None
             if any(is_attr_key(k) for k in edit.get("dec") or {}):  # round 14: only bodies with attributes
-                if schema is not None and package_closed(pkg):        # #80g: a closed set takes no answers
-                    return self._json(409, {"error": "set closed"})
                 pend = [k for k, d in edit["dec"].items() if is_attr_key(k) and isinstance(d, dict)
                         and d.get("pending") is True]
+                if pend and schema is not None and package_closed(pkg):   # #80g: a closed set takes no new answers
+                    return self._json(409, {"error": "set closed"})     # (echoed saved copies are dropped anyway)
                 if pend and schema is not None:
                     who = trusted_identity(self)
                     if who is None:

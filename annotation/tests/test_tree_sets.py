@@ -415,6 +415,11 @@ class TreeServer(unittest.TestCase):
         code, body = self.answer("0003", "au2", rel_by_line("0003", {1: "inner_vesicle", 2: "layer"}))
         self.assertEqual((code, body), (409, {"error": "set closed"}))
         self.assertEqual(put(self.srv, self.file["0003"], {"i:note": dec("still fine", "au2")})[0], 200)
+        k0 = f"a:{node(self.d, '0001', 1)}:type@au1"          # an echo of a saved answer (not pending) + a note
+        saved = json.loads((self.srv.pkg / "edits" / f"{self.file['0001']}.json").read_text(encoding="utf-8"))
+        code, body = put(self.srv, self.file["0001"], {k0: saved["edit"]["dec"][k0], "i:note": dec("n", "au1")})
+        self.assertEqual(code, 200, body)
+        self.assertEqual(body["edit"]["dec"][k0], saved["edit"]["dec"][k0])
         self.assertEqual(self.srv.request("GET", "/api/edits")[0], 200)
         tab2 = OS.table(self.srv.pkg)
         self.assertEqual(tab2["columns"][-len(OS.read_items(self.srv.pkg)["blind_cols"]):],
