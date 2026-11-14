@@ -6,7 +6,9 @@ Readable titles and live review-package facts for the Data and Jobs pages (no st
                                          <id>"; prediction -> the caller's display name (pred_name) or a plain word
   package_progress(pkg_dir)              cards decided / total, images reviewed / total, last edit time and who
   scan_packages(root, records)           the lab labeling + compare packages under a review root, with status,
-                                         base label version and decisions not applied yet
+                                         base label version and decisions not applied yet (no who / via on a
+                                         blind compare package)
+  applied_map(records)                   {package id: the label version built from it} (current wins)
 
 Reads only review_package.json, data.js and edits/*.json of a package folder, read-only. Never decoys.json (a private
 file beside compare packages) and never a prediction package (pred_*). A card is an object flagged `u` in data.js (gt
@@ -30,7 +32,8 @@ MAX_DATA_BYTES = 64_000_000
 MAX_DEPTH = 4
 MAX_JSON_BYTES = 1_000_000  # review_package.json and friends are tiny; a larger file is skipped, not parsed
 SCAN_TTL = 15.0  # seconds a scan_packages result is reused (admin polls, label pages)
-SKIP_DIRS = ("pred_", "_", "SANDBOX")
+SKIP_DIRS = ("pred_", "_", ".", "SANDBOX")  # "." = .building_* (a build in progress), .meta_locks (reviewers lock)
+BLIND_KINDS = ("compare",)  # who decided what is never shown for these (a compare without purpose "revise" is blind)
 SKIP_KINDS = ("part", "prediction")
 
 _cache: dict = {}
@@ -227,7 +230,8 @@ def package_progress(pkg_dir) -> dict | None:
 
 
 def scan_packages(root, records) -> list:
-    """Lab labeling and compare packages under the review root (never pred_*, parts, sandboxes or work folders):
+    """Lab labeling and compare packages under the review root (never pred_*, parts, sandboxes, work folders or
+    dot-folders such as .building_*; who / via are None on a blind compare package (is_blind)):
     [{id, title, kind, cards, decided, images, reviewed, last, who, via, status, applied_by (lv id or None),
     base_lv, waiting (decisions not applied yet, 0 when applied)}]; status ready / in_progress / applied."""
     if root is None:
@@ -244,20 +248,33 @@ def scan_packages(root, records) -> list:
     return out
 
 
+def applied_map(records) -> dict:
+    """{package id: the label version applied from it}: the current label set built from the package, else (only
+    when nothing current exists) a superseded one. Label version ids sort by time, so the newest wins."""
+    applied = {}
+    for lv, rec in sorted(_dict(_dict(records).get("label_version")).items()):
+        pkg = _text(_dict(rec).get("pkg"))
+        if not pkg:
+            continue
+        if _dict(rec).get("status") != "superseded":
+            applied[pkg] = lv
+        else:
+            applied.setdefault(pkg, lv)
+    return applied
+
+
+def is_blind(meta) -> bool:
+    """A blind package (an audit): a compare package whose purpose is not "revise". Who decided what is never shown."""
+    meta = _dict(meta)
+    return meta.get("kind") in BLIND_KINDS and meta.get("purpose") != "revise"
+
+
 def _scan_packages(root, records) -> list:
     try:
         dirs = sorted(d for d in Path(root).iterdir() if d.is_dir() and not d.name.startswith(SKIP_DIRS))
     except OSError:
         return []
-    applied = {}
-    for lv, rec in sorted(_dict(records.get("label_version")).items()):  # ids sort by time: the newest wins
-        pkg = _text(_dict(rec).get("pkg"))
-        if not pkg:
-            continue
-        if _dict(rec).get("status") != "superseded":
-            applied[pkg] = lv          # the current label set built from this package
-        else:
-            applied.setdefault(pkg, lv)  # only if nothing current exists
+    applied = applied_map(records)
     out = []
     for d in dirs:
         prog = package_progress(d)
@@ -270,8 +287,10 @@ def _scan_packages(root, records) -> list:
         by = applied.get(d.name)
         has_edits = prog["last"] is not None
         status = "applied" if by else ("in_progress" if has_edits and prog["decided"] else "ready")
+        blind = is_blind(meta)
         out.append({"id": d.name, "title": package_title(records, d.name, meta), "kind": meta.get("kind") or "review",
-                    **{k: prog[k] for k in ("cards", "decided", "images", "reviewed", "last", "who", "via")},
+                    **{k: prog[k] for k in ("cards", "decided", "images", "reviewed", "last")},
+                    "who": None if blind else prog["who"], "via": None if blind else prog["via"],
                     "status": status, "applied_by": by, "base_lv": base_lv,
                     "waiting": 0 if by else prog["decided"], "meta": meta})
     return out

@@ -312,8 +312,8 @@ class JobsTests(Base):
         self.assertEqual(sorted(by), ["lab_compare_x", "lab_pkg_applied", "lab_pkg_ready"])
         self.assertNotIn("pred_ps_20261101_aaaaaa", json.dumps(adm["pkgs"]))
         c = by["lab_compare_x"]
-        self.assertEqual((c["decided"], c["cards"], c["reviewed"], c["images"], c["who"], c["status"]),
-                         (2, 4, 1, 2, "bob", "in_progress"))
+        self.assertEqual((c["decided"], c["cards"], c["reviewed"], c["images"], c["who"], c["via"], c["status"]),
+                         (2, 4, 1, 2, None, None, "in_progress"))     # a blind compare: never who (round 13)
         self.assertEqual(by["lab_pkg_applied"]["applied_by"], LV)
         rendered = J.render(adm)
         html = rendered["finished"] + rendered["review"]                # in review moved up; applied stays below
