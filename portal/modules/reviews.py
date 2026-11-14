@@ -843,14 +843,14 @@ def may_export(user: dict, meta: dict, closed: bool, can_see) -> bool:
 
 
 def export_object_set(pkg: Path, fmt: str) -> bytes:
-    """B3's exporter (annotation/object_set.export, contract C4) -> the file's bytes. fmt "csv" | "coco"."""
+    """B3's exporter (annotation/object_set.py, contract C4) -> the file's bytes. fmt "csv": to_csv(table(pkg));
+    "coco": json.dumps(coco(pkg))."""
     from annotation import object_set as OS
-    out = OS.export(Path(pkg), fmt=fmt)
-    if isinstance(out, (str, Path)) and Path(str(out)).suffix and Path(str(out)).is_file():
-        return Path(str(out)).read_bytes()
-    if isinstance(out, (dict, list)):
-        return json.dumps(out, ensure_ascii=False).encode("utf-8")
-    return out.encode("utf-8") if isinstance(out, str) else bytes(out)
+    if fmt == "csv":
+        return OS.to_csv(OS.table(Path(pkg))).encode("utf-8")
+    if fmt == "coco":
+        return json.dumps(OS.coco(Path(pkg)), ensure_ascii=False).encode("utf-8")
+    raise ValueError(f"unknown export format {fmt!r}")
 
 
 def routes(ctx) -> list:

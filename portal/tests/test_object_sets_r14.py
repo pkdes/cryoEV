@@ -294,27 +294,49 @@ class ObjectSetsPortal(unittest.TestCase):
         st, _, basic = self.get("/reviews/start/", "rev1")
         self.assertNotIn("rs-objects", basic)
 
+    def wait_job(self, location, phases=("done", "failed")):
+        job = location.rsplit("/", 1)[1]
+        for _ in range(200):
+            st = RB.read_obj_status(self.cfg, job)
+            if st and st["phase"] in phases:
+                return job, st
+            import time
+            time.sleep(0.05)
+        self.fail(f"object set job {job} did not finish")
+
     def test_post_builds_through_start_objects(self):
-        got = []
+        got, regs = [], []
 
         def fake_build(**kw):
-            got.append(kw)
-            return {"id": "pred_obj_lamellarity_check_2_c0de"}
+            got.append(dict(kw, items_bytes=Path(kw["items_csv"]).read_bytes()))
+            return Path(kw["review_root"]) / "pred_obj_lamellarity_check_2_c0de"
         base = [("name", "Lamellarity check 2"), ("schema", "ls_lamellarity_v1"), ("ps", PS), ("outline", "target"),
                 ("reviewer", "rev1"), ("reviewer", "rev2")]
-        with mock.patch.object(RB, "_object_set_build", fake_build):
+        with mock.patch.object(RB, "_object_set_build", fake_build), \
+                mock.patch.object(RB, "_object_set_register", lambda pkg, reg: regs.append((pkg.name, reg))):
             st, h, _ = self.post_objects("admin", base + [("blind_ui", "1"), ("blind", "d_outer_nm")])
             self.assertEqual(st, 303)
-            self.assertTrue(T.hget(h, "location").startswith("/reviews/?kind=objects&f="))
+            loc = T.hget(h, "location")
+            self.assertRegex(loc, r"^/reviews/start/obj_\d{8}_\d{6}_[0-9a-f]{4}$")      # the progress page (QC 3)
+            job, jst = self.wait_job(loc)
+            self.assertEqual((jst["phase"], jst["pkg"]), ("done", "pred_obj_lamellarity_check_2_c0de"))
             kw = got[-1]
-            self.assertEqual((kw["schema"], kw["ps"], kw["blind_cols"], kw["reviewers"], kw["outline_mode"],
-                              kw["owner"], kw["name"], kw["built_by"]),
-                             ("ls_lamellarity_v1", PS, ["d_outer_nm"], ["rev1", "rev2"], "target", T.USER,
-                              "lamellarity_check_2", "portal"))
-            self.assertEqual(kw["items"].read_bytes(), b"id,image,line,d_outer_nm,gap_median_nm\nL1,imgA,0,103.5,9.6\n")
-            self.assertFalse(str(kw["items"]).startswith(str(self.review)))      # the CSV never goes under review/
-            st, _, _ = self.post_objects("admin", base)                           # no script ran: every non-key column
+            self.assertEqual((kw["schema"], kw["ps_dir"], kw["blind_cols"], kw["reviewers"], kw["outline_mode"],
+                              kw["owner"], kw["slug"], kw["built_by"], kw["title"], kw["image_col"], kw["line_col"],
+                              kw["particle_col"]),
+                             ("ls_lamellarity_v1", self.predict / PS, ["d_outer_nm"], ["rev1", "rev2"], "target",
+                              T.USER, "lamellarity_check_2", "portal", "Lamellarity check 2", "image", "line", None))
+            self.assertEqual(kw["items_bytes"], b"id,image,line,d_outer_nm,gap_median_nm\nL1,imgA,0,103.5,9.6\n")
+            self.assertFalse(str(kw["items_csv"]).startswith(str(self.review)))  # the CSV never goes under review/
+            self.assertFalse(Path(kw["items_csv"]).exists())                    # deleted after the build
+            self.assertEqual(regs[-1], ("pred_obj_lamellarity_check_2_c0de", self.cfg.registry))
+            st, _, page = self.get(loc, "admin")
+            self.assertEqual(st, 200)
+            self.assertIn("/reviews/go/pred_obj_lamellarity_check_2_c0de", page)
+            self.assertEqual(self.get(loc, "rev1")[0], 404)
+            st, h, _ = self.post_objects("admin", base)                           # no script ran: every non-key column
             self.assertEqual(st, 303)
+            self.wait_job(T.hget(h, "location"))
             self.assertEqual(got[-1]["blind_cols"], ["d_outer_nm", "gap_median_nm"])
             n = len(got)
             for fields, csv, why in ((base + [("blind_ui", "1"), ("blind", "image")], None, "a key column"),
@@ -335,14 +357,29 @@ class ObjectSetsPortal(unittest.TestCase):
             self.assertEqual(len(got), n)
 
     def test_builder_errors_never_show_paths(self):
+        """QC 3: a refusal's problem lines (at most 3, paths scrubbed) on the progress page; the CSV is deleted."""
+        seen = []
+
         def boom(**kw):
-            raise RuntimeError(r"refused: C:\Users\someone\CryoAI-laptop\predict\x missing /home/u/a/b")
-        with self.assertRaises(RB.BuildError) as cm, mock.patch.object(RB, "_object_set_build", boom):
-            RB.start_objects(self.cfg, T.USER, name="x", schema="ls_lamellarity_v1", ps=PS,
-                             items_csv=b"image,line\nimgA,0\n", schemas=[{"id": "ls_lamellarity_v1"}],
-                             sets=[{"id": PS}])
-        self.assertNotIn("Users", str(cm.exception))
-        self.assertNotIn("/home/u", str(cm.exception))
+            seen.append(kw["items_csv"])
+            raise RuntimeError("refused (4 problem(s)):\n  - row 2: C:\\Users\\someone\\CryoAI-laptop\\predict\\x missing"
+                               "\n  - row 3: /home/u/a/b gone\n  - row 4: image <b>9</b> is not in the prediction set"
+                               "\n  - row 5: fourth")
+        with mock.patch.object(RB, "_object_set_build", boom):
+            job = RB.start_objects(self.cfg, T.USER, name="x", schema="ls_lamellarity_v1", ps=PS,
+                                   items_csv=b"image,line\nimgA,0\n", schemas=[{"id": "ls_lamellarity_v1"}],
+                                   sets=[{"id": PS}], background=False)
+        st = RB.read_obj_status(self.cfg, job)
+        self.assertEqual((st["phase"], st["failed_at"]), ("failed", "building"))
+        self.assertEqual(len(st["problems"]), 3)
+        text = " ".join(st["problems"])
+        self.assertNotIn("Users", text)
+        self.assertNotIn("/home/u", text)
+        self.assertFalse(Path(seen[0]).exists())
+        code, _, page = self.get(f"/reviews/start/{job}", "admin")
+        self.assertEqual(code, 200)
+        self.assertIn("image &lt;b&gt;9&lt;/b&gt; is not in the prediction set", page)
+        self.assertNotIn("fourth", page)
 
     # ------------------------------------------------------------ Data pages
     def test_classmap_page(self):
@@ -351,8 +388,13 @@ class ObjectSetsPortal(unittest.TestCase):
         self.assertIn("Class map · ev_nonev", page)
         self.assertIn(">v1<", page)
         self.assertIn(">built-in<", page)
-        self.assertIn('<td>inner</td><td class="cj-lm-drop">dropped</td>', page)
-        self.assertIn('rowspan="3">EV</td>', page)
+        # cm_ev_nonev_v1 is B1's built-in (labels/classmaps/), which wins over this test's user copy: its own table
+        from labels import classmaps as LC
+        bi = LC.load("cm_ev_nonev_v1")
+        for src in (k for k, v in bi["map"].items() if v is None):
+            self.assertIn(f'<td>{src}</td><td class="cj-lm-drop">dropped</td>', page)
+        n_ev = sum(v == "EV" for v in bi["map"].values())
+        self.assertIn(f'rowspan="{n_ev}">EV</td>', page)
         self.assertIn('href="/data/dataset/ds_cm_test"', page)
         self.assertIn("runs run_cm_1", page)
         self.assertIn('href="/data/classmap/cm_ev_nonev_v2">v2</a>', page)
@@ -414,7 +456,115 @@ class HistoryPageSchemas(unittest.TestCase):
         self.assertIn(["used by (object set)", "review_package|pred_obj_x_0001"], m["recs"]["label_schema|ls_a_v2"]["links"])
 
 
+class StartObjectsReal(unittest.TestCase):
+    """QC 1 / 2 / 3 end to end with B3's REAL builder: the golden prediction set, a temp review root and registry."""
+
+    def setUp(self):
+        from types import SimpleNamespace
+        sys.path.insert(0, str(T.REPO / "annotation" / "tests"))
+        import test_object_sets as TOS
+        self.TOS = TOS
+        self.tmp = Path(tempfile.mkdtemp(prefix="cj_objreal_"))
+        for d in ("review", "predict", "registry", "state"):
+            (self.tmp / d).mkdir()
+        self.ps = TOS.golden_ps(self.tmp / "predict")
+        self.cfg = SimpleNamespace(review_root=self.tmp / "review", cj_predict_root=str(self.tmp / "predict"),
+                                   registry=self.tmp / "registry", state_dir=self.tmp / "state")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def start(self, csv_bytes, **kw):
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            return RB.start_objects(self.cfg, "pujan", name="Lamellarity check (Nov)", schema="ls_lamellarity_v1",
+                                    ps=self.ps.name, items_csv=csv_bytes, schemas=[{"id": "ls_lamellarity_v1"}],
+                                    sets=[{"id": self.ps.name}], reviewers=["au1"], background=False, **kw)
+
+    def test_real_build_register_export(self):
+        rows = "".join(f"{i},{ln},\"9.5\nnm\",S{n}x\n" for n, (i, ln) in enumerate(self.TOS.ALL10))
+        job = self.start(("image,line,gap,secret\n" + rows).encode(), blind_cols=["gap", "secret"])
+        st = RB.read_obj_status(self.cfg, job)
+        self.assertEqual(st["phase"], "done", st)
+        pkg = self.tmp / "review" / st["pkg"]
+        self.assertTrue(pkg.is_dir())
+        from registry import store
+        rec = store.current("review_package", self.tmp / "registry")[pkg.name]
+        self.assertEqual((rec["kind"], rec["built_by"], rec["title"], rec["blind_cols"]),
+                         ("objects", "portal", "Lamellarity check (Nov)", ["gap", "secret"]))
+        self.assertEqual(list((self.tmp / "state").rglob("items.csv")), [])        # the CSV is gone
+        items = json.loads((pkg / "items.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(items["items"]), 10)
+        self.assertRegex(items["source"]["sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(items["items"][0]["row"]["gap"], "9.5\nnm")              # a quoted newline: one cell
+        # QC 2: the hub's export through the real exporter
+        csv_out = REV.export_object_set(pkg, "csv").decode("utf-8")
+        self.assertTrue(csv_out.startswith("item,image,obj,line,"))
+        self.assertIn("schema_id,schema_version,gap,secret", csv_out.splitlines()[0])
+        coco = json.loads(REV.export_object_set(pkg, "coco"))
+        self.assertEqual(len(coco["annotations"]), 10)
+
+    def test_slug_cut_to_30_and_particle_col(self):
+        job = self.start(b"image,line\n0001,0\n", )
+        self.assertEqual(RB.read_obj_status(self.cfg, job)["phase"], "done")
+        self.assertEqual(RB.object_slug("A" * 50 + " set"), "a" * 30)
+        info = RB.parse_items_csv(b"image_id,particle_id,x\nimgA,3,1\n")
+        self.assertEqual((info["image_col"], info["line_col"], info["particle_col"]), ("image_id", None, "particle_id"))
+        info = RB.parse_items_csv(b"Stem,Line\nimgA,3\n")
+        self.assertEqual((info["image_col"], info["line_col"]), ("Stem", "Line"))
+
+    def test_refusal_problem_lines_and_csv_deleted(self):
+        job = self.start(b"image,line,secret\n0001,0,golden\n0009,0,x\n0001,99,y\n", blind_cols=["secret"])
+        st = RB.read_obj_status(self.cfg, job)
+        self.assertEqual(st["phase"], "failed")
+        self.assertTrue(1 <= len(st["problems"]) <= 3)
+        self.assertEqual(list((self.tmp / "state").rglob("items.csv")), [])
+        self.assertEqual([p.name for p in (self.tmp / "review").iterdir() if not p.name.startswith(".")], [])
+
+    def test_register_failure_removes_the_set(self):
+        def bad(pkg, reg):
+            raise OSError("registry is read only")
+        job = self.start(b"image,line\n0001,0\n", register=bad)
+        st = RB.read_obj_status(self.cfg, job)
+        self.assertEqual((st["phase"], st["failed_at"]), ("failed", "registering"))
+        self.assertEqual([p.name for p in (self.tmp / "review").iterdir() if not p.name.startswith(".")], [])
+
+    def test_background_does_not_block(self):
+        import threading
+        gate, started = threading.Event(), threading.Event()
+
+        def slow(**kw):
+            started.set()
+            gate.wait(10)
+            raise RuntimeError("stopped by the test")
+        job = RB.start_objects(self.cfg, "pujan", name="slow", schema="ls_lamellarity_v1", ps=self.ps.name,
+                               items_csv=b"image,line\n0001,0\n", schemas=[{"id": "ls_lamellarity_v1"}],
+                               sets=[{"id": self.ps.name}], build=slow)
+        self.assertTrue(started.wait(5))
+        self.assertEqual(RB.read_obj_status(self.cfg, job)["phase"], "building")      # returned while it builds
+        with self.assertRaises(RB.BuildError):                                           # one at a time
+            RB.start_objects(self.cfg, "pujan", name="two", schema="ls_lamellarity_v1", ps=self.ps.name,
+                             items_csv=b"image,line\n0001,0\n", schemas=[{"id": "ls_lamellarity_v1"}],
+                             sets=[{"id": self.ps.name}], build=slow)
+        gate.set()
+        for _ in range(100):
+            if RB.read_obj_status(self.cfg, job)["phase"] == "failed":
+                break
+            import time
+            time.sleep(0.05)
+        self.assertEqual(RB.read_obj_status(self.cfg, job)["phase"], "failed")
+
+
 class StartObjectsUnit(unittest.TestCase):
+    def test_limits_match_the_builder(self):
+        from annotation import object_set as OS
+        self.assertEqual(RB.ITEMS_MAX_ROWS, OS.MAX_ITEMS)
+        with self.assertRaises(RB.BuildError):
+            RB.parse_items_csv(("image,line\n" + "x,1\n" * (OS.MAX_ITEMS + 1)).encode())
+        with self.assertRaises(RB.BuildError):                                       # no line / particle_id column
+            RB.parse_items_csv(b"image,x\nimgA,1\n")
+
     def test_parse_items_csv(self):
         info = RB.parse_items_csv("\ufeffid,set,image_id,particle_id,d_outer_nm,children\nL1,HEK,x,7,103.5,[]\n".encode())
         self.assertEqual(info["rows"], 1)

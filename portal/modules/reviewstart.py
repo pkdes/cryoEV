@@ -18,12 +18,14 @@ a label-set build. The logic lives in portal/review_build.py; this module holds 
                                   name, schema, items (CSV, at most 2 MB), ps, blind (repeatable; set by the
                                   page's small script from the CSV's header, all ticked; without it every non-key
                                   column is hidden), outline (target | target+contained), reviewer (repeatable)
-                                  -> review_build.start_objects -> annotation/object_set.build (in a worker
-                                  thread) -> 303 to /reviews/?kind=objects with a flash. One audit line "object set
-                                  built" (counts only)
+                                  -> review_build.start_objects (checks, then a background thread runs
+                                  annotation/object_set.build and register) -> 303 to its progress page
+                                  /reviews/start/<obj job>. One audit line "object set built" (counts only)
     GET  /reviews/start/<name>    the progress page (admin; any other id or person: 404): the allowlisted phases
                                   from <review root>/.building/<name>/status.json, reloading itself every few
-                                  seconds (meta refresh) until done or failed; Continue opens /reviews/go/<name>
+                                  seconds (meta refresh) until done or failed; Continue opens /reviews/go/<name>.
+                                  An object set job (obj_<stamp>_<4hex>): its status under the portal state, at most
+                                  3 problem lines of a refusal (paths scrubbed); done links the set
 
 Non-admins get 403 on (b)/(c) (the POST) and 404 on progress pages; the page itself shows them (a) only.
 The nested PREFIX /reviews/start (under the reviews module's /reviews) is portal/modules/__init__.py's rule: its
@@ -396,6 +398,54 @@ def render_progress(st) -> str:
             f'<ol class="cj-rs-ph">{"".join(rows)}</ol><div class="cj-rs-acts">{"".join(acts)}</div></section></div>')
 
 
+OBJ_PHASE_LINE = {"checking": "The items CSV, the schema and the prediction set are checked.",
+                  "building": "The cards, pictures and the shuffled item order are written.",
+                  "registering": "The set is recorded so the Reviews hub lists it.",
+                  "done": "Ready to review."}
+
+
+def render_obj_progress(st) -> str:
+    """The progress page of an object set build (review_build.read_obj_status)."""
+    phase, failed = st["phase"], st["phase"] == "failed"
+    at = st.get("failed_at") if failed else phase
+    order = ("checking", "building", "registering", "done")
+    idx = order.index(at) if at in order else 0
+    rows = []
+    for i, ph in enumerate(order):
+        if failed and i == idx:
+            s_, mark, line = "failed", "!", "Failed"
+        elif phase == "done" or i < idx:
+            s_, mark, line = "done", "&#10003;", OBJ_PHASE_LINE[ph]
+        elif i == idx:
+            s_, mark, line = "now", str(i + 1), OBJ_PHASE_LINE[ph]
+        else:
+            s_, mark, line = "waiting", str(i + 1), ""
+        rows.append(f'<li data-s="{s_}"><span class="cj-rs-dot" aria-hidden="true">{mark}</span>'
+                    f'<span style="display:flex;flex-direction:column;gap:1px"><b>{esc(RB.OBJ_PHASE_TEXT[ph])}</b>'
+                    f'<span class="cj-mut">{esc(line)}</span></span><span class="cj-rs-state">{s_}</span></li>')
+    acts, probs = [], ""
+    if phase == "done" and st.get("pkg"):
+        acts.append(f'<a class="cj-rs-btn cj-rs-primary" href="/reviews/go/{quote(st["pkg"])}">Open the set &rarr;</a>')
+        acts.append('<a class="cj-rs-btn" href="/reviews/?kind=objects">Object sets</a>')
+    elif failed:
+        if st.get("problems"):
+            probs = ('<ul class="cj-rs-note cj-rs-err" role="alert">'
+                     + "".join(f"<li>{esc(x)}</li>" for x in st["problems"]) + "</ul>")
+        acts.append(f'<a class="cj-rs-btn" href="{PREFIX}/">Back to Start a review</a>')
+    else:
+        acts.append(f'<span class="cj-mut">This page reloads itself every {REFRESH_S} s. One object set at a time; '
+                    'you can leave and come back.</span>')
+    refresh = "" if phase in ("done", "failed") else f'<meta http-equiv="refresh" content="{REFRESH_S}">'
+    n = st.get("n_items")
+    sub = f'{esc(str(st.get("title") or ""))}' + (f" · {n} items" if isinstance(n, int) else "")
+    return (f'{refresh}<div class="cj-rs">{CSS}<a class="cj-rs-back" href="{PREFIX}/">&larr; Start a review</a>'
+            f'<section class="cj-rs-sec" aria-labelledby="rs-prog-h" aria-live="polite">'
+            f'<div><h2 id="rs-prog-h">Building object set</h2><span class="cj-rs-id">{esc(st["name"])}</span><br>'
+            f'<span class="cj-mut">{sub}</span></div>'
+            f'<ol class="cj-rs-ph">{"".join(rows)}</ol>{probs}<div class="cj-rs-acts">{"".join(acts)}</div>'
+            f'</section></div>')
+
+
 def parse_b(text) -> dict | None:
     kind, _, ident = str(text or "").partition(":")
     if kind == "model" and RB.MODEL_RE.match(ident):
@@ -506,9 +556,9 @@ def routes(ctx) -> list:
 
     async def objects(request: Request):
         """POST /reviews/start/objects (admin, never bearer): the multipart form of (d), at most RB.ITEMS_MAX_BYTES of
-        CSV. Builds the object set in a worker thread (RB.start_objects -> annotation/object_set.build), then one
-        audit line "object set built" (schema, prediction set, item / blind column / reviewer COUNTS, never a value)
-        and 303 to the Reviews hub's Object sets tab with a flash. A refusal page (400/403/409/413) otherwise."""
+        CSV. RB.start_objects checks it all and starts the build in a background thread (object_set.build, then
+        register), then one audit line "object set built" (schema, prediction set, item / blind column / reviewer
+        COUNTS, never a value) and 303 to the build's progress page. A refusal page (400/403/409/413) otherwise."""
         if not is_admin(request):
             return refuse(request, "Only admins can build object sets.", 403)
         ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
@@ -538,29 +588,32 @@ def routes(ctx) -> list:
         user = ctx.user(request)
         name, schema, ps, outline = fields["name"], fields["schema"], fields["ps"], fields["outline"] or "target"
 
-        def build():                                    # the roster read, the CSV check and the build: off the loop
-            if not blind_ui:                            # no script ran: hide every non-key column (the safe default)
-                cols = RB.parse_items_csv(data)["blindable"]
-            else:
-                cols = blind
+        def build():                                    # the roster read, the CSV check and the start: off the loop
+            info = RB.parse_items_csv(data)
+            cols = info["blindable"] if not blind_ui else blind   # no script ran: hide every non-key column
             ids = set(roster_ids(roster)) if roster else set()
-            pid = RB.start_objects(ctx.cfg, user.get("id"), name=name, schema=schema, ps=ps, items_csv=data,
+            job = RB.start_objects(ctx.cfg, user.get("id"), name=name, schema=schema, ps=ps, items_csv=data,
                                    blind_cols=cols, outline_mode=outline, reviewers=reviewers, roster_ids=ids)
-            return pid, len(cols), RB.parse_items_csv(data)["rows"]
+            return job, len(cols), info["rows"]
 
         try:
-            pid, n_blind, n_items = await run_in_threadpool(build)
+            job, n_blind, n_items = await run_in_threadpool(build)
         except RB.BuildError as e:
             busy = "one at a time" in str(e)
             return refuse(request, f"Not built: {e}.", 409 if busy else 400)
-        PA.event(ctx.cfg.state_dir, request, "object set built", pid,
+        PA.event(ctx.cfg.state_dir, request, "object set built", job,
                  {"schema": schema, "ps": ps, "items": n_items, "blind_cols": n_blind, "reviewers": len(reviewers),
                   "outline_mode": outline})
-        tok = AD.flash_put(AD.binding(request), f"Object set {name.strip()} built: {n_items} items. Order shuffled.")
-        return RedirectResponse(f"/reviews/?kind=objects&f={quote(tok)}", status_code=303)
+        return RedirectResponse(f"{PREFIX}/{quote(job)}", status_code=303)
 
     def progress(request: Request):
         name = request.path_params["name"]
+        if RB.OBJ_JOB_RE.match(name):                   # an object set build (round 14)
+            ost = RB.read_obj_status(ctx.cfg, name) if is_admin(request) else None
+            if ost is None:
+                return show(request, "Start a review", f'<div class="cj-rs">{CSS}<p class="cj-card">No such build.'
+                            f'</p><p><a href="{PREFIX}/">Back</a></p></div>', 404)
+            return show(request, "Building object set", render_obj_progress(ost))
         st = RB.read_status(RB.review_root(ctx.cfg), name) if is_admin(request) else None
         if st is None:
             return show(request, "Start a review", f'<div class="cj-rs">{CSS}<p class="cj-card">No such build.</p>'

@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import os
 import re
@@ -1028,29 +1029,45 @@ def register(spec, meta):
 # ---------------------------------------------------------------- object sets (round 14, contract C4)
 # Start a review -> Object set (admin): an items CSV (one row per object), a label schema, the prediction set the
 # objects come from, the CSV columns to hide from reviewers (blind), the outlines on the cards and the reviewers.
-# start_objects() checks everything, saves the CSV under <portal state>/review_build/objects/<stamp>/items.csv (never
-# under the review root), then calls annotation/object_set.build (B3) IN this process, one build at a time
-# (<review root>/.building/objects.lock). That build writes the package (pred_obj_<slug>_<4hex>, shuffled items,
-# opaque ids, items.json server-only) and its registry line; the portal never reads the blind values back.
+# start_objects() checks everything in the request, takes the one-at-a-time lock (<review root>/.building/objects.lock),
+# saves the CSV under <portal state>/review_build/objects/<job>/items.csv (never under the review root), writes that
+# job's status.json there and starts a background thread (QC 3: the POST never waits for a build). The thread calls
+# annotation/object_set.build (B3) with the prediction set's folder (<predict root>/<ps>), the CSV's own image column
+# (image | image_id | stem) and key column (line, else particle_id), then object_set.register into the portal's
+# registry (so the Reviews hub and the closed rule see it). The CSV is deleted after the build, success or not
+# (items.json keeps its sha256). The progress page /reviews/start/<job> reads the status: the allowlisted phases,
+# the package id when done, and at most 3 problem lines of a refusal with paths scrubbed.
 OBJ_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.()+-]{0,59}\Z")
 OBJ_SCHEMA_RE = re.compile(r"^ls_[a-z0-9][a-z0-9_]{0,60}_v\d{1,4}\Z")
 OBJ_PS_RE = re.compile(r"^ps_\d{8}_[0-9a-f]{6}\Z")
 OBJ_COL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.+-]{0,63}\Z")
 OBJ_ID_RE = re.compile(r"^pred_obj_[A-Za-z0-9][A-Za-z0-9_.-]{0,110}\Z")
+OBJ_JOB_RE = re.compile(r"^obj_\d{8}_\d{6}_[0-9a-f]{4}\Z")
 OUTLINE_MODES = ("target", "target+contained")
 ITEMS_MAX_BYTES = 2_000_000
-ITEMS_MAX_ROWS = 5000
+ITEMS_MAX_ROWS = 2000                  # = annotation/object_set.MAX_ITEMS (a test keeps them equal)
 ITEMS_MAX_COLS = 80
+SLUG_MAX = 30                          # annotation/object_set.SLUG_RE: [a-z0-9][a-z0-9_]{0,29}
+IMAGE_COLS = ("image", "image_id", "stem")      # the items CSV's image column, the first one present
 # columns that name the object (shown to reviewers as the item's image / object; never offered for blinding)
 OBJ_KEY_COLS = ("id", "item", "image", "image_id", "stem", "obj", "pkg_key", "line", "particle_id", "crop")
 OBJ_LOCK = "objects.lock"
 OBJ_SUB = "objects"
+OBJ_PHASES = ("checking", "building", "registering", "done", "failed")
+OBJ_PHASE_TEXT = {"checking": "Checking the items", "building": "Building the set", "registering": "Recording it",
+                  "done": "Done", "failed": "Failed"}
+OBJ_STATUS_KEYS = ("name", "phase", "failed_at", "pkg", "problems", "n_items", "title", "by", "started", "updated",
+                   "finished")
+OBJ_PROBLEMS_MAX = 3
 _PATHISH = re.compile(r"[A-Za-z]:[\\/]\S*|(?:/[^\s/]+){2,}")
+_obj_running: set = set()              # job names whose thread runs in this process (a restart: none)
+_obj_lock = threading.Lock()
 
 
 def parse_items_csv(data: bytes) -> dict:
-    """{"columns": [...], "rows": n, "blindable": [non-key columns]} of an items CSV, or BuildError. UTF-8 (a BOM is
-    fine), a header row of plain column names, 1..ITEMS_MAX_ROWS rows, an image column."""
+    """{"columns", "rows": n, "blindable": [non-key columns], "image_col", "line_col", "particle_col"} of an items
+    CSV, or BuildError. UTF-8 (a BOM is fine), read with the csv module (a quoted cell may hold a newline), a header
+    row of plain column names, 1..ITEMS_MAX_ROWS rows, an image column and a line or particle_id column."""
     if not isinstance(data, (bytes, bytearray)) or not bytes(data).strip():
         raise BuildError("the items CSV is empty")
     if len(data) > ITEMS_MAX_BYTES:
@@ -1060,7 +1077,7 @@ def parse_items_csv(data: bytes) -> dict:
     except UnicodeDecodeError:
         raise BuildError("the items CSV is not UTF-8 text") from None
     try:
-        rows = list(csv.reader(text.splitlines()))
+        rows = list(csv.reader(io.StringIO(text, newline="")))
     except csv.Error:
         raise BuildError("the items CSV could not be read") from None
     rows = [r for r in rows if any(c.strip() for c in r)]
@@ -1071,13 +1088,20 @@ def parse_items_csv(data: bytes) -> dict:
         raise BuildError("the items CSV's header must be plain, distinct column names")
     if len(rows) - 1 > ITEMS_MAX_ROWS:
         raise BuildError(f"the items CSV has more than {ITEMS_MAX_ROWS} items")
-    if not any(c.lower() in ("image", "image_id", "stem") for c in cols):
-        raise BuildError("the items CSV needs an image column (image or image_id)")
-    return {"columns": cols, "rows": len(rows) - 1, "blindable": [c for c in cols if c.lower() not in OBJ_KEY_COLS]}
+    low = {c.lower(): c for c in cols}
+    image_col = next((low[c] for c in IMAGE_COLS if c in low), None)
+    if image_col is None:
+        raise BuildError("the items CSV needs an image column (image, image_id or stem)")
+    line_col = low.get("line")
+    particle_col = None if line_col else low.get("particle_id")
+    if line_col is None and particle_col is None:
+        raise BuildError("the items CSV needs a line or particle_id column (which object of the image)")
+    return {"columns": cols, "rows": len(rows) - 1, "blindable": [c for c in cols if c.lower() not in OBJ_KEY_COLS],
+            "image_col": image_col, "line_col": line_col, "particle_col": particle_col}
 
 
 def object_slug(name: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")[:32].strip("_")
+    slug = re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")[:SLUG_MAX].strip("_")
     return slug or "set"
 
 
@@ -1108,17 +1132,75 @@ def ps_choices(cfg, owner) -> list:
 
 
 def _object_set_build(**kw):
-    """annotation/object_set.build (B3, contract C4). Keyword arguments: items (Path of the CSV), schema (label
-    schema id), ps (prediction set id), predict_root, review_root, registry (or None), blind_cols, outline_mode,
-    reviewers, owner, name (slug), title (as typed), built_by "portal". Returns the package id, its folder, or a dict
-    with "id"."""
+    """annotation/object_set.build (B3, contract C4), called with its own keyword arguments: ps_dir, items_csv,
+    schema, review_root, image_col, line_col, particle_col, blind_cols, outline_mode, slug, owner, reviewers,
+    registry_root, built_by, title. -> the package folder."""
     from annotation import object_set as OS
     return OS.build(**kw)
 
 
+def _object_set_register(pkg, reg):
+    """annotation/object_set.register: the set's review_package line into the portal's registry."""
+    from annotation import object_set as OS
+    return OS.register(pkg, reg)
+
+
+def problem_lines(exc) -> list:
+    """At most OBJ_PROBLEMS_MAX short lines of a builder refusal, paths scrubbed: its "  - ..." lines, else its
+    first line."""
+    text = str(exc).strip()
+    lines = [ln.strip()[2:].strip() for ln in text.splitlines() if ln.strip().startswith("- ")]
+    if not lines:
+        lines = (text.splitlines() or [type(exc).__name__])[:1]
+    return [_PATHISH.sub("…", ln)[:200] for ln in lines[:OBJ_PROBLEMS_MAX]]
+
+
+def obj_status_path(cfg, job) -> Path:
+    return state_root(cfg) / OBJ_SUB / job / "status.json"
+
+
+def write_obj_status(cfg, job, **fields) -> dict:
+    from jobs import predict_set as PS
+    p = obj_status_path(cfg, job)
+    cur = _read_json(p) or {}
+    st = {k: cur.get(k) for k in OBJ_STATUS_KEYS if k in cur}
+    for k, v in fields.items():
+        if k not in OBJ_STATUS_KEYS:
+            raise ValueError(f"status field {k!r} is not allowlisted")
+        st[k] = v
+    if fields.get("phase") == "failed" and cur.get("phase") not in ("done", "failed") and "failed_at" not in fields:
+        st["failed_at"] = cur.get("phase")
+    if st.get("phase") not in OBJ_PHASES:
+        raise ValueError(f"phase {st.get('phase')!r} is not allowlisted")
+    st["name"], st["updated"] = job, _now()
+    PS.write_json_atomic(p, st)
+    return st
+
+
+def read_obj_status(cfg, job) -> dict | None:
+    """An object set build's status (allowlisted keys), or None. A non-final status whose thread is not running in
+    this process (the portal restarted) reads as failed."""
+    if not isinstance(job, str) or not OBJ_JOB_RE.match(job):
+        return None
+    raw = _read_json(obj_status_path(cfg, job))
+    if not isinstance(raw, dict) or raw.get("phase") not in OBJ_PHASES:
+        return None
+    st = {k: raw.get(k) for k in OBJ_STATUS_KEYS}
+    st["problems"] = [str(x)[:200] for x in st["problems"] if isinstance(x, str)][:OBJ_PROBLEMS_MAX] \
+        if isinstance(st["problems"], list) else []
+    if st["phase"] not in ("done", "failed"):
+        with _obj_lock:
+            alive = job in _obj_running
+        if not alive:
+            st.update(phase="failed", failed_at=st["phase"], problems=["the build stopped (the portal restarted)"])
+    return st
+
+
 def start_objects(cfg, owner, *, name, schema, ps, items_csv: bytes, blind_cols=(), outline_mode="target",
-                  reviewers=(), roster_ids=None, schemas=None, sets=None, build=None, now=None) -> str:
-    """Check, then build an object set in this process. -> the package id. Raises BuildError (nothing built)."""
+                  reviewers=(), roster_ids=None, schemas=None, sets=None, build=None, register=None, now=None,
+                  background=True) -> str:
+    """Check, then start building an object set (a background thread unless background=False). -> the job name
+    (obj_<stamp>_<4hex>; its progress page is /reviews/start/<job>). Raises BuildError (nothing started)."""
     if not isinstance(owner, str) or not PID_RE.match(owner):
         raise BuildError("your portal id can't own a review package")
     if not isinstance(name, str) or not OBJ_NAME_RE.match(name.strip()):
@@ -1143,29 +1225,72 @@ def start_objects(cfg, owner, *, name, schema, ps, items_csv: bytes, blind_cols=
     rr = review_root(cfg)
     if rr is None or not Path(rr).is_dir():
         raise BuildError("the review folder is not configured on this portal")
+    ps_dir = Path(predict_root(cfg)) / ps
+    if not ps_dir.is_dir():
+        raise BuildError("that prediction set's folder is not on this computer")
     bdir = building_dir(rr)
     bdir.mkdir(exist_ok=True)
     lock = acquire_lock(bdir / OBJ_LOCK, 2.0)
     if lock is None:
         raise BuildError("another object set is being built; one at a time")
     try:
-        stamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(2)
-        sdir = state_root(cfg) / OBJ_SUB / stamp
+        job = f"obj_{(now or datetime.now()).strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(2)}"
+        sdir = state_root(cfg) / OBJ_SUB / job
         sdir.mkdir(parents=True)
         items = sdir / "items.csv"
         items.write_bytes(bytes(items_csv))
-        got = (build or _object_set_build)(
-            items=items, schema=schema, ps=ps, predict_root=predict_root(cfg), review_root=Path(rr),
-            registry=registry_root(cfg), blind_cols=blind, outline_mode=outline_mode, reviewers=revs, owner=owner,
-            name=object_slug(name), title=name.strip(), built_by="portal")
-    except BuildError:
-        raise
-    except Exception as e:                              # noqa: BLE001  the builder's refusal: its first line, no paths
-        first = (str(e).strip().splitlines() or [type(e).__name__])[0][:200]
-        raise BuildError(f"the object set was not built ({_PATHISH.sub('…', first)})") from None
-    finally:
+        write_obj_status(cfg, job, phase="checking", pkg=None, problems=[], n_items=info["rows"],
+                         title=name.strip(), by=owner, started=_now(), finished=None, failed_at=None)
+        kw = dict(ps_dir=ps_dir, items_csv=items, schema=schema, review_root=Path(rr), image_col=info["image_col"],
+                  line_col=info["line_col"], particle_col=info["particle_col"], blind_cols=blind,
+                  outline_mode=outline_mode, slug=object_slug(name), owner=owner, reviewers=revs,
+                  registry_root=registry_root(cfg), built_by="portal", title=name.strip())
+        with _obj_lock:
+            _obj_running.add(job)
+    except BaseException:
         lock.close()
-    pid = got.get("id") if isinstance(got, dict) else Path(got).name if isinstance(got, Path) else got
-    if not isinstance(pid, str) or not OBJ_ID_RE.match(pid):
-        raise BuildError("the object set was built but its id could not be read")
-    return pid
+        raise
+    args = (cfg, job, kw, items, lock, build or _object_set_build, register or _object_set_register)
+    if background:
+        threading.Thread(target=_run_objects, args=args, name=f"objset-{job}", daemon=True).start()
+    else:
+        _run_objects(*args)
+    return job
+
+
+def _run_objects(cfg, job, kw, items: Path, lock, build, register):
+    """The build thread: object_set.build, then register; the status after each step; the CSV deleted at the end
+    (success or not); the lock released last."""
+    pkg = None
+    try:
+        write_obj_status(cfg, job, phase="building")
+        try:
+            got = build(**kw)
+            pkg = Path(got) if isinstance(got, (str, Path)) else Path(kw["review_root"]) / str((got or {}).get("id"))
+            if not OBJ_ID_RE.match(pkg.name):
+                raise BuildError("the object set was built but its id could not be read")
+        except Exception as e:                          # noqa: BLE001  the builder's refusal: short lines, no paths
+            write_obj_status(cfg, job, phase="failed", problems=problem_lines(e), finished=_now())
+            return
+        write_obj_status(cfg, job, phase="registering", pkg=pkg.name)
+        reg = kw.get("registry_root")
+        if reg is not None:
+            try:
+                register(pkg, reg)
+            except Exception as e:                      # noqa: BLE001  not recorded: never leave an unlisted set
+                shutil.rmtree(pkg, ignore_errors=True)
+                write_obj_status(cfg, job, phase="failed", pkg=None, finished=_now(),
+                                 problems=["built, but its registry line was not written, so the set was removed"]
+                                 + problem_lines(e)[:OBJ_PROBLEMS_MAX - 1])
+                return
+        write_obj_status(cfg, job, phase="done", finished=_now())
+    except Exception:                                   # noqa: BLE001  a status write failed: the page reads stopped
+        pass
+    finally:
+        try:
+            items.unlink()
+        except OSError:
+            pass
+        with _obj_lock:
+            _obj_running.discard(job)
+        lock.close()
