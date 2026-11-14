@@ -11,7 +11,12 @@ lazily at request time), so object-set display code lives here. Read only; nothi
   history(pkg)                edits/_attr_log.jsonl rows ({t, who, key, v, file}); a cut-short line is skipped
   progress(pkg, reviewers)    {n_items, n_done, by_reviewer {rid: n items with every required attribute set}}:
                               an item is done when every reviewer (the package's reviewers, else everyone who
-                              decided anything) has set every required attribute (C4 "Progress")
+                              decided anything) has set every required attribute (C4 "Progress"). A whole-tree set
+                              (round 15 K3, data.js mode "tree"): every required attribute that applies to each
+                              node (applies_to: root = node n 1, child = the others), on every node of the item
+  is_tree(data)               data.js mode == "tree"
+  node_decisions(pkg)         {item id: {node obj: {"<attr>@<rid>": decision}}} (a whole-tree set: every node of
+                              the item; a one-object set: its one object)
 """
 from __future__ import annotations
 
@@ -81,6 +86,43 @@ def decisions(pkg, data=None) -> dict:
     return out
 
 
+def is_tree(data: dict) -> bool:
+    return isinstance(data, dict) and data.get("mode") == "tree"
+
+
+def _nodes(it: dict) -> list:
+    """An item's nodes [{obj, n, parent_n}] (a one-object item: its object as node 1)."""
+    nodes = it.get("nodes")
+    return nodes if isinstance(nodes, list) and nodes else [{"obj": it["obj"], "n": 1, "parent_n": None}]
+
+
+def node_decisions(pkg, data=None) -> dict:
+    """{item id: {node obj: {"<attr>@<rid>": decision}}} for every item and node (round 15 K3)."""
+    rs = _rs()
+    data = data or read_datajs(pkg)
+    by_obj = {}
+    out = {}
+    for it in data.get("items") or []:
+        out[it["id"]] = {}
+        for nd in _nodes(it):
+            by_obj[(it["image"], nd["obj"])] = it["id"]
+            out[it["id"]][nd["obj"]] = {}
+    for f in record_files(Path(pkg) / "edits"):
+        try:
+            rec = json.loads(f.read_text(encoding="utf-8"))
+            file, dec = rec["file"], (rec.get("edit") or {}).get("dec") or {}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+        for k, d in dec.items():
+            p = rs.parse_attr_key(k)
+            if p is None or p[0] is None or not isinstance(d, dict):
+                continue
+            iid = by_obj.get((_stem(file), p[0]))
+            if iid is not None:
+                out[iid][p[0]][f"{p[1]}@{p[2]}"] = d
+    return out
+
+
 def history(pkg) -> list:
     p = Path(pkg) / "edits" / ATTR_LOG
     rows = []
@@ -112,6 +154,8 @@ def required_attrs(schema: dict) -> list:
 def progress(pkg, reviewers=None) -> dict:
     """C4 progress: items on which every reviewer has set every required attribute (a value, not null)."""
     data = read_datajs(pkg)
+    if is_tree(data):
+        return _tree_progress(pkg, data, reviewers)
     req = required_attrs(data.get("schema") or {})
     dec = decisions(pkg, data)
     revs = list(reviewers if reviewers is not None else package_reviewers(pkg))
@@ -120,6 +164,30 @@ def progress(pkg, reviewers=None) -> dict:
 
     def done_by(item, rid):
         return all((dec[item].get(f"{a}@{rid}") or {}).get("v") is not None for a in req)
+
+    items = list(dec)
+    by = {r: sum(1 for i in items if done_by(i, r)) for r in revs}
+    n_done = sum(1 for i in items if revs and all(done_by(i, r) for r in revs))
+    return {"n_items": len(items), "n_done": n_done, "reviewers": revs, "by_reviewer": by}
+
+
+def _tree_progress(pkg, data, reviewers=None) -> dict:
+    """progress() for a whole-tree set: an item is done for a reviewer when every node has every required attribute
+    that applies to it (root = n 1, child = the others; applies_to absent / "all" = every node)."""
+    attrs = [a for a in (data.get("schema") or {}).get("object_attrs") or [] if a.get("required")]
+    dec = node_decisions(pkg, data)
+    revs = list(reviewers if reviewers is not None else package_reviewers(pkg))
+    if not revs:
+        revs = sorted({k.split("@", 1)[1] for d in dec.values() for x in d.values() for k in x})
+    nodes = {it["id"]: _nodes(it) for it in data.get("items") or []}
+
+    def done_by(item, rid):
+        for nd in nodes[item]:
+            role = "root" if nd["n"] == 1 else "child"
+            for a in attrs:
+                if a.get("applies_to", "all") in ("all", role) and                         (dec[item].get(nd["obj"], {}).get(f"{a['id']}@{rid}") or {}).get("v") is None:
+                    return False
+        return True
 
     items = list(dec)
     by = {r: sum(1 for i in items if done_by(i, r)) for r in revs}

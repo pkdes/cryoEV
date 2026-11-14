@@ -14,6 +14,20 @@ attributes (labels/schemas.py) instead of whole images.
     python -m annotation.object_set export --pkg <pkg> --out <file.csv> [--coco <file.json>]
     python -m annotation.object_set import --pkg <pkg> --csv <file.csv>
     python -m annotation.object_set instructions <pkg> (--text TEXT | --file PATH | --clear) [--do]
+    python -m annotation.object_set build --tree --ps <ps> --schema ls_lamellarity_tree_v1 [--items <roots.csv>
+        --line-col line] [--slug ..] [--seed N] [--owner ..] [--reviewers a,b] [--review-root <dir>] [--do ...]
+    python -m annotation.object_set close <pkg> --by <id> [--do]
+
+Whole-tree sets (round 15, contract K3; build --tree): items = the nesting_tree v1 unit roots (role outer, vesicle
+depth 0) of <ps>/results/objects.csv (steps.json must list nesting_tree v1 + nesting v1 and hold the file's sha256)
+that have at least one child; every outline below a root along nesting v1's parent_line (the geometric parent, the
+smallest container) is a node. data.js D.mode = "tree" and per item nodes [{obj, n, parent_n}]: n 1 = the root, the
+rest numbered in a seeded order, parent_n geometric. No role, unit, call or index is ever in data.js (check_tree_datajs);
+items.json keeps every objects.csv column per node (server-only). A node in two trees is refused; a tree with an
+outline that has no prediction line (drawn / reshaped on a reviewed image) is skipped and counted. Answers are
+a:<node obj>:<attr>@<rid>; applies_to (root = n 1, child = the others) is checked by the server. Export (tree_table):
+one row per (item, node) with each reviewer's derived tree (derive_tree); the hidden columns only once the set is
+closed. close (#80g): review_package.json closed: true (final); review_server then answers every a: PUT with 409.
 
 instructions (r15 hotfix) sets the maker's set instructions, plain text (<= 2000 characters, NFC, no control
 characters but newlines; CRLF -> LF), shown on every object card behind an "Instructions" button: data.js
@@ -352,13 +366,25 @@ def _is_num(t: str) -> bool:
         return False
 
 
-def _leaves(x, out: set):
+# #80f (round 15 K3): named calibration / acquisition fields of /api/meta are not compared with blind values (a blind
+# column may hold the image's nm/px, say). By NAME only, never "small numbers": counts stay compared (sentinel test).
+# nm_per_px, defocus*, tile* and magnification (K3), plus the same quantities' other spellings in review_meta
+# (mag; pixel_A / pixel_size_a = nm/px in Angstrom; target_defocus_um).
+BLIND_EXEMPT_RE = re.compile(r"^(?:nm_per_px|(?:target_)?defocus.*|tile.*|magnification|mag|pixel_a|pixel_size_a)$",
+                             re.I)
+
+
+def _leaves(x, out: set, exempt=None):
+    """Every leaf value of x into out (normalized); with exempt (a compiled regex) a dict value whose key matches
+    it is skipped, whole subtree included."""
     if isinstance(x, dict):
-        for v in x.values():
-            _leaves(v, out)
+        for k, v in x.items():
+            if exempt is not None and isinstance(k, str) and exempt.match(k):
+                continue
+            _leaves(v, out, exempt)
     elif isinstance(x, (list, tuple)):
         for v in x:
-            _leaves(v, out)
+            _leaves(v, out, exempt)
     elif isinstance(x, bool) or x is None:
         return
     elif isinstance(x, (str, int, float)):
@@ -369,10 +395,11 @@ def _leaves(x, out: set):
 
 def shown_values(pkg) -> set:
     """Every value the page or /api/meta shows for a built package: each leaf of review_meta.package_meta (session,
-    nm/px, sample, original names...) and data.js's per-image strings (split, file name and stem, gt classes)."""
+    sample, original names, counts...; not the named calibration fields, BLIND_EXEMPT_RE) and data.js's per-image
+    strings (split, file name and stem, gt classes)."""
     from annotation import review_meta
     out = set()
-    _leaves(review_meta.package_meta(Path(pkg)), out)
+    _leaves(review_meta.package_meta(Path(pkg)), out, BLIND_EXEMPT_RE)        # #80f: named fields exempt
     data = om.read_datajs(pkg)
     for im in data.get("images") or []:
         _leaves([im.get("split"), im.get("file"), Path(str(im.get("file") or "")).stem], out)
@@ -387,10 +414,11 @@ def check_blind_shown(pkg, P):
     shown = shown_values(pkg)
     texts = [x for x in shown if not _is_num(x)]
     bad = []
+    exact = set(P.get("blind_exact") or ())          # a closed vocabulary (a tree's role): whole values only
     for c in P["blind"]:
         vals = {_norm_value(r.get(c) or "") for r in P["rows"]} - {""}
         hit = sorted(vals & shown) or sorted(v for v in vals if len(v) >= SUBSTR_MIN and not _is_num(v)
-                                              and any(v in t for t in texts))
+                                              and c not in exact and any(v in t for t in texts))
         if hit:
             bad.append(f"blind column {c!r} holds values the page or its image info shows anyway (e.g. {hit[0]!r}): "
                        "not blind; drop it from --blind-cols")
@@ -548,9 +576,12 @@ def _dec(v: str, a: dict):
 def table(pkg) -> dict:
     """The export as data: {columns, rows (dicts of typed values)}. Columns (C4): item, image, obj, line,
     <attr>@<rid> (schema order x reviewers sorted), agree_<attr>, reviewers, last_t, history_n, schema_id,
-    schema_version, <blind cols>."""
+    schema_version, <blind cols>. A whole-tree set (round 15): tree_table."""
     pkg = Path(pkg)
-    items, doc, data = read_items(pkg), read_schema(pkg), om.read_datajs(pkg)
+    items = read_items(pkg)
+    if is_tree(items):
+        return tree_table(pkg)
+    doc, data = read_schema(pkg), om.read_datajs(pkg)
     dec = om.decisions(pkg, data)
     hist = om.history(pkg)
     attrs = [a["id"] for a in doc.get("object_attrs") or []]
@@ -621,6 +652,8 @@ def import_csv(path_or_text, schema: dict, items: dict | None = None) -> dict:
     rd = csv.reader(io.StringIO(text))
     cols = next(rd, None)
     cols = [_uncell(c) for c in cols] if cols else cols
+    if cols and cols[:len(TREE_HEAD)] == TREE_HEAD:     # a whole-tree export (round 15)
+        return _import_tree(rd, cols, schema, items)
     known = {it["id"]: it for it in (items or {}).get("items") or []} if items is not None else None
     if not cols or cols[:4] != ["item", "image", "obj", "line"]:
         raise ObjectSetError("not an object set export (first columns item, image, obj, line)")
@@ -658,6 +691,8 @@ def coco(pkg) -> dict:
     each item's annotation (plus item and line). Blind columns are not in it."""
     pkg = Path(pkg)
     tab, items = table(pkg), read_items(pkg)
+    if is_tree(items):
+        return _tree_coco(pkg, tab, items)
     base = json.loads((pkg / "labels.coco.json").read_text(encoding="utf-8"))
     doc = tab["schema"]
     by_key = {}
@@ -789,6 +824,557 @@ def set_instructions(pkg, text, do=False, lock_wait: float = 5.0) -> dict:
     return out
 
 
+# ---------------------------------------------------------------- whole-tree sets (round 15, contract K3)
+TREE_STEP, NEST_STEP = "nesting_tree", "nesting"
+TREE_MODE = "tree"
+TREE_COLS = ("unit", "parent_unit", "role", "layer_index", "vesicle_depth", "offset_idx", "shape_idx", "wide", "call")
+# values compared by the blind check (check_blind_shown); layer_index / vesicle_depth / wide are small whole numbers the
+# visible tree shows anyway (the number of outlines and their nesting are inherent to a whole-tree card)
+TREE_BLIND_CHECK = ("unit", "parent_unit", "role", "call", "offset_idx", "shape_idx")
+TREE_HEAD = ["item", "image", "node_n", "obj", "line", "parent_n", "depth"]
+TREE_INT_COLS = ("line", "node_n", "parent_n", "depth", "last_t", "history_n", "schema_version")
+REL_LAYER, REL_INNER, REL_DROP = "layer", "inner_vesicle", ("not_membrane", "duplicate")
+MAX_NODES = 200                    # outlines on one card
+TREE_ITEM_KEYS = {"id", "image", "obj", "crop", "nodes"}
+TREE_NODE_KEYS = {"obj", "n", "parent_n"}
+
+
+def _tc(name: str) -> str:
+    return f"{TREE_STEP}.{name}"
+
+
+def _unguard(v) -> str:
+    """An objects.csv cell as written (results/compute.py guard_cell puts ' before = + - @ tab CR)."""
+    t = "" if v is None else str(v)
+    return t[1:] if t[:1] == "'" and t[1:2] in ("=", "+", "-", "@", "\t", "\r") else t
+
+
+def _int_or_none(v):
+    t = _unguard(v).strip()
+    if t == "":
+        return None
+    try:
+        f = float(t)
+    except ValueError:
+        return None
+    return int(f) if f == f and abs(f) != float("inf") and f == int(f) else None
+
+
+def read_tree_results(ps_dir) -> tuple:
+    """<ps>/results/objects.csv + steps.json, checked: steps.json lists nesting_tree v1 (and nesting v1) and its
+    objects_csv_sha256 is the file's; results.json (the commit marker) is there. -> (columns, rows, sha256, recipe)."""
+    rdir = Path(ps_dir) / "results"
+    oc, sj = rdir / "objects.csv", rdir / "steps.json"
+    hint = ("the prediction set has no nesting_tree results: on its Results page, Change recipe -> add nesting_tree "
+            "(it adds nesting), then build again")
+    if not (oc.is_file() and sj.is_file() and (rdir / "results.json").is_file()):
+        raise ObjectSetError(f"{hint} (no {rdir.name}/objects.csv + steps.json + results.json)")
+    try:
+        steps = json.loads(sj.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise ObjectSetError(f"{sj}: unreadable ({e})") from e
+    recipe = steps.get("recipe") if isinstance(steps, dict) else None
+    have = {(r.get("step"), r.get("version")) for r in recipe or [] if isinstance(r, dict)}
+    if (TREE_STEP, 1) not in have or (NEST_STEP, 1) not in have:
+        names = sorted(f"{a} v{b}" for a, b in have) or ["none"]
+        raise ObjectSetError(f"{hint} (steps.json recipe: {', '.join(names)})")
+    raw = oc.read_bytes()
+    sha = hashlib.sha256(raw).hexdigest()
+    if steps.get("objects_csv_sha256") != sha:
+        raise ObjectSetError(f"{oc}: its sha256 is not the one steps.json records (written by another run?); "
+                             "recompute the results")
+    text = raw.decode("utf-8-sig")
+    rd = csv.DictReader(io.StringIO(text))
+    rows = list(rd)
+    cols = list(rd.fieldnames or [])
+    need = ["image", "line", f"{NEST_STEP}.parent_line", _tc("role"), _tc("vesicle_depth")]
+    miss = [c for c in need if c not in cols]
+    if miss:
+        raise ObjectSetError(f"{oc}: no column(s) {miss}")
+    return cols, rows, sha, recipe
+
+
+def tree_plan(ps_dir, schema, roots=None, registry_root=None) -> dict:
+    """Every check a whole-tree build makes, nothing written (raises ObjectSetError with every problem).
+    Items = unit roots (nesting_tree role outer, vesicle_depth 0, no parent_line, image not rejected) with at least
+    one child; nodes = the root and every outline below it along nesting v1's parent_line (geometric parents).
+    roots: only these (image, line) roots (default: all)."""
+    ps_dir = Path(ps_dir)
+    req, ps_id, model, ps_rows, pred_dir = pp._ps_inputs(ps_dir)
+    try:
+        doc = load_schema(schema, registry_root)
+    except S.SchemaError as e:
+        raise ObjectSetError(str(e)) from e
+    attrs = doc.get("object_attrs") or []
+    if not any(a.get("applies_to") == "child" for a in attrs) or not any(S.applies(a, "root") for a in attrs):
+        raise ObjectSetError(f"{doc['id']} has no root and child questions (applies_to): a whole-tree card needs a "
+                             "tree schema, e.g. ls_lamellarity_tree_v1")
+    cols, rows, sha, recipe = read_tree_results(ps_dir)
+    ps_images = {r["image"] for r in ps_rows}
+    problems, by_key, kids, no_line = [], {}, {}, []
+    pl = f"{NEST_STEP}.parent_line"
+    for n, r in enumerate(rows, 2):
+        if not _unguard(r.get(_tc("role"))).strip():
+            continue                                       # no tree call: not an EV outline the step classified
+        img = (r.get("image") or "").strip()
+        if img not in ps_images:
+            problems.append(f"objects.csv row {n}: image {img!r} is not in the prediction set")
+            continue
+        line, parent = _int_or_none(r.get("line")), _int_or_none(r.get(pl))
+        if line is None:
+            no_line.append((img, parent))
+            continue
+        if (img, line) in by_key:
+            problems.append(f"objects.csv row {n}: image {img} line {line} listed twice")
+            continue
+        by_key[(img, line)] = r
+        if parent is not None:
+            kids.setdefault((img, parent), []).append(line)
+    if problems:
+        raise ObjectSetError(f"refused ({len(problems)} problem(s)):\n  - " + "\n  - ".join(problems[:30]))
+    no_line_parents = {(img, p) for img, p in no_line if p is not None}
+
+    def is_root(r):
+        return (_unguard(r.get(_tc("role"))).strip() == "outer" and _int_or_none(r.get(_tc("vesicle_depth"))) == 0
+                and _int_or_none(r.get(pl)) is None and (r.get("exclude_reason") or "") != "rejected_image")
+    all_roots = sorted(k for k, r in by_key.items() if is_root(r) and kids.get(k))
+    root_set = set(all_roots)
+    if roots is not None:
+        want = [(str(i), int(ln)) for i, ln in roots]
+        problems += [f"root {i} line {ln}: not a unit root with children in objects.csv"
+                     for i, ln in want if (i, ln) not in root_set][:30]
+        chosen = [k for k in dict.fromkeys(want) if k in root_set]
+    else:
+        chosen = all_roots
+    trees, owner_of, skipped, lines_of, by_image = [], {}, [], {}, {}
+    for root in chosen:
+        img = root[0]
+        nodes, todo, bad = [], [(root[1], None, 0)], False
+        while todo:
+            ln, parent, depth = todo.pop(0)
+            k = (img, ln)
+            if k in owner_of:                              # parent_line makes a forest; refused if it ever doesn't
+                problems.append(f"image {img} line {ln}: in the trees of root lines {owner_of[k]} and {root[1]}")
+                bad = True
+                break
+            owner_of[k] = root[1]
+            nodes.append({"line": ln, "parent_line": parent, "depth": depth, "row": dict(by_key[k])})
+            if k in no_line_parents:
+                bad = True                                 # a child drawn / reshaped on a reviewed image: no polygon
+            todo += [(c, ln, depth + 1) for c in sorted(kids.get(k, []))]
+        if bad:
+            skipped.append(root)
+            continue
+        if len(nodes) > MAX_NODES:
+            problems.append(f"image {img} root line {root[1]}: {len(nodes)} outlines, at most {MAX_NODES} per card")
+            continue
+        if img not in lines_of:
+            f = pred_dir / f"{img}.txt"
+            lines_of[img] = read_lines(f) if f.is_file() else None
+        objs = lines_of[img]
+        if objs is None:
+            problems.append(f"image {img}: no predictions file")
+            continue
+        miss = [nd["line"] for nd in nodes if nd["line"] >= len(objs) or objs[nd["line"]] is None]
+        if miss:
+            problems.append(f"image {img}: line(s) {miss[:5]} are not polygons in its predictions file")
+            continue
+        trees.append({"image": img, "root": root[1], "nodes": nodes})
+        by_image.setdefault(img, []).extend(nd["line"] for nd in nodes)
+    if not trees and not problems:
+        problems.append("no unit root with children: nothing to put on a whole-tree card")
+    if len(trees) > MAX_ITEMS:
+        problems.append(f"{len(trees)} trees: at most {MAX_ITEMS}")
+    if problems:
+        raise ObjectSetError(f"refused ({len(problems)} problem(s)):\n  - " + "\n  - ".join(problems[:30]))
+    hidden = [c for c in cols if c.startswith(TREE_STEP + ".")]
+    return {"mode": TREE_MODE, "ps_dir": ps_dir, "ps_id": ps_id, "model": model, "req": req, "ps_rows": ps_rows,
+            "pred_dir": pred_dir, "schema": doc, "cols": cols, "sha256": sha, "recipe": recipe, "trees": trees,
+            "keys": [(t["image"], t["root"]) for t in trees], "by_image": by_image, "lines_of": lines_of,
+            "rows": [nd["row"] for t in trees for nd in t["nodes"]],
+            "blind": [_tc(c) for c in TREE_BLIND_CHECK if _tc(c) in cols], "hidden": hidden,
+            "blind_exact": [_tc("role")],          # outer / lamella / inner_vesicle: "lamella" is in "lamellarity"
+            "skipped_no_line": skipped, "outline_mode": TREE_MODE, "items_name": "results/objects.csv",
+            "n_nodes": sum(len(t["nodes"]) for t in trees)}
+
+
+def build_tree(ps_dir, schema, review_root, roots=None, slug=None, seed=None, owner=None, reviewers=(),
+               registry_root=None, width=1440, quality=72, built_by="cli", title=None, instructions=None) -> Path:
+    """Build a whole-tree object set (K3) under review_root -> its folder (tree_plan, then the package; registering
+    is register()). Same package layout as build(); data.js D.mode = "tree" and per item nodes [{obj, n, parent_n}]."""
+    instructions = clean_instructions(instructions) if instructions is not None else ""
+    P = tree_plan(ps_dir, schema, roots, registry_root)
+    P["instructions"] = instructions
+    owner = owner or P["req"].get("owner")
+    if not pp.OWNER_RE.match(owner or ""):
+        raise ObjectSetError(f"bad owner {owner!r}")
+    revs = list(dict.fromkeys(reviewers or ()))
+    bad = [r for r in revs if not pp.REVIEWER_ID_RE.fullmatch(r)]
+    if bad:
+        raise ObjectSetError(f"bad reviewer ids {bad}")
+    slug = slug or P["schema"]["name"]
+    if not SLUG_RE.match(slug):
+        raise ObjectSetError(f"slug {slug!r} must match {SLUG_RE.pattern}")
+    seed = secrets.randbits(32) if seed is None else int(seed)
+    title = " ".join(str(title if title is not None else slug).split())[:TITLE_MAX] or slug
+    review_root = Path(review_root)
+    for _ in range(50):
+        pid = f"{PREFIX}{slug}_{secrets.token_hex(2)}"
+        if not (review_root / pid).exists():
+            break
+    else:
+        raise ObjectSetError("no free package id")
+    final = review_root / pid
+    tmp = review_root / f".building_{pid}_{secrets.token_hex(4)}"
+    try:
+        _build_tree_into(tmp, final, P, owner, revs, seed, width, quality, built_by, title)
+        check_blind_shown(tmp, P)
+        check_tree_datajs(tmp)
+        if final.exists():
+            raise FileExistsError(f"{final} appeared during the build")
+        tmp.rename(final)
+    finally:
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+    print(f"[OK] {pid} -> {final}")
+    return final
+
+
+def check_tree_datajs(pkg):
+    """K3: a tree set's data.js items hold only id, image, obj, crop, nodes [{obj, n, parent_n}] (no role, unit,
+    call or index). Raises ObjectSetError."""
+    data = om.read_datajs(pkg)
+    for it in data.get("items") or []:
+        if set(it) != TREE_ITEM_KEYS or any(set(n) != TREE_NODE_KEYS for n in it["nodes"]):
+            raise ObjectSetError(f"internal: data.js item {it.get('id')} carries more than {sorted(TREE_ITEM_KEYS)}")
+
+
+def _build_tree_into(out, final, P, owner, reviewers, seed, width, quality, built_by, title=None):
+    (out / "images").mkdir(parents=True)
+    doc = P["schema"]
+    print(f"[steps] whole-tree set: {len(P['trees'])} trees ({P['n_nodes']} outlines) on {len(P['by_image'])} images; "
+          f"schema {doc['id']}; nodes from {P['items_name']} ({TREE_STEP} v1, geometric parents); images grayscale "
+          f"JPEG <= {width} px, q{quality}; order and node numbers shuffled (seed in {ITEMS})"
+          + (f"; {len(P['skipped_no_line'])} tree(s) skipped (an outline without a prediction line)"
+             if P["skipped_no_line"] else ""))
+    rows_by_image = {r["image"]: r for r in P["ps_rows"]}
+    coco = {"info": {"description": f"whole-tree set from prediction set {P['ps_id']}, model {P['model']}"},
+            "categories": [{"id": k, "name": n} for k, n in enumerate(pp.PRED_CLASSES)], "images": [],
+            "annotations": []}
+    images, meta_images, key_of, size_of, ann_id = [], {}, {}, {}, 0
+    for n, img in enumerate(sorted(P["by_image"]), 1):
+        r = rows_by_image[img]
+        src = P["ps_dir"] / r["file"]
+        with Image.open(src) as im0:
+            w, h = im0.size
+            im = im0.convert("L")
+        if im.width > width:
+            im = im.resize((width, round(im.height * width / im.width)), Image.LANCZOS)
+        jpg = f"images/{img}.jpg"
+        im.save(out / jpg, "JPEG", quality=quality)
+        size_of[img] = (w, h)
+        objs = {o["line"]: o for o in P["lines_of"][img] if o is not None}
+        anns, lab_meta = [], []
+        for ln in sorted(set(P["by_image"][img])):
+            o = objs[ln]
+            ann_id += 1
+            key_of[(img, ln)] = f"g{ann_id}"
+            seg = pp._flat_px(o["p"][0], w, h)
+            xs, ys = seg[0::2], seg[1::2]
+            anns.append({"id": ann_id, "image_id": n, "category_id": o["k"] if o["k"] in (0, 1) else 0,
+                         "segmentation": [seg], "iscrowd": 0, "score": o["sr"], "line": ln,
+                         "bbox": [min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)]})
+            lab_meta.append({"id": ann_id, "cls": o["k"], "conf": o["sr"], "line": ln})
+        coco["images"].append({"id": n, "file_name": Path(src).name, "width": w, "height": h})
+        coco["annotations"] += anns
+        gt = brp.gt_items(anns, dict(enumerate(pp.PRED_CLASSES)), w, h)
+        file = Path(src).name
+        images.append({"file": file, "split": pp._display_label(r.get("sample_label")), "w": w, "h": h, "src": jpg,
+                       "gt": gt, "pr": [], "fg": 0, "fp": 0})
+        meta_images[img] = {"file": file, "w": w, "h": h, "sample_label": r.get("sample_label"),
+                            "labels": lab_meta, "candidates": []}
+
+    rng = random.Random(seed)
+    order = list(range(len(P["trees"])))
+    rng.shuffle(order)
+    used, items, pub = set(), [], []
+    for k in order:
+        t = P["trees"][k]
+        img = t["image"]
+        while True:
+            iid = f"{rng.getrandbits(20):05x}"
+            if iid not in used:
+                used.add(iid)
+                break
+        rest = list(range(1, len(t["nodes"])))           # node 0 is the root: n 1; the rest in a seeded order
+        rng.shuffle(rest)
+        n_of = {t["nodes"][0]["line"]: 1}
+        for n, i in enumerate(rest, 2):
+            n_of[t["nodes"][i]["line"]] = n
+        nodes = sorted(({"key": key_of[(img, nd["line"])], "n": n_of[nd["line"]], "line": nd["line"],
+                         "parent_n": None if nd["parent_line"] is None else n_of[nd["parent_line"]],
+                         "depth": nd["depth"], "row": nd["row"]} for nd in t["nodes"]), key=lambda x: x["n"])
+        w, h = size_of[img]
+        root = key_of[(img, t["root"])]
+        crop = crop_box(P["lines_of"][img][t["root"]]["p"][0], w, h)
+        pub.append({"id": iid, "image": img, "obj": root, "crop": crop,
+                    "nodes": [{"obj": nd["key"], "n": nd["n"], "parent_n": nd["parent_n"]} for nd in nodes]})
+        items.append({"id": iid, "image": img, "obj": root, "crop": crop, "line": t["root"],
+                      "row": dict(t["nodes"][0]["row"]), "nodes": nodes})
+
+    built = pp._now()
+    pid = final.name
+    data = {"id": pid, "kind": "objects", "mode": TREE_MODE, "prediction_set": P["ps_id"], "model": P["model"],
+            "owner": owner, "source": f"prediction_set:{P['ps_id']}", "run": P["model"], "created": built,
+            "categories": pp.PRED_CLASSES + pp.EXTRA_CLASSES, "schema": S.to_page(doc), "outline_mode": TREE_MODE,
+            "title": title or pid, "blind": True, "items": pub, "images": images}
+    if P.get("instructions"):
+        data["instructions"] = P["instructions"]
+    brp.write_packages(out, data, part_size=0, zip_it=False)
+    (out / SCHEMA_FILE).write_bytes(S.canonical_bytes(doc))
+    pp._write_json(out / ITEMS, {
+        "schema": "object_items/1", "package": pid, "mode": TREE_MODE, "seed": seed, "source": {
+            "file": P["items_name"], "sha256": P["sha256"], "recipe": P["recipe"]},
+        "columns": P["cols"], "image_col": "image", "key_col": "line", "key_kind": "line",
+        "blind_cols": P["hidden"], "outline_mode": TREE_MODE, "label_schema": doc["id"],
+        "skipped_no_line": [list(k) for k in P["skipped_no_line"]], "items": items})
+    pp._write_json(out / "labels.coco.json", coco, indent=None)
+    pp._write_json(out / pp.META, {"schema": "prediction_package/1", "kind": "objects", "package": pid,
+                                   "prediction_set": P["ps_id"], "model": P["model"], "owner": owner,
+                                   "label_conf": pp.LABEL_CONF, "cand_conf": pp.CAND_CONF, "built": built,
+                                   "ps_dir": str(Path(P["ps_dir"]).resolve()), "images": meta_images})
+    (out / ".review_key").write_text(secrets.token_urlsafe(18), encoding="utf-8")
+    rec = registry_record(final, data, built, doc, {**P, "blind": P["hidden"]}, owner, reviewers, built_by)
+    rec["mode"], rec["n_nodes"] = TREE_MODE, P["n_nodes"]
+    pp._write_json(out / pp.RECORD, rec)  # last
+    print(f"[OK] {pid}: {len(pub)} trees, {P['n_nodes']} outlines on {len(images)} images")
+
+
+# ---------------------------------------------------------------- whole-tree export / import / close (K3, #80g)
+def is_tree(items: dict) -> bool:
+    return isinstance(items, dict) and items.get("mode") == TREE_MODE
+
+
+def read_record(pkg) -> dict:
+    try:
+        rec = json.loads((Path(pkg) / pp.RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return rec if isinstance(rec, dict) else {}
+
+
+def is_closed(pkg) -> bool:
+    """#80g: review_package.json closed: true (final: the server then refuses every attribute decision with 409)."""
+    return read_record(pkg).get("closed") is True
+
+
+def derive_tree(nodes, rel) -> dict | None:
+    """One reviewer's tree of one item (K3). nodes: [{n, parent_n}] (n 1 = the root); rel: {n: relation value}.
+    None until every child has a relation. Else {"parent": {n: derived parent n (None for the root and for a dropped
+    node)}, "membranes": 1 + the longest chain of "layer" answers down from the root, "inner": the number of
+    "inner vesicle" answers whose derived parent is in the root's unit (the root and its layer chains)}. A child of a
+    "not a membrane" / "duplicate" node moves up to the nearest kept ancestor."""
+    par = {nd["n"]: nd["parent_n"] for nd in nodes}
+    if any(rel.get(n) is None for n in par if n != 1):
+        return None
+    kept = {n for n in par if n == 1 or rel.get(n) not in REL_DROP}
+    dpar = {}
+    for n in par:
+        if n not in kept or n == 1:
+            dpar[n] = None
+            continue
+        p = par[n]
+        while p is not None and p not in kept:
+            p = par[p]
+        dpar[n] = p
+    kids = {}
+    for n, p in dpar.items():
+        if p is not None:
+            kids.setdefault(p, []).append(n)
+
+    def chain(n):
+        return 1 + max([chain(c) for c in kids.get(n, []) if rel.get(c) == REL_LAYER] or [0])
+    unit, todo = set(), [1]
+    while todo:
+        n = todo.pop()
+        unit.add(n)
+        todo += [c for c in kids.get(n, []) if rel.get(c) == REL_LAYER]
+    inner = sum(1 for n in kept if n != 1 and rel.get(n) == REL_INNER and dpar[n] in unit)
+    return {"parent": dpar, "membranes": chain(1), "inner": inner}
+
+
+def tree_table(pkg, unblind=None) -> dict:
+    """A whole-tree set's export as data (K3): one row per (item, node), columns
+    item, image, node_n, obj, line, parent_n, depth, <attr>@<rid> (schema order x reviewers sorted), agree_<attr>,
+    derived_parent_n@<rid>, derived_membranes@<rid>, derived_inner@<rid> (the last two on root rows; derive_tree),
+    reviewers, last_t, history_n, schema_id, schema_version, then the hidden nesting_tree columns only when
+    unblind (default: when the set is closed, #80g)."""
+    pkg = Path(pkg)
+    items, doc, data = read_items(pkg), read_schema(pkg), om.read_datajs(pkg)
+    dec = om.node_decisions(pkg, data)
+    hist = om.history(pkg)
+    attrs = [a["id"] for a in doc.get("object_attrs") or []]
+    rids = sorted({k.split("@", 1)[1] for d in dec.values() for x in d.values() for k in x}
+                  | set(om.package_reviewers(pkg)))
+    unblind = is_closed(pkg) if unblind is None else bool(unblind)
+    blind = list(items.get("blind_cols") or []) if unblind else []
+    cols = (TREE_HEAD + [f"{a}@{r}" for a in attrs for r in rids] + [f"agree_{a}" for a in attrs]
+            + [f"derived_{x}@{r}" for x in ("parent_n", "membranes", "inner") for r in rids]
+            + ["reviewers", "last_t", "history_n", "schema_id", "schema_version"] + blind)
+    n_hist = {}
+    for h in hist:
+        p = rs.parse_attr_key(h.get("key"))
+        if p and p[0] is not None:
+            k = (Path(str(h.get("file"))).stem, p[0])
+            n_hist[k] = n_hist.get(k, 0) + 1
+    rows = []
+    for it in items["items"]:
+        d = dec.get(it["id"], {})
+        derived = {r: derive_tree(it["nodes"], {nd["n"]: (d.get(nd["key"], {}).get(f"relation@{r}") or {}).get("v")
+                                                for nd in it["nodes"]}) for r in rids}
+        for nd in it["nodes"]:
+            x = d.get(nd["key"], {})
+            row = {"item": it["id"], "image": it["image"], "node_n": nd["n"], "obj": nd["key"], "line": nd["line"],
+                   "parent_n": nd["parent_n"], "depth": nd["depth"]}
+            who, last = set(), None
+            for a in attrs:
+                vals = []
+                for r in rids:
+                    e = x.get(f"{a}@{r}")
+                    v = e.get("v") if isinstance(e, dict) else None
+                    row[f"{a}@{r}"] = v
+                    if e is not None:
+                        t = e.get("server_t") if rs._num(e.get("server_t")) else e.get("t")
+                        last = t if last is None or (rs._num(t) and t > last) else last
+                    if v is not None:
+                        vals.append(v)
+                        who.add(r)
+                row[f"agree_{a}"] = None if len(vals) < 2 else (len(set(map(_enc, vals))) == 1)
+            for r in rids:
+                dv = derived[r]
+                row[f"derived_parent_n@{r}"] = None if dv is None else dv["parent"][nd["n"]]
+                row[f"derived_membranes@{r}"] = dv["membranes"] if dv is not None and nd["n"] == 1 else None
+                row[f"derived_inner@{r}"] = dv["inner"] if dv is not None and nd["n"] == 1 else None
+            row["reviewers"] = ";".join(sorted(who))
+            row["last_t"] = int(last) if rs._num(last) else None
+            row["history_n"] = n_hist.get((it["image"], nd["key"]), 0)
+            row["schema_id"], row["schema_version"] = doc["id"], doc["version"]
+            for c in blind:
+                row[c] = nd["row"].get(c, "")
+            rows.append(row)
+    return {"columns": cols, "rows": rows, "schema": doc}
+
+
+def _import_tree(rd, cols, schema, items) -> dict:
+    """import_csv for a whole-tree export (TREE_HEAD first): values checked against the schema (and applies_to by
+    node), each row against the set's items.json when given, and every derived_* cell recomputed from the
+    relation answers (a tampered derived value is refused)."""
+    attr = {a["id"]: a for a in schema.get("object_attrs") or []}
+    known = None
+    if items is not None:
+        known = {(it["id"], nd["n"]): (it, nd) for it in items.get("items") or [] for nd in it.get("nodes") or []}
+    rows = []
+    for n, vals in enumerate(rd, 2):
+        if len(vals) != len(cols):
+            raise ObjectSetError(f"row {n}: {len(vals)} values for {len(cols)} columns")
+        r = {}
+        for c, v in zip(cols, map(_uncell, vals)):
+            if c in TREE_INT_COLS or c.startswith("derived_"):
+                if v != "" and not re.fullmatch(r"-?[0-9]+", v):
+                    raise ObjectSetError(f"row {n}: {c} {v!r} is not a whole number")
+                r[c] = int(v) if v != "" else None
+            elif c.startswith("agree_") and c[6:] in attr:
+                r[c] = None if v == "" else _dec(v, {"id": c, "kind": "bool"})
+            elif "@" in c and c.split("@", 1)[0] in attr:
+                a = attr[c.split("@", 1)[0]]
+                r[c] = _dec(v, a)
+                role = "root" if r.get("node_n") == 1 else "child"
+                if r[c] is not None and not S.applies(a, role):
+                    raise ObjectSetError(f"row {n}: {c} is not asked of a {role} node")
+            else:
+                r[c] = v
+        if r.get("schema_id") != schema.get("id") or r.get("schema_version") != schema.get("version"):
+            raise ObjectSetError(f"row {n}: schema {r.get('schema_id')} v{r.get('schema_version')} is not "
+                                 f"{schema.get('id')} v{schema.get('version')}")
+        if known is not None:
+            hit = known.get((r.get("item"), r.get("node_n")))
+            if hit is None:
+                raise ObjectSetError(f"row {n}: item {r.get('item')!r} node {r.get('node_n')!r} is not in this set")
+            it, nd = hit
+            if (r.get("image"), r.get("obj"), r.get("line"), r.get("parent_n"), r.get("depth")) != (
+                    it["image"], nd["key"], nd["line"], nd["parent_n"], nd["depth"]):
+                raise ObjectSetError(f"row {n}: item {r['item']} node {r['node_n']} does not match this set")
+        rows.append(r)
+    rids = sorted({c.split("@", 1)[1] for c in cols if c.startswith("derived_membranes@")})
+    by_item = {}
+    for r in rows:
+        by_item.setdefault(r["item"], []).append(r)
+    for iid, group in by_item.items():
+        nodes = [{"n": r["node_n"], "parent_n": r["parent_n"]} for r in group]
+        for rid in rids:
+            dv = derive_tree(nodes, {r["node_n"]: r.get(f"relation@{rid}") for r in group})
+            for r in group:
+                want = (None if dv is None else dv["parent"].get(r["node_n"]),
+                        dv["membranes"] if dv is not None and r["node_n"] == 1 else None,
+                        dv["inner"] if dv is not None and r["node_n"] == 1 else None)
+                got = (r.get(f"derived_parent_n@{rid}"), r.get(f"derived_membranes@{rid}"),
+                       r.get(f"derived_inner@{rid}"))
+                if got != want:
+                    raise ObjectSetError(f"item {iid} node {r['node_n']}: derived columns for {rid} are {got}, "
+                                         f"the answers give {want}")
+    return {"columns": cols, "rows": rows, "schema": schema}
+
+
+def _tree_coco(pkg, tab, items) -> dict:
+    """coco() for a whole-tree set: every node's annotation with its item, node_n and attributes."""
+    base = json.loads((Path(pkg) / "labels.coco.json").read_text(encoding="utf-8"))
+    doc = tab["schema"]
+    img_id = {Path(i["file_name"]).stem: i["id"] for i in base["images"]}
+    by_key = {(a["image_id"], a["id"]): a for a in base["annotations"]}
+    attrs = [c for c in tab["columns"] if "@" in c and not c.startswith("derived_")]
+    anns = []
+    for row in tab["rows"]:
+        a = dict(by_key[(img_id[row["image"]], int(row["obj"][1:]))])
+        a["item"], a["node_n"] = row["item"], row["node_n"]
+        a["attributes"] = {c: row[c] for c in attrs if row[c] is not None}
+        a["attributes_schema"] = {"id": doc["id"], "version": doc["version"]}
+        anns.append(a)
+    return {"info": {"description": f"whole-tree set {items['package']} with attributes ({doc['id']})"},
+            "categories": base["categories"], "images": base["images"],
+            "annotations": sorted(anns, key=lambda a: a["id"])}
+
+
+def close_set(pkg, by: str, do=False, lock_wait: float = 5.0) -> dict:
+    """#80g: close an object set: review_package.json closed: true, closed_by, closed_t (under the package's meta
+    lock, atomic). Final: a closed set is never reopened (refused). Dry run unless do. The portal's POST
+    /reviews/{pkg}/close does the same and adds the registry status line. -> {pkg, closed_by, written}."""
+    pkg = Path(pkg)
+    if not pp.OWNER_RE.match(by or ""):
+        raise ObjectSetError(f"bad person id {by!r}")
+    rec_p = pkg / pp.RECORD
+    rec = read_record(pkg)
+    if rec.get("kind") != "objects":
+        raise ObjectSetError(f"{pkg.name}: not an object set")
+    if rec.get("closed") is True:
+        raise ObjectSetError(f"{pkg.name}: already closed by {rec.get('closed_by')} at {rec.get('closed_t')} (final)")
+    out = {"pkg": str(pkg), "closed_by": by, "written": False}
+    if not do:
+        return out
+    lk = pp.meta_lock(pkg.parent, pkg.name, lock_wait)
+    try:
+        rtext = rec_p.read_text(encoding="utf-8")
+        rec = json.loads(rtext)
+        if rec.get("closed") is True:
+            raise ObjectSetError(f"{pkg.name}: already closed (final)")
+        rec["closed"], rec["closed_by"], rec["closed_t"] = True, by, pp._now()
+        _write_atomic(rec_p, (json.dumps(rec, indent=1, ensure_ascii=False)
+                              + ("\n" if rtext.endswith("\n") else "")).encode("utf-8"))
+    finally:
+        lk.close()
+    out["written"] = True
+    return out
+
+
 # ---------------------------------------------------------------- CLI
 def _read_text_arg(text, file) -> str:
     if file is not None:
@@ -796,15 +1382,55 @@ def _read_text_arg(text, file) -> str:
     return text
 
 
+def _main_tree(a, revs, instr) -> int:
+    """build --tree (round 15 K3): dry run (tree_plan) unless --do."""
+    roots = None
+    if a.items is not None:
+        if a.line_col is None:
+            raise ObjectSetError("--tree --items limits the trees by root: give --line-col")
+        cols, rows, _ = read_items_csv(a.items)
+        if a.image_col not in cols or a.line_col not in cols:
+            raise ObjectSetError(f"--items needs columns {a.image_col!r} and {a.line_col!r}")
+        bad = [r for r in rows if not (r.get(a.line_col) or "").strip().isdigit()]
+        if bad:
+            raise ObjectSetError(f"--items: line {bad[0].get(a.line_col)!r} is not a whole number")
+        roots = [((r.get(a.image_col) or "").strip(), int(r[a.line_col])) for r in rows]
+    if a.blind_cols or a.particle_col or a.outline_mode != "target":
+        raise ObjectSetError("--tree sets hide every nesting_tree column and draw every outline of the tree: "
+                             "--blind-cols, --particle-col and --outline-mode don't apply")
+    if not a.do:
+        P = tree_plan(a.ps, a.schema, roots, a.registry)
+        print(f"DRY RUN, nothing written: {len(P['trees'])} whole-tree cards ({P['n_nodes']} outlines) on "
+              f"{len(P['by_image'])} images of {P['ps_id']}, schema {P['schema']['id']}"
+              + (f", {len(P['skipped_no_line'])} tree(s) skipped (an outline without a prediction line)"
+                 if P["skipped_no_line"] else "")
+              + (f", instructions {len(instr)} characters" if instr else "")
+              + ". Run again with --do to build"
+              + (" (and --register --registry <dir> to record it)." if not a.register else "."))
+        return 0
+    if a.review_root is None:
+        from data_utils import config
+        a.review_root = config.laptop_root() / "review"
+    pkg = build_tree(a.ps, a.schema, a.review_root, roots, a.slug, a.seed, a.owner, revs, a.registry,
+                     title=a.title, instructions=instr)
+    if a.register:
+        register(pkg, a.registry)
+        print(f"[OK] registered {pkg.name} in {a.registry}")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("build", help="items CSV + prediction set -> object set (dry run unless --do)")
     b.add_argument("--ps", required=True, type=Path)
-    b.add_argument("--items", required=True, type=Path)
+    b.add_argument("--items", type=Path, help="items CSV (required, except with --tree: then it optionally limits "
+                                               "the trees to the listed roots, by --image-col / --line-col)")
     b.add_argument("--schema", required=True, help="label schema id (built-in or registered) or a .json file")
+    b.add_argument("--tree", action="store_true", help="whole-tree cards (round 15): items = the nesting_tree unit "
+                                                       "roots of <ps>/results/objects.csv, every outline numbered")
     b.add_argument("--image-col", default="image")
-    g = b.add_mutually_exclusive_group(required=True)
+    g = b.add_mutually_exclusive_group()
     g.add_argument("--line-col")
     g.add_argument("--particle-col")
     b.add_argument("--blind-cols", default="", help="comma-separated items CSV columns kept off the page")
@@ -828,6 +1454,11 @@ def main(argv=None):
     sg.add_argument("--file", type=Path, help="a UTF-8 text file")
     sg.add_argument("--clear", action="store_true", help="remove the instructions")
     s.add_argument("--do", action="store_true", help="write (default: a dry run that writes nothing)")
+    c = sub.add_parser("close", help="close an object set (final: no new answers; exports unblind) (dry run unless "
+                                     "--do)")
+    c.add_argument("pkg", type=Path, help="the object set's folder (pred_obj_*)")
+    c.add_argument("--by", required=True, help="portal id of whoever closes it (the maker or an admin)")
+    c.add_argument("--do", action="store_true", help="write (default: a dry run that writes nothing)")
     e = sub.add_parser("export", help="decisions -> CSV (+ COCO)")
     e.add_argument("--pkg", required=True, type=Path)
     e.add_argument("--out", required=True, type=Path)
@@ -844,6 +1475,10 @@ def main(argv=None):
                 raise ObjectSetError("--register needs --do and an explicit --registry")
             instr = _read_text_arg(a.instructions, a.instructions_file)
             instr = clean_instructions(instr) if instr is not None else None
+            if a.tree:
+                return _main_tree(a, revs, instr)
+            if a.items is None or (a.line_col is None and a.particle_col is None):
+                raise ObjectSetError("build needs --items and one of --line-col / --particle-col (or --tree)")
             if not a.do:
                 P = plan(a.ps, a.items, a.schema, a.image_col, a.line_col, a.particle_col, blind, a.outline_mode,
                          a.registry)
@@ -881,6 +1516,14 @@ def main(argv=None):
             else:
                 print(f"[OK] {a.pkg.name}: {what} (data.js D.instructions, {pp.RECORD} instructions + "
                       "instructions_t). Open cards show it after a reload (data.js may be cached up to an hour).")
+        elif a.cmd == "close":
+            r = close_set(a.pkg, a.by, do=a.do)
+            if a.do:
+                print(f"[OK] {a.pkg.name}: closed by {a.by} (review_package.json closed: true; final). New answers are "
+                      "refused (409); exports now include the hidden columns.")
+            else:
+                print(f"DRY RUN, nothing written: would close {a.pkg.name} as {r['closed_by']} (final: it can't be "
+                      "reopened). Run again with --do to close it.")
         elif a.cmd == "export":
             tab = table(a.pkg)
             a.out.write_text(to_csv(tab), encoding="utf-8", newline="")

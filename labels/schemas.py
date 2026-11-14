@@ -7,7 +7,10 @@ Shape ("label_schema/1"):
   {"schema": "label_schema/1", "id": "ls_<name>_v<N>", "name", "version": N, "maker": <person id>, "description",
    "classes": [{"name", "color": "#rrggbb", "key"?, "label"?}],
    "object_attrs": [{"id", "label", "kind": choice|ordinal|bool|text, "required"?, "key"?, "max"? (text),
-                     "options"?: [{"v", "label"?, "key"?}] (choice / ordinal)}],
+                     "options"?: [{"v", "label"?, "key"?}] (choice / ordinal),
+                     "help"? (r15 K2: <= 200 plain characters, no < > &, shown under the question),
+                     "applies_to"? (r15 K2: "all" default | "root" | "child": which nodes of a whole-tree card
+                                    ask it; a card of one object is a root)}],
    "image_attrs": [same as object_attrs], "tags": [{"id", "label", "key"?}],
    "supersedes": null | <ls id>, "class_mapping": null | {<old class>: <new class> | null}}
 
@@ -16,15 +19,18 @@ validate(doc) -> [problems] (empty = valid):
   - colours ^#[0-9a-fA-F]{6}$; labels 1-40 characters, plain text (no control characters, no < > &; the page
     escapes them anyway);
   - keys: one character [a-z0-9] (case-insensitive), never reserved by the object card (RESERVED_KEYS:
-    ArrowLeft, ArrowRight, Enter, Backspace, i), never used twice within a scope: the classes and tags (the Editor's
+    ArrowLeft, ArrowRight, Enter, Backspace, Tab, i), never used twice within a scope: the classes and tags (the Editor's
     picker) are one scope, the object attributes (the object card) one, the image attributes one;
   - choice / ordinal: >= 2 options, values unique strings of 1-40 characters; text: max 1-300;
+  - help (optional): 1-200 characters of plain text (no control characters, no < > &);
+  - applies_to (optional): "all", "root" or "child" (legacy schemas don't carry it: "all");
   - a new version (supersedes) carries a class_mapping whose keys are the old schema's classes (checked when the
     old one is loadable) and whose targets are this schema's classes or null.
 load(id, registry_root=None) -> dict: a built-in, else the registered definition; validated.
 to_page(doc) -> the part the review page gets (data.js D.schema): labels filled in, no maker / description.
 migrate(cls, doc) -> the class name under doc for a class of the schema doc supersedes (class_mapping).
 value_ok(attr, v) -> True when v is a valid value of that attribute (the review server's check, contract C3).
+applies(attr, role) -> True when attr is asked of a node of that role ("root" | "child"; applies_to, default all).
 """
 from __future__ import annotations
 
@@ -42,14 +48,16 @@ ATTR_RE = re.compile(r"^[a-z][a-z0-9_]{0,15}$")
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 PERSON_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 KEY_RE = re.compile(r"^[a-z0-9]$")
-RESERVED_KEYS = ("arrowleft", "arrowright", "enter", "backspace", "i")   # the object card's own keys (lower case)
+RESERVED_KEYS = ("arrowleft", "arrowright", "enter", "backspace", "tab", "i")   # the object card's own keys (lower case)
 KINDS = ("choice", "ordinal", "bool", "text")
 TEXT_MAX = 300
 LABEL_MAX = 40
 DESC_MAX = 1000
 TOP_KEYS = {"schema", "id", "name", "version", "maker", "description", "classes", "object_attrs", "image_attrs",
             "tags", "supersedes", "class_mapping"}
-ATTR_KEYS = {"id", "label", "kind", "required", "key", "max", "options"}
+ATTR_KEYS = {"id", "label", "kind", "required", "key", "max", "options", "help", "applies_to"}
+HELP_MAX = 200                                       # r15 K2: an attribute's help line
+APPLIES = ("all", "root", "child")                   # r15 K2: applies_to (whole-tree cards); absent = "all"
 
 
 class SchemaError(ValueError):
@@ -59,6 +67,11 @@ class SchemaError(ValueError):
 def _label_ok(s) -> bool:
     return (isinstance(s, str) and 1 <= len(s) <= LABEL_MAX and s == s.strip()
             and not any(ord(c) < 32 or c in "<>&\x7f" for c in s))
+
+
+def _help_ok(s) -> bool:
+    return (isinstance(s, str) and 1 <= len(s) <= HELP_MAX and s == s.strip()
+            and not any(ord(c) < 32 or c in "<>&" for c in s))
 
 
 def _key_problem(key, where, scope: dict) -> str | None:
@@ -104,6 +117,10 @@ def _attrs_problems(attrs, field: str) -> list:
             out.append(f"{where}: kind {kind!r} must be one of {KINDS}")
         if "required" in a and not isinstance(a["required"], bool):
             out.append(f"{where}: required must be true or false")
+        if "help" in a and not _help_ok(a["help"]):
+            out.append(f"{where}: help must be 1-{HELP_MAX} plain characters (no control characters, no < > &)")
+        if "applies_to" in a and a["applies_to"] not in APPLIES:
+            out.append(f"{where}: applies_to must be one of {APPLIES}")
         p = _key_problem(a.get("key"), where, keys)
         if p:
             out.append(p)
@@ -312,6 +329,10 @@ def _page_attr(a: dict) -> dict:
                            **({"key": o["key"].lower()} if o.get("key") else {})} for o in a["options"]]
     if a["kind"] == "text":
         out["max"] = int(a.get("max", TEXT_MAX))
+    if a.get("help"):                                  # r15 K2: only when set (a legacy schema's page is unchanged)
+        out["help"] = a["help"]
+    if a.get("applies_to"):
+        out["applies_to"] = a["applies_to"]
     return out
 
 
@@ -351,6 +372,11 @@ def value_ok(a: dict, v) -> bool:
             return False
         return True
     return False
+
+
+def applies(a: dict, role: str) -> bool:
+    """r15 K2: is attribute a asked of a node of this role ("root" | "child")? applies_to absent / "all" = always."""
+    return a.get("applies_to", "all") in ("all", role)
 
 
 def migrate(cls: str, doc: dict):
