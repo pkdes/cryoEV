@@ -15,6 +15,9 @@ v2 (jobs and inputs, TRACKING_CONTRACT.md addendum):
 - `inputs` on label_version (base, edits), dataset (source), model (train_data, init_weights).
 - a dataset built from a label version (data_utils/dataset_from_lv.py: `provenance.json` in its folder, or a
   registered record with source.kind label_version) keeps its own record and list; only frozen -> trained is derived.
+- a package the portal built (round 13: built_by "portal" in its review_package.json or data.js) is skipped
+  entirely: the portal appends its own allowlisted review_package line, and it never gets a revise job (an 8766
+  job would let it take over /review/).
 - one revise `job/1` per top-level review package (no `_partN`, no SANDBOX): progress = edit records with
   `edit.reviewed` true / n_images; status in_progress if any record has decisions or reviewed, else ready.
   A package's `applied` status never makes its job done (only an explicit set-status line does).
@@ -425,6 +428,19 @@ def grid_fields(rows):
         vals = [(f, val(r, k)) for f, r in rows if val(r, k)]
         out[k] = (vals[0][1] if len(rows) == 1 else "; ".join(f"{f}: {v}" for f, v in vals)) if vals else None
     return out
+
+
+def portal_built(folder, datajs=None) -> bool:
+    """A package the portal built (portal/review_build.py, round 13): built_by "portal" in its review_package.json,
+    or in data.js (written first, so a package still being built is left alone too)."""
+    if isinstance(datajs, dict) and datajs.get("built_by") == "portal":
+        return True
+    f = Path(folder) / "review_package.json"
+    try:
+        meta = read_json(f) if f.is_file() else None
+    except (ValueError, OSError):
+        return False
+    return isinstance(meta, dict) and meta.get("built_by") == "portal"
 
 
 class Importer:
@@ -852,6 +868,9 @@ class Importer:
                     self.excluded["review_package (prediction, own line)"] += 1    # deriving it here would drop those
                     continue
                 d = read_datajs(e["path"] / "data.js")
+                if portal_built(e["path"], d):                 # the portal writes its own allowlisted line, and it
+                    self.excluded["review_package (portal-built, own line)"] += 1  # never gets a revise job (round 13)
+                    continue
                 run = (d.get("run") or "").split(" ")[0]
                 model = run if run in s.models else run_to_model.get(run)
                 edits = [f for f in (e["path"] / "edits").glob("*.json") if is_record_file(f)] \

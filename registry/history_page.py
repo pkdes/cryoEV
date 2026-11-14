@@ -409,7 +409,8 @@ GRAPH_JOBS = ("revise", "annotate")
 HIST_STATUSES = {"superseded", "abandoned", "cancelled", "retired"}
 UNKNOWN_SESSION = "session|?"               # the "Session unknown" node (no record: '?' is never a session id)
 BASE_KIND = {"pull": "pull", "export": "roboflow_export", "roboflow_export": "roboflow_export",
-             "prediction_set": "prediction_set"}
+             "prediction_set": "prediction_set", "label_version": "label_version"}   # label_version: portal-built
+                                                                                     # compare packages (round 13)
 
 
 def is_revised(rec) -> bool:
