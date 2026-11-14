@@ -35,6 +35,9 @@ Routes (everything except OPEN needs a session; see Gate):
   /review/<pkg_id>/      a prediction review package (pred_ps_<8 digits>_<6 hex>) in the same shell; its tool at
                          /review/<pkg_id>/app/... -> <pred upstream>/<pkg_id>/... with the package's own key; owner or
                          admin only (pred_mount). Anything else under /review/ -> 404
+                         Round 13: a server-rendered switcher strip above the frame on /review/<pkg>/ (and on
+                         /review/ only with CJ_REVIEW_STRIP_CORE on), built off the event loop within STRIP_BUDGET_S;
+                         any error or timeout = no strip. A blind audit's owner can't PUT edits / POST group (403)
 The sandbox is NOT proxied (it shares the real package's localStorage key); modules.json links out to :8443.
 Roles: plug-in modules declare ROLES (portal/modules); the core pages start from CORE_ROLES (review, history: admin)
 and a valid modules.json entry may replace one (manifest_rules; fail closed). The rules are read once at start (an
@@ -57,8 +60,10 @@ Retry-After over it; one open agent upload and the active-set cap for every agen
 (portal/predict_parts: uploads.upload_start, create.check_active). No bearer route checks a form token: binding() is
 "" for every bearer request, so one would be one shared token (portal/tests/test_agent_api.py guards it).
 
-Defaults: --registry = data_utils.config.registry_root(); --review-package = the newest open revise job on port
-8766 in that registry (its review_package path); roster and state dir under %USERPROFILE%\\.cryoev (portal/auth.py).
+Defaults: --registry = data_utils.config.registry_root(); --review-package = the --package of the review_server.py
+service with --port 8766 in the services config (registry_review_package; only when that config can't be read, the
+newest open revise job on port 8766 in the registry), with a WARNING at start when the package in use isn't that
+one; roster and state dir under %USERPROFILE%\\.cryoev (portal/auth.py).
 uvicorn runs with its access log OFF and proxy headers OFF; the app writes its own access log with `k` redacted.
 
 Audit (Admin > Recent actions): after every POST/PUT/DELETE/PATCH, done or refused, the Gate queues one line in
@@ -72,6 +77,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import contextlib
 import errno
 import html
@@ -87,7 +93,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import unquote_plus, urlsplit
+from urllib.parse import unquote, unquote_plus, urlsplit
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -179,6 +185,19 @@ ICONS = {
 }
 EXT_ICON = '<svg class="cj-ext" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 16L16 8M10 8h6v6"/></svg>'
 REVIEW_PORT = 8766
+# ---- the review switcher strip (round 13): server-rendered above the review tool's frame, never JS. Built off the
+# event loop in its own small pool with a time budget; any error or timeout = no strip (the page never fails for it)
+STRIP_CORE_ENV = "CJ_REVIEW_STRIP_CORE"     # on / 1 / true / yes: the strip on /review/ (the core package) too
+STRIP_BUDGET_S = 0.3
+STRIP_PER_GROUP = 8
+STRIP_KIND = {"prediction": "Prediction", "label_review": "Label set", "audit": "Audit", "sandbox": "Practice"}
+STRIP_STATUS = {"finished": "Finished", "applied": "Applied"}      # shown on a dropdown item; open ones need no chip
+_STRIP_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="cj-strip")
+# ---- the audit owner can't decide cards (round 13): writes to these tool paths are refused for the owner of a compare
+# package whose review_package.json has no purpose "revise" (a blind audit); reads stay allowed
+DECIDE_PATHS = frozenset({"api/edits", "api/group"})
+AUDIT_OWNER_REFUSED = ("You made this blind audit, so you can't decide its cards: the reviewers do. "
+                       "You can still look at it.")
 PUBLIC_PORTS = {"", "443", "8443", "8445", "8446"}   # tailscale serve's https ports (links use https there)
 HOST_RE = re.compile(r"[A-Za-z0-9.-]{1,253}|\[[0-9A-Fa-f:.]{2,45}\]")
 AUTH_MODES = ("key", "access")       # key links (tailnet) | Cloudflare Access JWT (portal/access.py); never mixed
@@ -434,9 +453,70 @@ def external_href(mod: dict, host: str | None) -> str | None:
     return f"http://{name}:{int(ext['local_port'])}{path}"
 
 
-def registry_review_package(registry: Path | None, port: int = REVIEW_PORT) -> Path | None:
-    """The real review package: the newest open revise job on `port` in the registry -> its review_package path.
-    Read through registry.store's current(); None when anything is missing."""
+def _argv_value(argv, flag: str):
+    """The value of `flag` (`--flag v` or `--flag=v`) in argv as given, else in its whole-command-line elements split
+    (annotation/multi_review_server._tokens: quoted parts kept together)."""
+    def find(tok):
+        return next((b for a, b in zip(tok, tok[1:]) if a == flag), None) or next(
+            (a.split("=", 1)[1] for a in tok if a.startswith(flag + "=")), None)
+    return find(argv) or find(MRS._tokens([a for a in argv if MRS.SINGLE_RE.search(a) or flag in a]))
+
+
+def services_review_package(port: int = REVIEW_PORT, environ=None) -> tuple:
+    """(package Path or None, readable): the --package of the annotation/review_server.py service started with
+    `--port <port>` in the services config (multi_review_server.services_config: $CRYOEV_SERVICES_CONFIG, else
+    $CRYOEV_SERVICES, else ~/.cryoev/services.json; read only, never written). Parsed fail-closed as
+    multi_review_server._parse_services: no file, unreadable, not JSON, no / empty services list, or any service whose
+    argv isn't a list of strings -> (None, False), "can't be read". Readable but no such service, or two enabled
+    services on that port with different packages -> (None, True). Disabled services count only when no enabled one
+    matches. {repo}, %VARS% and ~ in the package are expanded; nothing on disk is touched."""
+    path = MRS.services_config(environ)
+    try:
+        raw = path.read_bytes()
+        text = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig")
+        services = json.loads(text).get("services")
+        if not isinstance(services, list) or not services:
+            return None, False
+    except (OSError, ValueError, UnicodeError, AttributeError):
+        return None, False
+    hits = []                                       # (enabled, package text)
+    for svc in services:
+        argv = svc.get("argv") if isinstance(svc, dict) else None
+        if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
+            return None, False
+        if not any(MRS.SINGLE_RE.search(a) for a in argv) and not MRS.SINGLE_RE.search(" ".join(argv)):
+            continue
+        if str(_argv_value(argv, "--port") or "").strip() != str(port):
+            continue
+        pkg = _argv_value(argv, "--package")
+        if not pkg or not pkg.strip() or pkg.startswith("-"):
+            return None, False                      # a review server on that port with no readable package
+        hits.append((svc.get("enabled", True) is not False, pkg.strip()))
+    chosen = [p for on, p in hits if on] or [p for _, p in hits]
+    paths = list(dict.fromkeys(os.path.expanduser(os.path.expandvars(p.replace("{repo}", str(REPO)))) for p in chosen))
+    if len(paths) > 1:
+        log.warning("services config: %d review servers on port %d with different packages; none is used", len(paths),
+                    port)
+        return None, True
+    return (Path(paths[0]) if paths else None), True
+
+
+def same_package(a, b) -> bool:
+    """Two package paths name the same folder (text only: case and slashes normalised, nothing on disk touched)."""
+    if a is None or b is None:
+        return False
+    return os.path.normcase(os.path.normpath(str(a))) == os.path.normcase(os.path.normpath(str(b)))
+
+
+def registry_review_package(registry: Path | None, port: int = REVIEW_PORT, environ=None) -> Path | None:
+    """The real review package. First the services config: the review_server.py service with `--port <port>` -> its
+    --package (services_review_package); a readable config is the answer, also when it has no such service (None).
+    Only when the config can't be read: the newest open revise job on `port` in the registry -> its review_package
+    path, read through registry.store's current(); None when anything is missing. A newer lab_ package with its own
+    revise job can never take /review/ over while the services config names the package."""
+    pkg, readable = services_review_package(port, environ)
+    if readable:
+        return pkg
     if registry is None or not Path(registry).is_dir():
         return None
     try:
@@ -989,7 +1069,7 @@ def render_home(request: Request, cfg: Config, user: dict, rules=None) -> str:
         mid = str(m.get("id", ""))
         name, desc = esc(m.get("name", "?")), esc(m.get("desc", ""))
         ico = f'<span class="cj-ico">{icon(m.get("icon"))}</span>'
-        label = f'<span class="cj-evh">{esc(m["label"])}</span>' if m.get("label") and mid == "review" else ""
+        label = f'<span class="cj-evh">{esc(m["label"])}</span>' if m.get("label") and mid == "reviews" else ""
         if m.get("status") != "on":
             cards.append(f'<div class="cj-mod off" data-id="{esc(mid)}" aria-disabled="true"><div class="cj-mt">{ico}'
                          f'<b>{name}</b><span class="cj-tag">coming</span></div><p>{desc}</p></div>')
@@ -999,7 +1079,7 @@ def render_home(request: Request, cfg: Config, user: dict, rules=None) -> str:
         st = "" if not h or not sees_live else dot("unk" if stale or h not in srv else
                                                    ("up" if srv[h].get("up") else "down"))
         ext = f' <span class="cj-mut">(own address)</span>{EXT_ICON}' if m.get("external") else ""
-        cls = "cj-mod cj-mod-review" if mid == "review" else "cj-mod"
+        cls = "cj-mod cj-mod-review" if mid == "reviews" else "cj-mod"      # the eVHarmony tile (round 13: Reviews)
         cards.append(f'<a class="{cls}" data-id="{esc(mid)}" href="{esc(href or "#")}"><div class="cj-mt">{ico}'
                      f'<b>{name}</b>{label}{ext}{st}</div><p>{desc}</p></a>')
     if not cards:
@@ -1016,12 +1096,131 @@ def render_home(request: Request, cfg: Config, user: dict, rules=None) -> str:
                       "footer": footer})
 
 
-def shell_response(request: Request, base: str, title: str = "Review") -> HTMLResponse:
-    """The review shell page for the tool at base/app/: the bar + an iframe (the shell's query, minus k, goes along)."""
+def strip_core_on(environ=None) -> bool:
+    """$CJ_REVIEW_STRIP_CORE is on / 1 / true / yes: the switcher strip shows on /review/ (the core package) too. Off
+    by default while the live audit runs (its entry page stays as it is); read per request."""
+    env = os.environ if environ is None else environ
+    return str(env.get(STRIP_CORE_ENV, "")).strip().lower() in ("on", "1", "true", "yes")
+
+
+def _strip_href(url) -> str | None:
+    """A same-site absolute path ("/x", never "//x", no backslash or control character), else None."""
+    if not isinstance(url, str) or not url.startswith("/") or url.startswith("//") \
+            or any(c == "\\" or ord(c) < 0x20 or ord(c) == 0x7F for c in url):
+        return None
+    return url
+
+
+def _strip_count(row) -> str:
+    """"D / T" for a dropdown item, "" when the row has no card count."""
+    d, t = row.get("decided"), row.get("cards")
+    return f"{d} / {t}" if isinstance(d, int) and isinstance(t, int) else ""
+
+
+def render_strip(rows, current_id, groups) -> str:
+    """The switcher strip's HTML (everything escaped): "← All reviews", the current package's kind chip and name as a
+    <details> dropdown (groups from review_index.switcher_groups: "Needs you" first, then by kind; each item links to
+    its go_url, the current one marked and not a link), "D of T cards", and an "All reviews" footer link. `rows` are
+    review_index.list_reviews rows (already filtered to what this person may open)."""
+    esc = html.escape
+    cur = next((r for r in rows or () if isinstance(r, dict) and r.get("id") == current_id), None) \
+        if current_id else None
+
+    def chip(kind, cls="cj-rs-kind"):
+        k = kind if kind in STRIP_KIND else "other"
+        return f'<span class="{cls}" data-kind="{esc(k)}">{esc(STRIP_KIND.get(kind, "Review"))}</span>'
+
+    if cur is not None:
+        summary = (chip(cur.get("kind")) + f'<span class="cj-rs-name">{esc(str(cur.get("title") or cur.get("id")))}</span>')
+    else:
+        summary = '<span class="cj-rs-name">Switch review</span>'
+    parts = []
+    for gi, group in enumerate(groups or ()):
+        try:
+            label, items = group
+        except (TypeError, ValueError):
+            continue
+        items = [r for r in (items or ())[:STRIP_PER_GROUP] if isinstance(r, dict)]
+        if not items:
+            continue
+        needs = gi == 0 and str(label).lower().startswith("needs")
+        lines = []
+        for r in items:
+            bits = (chip(r.get("kind"), "cj-rs-kind cj-rs-sm") if needs else "") + \
+                f'<span class="cj-rs-t">{esc(str(r.get("title") or r.get("id") or "?"))}</span>'
+            if r.get("blind"):
+                bits += '<span class="cj-rs-tag">blind</span>'
+            st = STRIP_STATUS.get(r.get("status"))
+            if st:
+                bits += f'<span class="cj-rs-st" data-status="{esc(str(r.get("status")))}">{esc(st)}</span>'
+            n = _strip_count(r)
+            if current_id is not None and r.get("id") == current_id:
+                bits += '<span class="cj-rs-cur">current</span>'
+                lines.append(f'<span class="cj-rs-item is-current" aria-current="page">{bits}'
+                             f'<span class="cj-rs-n">{esc(n)}</span></span>')
+                continue
+            href = _strip_href(r.get("go_url"))
+            if href is None:
+                continue
+            lines.append(f'<a class="cj-rs-item" href="{esc(href)}">{bits}<span class="cj-rs-n">{esc(n)}</span></a>')
+        if lines:
+            total = sum(1 for r in rows or () if isinstance(r, dict) and r.get("needs_you")) if needs else 0
+            more = (f'{total - len(items)} more in All reviews' if total > len(items) else
+                    "More in All reviews" if not needs and len(items) >= STRIP_PER_GROUP else "")
+            parts.append(f'<div class="cj-rs-group"><div class="cj-rs-gh">{esc(str(label))}'
+                         f'<span class="cj-rs-gn">{len(lines)}</span></div>{"".join(lines)}'
+                         + (f'<a class="cj-rs-more" href="/reviews/">{esc(more)}</a>' if more else "") + '</div>')
+    menu = "".join(parts) or '<div class="cj-rs-empty">No other reviews yet.</div>'
+    prog = ""
+    if cur is not None and isinstance(cur.get("cards"), int) and isinstance(cur.get("decided"), int):
+        t, d = max(0, cur["cards"]), max(0, cur["decided"])
+        prog = (f'<span class="cj-rs-prog"><progress max="{max(t, 1)}" value="{min(d, max(t, 1))}" '
+                f'aria-hidden="true"></progress><b>{d}</b><span class="cj-rs-of">&#160;of&#160;</span><b>{t}</b>'
+                '<span class="cj-rs-of">&#160;cards</span></span>')        # nbsp: flex items drop plain spaces
+    return ('<nav class="cj-rstrip" id="cj-rstrip" aria-label="Switch review">'
+            '<a class="cj-rs-back" href="/reviews/" title="All reviews"><span aria-hidden="true">←</span>'
+            '<span class="cj-rs-long"> All reviews</span></a>'
+            f'<details class="cj-rs-pick"><summary>{summary}<span class="cj-rs-caret" aria-hidden="true"></span>'
+            f'</summary><div class="cj-rs-menu">{menu}'
+            '<div class="cj-rs-foot"><a href="/reviews/">All reviews</a></div></div></details>'
+            f'{prog}</nav>\n')
+
+
+def build_strip(cfg, user: dict, current_id, access_mode: bool = False) -> str:
+    """Blocking (run it in the strip pool): review_index.list_reviews for this person (admins: everyone's), the
+    switcher groups, render_strip. Raises on any error (review_strip turns that into no strip)."""
+    from portal import review_index as RI       # looked up per call: B1's module, and the tests' fakes
+    rows = RI.list_reviews(cfg, user, M.Ctx.can_see, show_all=(user or {}).get("role") == "admin",
+                           access_mode=access_mode)
+    groups = RI.switcher_groups(rows, current_id, per_group=STRIP_PER_GROUP)
+    return render_strip(rows, current_id, groups)
+
+
+async def review_strip(cfg, request: Request, current_id, budget_s: float | None = None) -> str:
+    """The strip for this request, built in _STRIP_POOL within STRIP_BUDGET_S; "" on any error or timeout (logged
+    without details). Never blocks the event loop; a strip still queued at the timeout is cancelled."""
+    user = request.scope.get("cj_user")
+    if not user:
+        return ""
+    loop = asyncio.get_running_loop()
+    fut = loop.run_in_executor(_STRIP_POOL, build_strip, cfg, user, current_id, getattr(cfg, "auth", "key") == "access")
+    try:
+        return await asyncio.wait_for(fut, STRIP_BUDGET_S if budget_s is None else budget_s)
+    except asyncio.TimeoutError:
+        log.warning("review strip: over its %g s budget, page shown without it", STRIP_BUDGET_S if budget_s is None
+                    else budget_s)
+    except Exception as e:                          # noqa: BLE001  the page never fails for the strip
+        log.warning("review strip failed (%s), page shown without it", type(e).__name__)
+    return ""
+
+
+def shell_response(request: Request, base: str, title: str = "Review", strip: str = "") -> HTMLResponse:
+    """The review shell page for the tool at base/app/: the bar + the switcher strip (`strip`, already rendered and
+    escaped; "" = none) + an iframe (the shell's query, minus k, goes along)."""
     app_prefix = base + "/app"
     q = P.strip_k(request.scope.get("query_string", b"").decode("latin-1"))
     src = app_prefix + "/" + (f"?{q}" if q else "")
-    body = (f'<iframe id="cj-review-frame" class="cj-review-frame" title="{html.escape(title)} tool" '
+    body = (strip + f'<iframe id="cj-review-frame" class="cj-review-frame" title="{html.escape(title)} tool" '
             f'src="{html.escape(src)}" data-base="{html.escape(base)}/" data-app="{html.escape(app_prefix)}/" '
             f'allow="clipboard-write; fullscreen"></iframe>\n<script src="/cj/review.js" defer></script>')
     return M.Ctx.page(request, title, body, active="review")
@@ -1051,19 +1250,20 @@ def shell_redirect(request: Request, base: str) -> Response:
     return r
 
 
-def review_mount(base: str, proxy: P.ReviewProxy, title: str = "Review") -> list:
+def review_mount(base: str, proxy: P.ReviewProxy, title: str = "Review", strip=None) -> list:
     """The routes for one review under `base` (no trailing slash):
          base/          the shell page: the bar + an iframe of base/app/ (the shell's query, minus k, goes along)
          base/app       -> base/app/
          base/app/...   the tool, through `proxy` (whose prefix must be base + "/app"). A top-level document GET of
                         the tool's page (a copied link) is sent to the shell instead: 302 base/?<query minus k>
-    The real review is review_mount("/review", ...); prediction packages are pred_mount (/review/<pkg_id>/)."""
+    The real review is review_mount("/review", ...); prediction packages are pred_mount (/review/<pkg_id>/).
+    `strip`: an async (request) -> the switcher strip's HTML ("" = none), or None for no strip."""
     app_prefix = base + "/app"
     if proxy.prefix != app_prefix:
         raise ValueError(f"review proxy prefix {proxy.prefix!r} != {app_prefix!r}")
 
     async def shell(request: Request):
-        return shell_response(request, base, title)
+        return shell_response(request, base, title, strip=(await strip(request)) if strip else "")
 
     async def tool(request: Request):
         if wants_shell(request, base):
@@ -1102,7 +1302,31 @@ def owner_checked(path: str) -> bool:
     return bool(OWNER_PATH_RE.match(path)) and not any(s in (".", "..") for s in path.split("/"))
 
 
-def pred_mount(proxy: P.ReviewProxy, root: Path | None, title: str = "Review", review_package: Path | None = None) -> list:
+def audit_owner(user, meta) -> bool:
+    """`user` owns this compare package and it is not a revise one (no purpose "revise"): a blind audit's owner, who
+    must not decide its cards. Owner by identity, whatever the role."""
+    if not isinstance(meta, dict) or meta.get("kind") != "compare" or meta.get("purpose") == "revise":
+        return False
+    owner, uid = meta.get("owner"), (user or {}).get("id")
+    return isinstance(owner, str) and bool(owner) and owner == uid
+
+
+def decides_cards(request: Request) -> bool:
+    """A write (PUT / POST / DELETE / PATCH) to one of DECIDE_PATHS under the tool (its path parameter, fully
+    percent-decoded as proxy.clean_subpath does, slashes trimmed, case folded)."""
+    if request.method not in UNSAFE:
+        return False
+    p = str(request.path_params.get("path") or "")
+    for _ in range(4):
+        q = unquote(p)
+        if q == p:
+            break
+        p = q
+    return p.strip("/").lower() in DECIDE_PATHS
+
+
+def pred_mount(proxy: P.ReviewProxy, root: Path | None, title: str = "Review", review_package: Path | None = None,
+               strip=None) -> list:
     """Prediction review packages in the shell, one URL space per package:
          /review/<pkg_id>/          the shell page (as /review/)
          /review/<pkg_id>/app       -> /review/<pkg_id>/app/
@@ -1110,7 +1334,9 @@ def pred_mount(proxy: P.ReviewProxy, root: Path | None, title: str = "Review", r
                                     own .review_key as X-Review-Key; every proxy rule applies (portal/proxy.py)
     Who: portal.modules.reviews.may_open: the owner (ctx.can_see: admins all, others their own) or a listed reviewer.
     Only what the multi server serves (portal.modules.reviews.serving: its prefixes and excluded packages, plus this
-    portal's real-review package). Unknown, malformed, not yours, not served or excluded: one 404 page."""
+    portal's real-review package). Unknown, malformed, not yours, not served or excluded: one 404 page.
+    A blind audit's owner (audit_owner) gets 403 JSON on card decisions (decides_cards: PUT api/edits, POST
+    api/group); every read goes on. `strip`: an async (request, pkg id) -> the switcher strip's HTML, or None."""
 
     def lookup(request: Request):
         from portal.modules.reviews import may_open, serving
@@ -1119,24 +1345,29 @@ def pred_mount(proxy: P.ReviewProxy, root: Path | None, title: str = "Review", r
         hit = pred_package(root, pid, prefixes)
         if hit is None or not may_open(request.scope.get("cj_user"), hit[1], M.Ctx.can_see) \
                 or not MRS.package_key(hit[0]) or hit[0].name.lower() in excluded:
-            return None, None                           # unknown, not yours, no key or excluded: one answer
-        return pid, hit[0]
+            return None, None, None                     # unknown, not yours, no key or excluded: one answer
+        return pid, hit[0], hit[1]
 
     def missing():
         return page(404, "Not found", "No such review package, or it isn't yours.")
 
     async def shell(request: Request):
-        pid, _ = lookup(request)
-        return missing() if pid is None else shell_response(request, f"{REVIEW_BASE}/{pid}", title)
+        pid, _, _ = lookup(request)
+        if pid is None:
+            return missing()
+        return shell_response(request, f"{REVIEW_BASE}/{pid}", title,
+                              strip=(await strip(request, pid)) if strip else "")
 
     async def to_app(request: Request):
-        pid, _ = lookup(request)
+        pid, _, _ = lookup(request)
         return missing() if pid is None else RedirectResponse(f"{REVIEW_BASE}/{pid}/app/", status_code=307)
 
     async def tool(request: Request):
-        pid, pkg = lookup(request)
+        pid, pkg, meta = lookup(request)
         if pid is None:
             return missing()
+        if decides_cards(request) and audit_owner(request.scope.get("cj_user"), meta):
+            return M.no_store(JSONResponse({"error": AUDIT_OWNER_REFUSED}, status_code=403))
         base = f"{REVIEW_BASE}/{pid}"
         if wants_shell(request, base):
             return shell_redirect(request, base)
@@ -1287,6 +1518,14 @@ def create_app(cfg: Config) -> Gate:
             return RedirectResponse(to, status_code=307)
         return go
 
+    core_id = cfg.review_package.name if cfg.review_package else None
+
+    async def core_strip(request: Request) -> str:   # /review/: only with $CJ_REVIEW_STRIP_CORE on (the live audit)
+        return await review_strip(cfg, request, core_id) if strip_core_on() else ""
+
+    async def pkg_strip(request: Request, pid: str) -> str:     # /review/<pkg>/: always
+        return await review_strip(cfg, request, pid)
+
     async def review_free(request: Request):
         return page(404, "Not found", "Nothing here yet. The review is at /review/.")
 
@@ -1320,8 +1559,8 @@ def create_app(cfg: Config) -> Gate:
         Route("/history/live/live.json", live_json, methods=["GET"]),
         Route("/history/{rest:path}", history_other, methods=["GET"]),
         Route(REVIEW_BASE, redirect(REVIEW_BASE + "/"), methods=["GET"]),
-        *review_mount(REVIEW_BASE, proxy),
-        *pred_mount(pred_proxy, cfg.review_root, review_package=cfg.review_package),
+        *review_mount(REVIEW_BASE, proxy, strip=core_strip),
+        *pred_mount(pred_proxy, cfg.review_root, review_package=cfg.review_package, strip=pkg_strip),
         # anything else under /review/: 404 (the same answer as an unknown or not-yours package)
         Route(REVIEW_BASE + "/{rest:path}", review_free, methods=["GET", "HEAD", "PUT", "POST", "DELETE"]),
     ]
@@ -1382,10 +1621,31 @@ def default_review_root() -> Path | None:
     return Path(root) / "review" if root else None
 
 
+def check_review_package(pkg, environ=None) -> str | None:
+    """At start: a WARNING (logged, and returned) when the core package (/review/) isn't the package of the
+    review_server.py service on port REVIEW_PORT in the services config, or when that can't be checked. None = fine.
+    An explicit --review-package still wins; this only says so."""
+    svc, readable = services_review_package(REVIEW_PORT, environ)
+    if not readable:
+        msg = (f"/review/ package: the services config can't be read, so it can't be checked against the port "
+               f"{REVIEW_PORT} review server (using {pkg or 'no package'})")
+    elif svc is None:
+        msg = (f"/review/ package: no review server on port {REVIEW_PORT} in the services config "
+               f"(using {pkg or 'no package'})")
+    elif not same_package(pkg, svc):
+        msg = (f"/review/ package {pkg or '(none)'} is NOT the port {REVIEW_PORT} review server's package "
+               f"({MRS._name(str(svc))}): /review/ shows a different package than that server")
+    else:
+        return None
+    log.warning(msg)
+    return msg
+
+
 def build_config(args) -> Config:
     """Raises ValueError (access.ConfigError, or PyJWT missing) when access mode can't get its config."""
     registry = args.registry if args.registry else repo_config.registry_root(required=False)
     pkg = args.review_package or registry_review_package(registry)
+    check_review_package(pkg)
     key = read_review_key(pkg)
     mode = getattr(args, "auth", None) or "key"
     access = None

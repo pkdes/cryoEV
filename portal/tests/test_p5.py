@@ -442,7 +442,8 @@ class MyReviews(unittest.TestCase):
             st, _, body = T.request(self.p.port, "GET", "/cj/header.js", T.cookie(self.tok[who]))
             st2, text = self.get("/", who)
             st3, _, mods = T.request(self.p.port, "GET", "/cj/modules.json", T.cookie(self.tok[who]))
-            self.assertIn("My reviews", mods.decode() + text + body.decode(), who)
+            names = [m["name"] for m in json.loads(mods)["modules"]]
+            self.assertIn("Reviews", names, who)                            # round 13: "My reviews" -> "Reviews"
         # the nav the shell renders server-side
         _, home = self.get("/reviews/", "bas")
         self.assertIn("My reviews", home)
