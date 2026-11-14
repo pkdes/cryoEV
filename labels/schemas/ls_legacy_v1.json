@@ -1,0 +1,25 @@
+{
+ "schema": "label_schema/1",
+ "id": "ls_legacy_v1",
+ "name": "legacy",
+ "version": 1,
+ "maker": "builtin",
+ "description": "The review tool's fixed class list before round 14 (review_tool CLASS_ORDER, colours and hotkeys 1-8) plus the Low conf tag. MV here is the outer outline of a multilayer stack (the annotators' 2-tier scheme), not multivesicular.",
+ "classes": [
+  {"name": "EV", "color": "#4ade80", "key": "1"},
+  {"name": "Low conf EV", "color": "#a78bfa", "key": "2"},
+  {"name": "MV", "label": "MV · stack outline", "color": "#f87171", "key": "3"},
+  {"name": "inner", "color": "#f472b6", "key": "4"},
+  {"name": "Incomplete", "color": "#fb923c", "key": "5"},
+  {"name": "Overlapping", "color": "#60a5fa", "key": "6"},
+  {"name": "VLDL", "color": "#d4a373", "key": "7"},
+  {"name": "non-EV", "color": "#e5e7eb", "key": "8"}
+ ],
+ "object_attrs": [],
+ "image_attrs": [],
+ "tags": [
+  {"id": "lowconf", "label": "Low conf", "key": "l"}
+ ],
+ "supersedes": null,
+ "class_mapping": null
+}

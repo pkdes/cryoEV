@@ -89,7 +89,7 @@ class PortalBuiltSkipped(unittest.TestCase):
         self.assertEqual(check_record(line, registry.schemas()), [])
         self.assertEqual(check_record(dict(line, purpose="audit", b_label_version=LV, model=None), registry.schemas()), [])
         self.assertTrue(check_record(dict(line, purpose="other"), registry.schemas()))    # controls: refused
-        self.assertTrue(check_record(dict(line, built_by="cli"), registry.schemas()))
+        self.assertTrue(check_record(dict(line, built_by="desktop"), registry.schemas()))   # "cli" is valid since round 14 (object sets)
         self.assertTrue(check_record(dict(line, base_kind="lv"), registry.schemas()))
         self.assertEqual(history_page.BASE_KIND["label_version"], "label_version")
 

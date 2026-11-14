@@ -52,7 +52,8 @@
     "kind": {
      "enum": [
       "session",
-      "upload"
+      "upload",
+      "adopted"
      ]
     },
     "session": {
@@ -60,6 +61,19 @@
       "string",
       "null"
      ]
+    },
+    "path": {
+     "type": "string",
+     "description": "kind=adopted (round 14, jobs/predict_set.py adopt): the outside run folder the predictions were copied from (read only)"
+    },
+    "run": {
+     "type": "string",
+     "description": "kind=adopted: the outside run's id"
+    },
+    "sha256": {
+     "type": "string",
+     "pattern": "^[0-9a-f]{64}$",
+     "description": "kind=adopted: sha256 of the adopted file list (relative path, size, sha256 per file)"
     }
    },
    "required": [

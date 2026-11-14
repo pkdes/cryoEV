@@ -145,7 +145,7 @@ class RejectNoteTests(Base):
     def test_reject_with_note_badge_filter_and_quick_check(self):
         f = "fixB_old.png"
         page = self.open("&who=tester&mode=editor", **DESK)
-        self.assertEqual(sorted(page.evaluate("__review.caps()")), ["g", "i", "m", "t"])  # round 12 added m, g
+        self.assertEqual(sorted(page.evaluate("__review.caps()")), ["a", "g", "i", "m", "t"])  # round 12 added m, g; round 14 a
         page.click("#toTri")
         self.assertIn(f, self.card_files(page))  # control: its cards are in the queue before
         page.click("#triExit")

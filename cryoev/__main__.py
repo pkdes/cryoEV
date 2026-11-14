@@ -14,6 +14,7 @@ Write (a DRY RUN that writes nothing unless --do; each --do is logged to <CryoAI
   python -m cryoev feedback reply <n> "<text>" [--do]                              reply to a report
   python -m cryoev register [--do]                         registry import, then the history page is regenerated
   python -m cryoev predict new <jobs/predict_set.py create args> [--do]            a new prediction set
+  python -m cryoev schema register <file> [--do]          a label schema (labels/schemas.py; round 14)
 
 Who: --who, else $CRYOEV_FOR; the agent: $CRYOEV_VIA (Claude Code sets both). Never automated (refused, exit 3):
 Roboflow uploads / relabels, production / promotion, git push, desktop training sends, anything under Box.
@@ -32,7 +33,7 @@ if __package__ in (None, ""):                       # `python cryoev/__main__.py
     __package__ = "cryoev"
 
 from cryoev import common as CM  # noqa: E402
-from cryoev.commands import feedback, predict, pull, read, register, review, status  # noqa: E402
+from cryoev.commands import feedback, predict, pull, read, register, review, schema, status  # noqa: E402
 
 _ROBOFLOW = ("Roboflow uploads, relabels and deletions are never automated: the user runs annotation/roboflow_*.py "
              "himself, each time, after annotation/roboflow_snapshot.py.")
@@ -70,7 +71,7 @@ def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="python -m cryoev", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
     sub = ap.add_subparsers(dest="cmd", required=True, metavar="command")
-    for m in (status, read, pull, review, feedback, register, predict):
+    for m in (status, read, pull, review, feedback, register, predict, schema):
         m.add(sub)
     return ap
 

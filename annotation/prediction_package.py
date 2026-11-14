@@ -295,9 +295,11 @@ def registry_record(pkg: Path, data: dict, built: str, predictions_dir=None) -> 
 def is_edited(edit) -> bool:
     """Any saved object decision (g / p / n, and t:<objkey> low-conf tags: without them a tag would never reach the
     results), or an edited label list (the Editor's gt + gtT). The image-level i:note and i:reject don't count: a
-    note or a rejection alone leaves the image's objects on the model path (rejection is read by is_rejected)."""
+    note or a rejection alone leaves the image's objects on the model path (rejection is read by is_rejected).
+    Round 14: attribute decisions (a:<obj>:<attr>@<rid>; i:a: is an i: key already) don't count either: they
+    describe an object, they never change it (contract C3)."""
     e = rs._migrate(edit) if edit else {"dec": {}}
-    return any(not k.startswith("i:") for k in e["dec"]) or (bool(e.get("gtT")) and e.get("gt") is not None)
+    return any(not k.startswith(("i:", "a:")) for k in e["dec"]) or (bool(e.get("gtT")) and e.get("gt") is not None)
 
 
 def is_rejected(edit) -> bool:
@@ -400,7 +402,7 @@ def reviewed_polygons(pkg_dir, write=True) -> dict:
             if note:
                 obj["note"] = note
             objs.append(obj)
-        who = sorted({d.get("who") for d in dec.values() if d.get("who")})
+        who = sorted({d.get("who") for k, d in dec.items() if d.get("who") and not rs.is_attr_key(k)})  # round 14
         out["images"][image] = _image_flags({"reviewed": reviewed, "edited": edited, "reviewed_by": who,
                                              "n_candidates_open": candidates_open(len(im["pr"]), edit),
                                              "objects": objs}, flags)

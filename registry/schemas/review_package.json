@@ -23,7 +23,8 @@
     "control",
     "part",
     "prediction",
-    "compare"
+    "compare",
+    "objects"
    ]
   },
   "purpose": {
@@ -112,9 +113,38 @@
    ],
    "enum": [
     "portal",
+    "cli",
     null
    ],
-   "description": "portal = built by portal/review_build.py, which writes this line itself; the importer skips such packages entirely"
+   "description": "portal = built by portal/review_build.py, which writes this line itself; the importer skips such packages entirely. cli = an object set built by annotation/object_set.py build --do --register (round 14)"
+  },
+  "label_schema": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "pattern": "^ls_[a-z0-9][a-z0-9_]{0,40}_v[1-9][0-9]{0,3}$",
+   "description": "kind=objects: the label schema id the set is labelled with (contract C4's \"schema\"; the envelope key schema is review_package/1)"
+  },
+  "n_items": {
+   "type": "integer",
+   "minimum": 0,
+   "description": "kind=objects: number of objects (cards)"
+  },
+  "blind_cols": {
+   "type": "array",
+   "items": {
+    "type": "string",
+    "maxLength": 64
+   },
+   "description": "kind=objects: item columns kept off the page (items.json only)"
+  },
+  "outline_mode": {
+   "type": "string",
+   "enum": [
+    "target",
+    "target+contained"
+   ]
   },
   "b_label_version": {
    "type": [

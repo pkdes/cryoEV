@@ -50,7 +50,7 @@ PROTECTED = list(config.protected_roots())  # processing datasets, Box
 EXCLUDED_SESSIONS = {"20261012"}
 ENTITIES = ["image", "session", "grid", "roboflow_image", "pull", "roboflow_export", "label_version",
             "review_package", "inference_check", "dataset", "job_bundle", "run", "model", "job",
-            "prediction_set"]
+            "prediction_set", "label_schema"]
 N_EXAMPLES = 3
 
 
@@ -198,6 +198,7 @@ class Scan:
         self.scan_packages()
         self.scan_label_versions()
         self.scan_inference_checks()
+        self.scan_label_schemas()
         self.finish_images()
         self.finish_models()
         return self
@@ -630,6 +631,29 @@ class Scan:
             else:
                 probs.append("changes.jsonl missing")
             t.add(d.name, ids.is_id("lv", d.name), probs)
+
+    def scan_label_schemas(self):
+        """Round 14 (contract C2): the repo's built-in label schemas (<repo>/labels/schemas/ls_*.json), each checked
+        with labels/schemas.validate. Registered definitions live in the registry (defs/label_schema/), which this
+        read-only scan doesn't open; their lines are checked by --jsonl like every registry file."""
+        t = self.t["label_schema"]
+        folder = (self.repo or REPO) / "labels" / "schemas"
+        if not folder.is_dir():
+            return
+        try:
+            from labels import schemas as S
+        except ImportError:                               # an older checkout without labels/: nothing to check
+            t.notes.append("labels/schemas.py not importable; built-in schemas not checked")
+            return
+        for f in sorted(folder.glob("ls_*.json")):
+            try:
+                doc = S.read_file(f)
+                probs = S.validate(doc)
+            except S.SchemaError as e:
+                doc, probs = {}, [str(e)]
+            if isinstance(doc, dict) and doc.get("id") != f.stem:
+                probs.append("id != file name")
+            t.add(f.stem, bool(S.ID_RE.match(f.stem)), probs)
 
     def scan_inference_checks(self):
         t = self.t["inference_check"]

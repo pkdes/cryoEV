@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Prediction sets (BUILD_CONTRACTS.md section 2): a user's tiles, ready to be predicted by one registry model.
 
+    python -m jobs.predict_set adopt --from <outside run> --model <model id> --images <dir> [--images <dir> ...]
+        --name <text> [--owner <person>] [--nm-confirmed-by <person>] [--sets A,B] [--root <dir>] [--registry <dir>]
+        [--do]                                  (round 14, contract C6: see adopt(); a dry run unless --do)
     python -m jobs.predict_set create --from-dir <dir> [--manifest <MANIFEST.csv>] [--only <list file>]
         --model <model id> --owner <person>
         (--sample-label <label> | --sample-label-from manifest:<column>)
@@ -811,6 +814,328 @@ def _set_record(ps_id, created, owner, model, where, path, session, n_images, co
     return rec
 
 
+# ---------------------------------------------------------------- adopt (round 14, contract C6)
+ADOPTED = "adopted"                              # <ps>/adopted/: what the set was adopted from
+PARTICLE_LINES = "particle_lines.csv"            # <ps>/adopted/particle_lines.csv (annotation/object_set.py reads it)
+SOURCE_FILES = "source_files.csv"                # <ps>/adopted/source_files.csv: rel path, size, sha256
+RUN_FILES = ("run_manifest.json", "data/D1_particles.csv", "data/D2_images.csv")
+ADOPT_IMAGE_EXT = (".png", ".jpg", ".jpeg")
+ADOPT_MAX_DET = 300                              # the poster run's infer.py (max_det=300)
+PARTICLE_COLUMNS = ["image", "run_image_id", "particle_id", "line", "cls", "conf", "area_px", "run_area_px",
+                    "area_match"]
+
+
+def run_short(label) -> str:
+    """The run's prediction folder name for a set label (the poster's infer.short: letters and digits, <= 12)."""
+    return re.sub(r"[^A-Za-z0-9]+", "", str(label))[:12]
+
+
+def _sha256_file(p) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(p, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def run_particle_lines(txt: Path, w: int, h: int, conf: float, classes: dict) -> list:
+    """The outside run's particle ids -> prediction lines (the poster's infer.particles(), read only): every
+    non-blank line of the .txt in file order, rasterized like its loader (integer-truncated points, cv2.fillPoly on
+    the polygon's box, clipped to w x h; an empty mask drops the line); kept when its class is ev / non_ev and conf
+    >= conf. particle_id = index among the EV ones, then the non-EV ones after them.
+    -> [(particle_id, line, class id, conf, mask area px)]."""
+    import cv2
+    import numpy as np
+    ev, non = [], []
+    for i, ln in enumerate(Path(txt).read_text().splitlines()):
+        p = ln.split()
+        if not p:
+            continue
+        c = [float(v) for v in p[2:]]
+        pts = np.asarray([(int(c[k] * w), int(c[k + 1] * h)) for k in range(0, len(c) - 1, 2)], np.int32).reshape(-1, 2)
+        if not len(pts):
+            continue
+        x0, y0 = int(pts[:, 0].min()), int(pts[:, 1].min())
+        x1, y1 = int(pts[:, 0].max()) + 1, int(pts[:, 1].max()) + 1
+        m = np.zeros((y1 - y0, x1 - x0), np.uint8)
+        cv2.fillPoly(m, [pts - [x0, y0]], 1)
+        if not m.any():
+            continue
+        cy0, cy1, cx0, cx1 = max(y0, 0), min(y1, h), max(x0, 0), min(x1, w)
+        if cy1 <= cy0 or cx1 <= cx0:
+            continue
+        mc = m[cy0 - y0:cy1 - y0, cx0 - x0:cx1 - x0]
+        if not mc.any():
+            continue
+        k, cf = int(p[0]), float(p[1])
+        raw = classes.get(k, "other")
+        if cf >= conf and raw == "ev":
+            ev.append((i, k, cf, int(mc.sum())))
+        elif cf >= conf and raw == "non_ev":
+            non.append((i, k, cf, int(mc.sum())))
+    return [(pid, ln, k, cf, a) for pid, (ln, k, cf, a) in enumerate(ev + non)]
+
+
+def _read_csv_rows(p: Path) -> list:
+    with open(p, newline="", encoding="utf-8") as fh:
+        return list(csv.DictReader(fh))
+
+
+def adopt_plan(run_dir, model, images, sets=None) -> dict:
+    """Everything adopt needs, read only (nothing is written anywhere). Raises PredictSetError with every problem.
+    run_dir: an outside run (run_manifest.json, data/D1_particles.csv, data/D2_images.csv, data/pa/<set>/<image>.txt).
+    images: folders searched (recursively) for each image by its D2 file name or image id, .png / .jpg / .jpeg."""
+    run_dir = Path(run_dir)
+    problems = []
+    for rel in RUN_FILES:
+        if not (run_dir / rel).is_file():
+            problems.append(f"{run_dir / rel} not found")
+    if problems:
+        raise PredictSetError("refused:" + _list(problems))
+    man = json.loads((run_dir / RUN_FILES[0]).read_text(encoding="utf-8"))
+    cfg = man.get("config") or {}
+    run_model = (cfg.get("model") or {}).get("id") or man.get("model_id")
+    if run_model != model:
+        problems.append(f"--model {model} is not the run's model ({run_model})")
+    try:
+        model_spec(model)
+    except PredictSetError as e:
+        problems.append(str(e))
+    params = cfg.get("params") or {}
+    conf = params.get("conf")
+    nm5760 = (cfg.get("pixel_size") or {}).get("nm_per_px_5760")
+    classes = {int(k): v for k, v in ((cfg.get("model") or {}).get("classes") or {}).items()}
+    if not isinstance(conf, (int, float)) or not isinstance(nm5760, (int, float)) or not classes:
+        problems.append("run_manifest.json lacks config.params.conf, config.pixel_size.nm_per_px_5760 or "
+                        "config.model.classes")
+    apps = {k: v for k, v in (cfg.get("applications") or {}).items() if isinstance(v, dict) and "path" in v}
+    sets = list(sets) if sets else list(apps)
+    for s_ in sets:
+        if s_ not in apps:
+            problems.append(f"set {s_!r} is not one of the run's applications ({', '.join(apps)})")
+    excl = {k: set(v) for k, v in ((cfg.get("applications") or {}).get("exclude_images") or {}).items()}
+    if problems:
+        raise PredictSetError("refused:" + _list(problems))
+    d2 = [r for r in _read_csv_rows(run_dir / "data" / "D2_images.csv")
+          if r.get("set") in sets and r.get("width_px") and r.get("file") not in excl.get(r.get("set"), set())]
+    d1 = {}
+    for r in _read_csv_rows(run_dir / "data" / "D1_particles.csv"):
+        if r.get("set") in sets:
+            d1.setdefault((r["set"], r["image_id"]), {})[str(r["particle_id"])] = r
+    if not d2:
+        raise PredictSetError(f"refused: no images of sets {sets} in {run_dir / 'data' / 'D2_images.csv'}")
+    if len(d2) > MAX_IMAGES:
+        raise PredictSetError(f"refused: {len(d2)} images; a prediction set takes at most {MAX_IMAGES}")
+    wanted = {}
+    for r in d2:
+        wanted.setdefault(r["file"].lower(), []).append(r)
+        wanted.setdefault(Path(r["file"]).stem.lower(), []).append(r)
+        wanted.setdefault(r["image_id"].lower(), []).append(r)
+    found = {}
+    for root in images or ():
+        root = Path(root)
+        if not root.is_dir():
+            problems.append(f"--images {root} is not a folder")
+            continue
+        if protected_problem(root):
+            problems.append(f"--images {root} refused: {protected_problem(root)}")
+            continue
+        for dirpath, _, names in os.walk(root):
+            for n in names:
+                p = Path(dirpath) / n
+                if p.suffix.lower() not in ADOPT_IMAGE_EXT:
+                    continue
+                for key in {n.lower(), p.stem.lower()}:
+                    for r in wanted.get(key, ()):
+                        found.setdefault((r["set"], r["image_id"]), set()).add(p)
+    rows, sizes = [], {}
+    for r in sorted(d2, key=lambda r: (sets.index(r["set"]), r["image_id"])):
+        k = (r["set"], r["image_id"])
+        txt = run_dir / "data" / "pa" / run_short(r["set"]) / f"{r['image_id']}.txt"
+        if not txt.is_file():
+            problems.append(f"{r['set']} {r['image_id']}: no predictions file {txt.name}")
+            continue
+        hits = sorted(found.get(k, ()))
+        if not hits:
+            problems.append(f"{r['set']} {r['image_id']}: image not found under --images")
+            continue
+        if len(hits) > 1:
+            problems.append(f"{r['set']} {r['image_id']}: {len(hits)} candidate images ({hits[0].name}, "
+                            f"{hits[1].name}...): pass narrower --images folders")
+            continue
+        try:
+            ext, (w, h) = inspect_image(hits[0])
+        except (ValueError, OSError) as e:
+            problems.append(f"{hits[0].name}: {e}")
+            continue
+        W, H = int(r["width_px"]), int(r["height_px"])
+        if round(h * W / w) != H:
+            problems.append(f"{r['image_id']}: image {w}x{h} is not the run's {W}x{H} shape")
+            continue
+        nm = nm5760 * 5760 / w
+        if w == W and abs(nm - float(r["nm_per_px"])) > 1e-3 * nm:
+            problems.append(f"{r['image_id']}: nm/px {nm:.4f} != the run's {r['nm_per_px']}")
+            continue
+        parts = run_particle_lines(txt, W, H, float(conf), classes)
+        ref = d1.get(k, {})
+        plines = []
+        for pid, ln, kk, cf, area in parts:
+            rr = ref.get(str(pid))
+            ra = int(rr["mask_area_px"]) if rr and str(rr.get("mask_area_px", "")).isdigit() else None
+            plines.append({"particle_id": pid, "line": ln, "cls": kk, "conf": cf, "area_px": area,
+                           "run_area_px": ra, "area_match": int(ra == area)})
+        extra = sorted(set(ref) - {str(p["particle_id"]) for p in plines})
+        if extra:
+            problems.append(f"{r['image_id']}: run particles {extra[:5]} have no line (the mapping rule is off)")
+        rows.append({"set": r["set"], "image_id": r["image_id"], "file": r["file"], "src": hits[0], "ext": ext,
+                     "w": w, "h": h, "nm": nm, "txt": txt, "plines": plines})
+        sizes[hits[0]] = (w, h)
+    if problems:
+        raise PredictSetError(f"refused ({len(problems)} problem(s)):" + _list(problems))
+    return {"run_dir": run_dir, "run_id": man.get("run_id") or run_dir.name, "model": model, "sets": sets,
+            "conf": conf, "rows": rows, "classes": classes, "imgsz": (cfg.get("model") or {}).get("imgsz")}
+
+
+def adopt_file_list(P) -> tuple:
+    """[(path relative to the run, size, sha256)] of every run file adopt reads, and the sha256 of that list."""
+    import hashlib
+    files = [P["run_dir"] / f for f in RUN_FILES] + [r["txt"] for r in P["rows"]]
+    out = []
+    for f in files:
+        out.append((Path(f).relative_to(P["run_dir"]).as_posix(), Path(f).stat().st_size, _sha256_file(f)))
+    text = "".join(f"{a}\t{b}\t{c}\n" for a, b, c in out)
+    return out, hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def adopt(run_dir, model, images, name, owner, nm_confirmed_by, sets=None, root=None, registry_root=None,
+          dry_run=True, via=None):
+    """Register an outside prediction run (e.g. the poster run) as an ordinary prediction set (status done), read
+    only on the source: its images are copied (md5 checked) from --images, its prediction files byte-copied to
+    p/<model>/predictions/<nnnn>.txt, and <ps>/adopted/ gets particle_lines.csv (run particle id -> line, each
+    checked against the run's own mask area) and source_files.csv. source = {kind: adopted, path, run, sha256 of
+    the file list}. dry_run (default): every check and the plan; nothing written. -> plan dict or the new folder."""
+    set_name = clean_name(name)
+    problems = []
+    if not owner or not PERSON_RE.match(str(owner)):
+        problems.append(f"owner {owner!r} is not a person id")
+    if not nm_confirmed_by or not PERSON_RE.match(str(nm_confirmed_by)):
+        problems.append("--nm-confirmed-by (a person id) is required: who confirmed the run's nm/px")
+    if not set_name:
+        problems.append("--name is required (the set's display name)")
+    root = Path(root) if root else default_root()
+    guard = protected_problem(root)
+    if guard:
+        problems.append(f"--root refused: {guard}")
+    if problems:
+        raise PredictSetError("refused:" + _list(problems))
+    P = adopt_plan(run_dir, model, images, sets)
+    files, list_sha = adopt_file_list(P)
+    n_part = sum(len(r["plines"]) for r in P["rows"])
+    n_match = sum(p["area_match"] for r in P["rows"] for p in r["plines"])
+    by_set = {}
+    for r in P["rows"]:
+        by_set[r["set"]] = by_set.get(r["set"], 0) + 1
+    reg = Path(registry_root) if registry_root else config.registry_root()
+    source = {"kind": "adopted", "path": str(P["run_dir"].resolve()), "run": str(P["run_id"]), "sha256": list_sha}
+    summary = {"run": str(P["run_id"]), "model": model, "n_images": len(P["rows"]), "by_set": by_set,
+               "n_particles": n_part, "n_area_match": n_match, "files_sha256": list_sha, "n_files": len(files),
+               "root": str(root), "registry": str(reg), "name": set_name, "owner": owner,
+               "examples": [{"image_id": r["image_id"], **p} for r in P["rows"][:5] for p in r["plines"][:1]]}
+    if n_match != n_part:
+        bad = [(r["image_id"], p["particle_id"]) for r in P["rows"] for p in r["plines"] if not p["area_match"]]
+        summary["area_mismatch"] = bad[:20]
+    regm = registry_module()
+    if dry_run:
+        rec = _adopt_record("ps_00000000_000000", C.now(), owner, model, record_path(root / "ps_x"), source,
+                            len(P["rows"]), P["conf"], via, set_name, P)
+        errs = regm.check_record(rec, regm.schemas())
+        if errs:
+            raise PredictSetError(f"refused: registry record invalid: {'; '.join(errs[:4])}")
+        return summary
+    if n_match != n_part:
+        raise PredictSetError(f"refused: {n_part - n_match} run particles don't match their line by mask area")
+    day = datetime.now().strftime("%Y%m%d")
+    with locked(reg / REGISTRY_LOCK):
+        taken = set(regm.current("prediction_set", reg))
+        for _ in range(50):
+            ps_id = f"ps_{day}_{secrets.token_hex(3)}"
+            if ps_id not in taken and not (root / ps_id).exists() and not (root / INCOMING / ps_id).exists():
+                break
+        else:
+            raise PredictSetError("could not make a free prediction set id")
+        inc = root / INCOMING / ps_id
+        (inc / IMAGES).mkdir(parents=True)
+    created = C.now()
+    final = root / ps_id
+    rec = _adopt_record(ps_id, created, owner, model, record_path(final), source, len(P["rows"]), P["conf"], via,
+                        set_name, P)
+    try:
+        errs = regm.check_record(rec, regm.schemas())
+        if errs:
+            raise PredictSetError(f"refused: registry record invalid: {'; '.join(errs[:4])}")
+        pred = inc / "p" / model / "predictions"
+        pred.mkdir(parents=True)
+        (inc / ADOPTED).mkdir()
+        rows, plines = [], []
+        for i, r in enumerate(P["rows"], 1):
+            img = f"{i:04d}"
+            name_ = f"{img}{r['ext']}"
+            _place(r["src"], inc / IMAGES / name_, md5_file(r["src"]), False)
+            shutil.copyfile(r["txt"], pred / f"{img}.txt")
+            rows.append({"image": img, "file": f"{IMAGES}/{name_}", "orig_name": r["src"].name,
+                         "sample_label": r["set"], "nm_per_px": repr(float(r["nm"])),
+                         "nm_confirmed_by": nm_confirmed_by, "source": f"adopted:{P['run_id']}",
+                         "md5": md5_file(inc / IMAGES / name_)})
+            plines += [{"image": img, "run_image_id": r["image_id"], **p} for p in r["plines"]]
+        with open(inc / IMAGES_CSV, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=CSV_COLUMNS, lineterminator="\n")
+            w.writeheader()
+            w.writerows(rows)
+        with open(inc / ADOPTED / PARTICLE_LINES, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=PARTICLE_COLUMNS, lineterminator="\n")
+            w.writeheader()
+            w.writerows(plines)
+        with open(inc / ADOPTED / SOURCE_FILES, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f, lineterminator="\n")
+            w.writerow(["path", "size", "sha256"])
+            w.writerows(files)
+        request = {"ps": ps_id, "owner": owner, "model": model, "conf": P["conf"], "max_det": ADOPT_MAX_DET,
+                   "imgsz": P["imgsz"],
+                   "source": source, "created": created, "name": set_name}
+        if via:
+            request["owner_via"] = request["nm_confirmed_via"] = via
+        write_json_atomic(inc / REQUEST, request)
+        write_json_atomic(inc / STATUS, {"state": "done", "n_done": len(rows), "n_total": len(rows),
+                                         "where": "laptop", "job": None, "error": None, "updated": created,
+                                         "pid": None, "waiting": None})
+        with locked(reg / REGISTRY_LOCK):
+            inc.rename(final)
+            try:
+                regm.append(rec, reg, **({"via": via} if via else {}))
+            except Exception as e:
+                write_status(final, state="failed", error=f"registry record not written: {e}")
+                raise PredictSetError(f"{final} was written but its registry record was not ({e}); status set to "
+                                      f"failed")
+    except BaseException:
+        shutil.rmtree(inc, ignore_errors=True)
+        raise
+    print(f"[predict_set] {ps_id}: adopted {len(rows)} image(s) from run {P['run_id']} -> {final}")
+    return final
+
+
+def _adopt_record(ps_id, created, owner, model, path, source, n_images, conf, via, name, P) -> dict:
+    rec = {"schema": "prediction_set/1", "id": ps_id, "logged": created, "created": created, "owner": owner,
+           "model": model, "job": None, "where": "laptop", "path": path, "source": source, "n_images": n_images,
+           "conf": float(conf), "status": "done", "review_package": None, "results": None,
+           "recorded_by": "jobs/predict_set.py adopt",
+           "note": f"adopted from outside run {P['run_id']} (sets {', '.join(P['sets'])}); predictions copied "
+                   f"byte-identical; particle ids mapped to lines in adopted/{PARTICLE_LINES}"[:NOTE_MAX]}
+    if via:
+        rec["owner_via"] = rec["nm_confirmed_via"] = via
+    return rec
+
+
 # ---------------------------------------------------------------- CLI
 def build_parser(allow_abbrev=True) -> argparse.ArgumentParser:
     """The CLI parser; `.create` is the create subparser (python -m cryoev predict new reads its exact options)."""
@@ -843,6 +1168,20 @@ def build_parser(allow_abbrev=True) -> argparse.ArgumentParser:
                                                     "script, git (module doc; at most 16 KB)")
     c.add_argument("--dry-run", action="store_true", help="every check, then the plan; nothing is written")
     ap.create = c
+    d = sub.add_parser("adopt", help="register an outside prediction run as a prediction set (dry run unless --do)",
+                       allow_abbrev=allow_abbrev)
+    d.add_argument("--from", dest="from_run", required=True, type=Path, help="the outside run folder (read only)")
+    d.add_argument("--model", required=True, help="model id from models/models.yaml (must be the run's)")
+    d.add_argument("--images", required=True, type=Path, action="append",
+                   help="folder searched for the run's images (repeatable; never under Box)")
+    d.add_argument("--name", required=True, help="display name of the set (at most 80 characters)")
+    d.add_argument("--owner", help="person id of the set's owner (default $CRYOEV_FOR)")
+    d.add_argument("--nm-confirmed-by", help="person id who confirmed the run's nm/px (default: the owner)")
+    d.add_argument("--sets", help="comma-separated run set labels (default: every application set)")
+    d.add_argument("--registry", type=Path, help="registry folder (default <CryoAI-laptop>/registry)")
+    d.add_argument("--root", type=Path, help=f"where sets live (default <CryoAI-laptop>/{PREDICT_DIR})")
+    d.add_argument("--do", action="store_true", help="adopt it (default: a dry run that writes nothing)")
+    ap.adopt = d
     return ap
 
 
@@ -859,6 +1198,8 @@ def main(argv=None):
     except actor.ActorError as e:
         print(f"[predict_set] {e}", file=sys.stderr)
         return 2
+    if a.cmd == "adopt":
+        return _adopt_main(a, via, actor)
     try:
         names = None
         if a.only:
@@ -881,6 +1222,25 @@ def main(argv=None):
                          default=str))
         return 0
     print(ps.name)
+    return 0
+
+
+def _adopt_main(a, via, actor) -> int:
+    try:
+        owner = a.owner or actor.who(None, None)
+        res = adopt(a.from_run, a.model, a.images, a.name, owner, a.nm_confirmed_by or owner,
+                    sets=[x.strip() for x in a.sets.split(",") if x.strip()] if a.sets else None, root=a.root,
+                    registry_root=a.registry, dry_run=not a.do, via=via)
+    except (PredictSetError, config.ConfigError, OSError, actor.ActorError) as e:
+        print(f"[predict_set] {e}", file=sys.stderr)
+        return 2
+    if not a.do:
+        print(f"[predict_set] DRY RUN, nothing written: would adopt {res['n_images']} image(s) of run {res['run']} "
+              f"({res['by_set']}) as a prediction set (status done) under {res['root']} and append a "
+              f"prediction_set/1 line to {res['registry']}/prediction_set.jsonl")
+        print(json.dumps(res, indent=1, default=str))
+        return 0 if res["n_area_match"] == res["n_particles"] else 2
+    print(res.name)
     return 0
 
 
