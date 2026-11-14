@@ -230,12 +230,19 @@ class OneAtATime(Base):
         finally:
             held.close()
         name = RB.start(self.cfg, T.USER, "revise", F.LV, B_LV, spawn=False)   # control: free -> starts
-        RB.write_status(rr, name, pid=os.getpid())                 # a live runner (this process)
-        with self.assertRaises(RB.BuildError):
+        with self.assertRaises(RB.BuildError):                     # still starting (no runner pid yet): busy
             RB.start(self.cfg, T.USER, "revise", F.LV, B_LV, spawn=False)
-        RB.write_status(rr, name, pid=999999)                      # its runner is gone: stale, reads as stopped
-        st = RB.read_status(rr, name)
+        RB.write_status(rr, name, pid=os.getpid())                 # a live runner (this process) with the lock
+        held = acquire_lock(rr / RB.BUILDING / RB.BUILD_LOCK, 0)
+        try:
+            with self.assertRaises(RB.BuildError):
+                RB.start(self.cfg, T.USER, "revise", F.LV, B_LV, spawn=False)
+            self.assertEqual(RB.read_status(rr, name)["phase"], "checking")
+        finally:
+            held.close()
+        st = RB.read_status(rr, name)                              # lock free: no runner, whatever the pid says
         self.assertEqual((st["phase"], st["reason"], st["failed_at"]), ("failed", "stopped", "checking"))
+        RB.write_status(rr, name, pid=999999)                      # a dead pid: stopped too
         self.assertIsNone(RB.active_build(rr))
         RB.start(self.cfg, T.USER, "revise", F.LV, B_LV, spawn=False)
 
@@ -424,6 +431,7 @@ class Pages(unittest.TestCase):
         RB.write_status(rr, busy, purpose="audit", lv=F.LV, b_kind="model", b_id="v5_evnonev_y8m_20261029",
                         phase="waiting", reason="gpu_busy", detail="Images found 3 of 3 · aspect ratios match",
                         started=RB._now(), pid=os.getpid(), by=T.USER)
+        held = acquire_lock(rr / RB.BUILDING / RB.BUILD_LOCK, 0)       # as its runner would
         try:
             page = self.get(T.USER, f"/reviews/start/{busy}")[2].decode()
             self.assertIn('http-equiv="refresh"', page)
@@ -432,6 +440,7 @@ class Pages(unittest.TestCase):
             self.assertIn("A review is being built now", start)                    # one at a time, shown
             self.assertEqual(self.post(T.USER, "/reviews/start/build", dict(f, t=self.token()))[0], 409)
         finally:
+            held.close()
             RB.write_status(rr, busy, phase="failed", reason="stopped")
 
     def test_5_check_images_get_is_cleaned(self):

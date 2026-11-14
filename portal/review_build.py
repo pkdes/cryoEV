@@ -442,8 +442,9 @@ def _age_s(iso) -> float:
 
 
 def read_status(rr, name) -> dict | None:
-    """The status (allowlisted keys only), or None. A non-final status whose runner is gone (or never started) reads
-    as failed "stopped"."""
+    """The status (allowlisted keys only), or None. A non-final status reads as failed "stopped" when its runner is
+    gone (runner_alive: the runner holds the build lock all its life, so a free lock means no runner; a pid that is
+    no longer alive too) or never started (no pid after START_GRACE_S)."""
     if not isinstance(name, str) or not NAME_RE.match(name) or rr is None:
         return None
     raw = _read_json(status_path(rr, name))
@@ -454,39 +455,47 @@ def read_status(rr, name) -> dict | None:
         st["reason"] = None
     if st["failed_at"] not in PHASES:
         st["failed_at"] = None
-    if st["phase"] not in TERMINAL and _stale(st):
+    if st["phase"] not in TERMINAL and _stale(rr, st):
         st.update(phase="failed", failed_at=st["phase"], reason="stopped")
     return st
 
 
-def _stale(st) -> bool:
+def runner_alive(rr) -> bool:
+    """A runner holds <review root>/.building/build.lock now (it can't be taken)."""
+    f = building_dir(rr) / BUILD_LOCK
+    if not f.exists():
+        return False
+    held = acquire_lock(f, 0)
+    if held is None:
+        return True
+    held.close()
+    return False
+
+
+def _stale(rr, st) -> bool:
     if st.get("pid"):
-        return not _pid_alive(st["pid"])
+        return not (runner_alive(rr) and _pid_alive(st["pid"]))
     return _age_s(st.get("started")) > START_GRACE_S
 
 
 def active_build(rr) -> dict | None:
-    """The build running now (its status), else None: the runner's lock is held, or a status is not final and its
-    runner is alive (or still starting)."""
+    """The build running now (its status), else None: a runner holds the build lock, or a status is still starting
+    (no runner pid yet, within START_GRACE_S)."""
     b = building_dir(rr)
     if not b.is_dir():
         return None
-    held = acquire_lock(b / BUILD_LOCK, 0) if (b / BUILD_LOCK).exists() else None
-    busy = (b / BUILD_LOCK).exists() and held is None
-    if held is not None:
-        held.close()
-    live = None
     try:
         names = sorted(d.name for d in b.iterdir() if d.is_dir() and NAME_RE.match(d.name))
     except OSError:
         names = []
+    live = None
     for n in names:
         st = read_status(rr, n)
         if st and st["phase"] not in TERMINAL:
             live = st
     if live:
         return live
-    return {"name": None, "phase": "checking"} if busy else None
+    return {"name": None, "phase": "checking"} if runner_alive(rr) else None
 
 
 # ---------------------------------------------------------------- start (the portal)
