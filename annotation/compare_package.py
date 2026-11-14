@@ -30,7 +30,9 @@ portal already holds). The key is never printed.
 Purpose (round 13, --purpose, default audit so earlier command lines are unchanged):
   audit   a blind audit: decoys (default 0.10), the answer key and every count that could reveal the decoys (the
           real FP/FN card counts, the decoy counts) only in <out>/../_work_<name>/decoys.json; review_package.json
-          has no "cards". The owner can never be one of its --reviewer people.
+          has no "cards". The owner can never be one of its --reviewer people. --work-dir (must not exist yet)
+          puts that work folder elsewhere instead (the portal builds in a short staging path and moves it to
+          _work_<name> itself); --seed picks the decoys (the portal passes a fresh one per build).
   revise  a label-set revision that apply_review_edits.py / the portal's Apply can merge back: no decoys (--decoys
           other than 0 is refused), purpose "revise" in review_package.json, and the scratch folder (staged images,
           predictions) OUTSIDE the review root: --work-dir (must not exist yet), else a temp folder; deleted after
@@ -396,9 +398,16 @@ def plan(args):
     if audit_work.exists() and (purpose == "revise" or not force):
         raise SystemExit(f"a _work_ folder for {name} already exists next to it: build under a new name"
                          + ("" if purpose == "revise" else " (or pass --force)"))
-    if purpose != "revise":
-        return purpose, decoys, audit_work, False
     wd = getattr(args, "work_dir", None)
+    if purpose != "revise":
+        if not wd:
+            return purpose, decoys, audit_work, False
+        wd = Path(wd)                                       # an audit built in a staging folder (portal/review_build:
+        if wd.exists():                                     # a short path), its caller moves it to _work_<name>
+            raise SystemExit("--work-dir already exists: give a new folder (a folder left by a crash is never reused)")
+        if inside(wd, out):
+            raise SystemExit("--work-dir must not be inside the package (the answer key is never served)")
+        return purpose, decoys, wd, False
     if not wd:
         return purpose, decoys, None, True                      # a temp folder, made when the build starts
     wd = Path(wd)
@@ -700,7 +709,8 @@ def parser() -> argparse.ArgumentParser:
                     help=f"Decoy cards as a fraction of real cards (0 = none; audit default {AUDIT_DECOYS}, "
                          "revise: 0 only)")
     ap.add_argument("--work-dir", type=Path, help="--purpose revise: the scratch folder (outside the review root, "
-                                                   "must not exist; deleted after a successful build)")
+                                                   "must not exist; deleted after a successful build); audit: the "
+                                                   "work folder instead of <out>/../_work_<name> (must not exist)")
     ap.add_argument("--built-by", choices=("portal", "none"), help=argparse.SUPPRESS)  # the portal's builder; with
     # --force an existing package's built_by is kept unless this says otherwise ("none" drops it)
     ap.add_argument("--seed", type=int, default=0)

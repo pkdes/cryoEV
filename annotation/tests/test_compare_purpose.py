@@ -98,6 +98,21 @@ class Purpose(CompareKnownAnswer):
         self.assertFalse((self.t / "review" / "lab_rev_w").exists())
 
     # ---------------------------------------------------------------- audit
+    def test_audit_work_dir_holds_the_key_elsewhere(self):
+        """r13 fixer 12: an audit with --work-dir writes its answer key there (no _work_<name> next to the package);
+        an existing --work-dir or one inside the package is refused."""
+        wd = self.t / "stage" / "w"
+        out, work, _ = self.run_build("lab_aud_wd", purpose="audit", work_dir=wd, seed=7)
+        self.assertEqual(work, wd)
+        self.assertEqual(json.loads((wd / "decoys.json").read_text(encoding="utf-8"))["seed"], 7)
+        self.assertFalse((self.t / "review" / "_work_lab_aud_wd").exists())
+        with self.assertRaises(SystemExit) as cm:
+            self.run_build("lab_aud_wd2", purpose="audit", work_dir=wd)
+        self.assertIn("already exists", str(cm.exception))
+        with self.assertRaises(SystemExit) as cm:
+            self.run_build("lab_aud_wd3", purpose="audit", work_dir=self.t / "review" / "lab_aud_wd3" / "w")
+        self.assertIn("inside the package", str(cm.exception))
+
     def test_audit_counts_only_in_work(self):
         out, work, printed = self.run_build("lab_aud_a", decoys=1.0)          # default purpose: audit
         meta = self.meta(out)

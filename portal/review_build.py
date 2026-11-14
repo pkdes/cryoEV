@@ -36,11 +36,13 @@ A build (start() in the portal, run() in the runner):
     jobs/predict_local.py does) and waits for jobs.predict_local.gpu_check (run_job.gpu_state) to find the GPU free,
     up to WAIT_S; after the build it releases the lock and starts the next queued prediction set
     (predict_local.next_queued + start_detached, as its --chain does). B is a label set (`--b-coco`): no GPU, no lock;
-  - the package (and an audit's _work_) is built in <review root>/.building/<name>/pkg/ and renamed into the review
-    root only once complete and checked (_work_ first), so a killed build never leaves a listable package. On start,
-    under the build lock, the runner marks every other non-final status failed "stopped" and sweeps leftovers of
-    killed builds (NAME_RE names only: staging folders, a <name> without a finished portal review_package.json, a
-    _work_<name> whose package is gone);
+  - the package is built in <review root>/.building/<short_id>/p/<name> and an audit's work folder (its answer key,
+    a fresh --seed per build) in .../<short_id>/w (short_id = sha1(name)[:8]: short paths, so 79-char image keys
+    stay under Windows MAX_PATH), and renamed into the review root (as <name> and _work_<name>) only once complete
+    and checked (_work_ first), so a killed build never leaves a listable package. On start, under the build lock,
+    the runner marks every other non-final status failed "stopped" and removes other builds' staging under
+    .building only; nothing in the review root is deleted (an unfinished <name> folder is only logged) and no
+    _work_* folder is ever touched;
   - after a successful build the runner appends an allowlisted review_package registry line (ALLOWED_LINE_KEYS: no
     `cards`, no `path`, no decoy counts) under <registry>/.review_package.lock, recorded_by "portal/review_build.py"
     (as portal/predict_parts/sets.py register_package); the registry importer skips the package (built_by "portal").
@@ -48,6 +50,7 @@ A build (start() in the portal, run() in the runner):
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import re
@@ -664,10 +667,30 @@ def spawn_runner(spec_path: Path) -> int:
 
 
 # ---------------------------------------------------------------- run (the detached runner)
+STAGE_RE = re.compile(r"[0-9a-f]{8}")   # <review root>/.building/<short_id>: a build's staging (fullmatch)
+
+
+def short_id(name) -> str:
+    """The build's 8-hex staging folder name: sha1(name)[:8]. Deterministic, so the status folder .building/<name>/
+    maps to it without storing it. Short on purpose (fixer 12): the long portal name twice in one path (the
+    package folder and _work_<name>) plus a 79-char image key passed Windows MAX_PATH on the real review root."""
+    return hashlib.sha1(str(name).encode("utf-8")).hexdigest()[:8]
+
+
+def staging_root(rr, name) -> Path:
+    """<review root>/.building/<short_id>: everything a build stages (removed whole after the build)."""
+    return building_dir(rr) / short_id(name)
+
+
 def staging_dir(rr, name) -> Path:
-    """<review root>/.building/<name>/pkg: the package (and an audit's _work_ folder) is built here, under a dot
-    folder nothing lists or serves, and renamed into the review root only once it is complete and checked."""
-    return building_dir(rr) / name / "pkg"
+    """<review root>/.building/<short_id>/p: the package is built in p/<name>, under a dot folder nothing lists or
+    serves, and renamed into the review root only once it is complete and checked."""
+    return staging_root(rr, name) / "p"
+
+
+def work_staging_dir(rr, name) -> Path:
+    """<review root>/.building/<short_id>/w: an audit's work folder (the answer key); published as _work_<name>."""
+    return staging_root(rr, name) / "w"
 
 
 def compare_args(spec, staged: Path, split_csv: Path) -> list:
@@ -684,6 +707,9 @@ def compare_args(spec, staged: Path, split_csv: Path) -> list:
         args += ["--b-coco", b["coco"], "--b-label", b["id"]]
     if spec["purpose"] == "revise":
         args += ["--work-dir", str(Path(spec["state"]) / "work")]
+    else:                                   # an audit: a short staging path; a fresh decoy seed per build (fixer 14),
+        args += ["--work-dir", str(work_staging_dir(spec["review_root"], spec["name"])),    # kept only in _work_
+                 "--seed", str(secrets.randbelow(2 ** 31))]
     for r in spec.get("reviewers") or []:
         args += ["--reviewer", r]
     return args
@@ -770,8 +796,8 @@ def finished(folder: Path, name: str) -> bool:
 
 def sweep(rr: Path, own: str, warn=None) -> dict:
     """Run by the runner while it holds the build lock (so no other runner lives): every other non-final status is
-    rewritten failed "stopped", and the staging left by killed builds of portal names (NAME_RE only) is removed:
-    ONLY <review root>/.building/<name>/pkg. Nothing in the review root itself is ever deleted: a <name> folder
+    rewritten failed "stopped", and the staging left by killed builds is removed: ONLY <review root>/.building/
+    <short_id> folders (STAGE_RE), never own's. Nothing in the review root itself is ever deleted: a <name> folder
     without a finished review_package.json is only reported (warn(text)), and a _work_* folder is never touched
     (or opened). -> counts."""
     n = {"stopped": 0, "staging": 0, "unfinished": 0}
@@ -784,8 +810,13 @@ def sweep(rr: Path, own: str, warn=None) -> dict:
             if isinstance(raw, dict) and raw.get("phase") in PHASES and raw["phase"] not in TERMINAL:
                 write_status(rr, d.name, phase="failed", failed_at=raw["phase"], reason="stopped", finished=_now())
                 n["stopped"] += 1
-            if (d / "pkg").exists():
+            if (d / "pkg").is_dir():                # the staging of builds before the short layout (fixer 12)
                 shutil.rmtree(d / "pkg", ignore_errors=True)
+                n["staging"] += 1
+        mine = short_id(own)
+        for d in sorted(b.iterdir()) if b.is_dir() else []:
+            if d.is_dir() and STAGE_RE.fullmatch(d.name) and d.name != mine:
+                shutil.rmtree(d, ignore_errors=True)
                 n["staging"] += 1
         for d in sorted(Path(rr).iterdir()):
             if d.name != own and NAME_RE.match(d.name) and d.is_dir() and not finished(d, d.name):
@@ -853,7 +884,7 @@ def publish(rr: Path, name: str, purpose: str) -> None:
     if (Path(rr) / name).exists() or (Path(rr) / f"_work_{name}").exists():
         raise OSError("the package or its work folder already exists in the review root")
     if purpose == "audit":
-        rename_retry(st / f"_work_{name}", Path(rr) / f"_work_{name}")
+        rename_retry(work_staging_dir(rr, name), Path(rr) / f"_work_{name}")
     rename_retry(st / name, Path(rr) / name)
 
 
@@ -890,7 +921,7 @@ def run(spec_path) -> int:
         say(phase="failed", reason="busy", finished=_now(), pid=os.getpid())
         return 3
     gpu_lock = None
-    stage_dir = staging_dir(rr, name)
+    stage_dir, stage_root = staging_dir(rr, name), staging_root(rr, name)
     try:
         say(phase="checking", pid=os.getpid(), reason=None)
         swept = sweep(rr, name, warn=note)
@@ -909,7 +940,7 @@ def run(spec_path) -> int:
             note("refused: two images stage to one file name (names that differ only in case)")
             say(phase="failed", reason="images", finished=_now())
             return 1
-        if (rr / name).exists() or (rr / f"_work_{name}").exists() or stage_dir.exists():
+        if (rr / name).exists() or (rr / f"_work_{name}").exists() or stage_root.exists():
             note("refused: the package, its work folder or its staging folder already exists")
             say(phase="failed", reason="build", finished=_now())
             return 1
@@ -961,7 +992,7 @@ def run(spec_path) -> int:
         if gpu_lock is not None:
             gpu_lock.close()
             chain_next_prediction(spec, note)
-        shutil.rmtree(stage_dir, ignore_errors=True)        # gone once published; a failed build's leftovers too
+        shutil.rmtree(stage_root, ignore_errors=True)       # gone once published; a failed build's leftovers too
         shutil.rmtree(Path(spec["state"]) / "images", ignore_errors=True)    # staged links / copies
         lock.close()
 

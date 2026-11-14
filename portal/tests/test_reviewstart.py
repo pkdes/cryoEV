@@ -306,7 +306,8 @@ class Builds(Base):
 
         def spy(rr, name, purpose):
             seen["root"] = sorted(p.name for p in Path(rr).iterdir())
-            seen["staged"] = sorted(p.name for p in RB.staging_dir(rr, name).iterdir())
+            seen["staged"] = sorted(p.name for p in RB.staging_root(rr, name).iterdir())
+            seen["pkg"] = sorted(p.name for p in RB.staging_dir(rr, name).iterdir())
             real(rr, name, purpose)
             seen["after"] = sorted(p.name for p in Path(rr).iterdir())
 
@@ -314,11 +315,80 @@ class Builds(Base):
             name, rc, st = self.build("audit", reviewers=["alyssia"])
         self.assertEqual(rc, 0, st)
         self.assertEqual(seen["root"], [".building"])
-        self.assertEqual(seen["staged"], [f"_work_{name}", name])
+        self.assertEqual((seen["staged"], seen["pkg"]), (["p", "w"], [name]))     # short layout (fixer 12)
         self.assertEqual(seen["after"], [".building", f"_work_{name}", name])
         self.assertFalse(RB.staging_dir(self.w["review"], name).exists())
         meta = json.loads((self.w["review"] / name / "review_package.json").read_text(encoding="utf-8"))
         self.assertEqual(Path(meta["path"]), (self.w["review"] / name).resolve())   # its final place, not staging
+
+    def long_key(self, keylen):
+        """Rename the fixture's img_a to a key of keylen chars in both label sets, the export and its split file."""
+        long = "S1__" + "x" * (keylen - 8)
+        for lv in (F.LV, F.LV_BASE):
+            p = self.w["labels"] / lv / "labels.coco.json"
+            d = json.loads(p.read_text(encoding="utf-8"))
+            for im in d["images"]:
+                if im["file_name"] == "img_a.png":
+                    im["file_name"], im["extra"]["name"] = f"{long}.png", f"{long}_png"
+            p.write_text(json.dumps(d), encoding="utf-8")
+        old = self.w["export"] / "train" / "img_a_png.rf.0001.jpg"
+        old.rename(old.with_name(f"{long}_png.rf.0001.jpg"))
+        csvp = self.w["export"] / "split_assignment.csv"
+        csvp.write_text(csvp.read_text(encoding="utf-8").replace("img_a_png", f"{long}_png"), encoding="utf-8")
+        RB._cov_cache.clear()
+        return f"{long}_png"
+
+    def test_long_key_audit_fits_max_path(self):
+        """fixer 12: an audit with a 79-char image key (the real lv_20261111_1409 has keys this long) builds, and no
+        path it makes (staging, the published package and _work_) would pass 240 chars on the real 57-char review
+        root. The old layout (.building/<name>/pkg/_work_<name>/images/<key>.png) came to 262."""
+        key = self.long_key(79)
+        self.assertEqual(len(key), 79)
+        rr = self.w["review"]
+        longest, real = [0, ""], RB.run_compare
+
+        def walk(root):
+            for p in Path(root).rglob("*"):
+                if len(str(p)) > longest[0]:
+                    longest[:] = [len(str(p)), str(p)]
+
+        def spy(args, log, say):
+            rc = real(args, log, say)
+            walk(RB.building_dir(rr))
+            return rc
+
+        with mock.patch.object(RB, "run_compare", spy):
+            name, rc, st = self.build("audit", reviewers=["alyssia"])
+        self.assertEqual((rc, st["phase"]), (0, "done"), st)
+        walk(rr)
+        self.assertTrue(any(key in p.name for p in (rr / f"_work_{name}").rglob("*")) or
+                        any(key in p.name for p in (rr / name).rglob("*")))       # control: the long key was used
+        on_real_root = longest[0] - len(str(rr)) + 57
+        self.assertLess(on_real_root, 240, longest[1])
+        old_layout = 57 + len("/.building/") + len(name) + len("/pkg/_work_") + len(name) + len("/images/") + 79 + 4
+        self.assertGreater(old_layout, 259)                                     # control: the old layout did not fit
+
+    def test_each_audit_gets_its_own_decoy_seed(self):
+        """fixer 14: compare_args passes a fresh --seed per audit (never on a revise); the seed is recorded only in
+        _work_/decoys.json: not in the status, the registry line or the package's json / data.js."""
+        seeds = []
+        for _ in range(2):
+            name, rc, st = self.build("audit", reviewers=["alyssia"])
+            self.assertEqual(rc, 0, st)
+            key = json.loads((self.w["review"] / f"_work_{name}" / "decoys.json").read_text(encoding="utf-8"))
+            seeds.append(key["seed"])
+            seed = str(key["seed"]) if len(str(key["seed"])) >= 6 else '"seed"'    # a short seed could match a date
+            line = json.dumps(store.current("review_package", self.w["registry"]).get(name))
+            pkg_json = (self.w["review"] / name / "review_package.json").read_text(encoding="utf-8")
+            data_js = (self.w["review"] / name / "data.js").read_text(encoding="utf-8")
+            for text in (json.dumps(st), line, pkg_json, data_js):
+                self.assertNotIn('"seed"', text)
+                self.assertNotIn(seed, text)
+        self.assertNotEqual(seeds[0], seeds[1])
+        self.assertNotIn(0, seeds)
+        spec = {"labels": "l", "purpose": "revise", "owner": "o", "review_root": str(self.w["review"]), "name": "n",
+                "lv": F.LV, "state": str(self.tmp / "s"), "b": {"kind": "label_version", "coco": "c", "id": F.LV_BASE}}
+        self.assertNotIn("--seed", RB.compare_args(spec, Path("i"), Path("s.csv")))   # a revise has no decoys
 
     def test_compare_runs_in_the_runner_process(self):
         """QC 1: no child process for compare_package (a killed runner can't orphan GPU work)."""
