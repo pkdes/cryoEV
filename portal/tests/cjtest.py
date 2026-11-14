@@ -42,6 +42,31 @@ from portal import auth as A  # noqa: E402
 UPKEY = "upstream-review-key-for-tests"
 USER = "tester"
 
+# No portal test may read the real ~/.cryoev/services.json: every process that imports this module gets a temp,
+# empty services config as CRYOEV_SERVICES_CONFIG unless a test already set one (Env sets it again when a test
+# popped it). Tests that need a config still write their own and set the variable.
+_SERVICES_DIR = Path(tempfile.mkdtemp(prefix="cj_services_"))
+SERVICES_EMPTY = _SERVICES_DIR / "services.json"
+SERVICES_EMPTY.write_text(json.dumps({"services": []}), encoding="utf-8")
+
+
+def _drop_services_dir():
+    shutil.rmtree(_SERVICES_DIR, ignore_errors=True)
+
+
+import atexit  # noqa: E402
+atexit.register(_drop_services_dir)
+
+
+def no_real_services_config() -> None:
+    """CRYOEV_SERVICES_CONFIG -> SERVICES_EMPTY when unset (never the real config)."""
+    import os
+    if not os.environ.get("CRYOEV_SERVICES_CONFIG"):
+        os.environ["CRYOEV_SERVICES_CONFIG"] = str(SERVICES_EMPTY)
+
+
+no_real_services_config()
+
 
 def md5(b: bytes) -> str:
     return hashlib.md5(b).hexdigest()
@@ -72,6 +97,7 @@ class Env:
         self.registry = self.tmp / "registry"
         self.tokens = self.tmp / "agent_tokens.json"
         (self.registry / "live").mkdir(parents=True)
+        no_real_services_config()
         self.key = A.add_key(self.roster, USER, "admin")
 
     def config(self, **kw) -> APP.Config:
