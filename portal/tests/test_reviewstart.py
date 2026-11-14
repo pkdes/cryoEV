@@ -156,6 +156,56 @@ class Inputs(Base):
         F.picture(self.w["export"] / "test" / "S1__img_c_png.rf.0098.jpg")  # an alias's stem twice: ambiguous too
         self.assertEqual(RB.coverage(self.cfg, F.LV, use_cache=False)["ambiguous"], 2)
 
+    def test_case_folded_stem_twice_is_ambiguous(self):
+        """fixer 8: IMG_A_png and img_a_png stage to one file on Windows: both spellings are ambiguous."""
+        ex, dups = RB.export_images(self.w["export"])
+        self.assertIn("img_a_png", ex)                                   # control: one spelling is found
+        F.picture(self.w["export"] / "valid" / "IMG_A_png.rf.0097.jpg")
+        ex, dups = RB.export_images(self.w["export"])
+        self.assertNotIn("img_a_png", ex)
+        self.assertNotIn("IMG_A_png", ex)
+        self.assertEqual({"img_a_png", "IMG_A_png"} & dups, {"img_a_png", "IMG_A_png"})
+        cov = RB.coverage(self.cfg, F.LV, use_cache=False)
+        self.assertEqual((cov["ok"], cov["found"], cov["ambiguous"]), (False, 2, 1))
+
+    def test_staging_never_copies_over_an_existing_file(self):
+        """fixer 8: two keys staging to one name refuse (FileExistsError), with a hard link and with the copy
+        fallback; the file already staged is never overwritten; the runner fails the build cleanly."""
+        import contextlib
+        src = self.tmp / "one.jpg"
+        src.write_bytes(b"first")
+        for link_fails in (False, True):
+            with self.subTest(link_fails=link_fails):
+                sdir = self.tmp / f"state_{int(link_fails)}"
+                flat = sdir / "images"
+                flat.mkdir(parents=True)
+                (flat / "k_png.rf.0.jpg").write_bytes(b"already")      # staged by a key differing only in case
+                ctx = (mock.patch.object(os, "link", side_effect=OSError("no links")) if link_fails
+                       else contextlib.nullcontext())
+                with ctx, mock.patch.object(Path, "mkdir"), self.assertRaises(FileExistsError):
+                    RB.stage({"state": str(sdir)}, {"files": {"k_png": [str(src), "train"]}})
+                self.assertEqual((flat / "k_png.rf.0.jpg").read_bytes(), b"already")
+        cov = RB.coverage(self.cfg, F.LV, use_cache=False)
+        with mock.patch.object(RB, "stage", side_effect=FileExistsError("x")):
+            name, rc, st = self.build("revise")
+        self.assertEqual((rc, st["phase"], st["reason"]), (1, "failed", "images"))
+        self.assertEqual(sorted(p.name for p in self.w["review"].iterdir()), [".building"])
+        self.assertTrue(cov["ok"])
+
+    def test_names_refuse_a_trailing_newline(self):
+        """fixer 9: the name regexes end in backslash-Z: a value plus a trailing newline is never a name ($ let it
+        through)."""
+        good = {RB.LV_RE: F.LV, RB.MODEL_RE: "v5_model", RB.PID_RE: "alyssia",
+                RB.NAME_RE: "lab_revise_lv_20990101_0101_20990101_0000_aaaa", RB.KEY_RE: "img_a_png"}
+        for rx, v in good.items():
+            with self.subTest(rx=rx.pattern):
+                self.assertTrue(rx.match(v))                             # control
+                self.assertIsNone(rx.match(v + "\n"))
+        with self.assertRaises(RB.BuildError):
+            RB.validate(self.cfg, "revise", F.LV + "\n", B_LV, [], T.USER)
+        with self.assertRaises(RB.BuildError):
+            RB.validate(self.cfg, "audit", F.LV, B_LV, ["alyssia\n"], T.USER)
+
     def test_unusable_keys_refused(self):
         labels = self.w["labels"] / F.LV / "labels.coco.json"
         coco = json.loads(labels.read_text(encoding="utf-8"))
@@ -281,15 +331,22 @@ class Builds(Base):
         self.assertIn(f"[OK] {name}", log)
 
     def test_sweep_of_killed_builds(self):
-        """QC 3 + 4: at runner start, other non-final statuses become stopped; leftovers of NAME_RE builds go;
-        everything else (another package, its _work_, a finished portal build) stays."""
+        """QC 3 + 4, fixer 2: at runner start, other non-final statuses become stopped and their staging
+        (.building/<name>/pkg) goes; NOTHING in the review root is deleted: a portal-name folder without a finished
+        json (a published package whose json can't be read, a killed publish) only gets a log warning, and every
+        _work_* folder stays, even one whose package folder is gone."""
         rr = self.w["review"]
-        dead, dead2, done = ("lab_revise_lv_20990101_0101_20990101_0000_aaaa",
-                             "lab_audit_lv_20990101_0101_20990101_0000_bbbb",
-                             "lab_revise_lv_20990101_0101_20990101_0000_cccc")
+        dead, dead2, done, unread = ("lab_revise_lv_20990101_0101_20990101_0000_aaaa",
+                                     "lab_audit_lv_20990101_0101_20990101_0000_bbbb",
+                                     "lab_revise_lv_20990101_0101_20990101_0000_cccc",
+                                     "lab_audit_lv_20990101_0101_20990101_0000_dddd")
         (rr / dead).mkdir()                                         # killed mid-publish: no review_package.json
         (rr / dead / "data.js").write_text("x", encoding="utf-8")
-        (rr / f"_work_{dead2}").mkdir()                             # its package folder is gone
+        (rr / unread).mkdir()                                       # published, its json unreadable right now
+        (rr / unread / "review_package.json").write_text("{not json", encoding="utf-8")
+        (rr / f"_work_{unread}").mkdir()
+        (rr / f"_work_{dead2}").mkdir()                             # its package folder is gone: still kept
+        (rr / f"_work_{dead2}" / "decoys.json").write_text("{}", encoding="utf-8")
         (rr / done).mkdir()                                         # a finished portal build: kept
         (rr / done / "review_package.json").write_text(json.dumps({"id": done, "built_by": "portal"}),
                                                        encoding="utf-8")
@@ -298,16 +355,34 @@ class Builds(Base):
             (rr / other).mkdir()                                    # never a portal name: never touched
         RB.write_status(rr, dead2, phase="predicting", started=RB._now(), pid=999999)
         RB.staging_dir(rr, dead2).mkdir(parents=True)
+        before = sorted(p.name for p in rr.iterdir())
         name, rc, st = self.build("revise")
         self.assertEqual(rc, 0, st)
         left = sorted(p.name for p in rr.iterdir())
-        self.assertEqual(left, sorted([".building", name, done, f"_work_{done}", "lab_compare_live_audit",
-                                       "_work_lab_compare_live_audit", "pred_ps_20990101_cccccc"]))
+        self.assertEqual(left, sorted(before + [name]))
+        self.assertTrue((rr / f"_work_{dead2}" / "decoys.json").is_file())
+        self.assertEqual((rr / unread / "review_package.json").read_text(encoding="utf-8"), "{not json")
         raw = json.loads(RB.status_path(rr, dead2).read_text(encoding="utf-8"))
         self.assertEqual((raw["phase"], raw["reason"], raw["failed_at"]), ("failed", "stopped", "predicting"))
-        self.assertFalse(RB.staging_dir(rr, dead2).exists())
-        self.assertIn("swept leftovers", (Path(self.cfg.state_dir) / RB.STATE_SUB / name / "build.log")
-                      .read_text(encoding="utf-8"))
+        self.assertFalse(RB.staging_dir(rr, dead2).exists())        # control: the staging IS swept
+        log = (Path(self.cfg.state_dir) / RB.STATE_SUB / name / "build.log").read_text(encoding="utf-8")
+        self.assertIn("swept leftovers", log)
+        self.assertIn(f"left alone: review-root folder {unread}", log)
+        self.assertIn(f"left alone: review-root folder {dead}", log)
+
+    def test_sweep_never_deletes_in_the_review_root(self):
+        """fixer 2, direct: sweep() on a root holding only leftovers deletes nothing outside .building."""
+        rr = self.w["review"]
+        n1, n2 = "lab_audit_lv_20990101_0101_20990101_0000_eeee", "lab_revise_lv_20990101_0101_20990101_0000_ffff"
+        (rr / n1).mkdir()
+        (rr / n1 / "review_package.json").write_bytes(bytes([0xFF, 0xFE]))     # unreadable
+        (rr / f"_work_{n2}").mkdir()
+        warned = []
+        n = RB.sweep(rr, "lab_revise_lv_20990101_0101_20990101_0000_0000", warn=warned.append)
+        self.assertTrue((rr / n1 / "review_package.json").is_file())
+        self.assertTrue((rr / f"_work_{n2}").is_dir())
+        self.assertEqual(n["unfinished"], 1)
+        self.assertEqual(len(warned), 1)
 
     def test_check_failure_removes_the_build(self):
         """QC 11a: a complete build that fails the final check is never published or registered."""

@@ -67,10 +67,10 @@ REPO = HERE.parent
 TOOL = "annotation/compare_package.py"
 RECORDED_BY = "portal/review_build.py"
 PURPOSES = ("revise", "audit")
-LV_RE = re.compile(r"^lv_\d{8}_\d{4}$")
-MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_]{0,80}$")
-PID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")          # a portal id (compare_package REVIEWER_RE)
-NAME_RE = re.compile(r"^lab_(?:revise|audit)_lv_\d{8}_\d{4}_\d{8}_\d{4}_[0-9a-f]{4}$")
+LV_RE = re.compile(r"^lv_\d{8}_\d{4}\Z")
+MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_]{0,80}\Z")
+PID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}\Z")          # a portal id (compare_package REVIEWER_RE)
+NAME_RE = re.compile(r"^lab_(?:revise|audit)_lv_\d{8}_\d{4}_\d{8}_\d{4}_[0-9a-f]{4}\Z")
 MAX_REVIEWERS = 12
 BUILDING = ".building"                 # <review root>/.building/<name>/status.json; a dot folder: never a package
 BUILD_LOCK = "build.lock"              # held by the runner for its whole life: one build at a time
@@ -78,7 +78,7 @@ START_LOCK = "start.lock"              # held by start() while it checks and sta
 STATE_SUB = "review_build"             # <portal state>/review_build/<name>/
 REVIEW_PACKAGE_LOCK = ".review_package.lock"   # in the registry folder (portal/predict_parts/sets.py)
 RATIO_TOL = 0.01
-KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")    # a label-set image key: it names the staged file
+KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\Z")    # a label-set image key: it names the staged file
 SPLIT_DIRS = ("train", "valid", "val", "test")
 IMG_SUFFIXES = (".png", ".jpg", ".jpeg", ".tif", ".tiff")
 WAIT_S = 6 * 3600                      # a model build waits this long for the predict lock / a free GPU
@@ -268,9 +268,10 @@ def _split_of(export, dataset) -> Path | None:
 
 def export_images(export_path: Path) -> tuple:
     """-> ({image key: (path, split folder or "")}, {keys found more than once}): the export folder's own images and
-    those in its split folders. A key seen twice is ambiguous: left out of the first dict, never matched."""
+    those in its split folders. A key seen twice is ambiguous: left out of the first dict, never matched. Keys are
+    compared case-folded (a.png and A.png stage to one file on Windows): every spelling of such a key is ambiguous."""
     from annotation import build_review_package as B
-    out, dups = {}, set()
+    out, dups, seen = {}, set(), {}            # seen: case-folded key -> the spellings found
     roots = [(Path(export_path), "")] + [(Path(export_path) / s, s) for s in SPLIT_DIRS]
     for root, split in roots:
         try:
@@ -280,11 +281,14 @@ def export_images(export_path: Path) -> tuple:
         for p in files:
             if p.is_file() and p.suffix.lower() in IMG_SUFFIXES:
                 k = B.stem_of(p.name)
-                if k in out or k in dups:
-                    dups.add(k)
-                    out.pop(k, None)
+                spell = seen.setdefault(k.casefold(), [])
+                if spell:
+                    for x in spell + [k]:
+                        dups.add(x)
+                        out.pop(x, None)
                 else:
                     out[k] = (p, split)
+                spell.append(k)
     return out, dups
 
 
@@ -687,7 +691,8 @@ def compare_args(spec, staged: Path, split_csv: Path) -> list:
 
 def stage(spec, cov) -> tuple:
     """The checked images under their label-set keys in <state>/review_build/<name>/images (hard links, else copies),
-    and their splits in <state>/.../splits.csv. -> (images folder, split CSV). Never under the review root."""
+    and their splits in <state>/.../splits.csv. -> (images folder, split CSV). Never under the review root.
+    Two keys that stage to one file (case-folded names) raise FileExistsError: a refusal, never a copy over it."""
     sdir = Path(spec["state"])
     flat = sdir / "images"
     flat.mkdir(parents=True, exist_ok=False)
@@ -697,8 +702,12 @@ def stage(spec, cov) -> tuple:
         dst = flat / f"{key}.rf.0{src.suffix.lower()}"      # compare_package reads the key back (stem_of)
         try:
             os.link(src, dst)
+        except FileExistsError:
+            raise
         except OSError:
-            shutil.copy2(src, dst)
+            with open(src, "rb") as fi, open(dst, "xb") as fo:     # "x": an existing file is FileExistsError
+                shutil.copyfileobj(fi, fo)
+            shutil.copystat(src, dst)
         rows.append((key, split or "train"))
     sc = sdir / "splits.csv"
     with open(sc, "w", newline="", encoding="utf-8") as fh:
@@ -759,12 +768,13 @@ def finished(folder: Path, name: str) -> bool:
     return isinstance(meta, dict) and meta.get("id") == name and meta.get("built_by") == "portal"
 
 
-def sweep(rr: Path, own: str) -> dict:
+def sweep(rr: Path, own: str, warn=None) -> dict:
     """Run by the runner while it holds the build lock (so no other runner lives): every other non-final status is
-    rewritten failed "stopped"; leftovers of killed builds of portal names (NAME_RE only, never another package):
-    a staging folder, a <name> folder without a finished review_package.json, and a _work_<name> folder whose
-    package folder is gone (only its name is looked at; it is never opened). -> counts."""
-    n = {"stopped": 0, "staging": 0, "package": 0, "work": 0}
+    rewritten failed "stopped", and the staging left by killed builds of portal names (NAME_RE only) is removed:
+    ONLY <review root>/.building/<name>/pkg. Nothing in the review root itself is ever deleted: a <name> folder
+    without a finished review_package.json is only reported (warn(text)), and a _work_* folder is never touched
+    (or opened). -> counts."""
+    n = {"stopped": 0, "staging": 0, "unfinished": 0}
     b = building_dir(rr)
     try:
         for d in sorted(b.iterdir()) if b.is_dir() else []:
@@ -778,15 +788,10 @@ def sweep(rr: Path, own: str) -> dict:
                 shutil.rmtree(d / "pkg", ignore_errors=True)
                 n["staging"] += 1
         for d in sorted(Path(rr).iterdir()):
-            if d.name == own or not d.is_dir():
-                continue
-            if NAME_RE.match(d.name) and not finished(d, d.name):
-                shutil.rmtree(d, ignore_errors=True)
-                n["package"] += 1
-            elif d.name.startswith("_work_") and NAME_RE.match(d.name[6:]) and d.name[6:] != own \
-                    and not (Path(rr) / d.name[6:]).exists():
-                shutil.rmtree(d, ignore_errors=True)
-                n["work"] += 1
+            if d.name != own and NAME_RE.match(d.name) and d.is_dir() and not finished(d, d.name):
+                n["unfinished"] += 1
+                if warn is not None:
+                    warn(f"left alone: review-root folder {d.name} has no finished review_package.json")
     except OSError:
         pass
     return n
@@ -888,7 +893,7 @@ def run(spec_path) -> int:
     stage_dir = staging_dir(rr, name)
     try:
         say(phase="checking", pid=os.getpid(), reason=None)
-        swept = sweep(rr, name)
+        swept = sweep(rr, name, warn=note)
         if any(swept.values()):
             note(f"swept leftovers of earlier builds: {swept}")
         cov = coverage(_Cfg(spec), spec["lv"], use_cache=False)
@@ -898,7 +903,12 @@ def run(spec_path) -> int:
             say(phase="failed", reason="images" if cov.get("total") else "inputs", detail=detail, finished=_now())
             return 1
         say(detail=f"{found_text(cov)} · sizes match")
-        staged, splits = stage(spec, cov)
+        try:
+            staged, splits = stage(spec, cov)
+        except FileExistsError:
+            note("refused: two images stage to one file name (names that differ only in case)")
+            say(phase="failed", reason="images", finished=_now())
+            return 1
         if (rr / name).exists() or (rr / f"_work_{name}").exists() or stage_dir.exists():
             note("refused: the package, its work folder or its staging folder already exists")
             say(phase="failed", reason="build", finished=_now())
