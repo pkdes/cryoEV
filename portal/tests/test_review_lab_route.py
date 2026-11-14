@@ -43,6 +43,10 @@ class LabRoute(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls._env = {k: os.environ.pop(k) for k in list(os.environ) if k.startswith(("CRYOEV_", "CJ_"))}
+        from contextlib import ExitStack
+        import test_reviews_hub as RH
+        cls.stack = ExitStack()
+        RH.fake_listing(cls.stack)                     # only while portal/listing.py is the contract stub (round 13)
         cls.up = MultiDummy()
         cls.e = T.Env()
         cls.root = cls.e.tmp / "review"
@@ -66,6 +70,7 @@ class LabRoute(unittest.TestCase):
         for k in ("CRYOEV_SERVICES_CONFIG", MRS.PREFIX_ENV, MRS.EXCLUDE_ENV):
             os.environ.pop(k, None)
         os.environ.update(cls._env)
+        cls.stack.close()
 
     def get(self, who, path):
         st, _, body = T.request(self.p.port, "GET", path, T.cookie(self.tok[who]))
@@ -125,7 +130,7 @@ class LabRoute(unittest.TestCase):
     def test_picker_lists_the_same_set(self):
         st, body = self.get("basic", "/reviews/")
         self.assertEqual(st, 200)
-        self.assertIn(f'href="/review/{LAB}/"'.encode(), body)
+        self.assertIn(f'href="/reviews/go/{LAB}"'.encode(), body)      # the hub opens through go (round 13)
         for pid in (SVC, ENVX, OWN):
             self.assertNotIn(pid.encode(), body)
         self.assertNotIn(LAB.encode(), self.get("other", "/reviews/")[1])

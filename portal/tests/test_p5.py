@@ -357,8 +357,14 @@ def make_pkg(root: Path, ps: str, owner: str, n_images: int, checked: int, edite
 
 
 class MyReviews(unittest.TestCase):
+    """The Reviews hub (round 13; was My reviews) on the P5 fixture packages."""
+
     @classmethod
     def setUpClass(cls):
+        from contextlib import ExitStack
+        import test_reviews_hub as RH
+        cls.stack = ExitStack()
+        RH.fake_listing(cls.stack)                     # only while portal/listing.py is the contract stub
         cls.env = T.Env()
         cls.tmp = Path(tempfile.mkdtemp(prefix="cj_p5rev_"))
         cls.review, cls.predict = cls.tmp / "review", cls.tmp / "predict"
@@ -385,6 +391,7 @@ class MyReviews(unittest.TestCase):
         cls.p.stop()
         cls.env.cleanup()
         shutil.rmtree(cls.tmp, ignore_errors=True)
+        cls.stack.close()
 
     def get(self, path, who):
         st, _, body = T.request(self.p.port, "GET", path, T.cookie(self.tok[who]))
@@ -393,9 +400,9 @@ class MyReviews(unittest.TestCase):
     def test_basic_sees_only_own(self):
         st, text = self.get("/reviews/", "bas")
         self.assertEqual(st, 200)
-        self.assertIn("checked 3 of 10 images", text)                 # 2 reviewed + 1 edited; empty files not counted
         self.assertIn("My &lt;b&gt;EV&lt;/b&gt; run", text)
-        self.assertIn("/review/pred_ps_20261101_aaaaa1/", text)
+        self.assertIn("/reviews/go/pred_ps_20261101_aaaaa1", text)
+        self.assertIn("10 images", text)
         for hidden in ("ps_20261102_bbbbb2", "SecretOtherName", "other", "ps_20261103_ccccc3", "tester"):
             self.assertNotIn(hidden, text.split("<main")[-1] if "<main" in text else text)
         # the other user sees theirs, not bas's
@@ -411,7 +418,8 @@ class MyReviews(unittest.TestCase):
         st, text = self.get("/reviews/?show=all", "bas")
         self.assertEqual(st, 200)
         self.assertNotIn("ps_20261102_bbbbb2", text)
-        self.assertNotIn("Owner", text)
+        self.assertNotIn("SecretOtherName", text)
+        self.assertNotIn("Mine</a>", text)                            # Mine | All is admin only
 
     def test_admin_mine_and_all(self):
         st, mine = self.get("/reviews/", "admin")
@@ -419,10 +427,9 @@ class MyReviews(unittest.TestCase):
         self.assertIn("pred_ps_20261103_ccccc3", mine.replace("/review/", " "))
         self.assertNotIn("ps_20261101_aaaaa1", mine)
         self.assertNotIn("ps_20261102_bbbbb2", mine)
-        self.assertNotIn("<th>Owner</th>", mine)
-        self.assertIn("Mine", mine)
+        self.assertIn("Mine</a>", mine)
         st, every = self.get("/reviews/?show=all", "admin")
-        for want in ("ps_20261101_aaaaa1", "ps_20261102_bbbbb2", "ps_20261103_ccccc3", "<th>Owner</th>", "SecretOtherName"):
+        for want in ("ps_20261101_aaaaa1", "ps_20261102_bbbbb2", "ps_20261103_ccccc3", "SecretOtherName"):
             self.assertIn(want, every)
         self.assertIn(">other<", every)
         self.assertIn(">bas<", every)
@@ -437,16 +444,17 @@ class MyReviews(unittest.TestCase):
         self.assertIsNone(APP.OWNER_PATH_RE.match("/reviews"))
         self.assertEqual(self.get("/review/", "bas")[0], 403)
 
-    def test_nav_shows_my_reviews_for_all_roles(self):
+    def test_nav_shows_reviews_for_all_roles(self):
         for who in ("admin", "adv", "bas"):
             st, _, body = T.request(self.p.port, "GET", "/cj/header.js", T.cookie(self.tok[who]))
             st2, text = self.get("/", who)
             st3, _, mods = T.request(self.p.port, "GET", "/cj/modules.json", T.cookie(self.tok[who]))
             names = [m["name"] for m in json.loads(mods)["modules"]]
             self.assertIn("Reviews", names, who)                            # round 13: "My reviews" -> "Reviews"
-        # the nav the shell renders server-side
-        _, home = self.get("/reviews/", "bas")
-        self.assertIn("My reviews", home)
+            self.assertIn('"/reviews/"', mods.decode(), who)
+            self.assertIn("reviews", (mods.decode() + text + body.decode()).lower(), who)
+        _, page = self.get("/reviews/", "bas")
+        self.assertIn("<title>Reviews</title>", page)
 
     def test_cache_follows_edits_folder_mtime(self):
         d = self.review / "pred_ps_20261101_aaaaa1"

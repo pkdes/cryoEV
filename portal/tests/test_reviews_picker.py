@@ -1,10 +1,12 @@
 """
-The review package picker (round 9, R2; portal/modules/reviews.py): card progress (the Quick check queue, not images),
-access by owner or `reviewers`, "made from" without local paths, lab_ packages once the portal route takes them,
-the multi server's excluded package never listed, and the rendered row.
+The review package list (round 9, R2; since round 13 reviews.served_packages + portal/review_index.list_reviews):
+card progress (the Quick check queue, not images), access by owner or `reviewers`, "made from" without local paths,
+lab_ packages once the portal route takes them, the multi server's excluded package never listed, and the rendered
+hub row.
 
   python -m unittest portal.tests.test_reviews_picker -v
 """
+import itertools
 import json
 import os
 import re
@@ -24,6 +26,7 @@ sys.path.insert(0, str(REPO / "annotation" / "tests"))
 import make_fixture  # noqa: E402
 from annotation import multi_review_server as MRS  # noqa: E402
 from portal import app as APP  # noqa: E402
+from portal import review_index as RI  # noqa: E402
 from portal.modules import Ctx  # noqa: E402
 from portal.modules import reviews as REV  # noqa: E402
 
@@ -45,10 +48,14 @@ def build(root: Path, name: str, meta: dict) -> Path:
     return pkg
 
 
+_TICK = itertools.count()
+
+
 def put(pkg: Path, file: str, dec: dict):
     (pkg / "edits").mkdir(exist_ok=True)
     (pkg / "edits" / f"{file}.json").write_text(json.dumps({"file": file, "edit": {"t": 1, "dec": dec}}), encoding="utf-8")
-    os.utime(pkg / "edits", (time.time() + 5, time.time() + 5))  # the cache follows the folder's mtime
+    t = time.time() + 5 + next(_TICK)                              # the cache follows the folder's mtime; a step per
+    os.utime(pkg / "edits", (t, t))                                 # call (time.time() can repeat within a clock tick)
 
 
 class PickerTests(unittest.TestCase):
@@ -71,11 +78,12 @@ class PickerTests(unittest.TestCase):
             "base": "C:\\Users\\someone\\CryoAI-laptop\\labels\\lv_20261030_0909\\labels.coco.json",
             "compare": {"a": {"kind": "labels", "coco": "C:\\Users\\someone\\x\\lv_20261030_0909\\labels.coco.json"},
                         "b": {"kind": "model", "weights": "models\\v5_evnonev_y8m_20261029\\best.pt"}}})
-        self.cfg = SimpleNamespace(review_root=self.root, predict_root=None)
+        self.cfg = SimpleNamespace(review_root=self.root, predict_root=self.tmp / "predict", registry=None)
 
     def rows(self, who, only_mine=True, regex=LAB_RE):
         with mock.patch.object(APP, "PRED_ID_RE", regex):
-            return {r["pkg"]: r for r in REV.list_packages(self.cfg, who, Ctx.can_see, only_mine)}
+            return {r["id"]: r for r in RI.list_reviews(self.cfg, who, Ctx.can_see, show_all=not only_mine)
+                    if r["kind"] != "sandbox"}
 
     def test_card_progress_counts_cards_not_images(self):
         # fixture, conf 0.35 (no cand_conf): B p1 (.52, u), g202, g203; A g104, g105 -> 5 cards
@@ -98,7 +106,7 @@ class PickerTests(unittest.TestCase):
 
     def test_access_owner_reviewer_admin(self):
         self.assertEqual(set(self.rows(user("bas"))), {PRED, LAB})          # owner of one, reviewer of the other
-        self.assertEqual(self.rows(user("bas"))[LAB]["role"], "reviewer: you")
+        self.assertEqual(self.rows(user("bas"))[LAB]["role"], "reviewer")
         self.assertEqual(self.rows(user("bas"))[PRED]["role"], "yours")
         self.assertEqual(set(self.rows(user("other"))), set())                # neither: no trace
         self.assertEqual(set(self.rows(user("other"), only_mine=False)), set())
@@ -143,21 +151,29 @@ class PickerTests(unittest.TestCase):
         self.assertEqual(set(self.rows(user("bas"))), {PRED})
 
     def test_made_from_has_no_paths(self):
+        self.assertEqual(REV.made_from(json.loads((self.lab / "review_package.json").read_text())),
+                         "lv_20261030_0909 vs v5_evnonev_y8m_20261029 · 4 images")
         r = self.rows(user("bas"))
-        self.assertEqual(r[LAB]["made_from"], "lv_20261030_0909 vs v5_evnonev_y8m_20261029 · 4 images")
+        self.assertEqual(r[LAB]["made_from"], "Blind comparison · 4 images")    # an audit (blind): counts only
         self.assertEqual(r[PRED]["made_from"], "v5_model predictions · 4 images")
         self.assertEqual(REV._folder_name("D:\\a\\roboflow - x\\test\\_annotations.coco.json"), "roboflow - x")
 
+    def test_served_packages_checks_access_first(self):
+        self.assertEqual([d.name for d, _ in REV.served_packages(self.cfg, user("pujan"), Ctx.can_see)], [LAB])
+        self.assertEqual(REV.served_packages(self.cfg, user("other"), Ctx.can_see), [])
+
     def test_render(self):
         put(self.lab, "fixA_new.png", {"g104": {"v": "keep:EV", "t": 1}})
-        html = REV.render(sorted(self.rows(user("bas")).values(), key=lambda r: r["pkg"]), False, False)
-        self.assertIn("<b>1 of 5 cards</b> decided", html)
-        self.assertIn("checked 1 of 4 images", html)
-        self.assertIn(f'href="/review/{LAB}/"', html)
-        self.assertIn("reviewer: you", html)
+        rows = sorted(self.rows(user("bas")).values(), key=lambda r: r["id"])
+        html = "".join(REV._row_html(r) for r in rows)
+        self.assertIn("1 of 5 cards", html)
+        self.assertIn(f'href="/reviews/go/{LAB}"', html)
+        self.assertIn(f'href="/reviews/go/{PRED}"', html)
+        self.assertIn(f'href="/reviews/{PRED}/reviewers">Assign', html)       # bas owns PRED
+        self.assertNotIn(f"/reviews/{LAB}/reviewers", html)                    # a reviewer can't assign
+        self.assertIn("hidden (blind)", html)                                  # LAB is a blind compare
+        self.assertNotIn("pujan", html)                                        # its owner never shown
         self.assertNotIn("Users", html)
-        self.assertNotIn("<th>Owner</th>", html)
-        self.assertIn("<th>Owner</th>", REV.render(list(self.rows(user("a", "admin"), False).values()), True, True))
 
 
 if __name__ == "__main__":

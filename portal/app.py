@@ -216,6 +216,7 @@ AUDIT_LABELS = {      # route template -> (action, frequent: first per 10 min wr
     "/apply/preview": ("apply preview", False),
     "/apply/run": ("label set applied", False),
     "/reviews/start/build": ("review build started", False),
+    "/reviews/{pkg_id}/reviewers": ("reviewers changed", False),
     "/predict/api/upload":("upload started", False),
     "/predict/api/upload/{uid}/file": ("upload chunk", True),
     "/predict/api/upload/{uid}/create": ("prediction set created", False),
@@ -259,7 +260,7 @@ SELF_LOGGED = frozenset({"/admin/people/add", "/admin/people/role", "/admin/peop
                          "/admin/people/revoke", "/admin/predict/label", "/admin/predict/show", "/jobs/api/cancel",
                          "/jobs/api/release", "/train/queue", "/admin/people/token-revoke", "/account/tokens/new",
                          "/account/tokens/revoke", "/apply/preview",
-                         "/apply/run", "/reviews/start/build"})
+                         "/apply/run", "/reviews/start/build", "/reviews/{pkg_id}/reviewers"})
 AUDIT_IDS = ("ps", "pkg_id", "cid", "rid", "eid", "uid", "tid")      # the only path parameters a line may carry
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}\Z")
 SWEEP_S = 60.0                                                       # close due 10-min windows this often
