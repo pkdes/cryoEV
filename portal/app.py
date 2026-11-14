@@ -160,7 +160,8 @@ CORE_ROLES = {"/review": ("admin",), "/history": ("admin",)}   # built-in defaul
 CORE_IDS = {"/review": "review", "/history": "history"}       # the only entry that may set each core prefix
 PRED_PORT = 8767                                              # annotation/multi_review_server.py
 # review package ids the multi server serves: prediction (pred_ps_*) and lab / compare (lab_*); never "app"
-PRED_ID_RE = re.compile(r"^(?:pred_ps_\d{8}_[0-9a-f]{6}|lab_[A-Za-z0-9][A-Za-z0-9_.-]{0,100})\Z")
+PRED_ID_RE = re.compile(r"^(?:pred_ps_\d{8}_[0-9a-f]{6}|pred_obj_[a-z0-9][a-z0-9_]{0,40}_[0-9a-f]{4}"
+                        r"|lab_[A-Za-z0-9][A-Za-z0-9_.-]{0,100})\Z")      # pred_obj_: object sets (round 14)
 OWNER_PATH_RE = re.compile(r"^/review/(?!app(?:/|$))[^/]+(?:/|$)")   # /review/<pkg id>...: owner-checked routes
 TPL_RE = re.compile(r"\{\{(\w+)\}\}")
 # module icons (24 x 24, stroked; design direction A)
@@ -217,6 +218,8 @@ AUDIT_LABELS = {      # route template -> (action, frequent: first per 10 min wr
     "/apply/run": ("label set applied", False),
     "/reviews/start/build": ("review build started", False),
     "/reviews/{pkg_id}/reviewers": ("reviewers changed", False),
+    "/reviews/start/objects": ("object set built", False),
+    "/train/collapse": ("dataset derived (collapse)", False),
     "/predict/api/upload":("upload started", False),
     "/predict/api/upload/{uid}/file": ("upload chunk", True),
     "/predict/api/upload/{uid}/create": ("prediction set created", False),
@@ -260,7 +263,8 @@ SELF_LOGGED = frozenset({"/admin/people/add", "/admin/people/role", "/admin/peop
                          "/admin/people/revoke", "/admin/predict/label", "/admin/predict/show", "/jobs/api/cancel",
                          "/jobs/api/release", "/train/queue", "/admin/people/token-revoke", "/account/tokens/new",
                          "/account/tokens/revoke", "/apply/preview",
-                         "/apply/run", "/reviews/start/build", "/reviews/{pkg_id}/reviewers"})
+                         "/apply/run", "/reviews/start/build", "/reviews/{pkg_id}/reviewers",
+                         "/reviews/start/objects", "/train/collapse"})
 AUDIT_IDS = ("ps", "pkg_id", "cid", "rid", "eid", "uid", "tid")      # the only path parameters a line may carry
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}\Z")
 SWEEP_S = 60.0                                                       # close due 10-min windows this often

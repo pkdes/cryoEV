@@ -30,7 +30,9 @@ INCLUDE = [
     "registry/**/*.txt",
     "registry/**/*.csv",
     "review/*/edits/**/*.json",
+    "review/*/edits/_attr_log.jsonl",   # object-set attribute history (round 14)
     "review/*/*.json",          # package metadata
+    "classmaps/*.json",         # user class maps, written once (round 14)
     "labels/**/*.json",
     "labels/**/*.csv",
     "labels/**/*.txt",

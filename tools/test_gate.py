@@ -75,6 +75,9 @@ AFFECTS = [
     ("tests/", {"tests"}),
     ("inference/", {"jobs", "portal", "annotation", "results"}),
     ("models/", {"jobs", "portal", "registry", "cryoev"}),
+    # class maps + label schemas (round 14): dataset builds, review server, portal pages, registry kind, CLI
+    ("labels/", {"data_utils", "annotation", "portal", "registry", "cryoev", "results"}),
+    ("analysis/", {"results", "portal", "annotation"}),
 ]
 DOC_ONLY = re.compile(r"(\.md|\.txt|\.png|\.jpg|\.svg)$", re.I)
 # .md/.txt files that are NOT doc-only: they change what runs (CHANGELOG is parsed by tests; requirements pin the env)
