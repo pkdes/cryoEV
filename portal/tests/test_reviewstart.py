@@ -202,6 +202,20 @@ class Builds(Base):
         n = key["counts"]["decoys"]
         self.assertNotIn(f'"accept": {n["accept"]}', texts[1] + texts[2])
 
+    def test_apply_takes_the_revise_not_the_audit(self):
+        """QC 1 end to end: a portal-built revise is eligible for Apply once an image is reviewed; the audit isn't."""
+        from portal.modules import applyreview as AP
+        rev, _, _ = self.build("revise")
+        aud, _, _ = self.build("audit", reviewers=["alyssia"])
+        for name in (rev, aud):
+            (self.w["review"] / name / "edits").mkdir()
+            (self.w["review"] / name / "edits" / "img_a.png.json").write_text(json.dumps(
+                {"file": "img_a.png", "pkg": name, "fmt": 1, "edit": {"reviewed": True, "dec": {}}}), encoding="utf-8")
+        rows = {r["id"]: r for r in AP.packages(self.cfg, {}, set(), None)}
+        self.assertTrue(rows[rev]["eligible"], rows[rev]["why"])
+        self.assertEqual(rows[rev]["base_lv"], F.LV)
+        self.assertNotIn(aud, rows)
+
     def test_failed_build_cleans_up(self):
         name = RB.start(self.cfg, T.USER, "revise", F.LV, B_LV, spawn=False)
         os.remove(self.w["labels"] / F.LV_BASE / "labels.coco.json")    # B vanishes: compare_package fails
