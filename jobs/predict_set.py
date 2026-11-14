@@ -726,8 +726,6 @@ def create(from_dir, model, owner, nm_confirmed_by, sample_label=None, sample_la
                 "record": {k: v for k, v in rec.items() if k not in ("id", "path", "logged", "created")}}
     # ---- id + record, validated before anything is written; the id is reserved by its .incoming folder
     with locked(reg / REGISTRY_LOCK):
-        if not again and adopted_before(reg, list_sha):          # re-checked under the lock (a racing adopt)
-            raise PredictSetError("refused: this run was just adopted; pass --again to adopt it once more")
         taken = set(regm.current("prediction_set", reg))
         for _ in range(50):
             ps_id = f"ps_{day}_{secrets.token_hex(3)}"
@@ -823,9 +821,18 @@ SOURCE_FILES = "source_files.csv"                # <ps>/adopted/source_files.csv
 RUN_FILES = ("run_manifest.json", "data/D1_particles.csv", "data/D2_images.csv")
 ADOPT_IMAGE_EXT = (".png", ".jpg", ".jpeg")
 ADOPT_MAX_DET = 300                              # the poster run's infer.py (max_det=300)
-RUN_IMAGE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+ -]{0,200}\Z")  # a run image id: it names a file (no
-#                                     separators, no ':', no leading dot; '..' refused separately; the poster's ids hold
-#                                     '+', '.', '-' and spaces)
+RUN_IMAGE_ID_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_.+ -]{0,199}[A-Za-z0-9_+-])?\Z")  # a run image id names
+#   a file: no separators, ':' or leading dot; no trailing dot or space; the poster's ids hold '+', '.', '-' and spaces
+WIN_RESERVED_RE = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?\Z", re.I)
+
+
+def plain_run_id(x) -> bool:
+    """A run image id that is safe as a file name stem: RUN_IMAGE_ID_RE, no '..', no Windows reserved name."""
+    x = str(x or "")
+    return bool(RUN_IMAGE_ID_RE.match(x)) and ".." not in x and not WIN_RESERVED_RE.match(x.split(".")[0].strip()) \
+        and not WIN_RESERVED_RE.match(x)
+
+
 PARTICLE_COLUMNS = ["image", "run_image_id", "particle_id", "line", "cls", "conf", "area_px", "run_area_px",
                     "area_match"]
 
@@ -924,8 +931,7 @@ def adopt_plan(run_dir, model, images, sets=None) -> dict:
         raise PredictSetError("refused:" + _list(problems))
     d2 = [r for r in _read_csv_rows(run_dir / "data" / "D2_images.csv")
           if r.get("set") in sets and r.get("width_px") and r.get("file") not in excl.get(r.get("set"), set())]
-    bad_ids = [str(r.get("image_id")) for r in d2
-               if not RUN_IMAGE_ID_RE.match(str(r.get("image_id") or "")) or ".." in str(r.get("image_id"))]
+    bad_ids = [str(r.get("image_id")) for r in d2 if not plain_run_id(r.get("image_id"))]
     if bad_ids:                                  # checked before any path is built from them
         raise PredictSetError(f"refused: D2_images.csv image ids that are not plain names: {bad_ids[:5]}")
     d1 = {}
@@ -1097,6 +1103,8 @@ def adopt(run_dir, model, images, name, owner, nm_confirmed_by, sets=None, root=
         raise PredictSetError(f"refused: {n_part - n_match} run particles don't match their line by mask area")
     day = datetime.now().strftime("%Y%m%d")
     with locked(reg / REGISTRY_LOCK):
+        if not again and adopted_before(reg, list_sha):          # re-checked under the lock (a racing adopt)
+            raise PredictSetError("refused: this run was just adopted; pass --again to adopt it once more")
         taken = set(regm.current("prediction_set", reg))
         for _ in range(50):
             ps_id = f"ps_{day}_{secrets.token_hex(3)}"

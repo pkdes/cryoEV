@@ -155,6 +155,21 @@ class Adopt(unittest.TestCase):
         second = self.adopt(dry=False, again=True)
         self.assertNotEqual(second, first)
 
+    def test_race_recheck_under_the_lock(self):
+        """QC A: the second check runs inside adopt's registry lock (a racing adopt), never in create()."""
+        calls = []
+
+        def fake(reg, sha):
+            calls.append(sha)
+            return [] if len(calls) == 1 else ["ps_20991231_aaaaaa"]
+        from unittest import mock
+        with mock.patch.object(P, "adopted_before", fake):
+            with self.assertRaises(P.PredictSetError) as cm:
+                self.adopt(dry=False)
+        self.assertIn("just adopted", str(cm.exception))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([p.name for p in self.root.iterdir() if not p.name.startswith(".")], [])
+
     def test_root_or_registry_inside_run_refused(self):
         """QC 14: --root / --registry inside --from are refused before anything is read or written."""
         run_before = snapshot(self.run)
@@ -172,13 +187,16 @@ class Adopt(unittest.TestCase):
         with self.assertRaises(P.PredictSetError) as cm:
             self.adopt()
         self.assertIn("not plain names", str(cm.exception))
-        for bad in ("a/b", "a\\b","C:x", ".hidden", "x..y"):
-            self.assertFalse(P.RUN_IMAGE_ID_RE.match(bad) and ".." not in bad, bad)
+        for bad in ("a/b", "a\\b", "C:x", ".hidden", "x..y", "CON", "nul", "com1.txt", "LPT9.png", "Aux.a.b",
+                    "x.", "x ", "trail. "):
+            self.assertFalse(P.plain_run_id(bad), bad)
+        for ok in ("CONTROL_1", "com10", "a.b", "HEK_pll+__x_View_1.11_HEK_PLL_-11K", "a b"):
+            self.assertTrue(P.plain_run_id(ok), ok)
 
     def test_poster_style_image_ids_accepted(self):
         """The real poster run's ids hold '+', '.', '-' and must adopt (dry run, every particle area matching)."""
         real = "HEK_pll+__raw_images__20230920_G9__20230920_Sima_Grid_9_View_1.11_HEK_PLL_-11K"
-        self.assertTrue(P.RUN_IMAGE_ID_RE.match(real))
+        self.assertTrue(P.plain_run_id(real))
         d2 = rcsv(self.run / "data" / "D2_images.csv")
         d1 = rcsv(self.run / "data" / "D1_particles.csv")
         pa = self.run / "data" / "pa" / "SetA"
