@@ -430,6 +430,20 @@ def grid_fields(rows):
     return out
 
 
+def object_set(folder, datajs=None) -> bool:
+    """An object review set (round 14, annotation/object_set.py: data.js kind "objects", or kind "objects" in its
+    review_package.json): its builder writes its own line (only with --do --register), and it never gets a revise
+    job: its decisions are attributes, not label edits."""
+    if isinstance(datajs, dict) and datajs.get("kind") == "objects":
+        return True
+    f = Path(folder) / "review_package.json"
+    try:
+        meta = read_json(f) if f.is_file() else None
+    except (ValueError, OSError):
+        return False
+    return isinstance(meta, dict) and meta.get("kind") == "objects"
+
+
 def portal_built(folder, datajs=None) -> bool:
     """A package the portal built (portal/review_build.py, round 13): built_by "portal" in its review_package.json,
     or in data.js (written first, so a package still being built is left alone too)."""
@@ -863,6 +877,9 @@ class Importer:
             for e in entries:
                 if e["folder"].upper().startswith("SANDBOX"):
                     self.excluded["review_package (SANDBOX)"] += 1
+                    continue
+                if object_set(e["path"]):                      # round 14: an object set, never a revise job
+                    self.excluded["review_package (object set, own line)"] += 1
                     continue
                 if e.get("base_kind") == "prediction_set":     # registered by its builder (owner, prediction_set);
                     self.excluded["review_package (prediction, own line)"] += 1    # deriving it here would drop those

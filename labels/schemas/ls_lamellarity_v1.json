@@ -1,0 +1,31 @@
+{
+ "schema": "label_schema/1",
+ "id": "ls_lamellarity_v1",
+ "name": "lamellarity",
+ "version": 1,
+ "maker": "pujan",
+ "description": "Nested EVs: single / multilamellar (ML) / multivesicular (MV) / ML+MV, the number of concentric membranes (outer included) and the number of inner, non-concentric vesicles. Calibrates the ML / MV geometry rule. MV_vesicular means multivesicular, not the legacy MV stack outline.",
+ "classes": [
+  {"name": "EV", "color": "#4ade80", "key": "1"}
+ ],
+ "object_attrs": [
+  {"id": "type", "label": "Type", "kind": "choice", "required": true,
+   "options": [
+    {"v": "single", "label": "Single", "key": "1"},
+    {"v": "ML", "label": "ML", "key": "2"},
+    {"v": "MV_vesicular", "label": "MV multivesicular", "key": "3"},
+    {"v": "ML+MV", "label": "ML+MV", "key": "4"},
+    {"v": "unsure", "label": "Unsure", "key": "0"}
+   ]},
+  {"id": "membranes", "label": "Concentric membranes", "kind": "ordinal", "required": true,
+   "options": [{"v": "1", "key": "a"}, {"v": "2", "key": "s"}, {"v": "3", "key": "d"}, {"v": "4+", "key": "f"}]},
+  {"id": "inner", "label": "Inner vesicles", "kind": "ordinal", "required": true,
+   "options": [{"v": "0", "key": "z"}, {"v": "1", "key": "x"}, {"v": "2", "key": "c"}, {"v": "3+", "key": "v"}]},
+  {"id": "outline_wrong", "label": "Outlines wrong", "kind": "bool", "key": "o"},
+  {"id": "note", "label": "Note", "kind": "text", "max": 300, "key": "n"}
+ ],
+ "image_attrs": [],
+ "tags": [],
+ "supersedes": null,
+ "class_mapping": null
+}
