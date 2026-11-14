@@ -1315,10 +1315,12 @@ def owner_checked(path: str) -> bool:
     return bool(OWNER_PATH_RE.match(path)) and not any(s in (".", "..") for s in path.split("/"))
 
 
-def audit_owner(user, meta) -> bool:
-    """`user` owns this compare package and it is not a revise one (no purpose "revise"): a blind audit's owner, who
-    must not decide its cards. Owner by identity, whatever the role."""
-    if not isinstance(meta, dict) or meta.get("kind") != "compare" or meta.get("purpose") == "revise":
+def audit_owner(user, meta, pkg=None) -> bool:
+    """`user` owns this package and it is blind (titles.is_blind(meta, pkg), the one rule: a compare package unless
+    purpose "revise" AND no _work_<name> folder beside pkg): a blind audit's owner, who must not decide its cards.
+    Owner by identity, whatever the role."""
+    from portal import titles as TT
+    if not isinstance(meta, dict) or not TT.is_blind(meta, pkg):
         return False
     owner, uid = meta.get("owner"), (user or {}).get("id")
     return isinstance(owner, str) and bool(owner) and owner == uid
@@ -1385,7 +1387,7 @@ def pred_mount(proxy: P.ReviewProxy, root: Path | None, title: str = "Review", r
         pid, pkg, meta = lookup(request)
         if pid is None:
             return missing()
-        if audit_owner_refused(request) and audit_owner(request.scope.get("cj_user"), meta):
+        if audit_owner_refused(request) and audit_owner(request.scope.get("cj_user"), meta, pkg):
             return M.no_store(JSONResponse({"error": AUDIT_OWNER_REFUSED}, status_code=403))
         base = f"{REVIEW_BASE}/{pid}"
         if wants_shell(request, base):

@@ -342,10 +342,14 @@ LAB_PACKAGE_ID = re.compile(r"^lab_[A-Za-z0-9][A-Za-z0-9_.-]{0,120}$")
 
 def disk_reviewers(records, package_id):
     """Reviewers from the package's own review_package.json (round 13: the Reviews hub writes them there; the
-    registry line is not updated). None on an audit (a compare package not built to revise), like the hub."""
+    registry line is not updated). None on a blind audit: the one rule, titles.is_blind (a compare package unless
+    purpose "revise" AND no _work_<name> folder beside it), like the hub."""
+    from portal.modules.data.records import package_folder
     meta = _dict(package_meta(records, package_id))
-    if meta.get("kind") == "compare" and meta.get("purpose") != "revise":
-        return None
+    if meta.get("kind") in TT.BLIND_KINDS:
+        folder = package_folder(package_id, records["review_package"].get(package_id) or {})
+        if TT.is_blind(meta, folder):
+            return None
     return ", ".join(str(r) for r in _list(meta.get("reviewers")) if _text(r)) or None
 
 

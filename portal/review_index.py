@@ -158,11 +158,21 @@ def _title(pkg_id, meta, kind, records, req) -> str:
     return t[len("Audit: "):] if kind == "audit" and t.startswith("Audit: ") else t
 
 
+def _blind_title(built) -> str:
+    """A non-admin's audit title: "Blind audit · 12 Nov 2026" (its built date), never a set name or id."""
+    try:
+        dt = datetime.fromtimestamp(built) if built else None
+    except (OverflowError, OSError, ValueError, TypeError):
+        dt = None
+    return "Blind audit" + (f" · {dt.day} {dt.strftime('%b')} {dt.year}" if dt else "")
+
+
 def _made_from(meta, kind, req) -> str:
     from portal.modules import reviews as REV
     n = meta.get("n_images") if isinstance(meta.get("n_images"), int) and not isinstance(meta.get("n_images"), bool) \
         else None
-    if kind == "audit":                                 # counts only: never which sets are compared
+    if kind == "audit":         # every viewer: the image count only, never which sets are compared (an admin's TITLE
+                                # names them: _title; a non-admin's is _blind_title)
         return " · ".join(x for x in ("Blind comparison", f"{n} images" if n is not None else "") if x)
     if kind == "label_review" and meta.get("kind") == "compare":
         a, b = _compare_sides(meta)
@@ -237,7 +247,8 @@ def _row(d: Path, meta: dict, *, user, records, applied, proot, core: bool, hidd
     via = _str(meta.get("owner_via")) or _str((req or {}).get("owner_via"))
     n = meta.get("n_images")
     return {
-        "id": pid, "kind": kind, "title": _title(pid, meta, kind, records, req),
+        "id": pid, "kind": kind,
+        "title": _blind_title(built) if blind and not is_admin else _title(pid, meta, kind, records, req),
         "made_from": _made_from(meta, kind, req),
         "owner": None if blind else owner, "reviewers": [] if blind else revs, "role": role, "status": status,
         "cards": cards, "decided": decided, "n_images": n if isinstance(n, int) and not isinstance(n, bool) else None,

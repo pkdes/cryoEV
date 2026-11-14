@@ -219,6 +219,37 @@ class ListTests(World):
         self.assertNotIn("purpose", meta)                                   # no purpose at all: an audit
         self.assertEqual(self.rows(user("audowner"))[AUDIT2]["kind"], "audit")
 
+    def test_non_admin_audit_title_names_no_set(self):
+        """fixer 3: a basic reviewer's audit row is "Blind audit · <built date>" / "Blind comparison · N images":
+        the hub and strip HTML never hold either compared set (A's label set, B's model or label set, a meta title
+        naming them); the admin keeps the descriptive title (control: the names really are in the package)."""
+        from portal import app as APP
+        pid = "lab_compare_blindx_20261112"
+        a_lv, b_lv, model = "lv_20261031_0707", "lv_20261029_0606", "v5_secretmodel_y8m"
+        build(self.root, pid, {"kind": "compare", "purpose": "audit", "owner": "adm", "reviewers": ["bas"],
+                               "n_images": 4, "built": "2026-11-12T10:00",
+                               "title": f"Audit {a_lv} vs {model}", "base": f"x/{a_lv}",
+                               "compare": {"a": {"id": a_lv, "coco": f"x/{a_lv}/labels.coco.json"},
+                                           "b": {"kind": "model", "id": model,
+                                                 "weights": f"models/{model}/best.pt", "label": b_lv}}})
+        (self.root / f"_work_{pid}").mkdir()
+        secret = (a_lv, b_lv, model, "secretmodel")
+        rows = RI.list_reviews(self.cfg, user("bas"), Ctx.can_see)
+        r = next(x for x in rows if x["id"] == pid)
+        self.assertEqual((r["kind"], r["title"], r["made_from"]),
+                         ("audit", "Blind audit · 12 Nov 2026", "Blind comparison · 4 images"))
+        hub = REV.render_hub(rows, user=user("bas"), params={}, flash_html="")
+        strip = APP.render_strip(rows, pid, RI.switcher_groups(rows, pid))
+        self.assertIn("Blind audit · 12 Nov 2026", hub)
+        self.assertIn("Blind audit · 12 Nov 2026", strip)
+        for text in (hub, strip, json.dumps(rows)):
+            for s_ in secret:
+                self.assertNotIn(s_, text)
+        adm = self.rows(user("adm", "admin"), show_all=True)[pid]
+        self.assertTrue(any(s_ in adm["title"] for s_ in secret), adm["title"])        # control: admins see it
+        self.assertEqual(adm["made_from"], "Blind comparison · 4 images")
+        self.assertEqual(RI._blind_title(None), "Blind audit")
+
     def test_package_being_built_is_skipped(self):
         """A portal build writes data.js, images and .review_key before review_package.json: not listed yet."""
         d = self.root / "pred_ps_20261112_fffff6"

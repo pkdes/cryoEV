@@ -352,6 +352,35 @@ class StripThroughThePortal(unittest.TestCase):
                 P.clean_subpath(raw)
         self.assertEqual(P.clean_subpath("/api/edits"), "/api/edits")                # control
 
+    def test_revise_with_a_work_folder_is_blind_for_its_owner(self):
+        """fixer 4, one blind rule (titles.is_blind): purpose revise + a _work_<name> folder = an audit, so its owner's
+        PUT api/edits is refused. Control: the same package without _work_ takes the owner's write."""
+        work = self.root / f"_work_{REVISE}"
+        work.mkdir()
+        try:
+            st, _, body = self.req("adv", "PUT", f"/review/{REVISE}/app/api/edits?f=a.png", b"{}")
+            self.assertEqual(st, 403, body)
+            self.assertEqual(self.req("adv", "POST", f"/review/{REVISE}/app/api/group", b"{}")[0], 403)
+            self.assertEqual(self.req("adv", "GET", f"/review/{REVISE}/app/api/edits")[0], 200)       # reads go on
+        finally:
+            work.rmdir()
+        self.assertEqual(self.req("adv", "PUT", f"/review/{REVISE}/app/api/edits?f=a.png", b"{}")[0], 200)
+
+    def test_data_page_reviewers_follow_the_one_blind_rule(self):
+        """fixer 4: data/details.disk_reviewers hides a revise package's reviewers once it has a _work_ folder."""
+        from portal.modules.data import details as DD
+        from portal.modules.data import records as DR
+        meta = {"kind": "compare", "purpose": "revise", "owner": "u-adv", "reviewers": ["u-basic"]}
+        recs = {"review_package": {REVISE: {}}}
+        with mock.patch.object(DD, "package_meta", lambda r, i: meta), \
+                mock.patch.object(DR, "package_folder", lambda i, r: self.root / REVISE):
+            self.assertEqual(DD.disk_reviewers(recs, REVISE), "u-basic")                 # control
+            (self.root / f"_work_{REVISE}").mkdir()
+            try:
+                self.assertIsNone(DD.disk_reviewers(recs, REVISE))
+            finally:
+                (self.root / f"_work_{REVISE}").rmdir()
+
     def test_audit_owner_rule(self):
         u = {"id": "u-adv", "role": "admin"}
         self.assertTrue(APP.audit_owner(u, {"kind": "compare", "owner": "u-adv"}))
@@ -362,6 +391,13 @@ class StripThroughThePortal(unittest.TestCase):
         self.assertFalse(APP.audit_owner(u, {"kind": "prediction", "owner": "u-adv"}))
         self.assertFalse(APP.audit_owner(u, {"kind": "compare", "owner": None}))
         self.assertFalse(APP.audit_owner(None, {"kind": "compare", "owner": "u-adv"}))
+        rev = {"kind": "compare", "owner": "u-adv", "purpose": "revise"}
+        self.assertFalse(APP.audit_owner(u, rev, self.root / REVISE))                  # no _work_: a revise
+        (self.root / f"_work_{REVISE}").mkdir()
+        try:
+            self.assertTrue(APP.audit_owner(u, rev, self.root / REVISE))               # _work_: blind (is_blind)
+        finally:
+            (self.root / f"_work_{REVISE}").rmdir()
 
 
 class ReviewPackagePin(unittest.TestCase):
