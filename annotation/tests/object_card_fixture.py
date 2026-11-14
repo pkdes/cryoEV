@@ -72,7 +72,8 @@ def _png(path: Path, w, h, circles):
     im.filter(ImageFilter.GaussianBlur(0.8)).convert("RGB").save(path)
 
 
-def build(folder, *, blind=True, outline_mode="target", n_items=6, sentinel=None, title="Lamellarity check 1") -> dict:
+def build(folder, *, blind=True, outline_mode="target", n_items=6, sentinel=None, title="Lamellarity check 1",
+          instructions=None) -> dict:
     folder = Path(folder)
     (folder / "images").mkdir(parents=True, exist_ok=True)
     shutil.copyfile(PAGE, folder / "index.html")
@@ -110,6 +111,8 @@ def build(folder, *, blind=True, outline_mode="target", n_items=6, sentinel=None
             "blind": bool(blind), "images": [img_a, img_b]}   # a flag only (QC 4): no column names in data.js
     if sentinel:                                       # a test may plant a value that must never reach the page
         data["note_for_tests"] = sentinel
+    if instructions is not None:                       # r15 hotfix: D.instructions (object_set.py instructions)
+        data["instructions"] = instructions
     (folder / "data.js").write_text("window.REVIEW_DATA = " + json.dumps(data) + ";\n", encoding="utf-8")
     (folder / "review_package.json").write_text(json.dumps({
         "kind": "objects", "schema": SCHEMA["id"], "base": "ps_20261114_abcdef", "base_kind": "prediction_set",

@@ -13,6 +13,13 @@ attributes (labels/schemas.py) instead of whole images.
         [--review-root <dir>] [--do [--register --registry <dir>]]
     python -m annotation.object_set export --pkg <pkg> --out <file.csv> [--coco <file.json>]
     python -m annotation.object_set import --pkg <pkg> --csv <file.csv>
+    python -m annotation.object_set instructions <pkg> (--text TEXT | --file PATH | --clear) [--do]
+
+instructions (r15 hotfix) sets the maker's set instructions, plain text (<= 2000 characters, NFC, no control
+characters but newlines; CRLF -> LF), shown on every object card behind an "Instructions" button: data.js
+D.instructions (only that key changes: every other byte of data.js stays as it was) and review_package.json
+`instructions` + `instructions_t`. build takes them too (--instructions / --instructions-file); a set built
+without them is byte-identical to before. Both are dry runs unless --do.
 
 build is a dry run (checks, then the plan) unless --do; the registry line is written only with --do --register and an
 explicit --registry. Built in a temp folder (.building_*) and renamed into place, so a half-built set is never served.
@@ -78,6 +85,9 @@ COL_MAX = 64
 TITLE_MAX = 60
 CSV_RISKY = ("=", "+", "-", "@", "\t", "\r", "'")   # a cell starting with one gets a ' (spreadsheet formulas)
 PARTICLES_CSV = Path("adopted") / "particle_lines.csv"   # jobs/predict_set.py adopt
+INSTR_MAX = 2000                  # set instructions: characters after clean_instructions
+DATAJS_PREFIX = b"window.REVIEW_DATA = "
+REPLACE_RETRY_S = 5.0             # os.replace on Windows fails while a reader holds the file: retried this long
 
 
 class ObjectSetError(ValueError):
@@ -279,10 +289,13 @@ def plan(ps_dir, items_csv, schema, image_col="image", line_col=None, particle_c
 
 def build(ps_dir, items_csv, schema, review_root, image_col="image", line_col=None, particle_col=None,
           blind_cols=(), outline_mode="target", slug=None, seed=None, owner=None, reviewers=(),
-          registry_root=None, width=1440, quality=72, built_by="cli", title=None) -> Path:
+          registry_root=None, width=1440, quality=72, built_by="cli", title=None, instructions=None) -> Path:
     """Build the object set (module doc) under review_root. -> its folder. Registering is separate (register()).
-    title: the set's name as its maker typed it (data.js D.title and the record's title; default the slug)."""
+    title: the set's name as its maker typed it (data.js D.title and the record's title; default the slug).
+    instructions: the set instructions (clean_instructions; None or empty = none, the data.js of before)."""
+    instructions = clean_instructions(instructions) if instructions is not None else ""
     P = plan(ps_dir, items_csv, schema, image_col, line_col, particle_col, blind_cols, outline_mode, registry_root)
+    P["instructions"] = instructions
     owner = owner or P["req"].get("owner")
     if not pp.OWNER_RE.match(owner or ""):
         raise ObjectSetError(f"bad owner {owner!r}")
@@ -459,6 +472,8 @@ def _build_into(out, final, P, owner, reviewers, seed, width, quality, built_by,
             "source": f"prediction_set:{P['ps_id']}", "run": P["model"], "created": built,
             "categories": pp.PRED_CLASSES + pp.EXTRA_CLASSES, "schema": S.to_page(doc), "outline_mode": mode,
             "title": title or pid, "blind": bool(P["blind"]), "items": pub, "images": images}
+    if P.get("instructions"):           # only when given: a set without them is byte-identical to before
+        data["instructions"] = P["instructions"]
     brp.write_packages(out, data, part_size=0, zip_it=False)
     (out / SCHEMA_FILE).write_bytes(S.canonical_bytes(doc))
     pp._write_json(out / ITEMS, {
@@ -478,6 +493,13 @@ def _build_into(out, final, P, owner, reviewers, seed, width, quality, built_by,
 
 def registry_record(pkg, data, built, doc, P, owner, reviewers, built_by="cli") -> dict:
     """The review_package/1 line of an object set (C4; the schema id is `label_schema`: `schema` is the envelope)."""
+    rec = _record(pkg, data, built, doc, P, owner, reviewers, built_by)
+    if P.get("instructions"):
+        rec["instructions"], rec["instructions_t"] = P["instructions"], built
+    return rec
+
+
+def _record(pkg, data, built, doc, P, owner, reviewers, built_by) -> dict:
     return {"schema": "review_package/1", "id": data["id"], "logged": built, "recorded_by": TOOL,
             "path": str(Path(pkg).resolve()), "kind": "objects", "parent": None, "base": P["ps_id"],
             "base_kind": "prediction_set", "model": P["model"], "run": None, "label_schema": doc["id"],
@@ -656,7 +678,124 @@ def coco(pkg) -> dict:
             "annotations": sorted(anns, key=lambda a: a["id"])}
 
 
+# ---------------------------------------------------------------- set instructions (r15 hotfix)
+def clean_instructions(text) -> str:
+    """The set instructions as stored: NFC, CRLF / CR -> LF, outer whitespace stripped. Refuses (ObjectSetError) any
+    other control character and more than INSTR_MAX characters. "" = no instructions."""
+    if not isinstance(text, str):
+        raise ObjectSetError("instructions must be text")
+    t = unicodedata.normalize("NFC", text.replace("\r\n", "\n").replace("\r", "\n")).strip()
+    bad = sorted({f"U+{ord(c):04X}" for c in t if c != "\n" and unicodedata.category(c) == "Cc"})
+    if bad:
+        raise ObjectSetError(f"instructions hold control characters ({', '.join(bad[:5])}): only newlines are allowed")
+    if len(t) > INSTR_MAX:
+        raise ObjectSetError(f"instructions are {len(t)} characters: at most {INSTR_MAX}")
+    return t
+
+
+def _split_datajs(raw: bytes) -> tuple:
+    """data.js bytes -> (data, dumps kwargs that re-serialize its JSON byte for byte, tail bytes after the JSON).
+    Refuses a file this module can't rewrite with every other byte unchanged."""
+    if not raw.startswith(DATAJS_PREFIX):
+        raise ObjectSetError("data.js does not start with 'window.REVIEW_DATA = '")
+    end = raw.rfind(b";")
+    if end < 0 or raw[end:].strip() != b";":
+        raise ObjectSetError("data.js does not end with ';'")
+    body = raw[len(DATAJS_PREFIX):end]
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as e:
+        raise ObjectSetError(f"data.js is not readable JSON: {e}") from e
+    if not isinstance(data, dict):
+        raise ObjectSetError("data.js does not hold an object")
+    for kw in ({"separators": (",", ":")}, {}):      # build_review_package.write_packages; older hand-made packages
+        if json.dumps(data, **kw).encode("utf-8") == body:
+            return data, kw, raw[end:]
+    raise ObjectSetError("data.js was not written by the package builder (its JSON does not re-serialize byte for "
+                         "byte), so it can't be changed without touching other bytes; refused")
+
+
+def _replace(tmp: Path, dst: Path, retry_s: float = REPLACE_RETRY_S):
+    import os
+    import time
+    t_end = time.monotonic() + retry_s
+    while True:
+        try:
+            os.replace(tmp, dst)
+            return
+        except PermissionError:
+            if time.monotonic() >= t_end:
+                raise
+            time.sleep(0.1)
+
+
+def _write_atomic(dst: Path, payload: bytes):
+    tmp = dst.parent / f".{dst.name}.{secrets.token_hex(4)}.tmp"
+    try:
+        tmp.write_bytes(payload)
+        _replace(tmp, dst)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def set_instructions(pkg, text, do=False, lock_wait: float = 5.0) -> dict:
+    """Set (text) or clear ("") an object set's instructions: data.js D.instructions (only that key changes) and
+    review_package.json instructions + instructions_t. Dry run unless do. -> {pkg, old, new, changed, written}.
+    Refuses a package that isn't kind "objects" (data.js and review_package.json). Writes under the package's
+    .meta_locks lock (the same one as the Reviews hub's reviewers write), each file via a temp file + os.replace."""
+    pkg = Path(pkg)
+    new = clean_instructions(text)
+    djs, rec_p = pkg / "data.js", pkg / pp.RECORD
+    if not djs.is_file() or not rec_p.is_file():
+        raise ObjectSetError(f"{pkg}: not a review package (no data.js / {pp.RECORD})")
+    data, _, _ = _split_datajs(djs.read_bytes())
+    rec = json.loads(rec_p.read_text(encoding="utf-8"))
+    if data.get("kind") != "objects" or not isinstance(rec, dict) or rec.get("kind") != "objects":
+        raise ObjectSetError(f"{pkg.name}: not an object set (kind {data.get('kind')!r}); instructions are for object "
+                             "sets only")
+    old = data.get("instructions") if isinstance(data.get("instructions"), str) else ""
+    out = {"pkg": str(pkg), "old": old, "new": new, "changed": old != new, "written": False}
+    if not do or not out["changed"]:
+        return out
+    lk = pp.meta_lock(pkg.parent, pkg.name, lock_wait)
+    try:
+        raw = djs.read_bytes()                          # re-read under the lock
+        data, kw, tail = _split_datajs(raw)
+        if new:
+            data["instructions"] = new                  # replaces in place, or appended as the last key
+        else:
+            data.pop("instructions", None)
+        payload = DATAJS_PREFIX + json.dumps(data, **kw).encode("utf-8") + tail
+        rest = dict(data)
+        rest.pop("instructions", None)
+        before = _split_datajs(raw)[0]
+        before.pop("instructions", None)
+        if rest != before:                              # belt and braces: nothing but the key may differ
+            raise ObjectSetError("internal: data.js would change beyond `instructions`; refused")
+        rtext = rec_p.read_text(encoding="utf-8")
+        rec = json.loads(rtext)
+        if new:
+            rec["instructions"] = new
+        else:
+            rec.pop("instructions", None)
+        rec["instructions_t"] = pp._now()
+        rbytes = (json.dumps(rec, indent=1, ensure_ascii=False) + ("\n" if rtext.endswith("\n") else "")).encode("utf-8")
+        _write_atomic(djs, payload)
+        _write_atomic(rec_p, rbytes)
+    finally:
+        lk.close()
+    out["written"] = True
+    return out
+
+
 # ---------------------------------------------------------------- CLI
+def _read_text_arg(text, file) -> str:
+    if file is not None:
+        return Path(file).read_text(encoding="utf-8-sig")
+    return text
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -679,6 +818,16 @@ def main(argv=None):
     b.add_argument("--registry", type=Path, help="registry folder (only with --register; never a default)")
     b.add_argument("--do", action="store_true", help="build it (default: a dry run that writes nothing)")
     b.add_argument("--register", action="store_true", help="with --do: append the review_package line to --registry")
+    bi = b.add_mutually_exclusive_group()
+    bi.add_argument("--instructions", help=f"set instructions shown on every card (plain text, <= {INSTR_MAX} chars)")
+    bi.add_argument("--instructions-file", type=Path, help="the set instructions from a UTF-8 text file")
+    s = sub.add_parser("instructions", help="set / clear a built object set's instructions (dry run unless --do)")
+    s.add_argument("pkg", type=Path, help="the object set's folder (pred_obj_*)")
+    sg = s.add_mutually_exclusive_group(required=True)
+    sg.add_argument("--text")
+    sg.add_argument("--file", type=Path, help="a UTF-8 text file")
+    sg.add_argument("--clear", action="store_true", help="remove the instructions")
+    s.add_argument("--do", action="store_true", help="write (default: a dry run that writes nothing)")
     e = sub.add_parser("export", help="decisions -> CSV (+ COCO)")
     e.add_argument("--pkg", required=True, type=Path)
     e.add_argument("--out", required=True, type=Path)
@@ -693,22 +842,45 @@ def main(argv=None):
             revs = [c.strip() for c in a.reviewers.split(",") if c.strip()]
             if a.register and not (a.do and a.registry):
                 raise ObjectSetError("--register needs --do and an explicit --registry")
+            instr = _read_text_arg(a.instructions, a.instructions_file)
+            instr = clean_instructions(instr) if instr is not None else None
             if not a.do:
                 P = plan(a.ps, a.items, a.schema, a.image_col, a.line_col, a.particle_col, blind, a.outline_mode,
                          a.registry)
                 print(f"DRY RUN, nothing written: {len(P['keys'])} objects on {len(P['by_image'])} images of "
                       f"{P['ps_id']}, schema {P['schema']['id']}, blind {P['blind'] or 'none'}, outlines "
-                      f"{P['outline_mode']}. Run again with --do to build"
+                      f"{P['outline_mode']}"
+                      + (f", instructions {len(instr)} characters" if instr else "")
+                      + ". Run again with --do to build"
                       + (" (and --register --registry <dir> to record it)." if not a.register else "."))
                 return 0
             if a.review_root is None:
                 from data_utils import config
                 a.review_root = config.laptop_root() / "review"
             pkg = build(a.ps, a.items, a.schema, a.review_root, a.image_col, a.line_col, a.particle_col, blind,
-                        a.outline_mode, a.slug, a.seed, a.owner, revs, a.registry, title=a.title)
+                        a.outline_mode, a.slug, a.seed, a.owner, revs, a.registry, title=a.title,
+                        instructions=instr)
             if a.register:
                 register(pkg, a.registry)
                 print(f"[OK] registered {pkg.name} in {a.registry}")
+        elif a.cmd == "instructions":
+            try:                                        # a cp1252 console must not crash on "•" in the preview
+                sys.stdout.reconfigure(errors="backslashreplace")
+            except (AttributeError, ValueError):
+                pass
+            text ="" if a.clear else _read_text_arg(a.text, a.file)
+            r = set_instructions(a.pkg, text, do=a.do)
+            what = "clear the instructions" if not r["new"] else f"set {len(r['new'])} characters of instructions"
+            if not r["changed"]:
+                print(f"[OK] {a.pkg.name}: unchanged (the same instructions are already set); nothing written")
+            elif not a.do:
+                print(f"DRY RUN, nothing written: would {what} on {a.pkg.name} (now: "
+                      f"{len(r['old'])} characters) in data.js and {pp.RECORD}. Text as stored:")
+                print("  | " + r["new"].replace("\n", "\n  | ") if r["new"] else "  (none)")
+                print("Run again with --do to write.")
+            else:
+                print(f"[OK] {a.pkg.name}: {what} (data.js D.instructions, {pp.RECORD} instructions + "
+                      "instructions_t). Open cards show it after a reload (data.js may be cached up to an hour).")
         elif a.cmd == "export":
             tab = table(a.pkg)
             a.out.write_text(to_csv(tab), encoding="utf-8", newline="")

@@ -226,6 +226,73 @@ class ObjectCardTests(_Browser):
         self.assertEqual(self.obj(pg)["pos"], 3)
 
 
+INSTR = ("Count the outer EV's own level only.\n• Concentric membranes: one tight layer inside the outer = 2.\n"
+         "<b>not bold</b> <img src=x onerror=window.__pwn=1>")
+
+
+@browser
+class InstructionsTests(_Browser):
+    """r15 hotfix: D.instructions -> an "ⓘ Instructions" button and panel; none -> nothing changes."""
+
+    def open_with(self, instructions, width=1280, height=800):
+        d, srv = self.serve(lambda f: F.build(f, instructions=instructions))
+        pg = self.page(srv.url + "?who=rev1", width=width, height=height)
+        pg.wait_for_function("window.__review && __review.obj() && __review.state().server", timeout=15000)
+        return d, srv, pg
+
+    def test_button_panel_keys_once_per_browser(self):
+        d, srv, pg = self.open_with(INSTR, width=390, height=844)
+        self.assertEqual(self.obj(pg)["instr"], {"has": True, "open": True})      # first card: opened by itself
+        self.assertTrue(pg.is_visible("#oInfoBtn") and pg.is_visible("#oInstr"))
+        self.assertEqual(pg.eval_on_selector("#oInstrTx", "e => e.textContent"), INSTR)
+        self.assertEqual(pg.eval_on_selector("#oInstrTx", "e => getComputedStyle(e).whiteSpace"), "pre-wrap")
+        self.assertEqual(pg.eval_on_selector_all("#oInstr img, #oInstr b", "e => e.length"), 0)
+        self.assertIsNone(pg.evaluate("window.__pwn || null"))
+        # phone: no horizontal overflow; the top bar and the panel stay inside 390 px
+        self.assertLessEqual(pg.evaluate("document.documentElement.scrollWidth"), 390)
+        rights = pg.eval_on_selector_all("#obj .otbar > *, #oInstr", "es => es.filter(e => e.offsetParent || "
+                                         "getComputedStyle(e).position === 'fixed').map(e => e.getBoundingClientRect().right)")
+        self.assertTrue(rights and max(rights) <= 390, rights)
+        pg.click("#oInstrX")
+        self.assertFalse(pg.is_visible("#oInstr"))
+        self.assertEqual(pg.get_attribute("#oInfoBtn", "aria-expanded"), "false")
+        pg.click("#oInfoBtn")
+        self.assertTrue(pg.is_visible("#oInstr"))
+        pg.keyboard.press("Escape")
+        self.assertFalse(pg.is_visible("#oInstr"))
+        pg.keyboard.press("?")
+        self.assertTrue(self.obj(pg)["instr"]["open"])
+        pg.keyboard.press("?")
+        self.assertFalse(self.obj(pg)["instr"]["open"])
+        self.assertIn("? = instructions", pg.inner_text("#oKeys") if pg.is_visible("#oKeys") else
+                      pg.eval_on_selector("#oKeys", "e => e.textContent"))
+        # once per browser: a reload doesn't open it again
+        pg.reload()
+        pg.wait_for_function("window.__review && __review.obj() && __review.state().server", timeout=15000)
+        self.assertEqual(self.obj(pg)["instr"], {"has": True, "open": False})
+        self.assertTrue(pg.is_visible("#oInfoBtn"))
+        self.assertEqual(self.errors, [])
+
+    def test_laptop_button_label(self):
+        d, srv, pg = self.open_with("Short text.")
+        self.assertEqual(pg.inner_text("#oInfoBtn").strip(), "ⓘ Instructions")
+        self.assertTrue(self.obj(pg)["instr"]["open"])
+
+    def test_absent_or_empty_changes_nothing(self):
+        for instructions in (None, "", "   "):
+            with self.subTest(instructions=instructions):
+                d, srv, pg = self.open_with(instructions)
+                self.assertEqual(self.obj(pg)["instr"], {"has": False, "open": False})
+                self.assertFalse(pg.is_visible("#oInfoBtn"))
+                self.assertFalse(pg.is_visible("#oInstr"))
+                pg.keyboard.press("?")
+                self.assertFalse(pg.is_visible("#oInstr"))
+                self.assertEqual(pg.eval_on_selector("#oKeys", "e => e.textContent"),
+                                 "← → move · Enter = next unlabelled · Backspace = undo · i = outline on/off")
+                self.assertEqual(pg.evaluate("Object.keys(localStorage).filter(k => k.endsWith(':objinstr'))"), [])
+                self.assertEqual(self.errors, [])
+
+
 @browser
 class SchemaClassesTests(_Browser):
     def test_schema_classes_colours_keys(self):

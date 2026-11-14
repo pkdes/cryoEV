@@ -7,6 +7,12 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-14 15:45 · Set instructions on object cards
+
+- **Set instructions:** an object set can carry its maker's instructions (how to count, what to note). Every card shows an "ⓘ Instructions" button in the top bar that opens them in a small panel (phone and laptop; `?` opens and closes it, Esc closes). The panel opens by itself the first time you open the set in a browser, and again if the instructions change.
+- **Setting them:** `python -m annotation.object_set instructions <set folder> --text "..."` (or `--file`, `--clear`), a dry run until `--do`; `build` takes `--instructions` / `--instructions-file`. Only the instructions change in the set; sets without them look exactly as before.
+- **Components:** review page 2026-11-14.2 / CLI (`annotation.object_set instructions`, `build --instructions`).
+
 ## 2026-11-14 15:30 · Round 14: object sets with your own label questions, class maps, analysis steps
 
 - **Object sets:** review a chosen list of objects (for example nested EVs) as phone-friendly cards that ask a label schema's questions: type, membrane count, inner vesicles, "outlines wrong", note. Every tap saves. Each reviewer's answers are kept separately and nobody sees anyone else's. An admin starts one from Reviews → Start a review → Object set.

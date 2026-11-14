@@ -732,5 +732,116 @@ class BlindHttp(unittest.TestCase):
             server.server_close()
 
 
+# ---------------------------------------------------------------- set instructions (r15 hotfix)
+INSTR = ("Count the outer EV's own level only.\n• Concentric membranes: the outer membrane plus its own concentric "
+         "layers (outer included). One tight layer inside the outer = 2.\n• Deeper structure: add a note (n), e.g. "
+         "'inner is ML2'.")
+
+
+def snapshot(root: Path) -> dict:
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+class Instructions(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="objset_instr_"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def cli(self, *args):
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = OS.main(["instructions", *map(str, args)])
+        return rc, out.getvalue() + err.getvalue()
+
+    def test_dry_run_writes_nothing(self):
+        pkg = build_set(self.tmp)
+        before = snapshot(self.tmp)
+        rc, out = self.cli(pkg, "--text", INSTR)
+        self.assertEqual(rc, 0)
+        self.assertIn("DRY RUN", out)
+        self.assertEqual(snapshot(self.tmp), before)                     # no lock folder, no temp file either
+
+    def test_do_changes_only_that_key(self):
+        pkg = build_set(self.tmp)
+        old_js, old_rec = (pkg / "data.js").read_bytes(), json.loads((pkg / pp.RECORD).read_text(encoding="utf-8"))
+        others = {k: v for k, v in snapshot(pkg).items() if k not in ("data.js", pp.RECORD)}
+        self.assertNotIn(b"instructions", old_js)
+        self.assertEqual(self.cli(pkg, "--text", INSTR, "--do")[0], 0)
+        new_js = (pkg / "data.js").read_bytes()
+        end = old_js.rindex(b"}")                                         # the key is added last, nothing else moves
+        self.assertEqual(new_js, old_js[:end] + b',"instructions":' + json.dumps(INSTR).encode() + old_js[end:])
+        self.assertEqual(load_data(pkg)["instructions"], INSTR)
+        rec = json.loads((pkg / pp.RECORD).read_text(encoding="utf-8"))
+        self.assertEqual(rec["instructions"], INSTR)
+        self.assertRegex(rec["instructions_t"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d")
+        self.assertEqual({k: v for k, v in rec.items() if not k.startswith("instructions")}, old_rec)
+        self.assertEqual({k: v for k, v in snapshot(pkg).items() if k not in ("data.js", pp.RECORD)}, others)
+        self.assertEqual([p.name for p in pkg.iterdir() if p.name.endswith(".tmp")], [])
+        # replacing keeps the key's place; the same text again writes nothing; --clear gives back the old bytes
+        self.assertEqual(self.cli(pkg, "--text", "Second\r\ntext", "--do")[0], 0)
+        self.assertEqual((pkg / "data.js").read_bytes(),
+                         old_js[:end] + b',"instructions":"Second\\ntext"' + old_js[end:])
+        mt = (pkg / "data.js").stat().st_mtime_ns
+        rc, out = self.cli(pkg, "--text", "Second\ntext", "--do")
+        self.assertIn("unchanged", out)
+        self.assertEqual((pkg / "data.js").stat().st_mtime_ns, mt)
+        self.assertEqual(self.cli(pkg, "--clear", "--do")[0], 0)
+        self.assertEqual((pkg / "data.js").read_bytes(), old_js)
+        self.assertNotIn("instructions", json.loads((pkg / pp.RECORD).read_text(encoding="utf-8")))
+
+    def test_file_input_nfc_and_crlf(self):
+        pkg = build_set(self.tmp)
+        f = self.tmp / "instr.txt"
+        f.write_bytes("\ufeffCafe\u0301 rule\r\nline two\r\n".encode("utf-8"))
+        self.assertEqual(self.cli(pkg, "--file", f, "--do")[0], 0)
+        self.assertEqual(load_data(pkg)["instructions"], "Caf\u00e9 rule\nline two")
+
+    def test_refuses_non_objects(self):
+        pkg = self.tmp / "pred_ps_20261105_abc123"
+        pkg.mkdir()
+        (pkg / "data.js").write_text("window.REVIEW_DATA = " + json.dumps({"id": pkg.name, "kind": "predictions",
+                                                                            "images": []}, separators=(",", ":"))
+                                     + ";\n", encoding="utf-8")
+        (pkg / pp.RECORD).write_text(json.dumps({"kind": "predictions"}), encoding="utf-8")
+        before = snapshot(self.tmp)
+        rc, out = self.cli(pkg, "--text", "x", "--do")
+        self.assertEqual(rc, 2)
+        self.assertIn("not an object set", out)
+        self.assertEqual(snapshot(self.tmp), before)
+
+    def test_length_cap_and_control_chars(self):
+        pkg = build_set(self.tmp)
+        before = snapshot(self.tmp)
+        for bad in ("x" * (OS.INSTR_MAX + 1), "tab\there", "nul\x00", "esc\x1b[31m"):
+            with self.subTest(bad=bad[:12]):
+                rc, out = self.cli(pkg, "--text", bad, "--do")
+                self.assertEqual(rc, 2)
+                self.assertEqual(snapshot(self.tmp), before)
+        self.assertEqual(self.cli(pkg, "--text", "y" * OS.INSTR_MAX, "--do")[0], 0)
+        self.assertEqual(len(load_data(pkg)["instructions"]), OS.INSTR_MAX)
+
+    def test_build_with_and_without(self):
+        plain = build_set(self.tmp / "a")
+        self.assertNotIn(b"instructions", (plain / "data.js").read_bytes())
+        self.assertNotIn("instructions", json.loads((plain / pp.RECORD).read_text(encoding="utf-8")))
+        ps = golden_ps(self.tmp)
+        src = items_csv(self.tmp / "items.csv", [("0001", 0, 1, 2)])
+        f = self.tmp / "i.txt"
+        f.write_text(INSTR, encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = OS.main(["build", "--ps", str(ps), "--items", str(src), "--schema", "ls_lamellarity_v1",
+                          "--line-col", "line", "--review-root", str(self.tmp / "rv"), "--instructions-file", str(f),
+                          "--do"])
+        self.assertEqual(rc, 0)
+        pkg = next((self.tmp / "rv").glob("pred_obj_*"))
+        self.assertEqual(load_data(pkg)["instructions"], INSTR)
+        rec = json.loads((pkg / pp.RECORD).read_text(encoding="utf-8"))
+        self.assertEqual((rec["instructions"], rec["instructions_t"]), (INSTR, rec["built"]))
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(OS.main(["build", "--ps", str(ps), "--items", str(src), "--schema", "ls_lamellarity_v1",
+                                      "--line-col", "line", "--instructions", "x" * (OS.INSTR_MAX + 1)]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
