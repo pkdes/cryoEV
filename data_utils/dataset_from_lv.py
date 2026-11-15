@@ -821,6 +821,22 @@ def _move_built(prov, tmp_dir: Path, final: Path):
     return prov
 
 
+DERIVE_SPACE_FACTOR = 1.5          # free space a derived copy needs: 1.5 x the parent's images (portal uses the same)
+
+
+def derive_space_needed(rec) -> int:
+    d = Path(str((rec or {}).get("dataset_dir") or "")) / "images"
+    total = sum(p.stat().st_size for p in d.rglob("*") if p.is_file()) if d.is_dir() else 0
+    return int(total * DERIVE_SPACE_FACTOR)
+
+
+def _free_bytes(path) -> int:
+    p = Path(path)
+    while not p.exists() and p.parent != p:                  # the output root may not exist yet: its nearest parent
+        p = p.parent
+    return shutil.disk_usage(p).free
+
+
 def derive(dataset_id, class_map, registry_root=None, output_root=None, output_name=None, register_it=False,
            log=print):
     """Rebuild a registered dataset from its recorded label version + export (+ export-only choice) with a class map,
@@ -841,6 +857,11 @@ def derive(dataset_id, class_map, registry_root=None, output_root=None, output_n
     final = out_root / name
     if final.exists():
         raise BuildError(f"{final} exists (built but not registered?); datasets are never overwritten")
+    need = derive_space_needed(rec)                          # #80h: the same rule as the portal's Collapse classes
+    have = _free_bytes(out_root)
+    if have < need:
+        raise BuildError(f"not enough free disk space for the copy: {have / 1e9:.1f} GB free, "
+                         f"{need / 1e9:.1f} GB needed (1.5 x the parent's images); nothing was made")
     out_root.mkdir(parents=True, exist_ok=True)
     tmp_root = out_root / f".d_{secrets.token_hex(4)}"      # short: Windows MAX_PATH
     moved = False
