@@ -58,7 +58,8 @@ class LabelSchemaKind(unittest.TestCase):
             files = {next(iter(files)): b"{}"}
             with self.assertRaises(store.RegistryError):
                 store.append(rec, root, files=files, via=None)
-            self.assertEqual(len((root / "label_schema.jsonl").read_text(encoding="utf-8").splitlines()), 2)
+            self.assertEqual(len((root / "label_schema.jsonl").read_text(encoding="utf-8").splitlines()),
+                             len(S.builtin_ids()))          # one line per built-in (r15: 4), nothing more
 
     def test_bad_line_refused(self):
         rec, _ = S.registry_record(S.load("ls_lamellarity_v1"), "2099-12-31T10:00:00")
@@ -69,7 +70,9 @@ class LabelSchemaKind(unittest.TestCase):
         s = validate.Scan(None, None, None)
         s.scan_label_schemas()
         d = s.t["label_schema"].as_dict()
-        self.assertEqual((d["found"], d["identified"], d["linked"]), (2, 2, 2))
+        n = len(S.builtin_ids())                             # r15: + ls_lamellarity_v2, ls_lamellarity_tree_v1
+        self.assertEqual(n, 4)
+        self.assertEqual((d["found"], d["identified"], d["linked"]), (n, n, n))
         self.assertIn("label_schema", validate.ENTITIES)
 
 
