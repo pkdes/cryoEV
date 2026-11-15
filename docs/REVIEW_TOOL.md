@@ -246,7 +246,7 @@ New image and object state are **decisions on keys of their own** (`i:reject`, `
 extra fields on a class decision. So they merge per key (the newest received wins), carry `who` and `server_t`, and
 pass through older pages, exports and imports untouched. A class change on another device leaves an object's `t:` as it is.
 
-- **Capability gate.** `GET /api/ping` answers `{"ok": true, "caps": ["i", "t", ...]}` (round 12 added `m`, `g`). The page shows the reject, note and
+- **Capability gate.** `GET /api/ping` answers `{"ok": true, "caps": ["i", "t", ...]}` (round 12 added `m`, `g`; round 14 `a`, object-set attribute decisions). The page shows the reject, note and
   Low conf controls only when the caps are there. A server started on older code answers `{"ok": true}` and would
   refuse the new keys with a 400, so the page never offers them; the same for a page opened from a file. The multi
   server reads `index.html` from disk on every request but validates with the code it started with: restart the
@@ -391,6 +391,44 @@ python -m annotation.prediction_package spotcheck --pkg <review>/pred_<ps> [--n 
   - The key is checked before anything is made for the package: no handler, cache entry or `edits/` folder for a request without it.
   - **An unknown id and a wrong key both get the same 403,** so ids can't be enumerated. A malformed id, or a path with `..`, `\` or `:`, gets 400. `/` gets 404. `/<id>` with its key redirects to `/<id>/`.
   - A package built after start is found on its first request. A rebuilt `data.js` or a new key is picked up on the next one.
+
+## Object sets (rounds 14-15)
+An object set (`review/pred_obj_<slug>_<4hex>/`, `data.js` `D.kind = "objects"`) asks a label schema's questions about
+chosen objects instead of reviewing whole images. Built with `python -m annotation.object_set build` (or the portal's
+Start a review -> Object set); the package layout and the blind rule are in `annotation/object_set.py`'s docstring.
+
+- **Caps:** `/api/ping` caps are `["i", "t", "m", "g", "a"]`. `a` = the server takes attribute decisions; without it
+  (an older server, a page opened from a file) the card shows the questions but says answers save only on the review
+  server.
+- **Attribute decisions** are keys of their own on the item's image record: `a:<obj>:<attr>@<rid>` (`i:a:<attr>@<rid>`
+  for an image-level question), value `{v, t, who, server_t}`. The server checks each against `schema.json` (kind,
+  options, text length), takes them only from a signed-in reviewer of the set (`X-CJ-User` from the portal; `@<rid>`
+  is overwritten with that identity), at most 64 new ones per PUT (the page sends bigger batches in chunks), and
+  answers each reviewer with **only their own** answers (rater independence). Undo = `v: null`.
+- **Help lines:** a schema question may carry `help` (plain text, at most 200 characters); the card shows it under the
+  question, as text.
+- **Instructions:** the maker's plain-text set instructions (`object_set instructions <pkg> --text ... --do`, or at
+  build): an "Instructions" button in the top bar (`?` toggles, Esc closes), opened by itself once per browser and
+  text. `data.js` `D.instructions`; absent = no button.
+- **Whole-tree cards (round 15):** `D.mode = "tree"` (built with `object_set build --tree` from a prediction set whose
+  Results ran the `nesting_tree` step). One card per nested EV: every outline of the tree is numbered on the image (1 =
+  the outer vesicle, the rest in a seeded order), with one block per node holding the questions that apply to it
+  (`applies_to`: `root` = node 1, `child` = the others, `all`). For `ls_lamellarity_tree_v1`: node 1 "Type"
+  (Single / ML / MV / ML+MV / Unsure, keys 1-4, 0); every other node "What is it?" (Layer of parent `l`, Inner vesicle
+  `v`, Not a membrane `x`, Duplicate outline `d`), an optional "If inner vesicle: its type", and a note (`n`). Tab =
+  next node; keys answer the current node; a tap on a block makes it current. An item is done when every assigned
+  reviewer answered every required question of every node. No role, unit, call or measurement is in `data.js`; the
+  export derives each reviewer's tree (`derived_parent_n`, `derived_membranes`, `derived_inner`).
+- **Close set:** Reviews hub -> Close (the set's maker or an admin, typing the set's name), or
+  `python -m annotation.object_set close <pkg> --by <id> --do --registry <dir>`. One writer for both
+  (`object_set.close_set`): `review_package.json` `closed: true`, `closed_by`, `closed_t` under the meta lock, `data.js`
+  `D.closed = true` (only that key), then the registry status line `reviewed` (`status_by` = the closer). It is
+  final. The server then answers every PUT carrying a new attribute decision with 409 `{"error": "set closed"}`
+  (re-checked under the write lock); other keys (notes, reject) still save. The card says the set is closed and sends
+  nothing: at load from `D.closed`, or on that 409. **Any other 409** (the package open in another review server) is
+  not a close: the answer is kept and retried, as before. Exports leave out any answer stamped after `closed_t`.
+- **Blind columns:** a whole-tree set's hidden `nesting_tree` columns are in its export only after Close. A one-object
+  set's blind columns are in its export (to the maker) before Close too: unchanged by rule zero (the live set).
 
 ## Tests
 ```bash

@@ -168,6 +168,29 @@ action log. Shows: Admin Recent actions.
    --class-scheme ev_nonev --export-only drop --register` (script docstring). Then `python -m cryoev register --do`.
    Shows: Data page (label version, dataset, lineage), history page.
 
+### Object review sets (attribute questions; whole lamellarity trees)
+1. An outside prediction run (e.g. the poster's) as a prediction set, dry run then `--do`:
+   `python -m jobs.predict_set adopt --from <run folder> --model <model id> --images <folder> --name "<name>"`
+   (writes `<CryoAI-laptop>/predict/<ps id>/` with `adopted/particle_lines.csv`, and the registry line).
+2. A new label schema (a built-in needs nothing): `python -m cryoev schema register <file.json>`, then `--do`.
+3. Whole trees only: the set's Results must include the `nesting_tree` step (it adds `nesting`): Results -> Change
+   recipe in the portal, or `results.compute.compute_and_write(<ps dir>, recipe=[("roles", 1), ("nesting", 1),
+   ("nesting_tree", 1)])`. nesting_tree v1 measures gaps / polar indices at 1440 px wide (param `measure_px`, as the
+   poster calibrated); the default recipe's `results.json` is unchanged.
+4. Build, dry run then `--do` (`--register --registry <dir>` for the registry line): one object per card
+   `python -m annotation.object_set build --ps <ps dir> --items <items.csv> --schema <ls id> --line-col line ...`;
+   whole tree per card `python -m annotation.object_set build --tree --ps <ps dir> --schema ls_lamellarity_tree_v1
+   --reviewers a,b`. The portal's Start a review -> Object set does the same.
+5. Instructions: `python -m annotation.object_set instructions <pkg> --text "..." [--do]`.
+6. Progress: `python -m cryoev review progress <pkg>` (counts only). Answers are blind between reviewers: never
+   read `edits/` to report what someone answered.
+7. Close (final; the maker's or an admin's call, with the user's OK): `python -m annotation.object_set close <pkg>
+   --by <id> --do --registry <dir>`, or the hub's Close. Then export / import:
+   `python -m annotation.object_set export --pkg <pkg> --out <file.csv> [--coco <file.json>]` and
+   `python -m annotation.object_set import --pkg <pkg> --csv <file.csv>` (checks the file against the set).
+   Recorded: `review_package.json` closed / closed_by / closed_t, the registry status `reviewed`. Shows: the Reviews
+   hub (Finished, no Close link). Details: [REVIEW_TOOL.md](REVIEW_TOOL.md), "Object sets".
+
 ### The training loop
 1. A train job: `python registry/registry.py job new --type train --where desktop --name <name> --images <list>`
    (stamped from the env).
