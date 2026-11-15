@@ -20,7 +20,11 @@ a label-set build. The logic lives in portal/review_build.py; this module holds 
                                   column is hidden), outline (target | target+contained), reviewer (repeatable)
                                   -> review_build.start_objects (checks, then a background thread runs
                                   annotation/object_set.build and register) -> 303 to its progress page
-                                  /reviews/start/<obj job>. One audit line "object set built" (counts only)
+                                  /reviews/start/<obj job>. One audit line "object set built" (counts only).
+                                  Round 15: cards = objects (the above) | tree (whole-tree cards from the
+                                  prediction set's nesting_tree results: no CSV, blind columns or outline choice;
+                                  a whole-tree schema; the form's callout gives each set's tree counts, or says
+                                  the step is missing and links Results -> Change recipe)
     GET  /reviews/start/<name>    the progress page (admin; any other id or person: 404): the allowlisted phases
                                   from <review root>/.building/<name>/status.json, reloading itself every few
                                   seconds (meta refresh) until done or failed; Continue opens /reviews/go/<name>.
@@ -109,6 +113,8 @@ CSS = """<style>
 .cj-rs-ph [data-s="now"] b{font-weight:700}
 .cj-rs-ph [data-s="waiting"] b,.cj-rs-ph [data-s="skipped"] b{color:var(--mut);font-weight:500}
 .cj-rs-state{margin-left:auto;font-size:.8rem;color:var(--mut)}
+.cj-rs [hidden]{display:none!important}
+.cj-rs-cov a{color:inherit;font-weight:600}
 </style>"""
 
 
@@ -266,6 +272,48 @@ def render_form(purpose, tok, sets, models, lv, b, cov, roster, me, busy) -> str
 
 
 # ---------------------------------------------------------------- (d) Object set (round 14, admin; contract C4)
+# Round 15 (K4): "Cards" picks one object per card (the items CSV) or a whole tree per card (from the prediction
+# set's nesting_tree results). TREE_SCRIPT shows the parts of the picked mode, the schemas of that mode and the picked
+# prediction set's tree callout (from the JSON block the page carries: counts only).
+TREE_SCRIPT = """<script>
+(() => {
+  const form = document.getElementById("rs-obj-form"), data = document.getElementById("rs-obj-trees");
+  if (!form || !data) return;
+  let trees = {}; try { trees = JSON.parse(data.textContent); } catch (e) {}
+  const note = document.getElementById("rs-obj-tree-note"), ps = form.elements["ps"], schema = form.elements["schema"],
+        items = document.getElementById("rs-obj-items");
+  const say = (cls, parts) => { note.className = "cj-rs-cov " + cls; note.textContent = ""; const sp = document.createElement("span"); for (const p of parts) sp.append(p); note.append(sp); };
+  const link = (id, text) => { const a = document.createElement("a"); a.href = "/results/" + encodeURIComponent(id) + "/#cj-results-recipe"; a.textContent = text; return a; };
+  function update() {
+    const tree = form.elements["cards"].value === "tree";
+    for (const el of form.querySelectorAll(".rs-only-objects")) el.hidden = tree;
+    if (items) items.required = !tree;
+    for (const o of schema.options) o.disabled = (o.dataset.tree === "1") !== tree;
+    if (schema.selectedOptions[0] && schema.selectedOptions[0].disabled) {
+      const ok = [...schema.options].find(o => !o.disabled); if (ok) schema.value = ok.value;
+    }
+    note.hidden = !tree;
+    if (!tree) return;
+    const id = ps.value, t = trees[id];
+    if (t && t.ok) say("cj-rs-cov-ok", [`${t.trees} whole trees (${t.nodes} outlines) on ${t.images} images: one card per tree, every outline numbered and asked about.`]);
+    else say("cj-rs-cov-bad", [`This prediction set has no whole trees: ${(t && t.why) || "no nesting tree results"}. `, link(id, "Results → Change recipe"), " adds the nesting tree step."]);
+  }
+  form.addEventListener("change", ev => { if (["cards", "ps"].includes(ev.target.name)) update(); });
+  update();
+})();
+</script>"""
+
+
+def tree_callout(ps_id, t) -> str:
+    """The whole-tree callout for one prediction set (the server's copy of what TREE_SCRIPT writes)."""
+    if t and t.get("ok"):
+        return (f'{t["trees"]} whole trees ({t["nodes"]} outlines) on {t["images"]} images: one card per tree, every '
+                'outline numbered and asked about.')
+    href = f"/results/{quote(ps_id or '')}/#cj-results-recipe"
+    return (f'This prediction set has no whole trees: {esc((t or {}).get("why") or "no nesting tree results")}. '
+            f'<a href="{esc(href)}">Results → Change recipe</a> adds the nesting tree step.')
+
+
 OBJ_SCRIPT = """<script>
 (() => {  // the items CSV's columns as "Hide from reviewers" boxes (all on); without this script every non-key column is hidden
   const f = document.getElementById("rs-obj-items"), box = document.getElementById("rs-obj-blind"),
@@ -289,15 +337,19 @@ OBJ_SCRIPT = """<script>
 </script>"""
 
 
-def render_objects_form(tok, schemas, sets, roster, me, error="") -> str:
-    """(d) Object set: name, label schema, items CSV, the prediction set the objects come from, the columns to hide,
-    the outlines on the cards, reviewers. One multipart POST to /reviews/start/objects (admin)."""
+def render_objects_form(tok, schemas, sets, roster, me, error="", trees=None) -> str:
+    """(d) Object set: cards (one object per card | whole tree per card, round 15), name, label schema, items CSV,
+    the prediction set the objects come from, the columns to hide, the outlines on the cards, reviewers. One
+    multipart POST to /reviews/start/objects (admin). trees: {ps id: review_build.tree_info} (counts only)."""
     def s_label(s):
         return f'{s["name"]}' + (f' v{s["version"]}' if s.get("version") else "") + f' · {s["id"]}'
 
     def p_label(p):
         return f'{p["name"]} · {p["id"]}' + (f' · {p["images"]} img' if p.get("images") is not None else "")
-    s_opts = "".join(f'<option value="{esc(s["id"])}">{esc(s_label(s))}</option>' for s in schemas)
+    trees = trees or {}
+    tree_attr = ' data-tree="1"'
+    s_opts = "".join(f'<option value="{esc(s["id"])}"{tree_attr if s.get("tree") else ""}>'
+                     f'{esc(s_label(s))}</option>' for s in schemas)
     p_opts = "".join(f'<option value="{esc(p["id"])}">{esc(p_label(p))}</option>' for p in sets)
     boxes = "".join(f'<label><input type="checkbox" name="reviewer" value="{esc(p)}"> {esc(p)}</label>' for p in roster)
     err = f'<p class="cj-rs-note cj-rs-err" role="alert">{esc(error)}</p>' if error else ""
@@ -305,23 +357,36 @@ def render_objects_form(tok, schemas, sets, roster, me, error="") -> str:
     why = ("" if schemas and sets else '<span class="cj-mut">' + (
         "No label schema is registered yet (cryoev schema register)." if not schemas else
         "No finished prediction set to take the objects from.") + "</span>")
+    first = sets[0]["id"] if sets else ""
+    tree_json = json.dumps({p["id"]: {k: trees[p["id"]].get(k) for k in ("ok", "why", "trees", "nodes", "images")}
+                            for p in sets if isinstance(trees.get(p["id"]), dict)}).replace("<", "\\u003c")
     return (f'<section class="cj-rs-sec" id="rs-objects" aria-labelledby="rs-objects-h"><div><h2 id="rs-objects-h">'
-            f'Object set</h2><span class="cj-mut">One card per listed object: reviewers answer the label schema\'s '
-            f'questions about it. Admin only.</span></div>{err}'
-            f'<form method="post" action="{PREFIX}/objects" enctype="multipart/form-data">{AD.hidden_token(tok)}'
+            f'Object set</h2><span class="cj-mut">One card per listed object, or one card per whole tree: reviewers '
+            f'answer the label schema\'s questions about it. Admin only.</span></div>{err}'
+            f'<form method="post" action="{PREFIX}/objects" enctype="multipart/form-data" id="rs-obj-form">'
+            f'{AD.hidden_token(tok)}'
             '<input type="hidden" name="blind_ui" id="rs-obj-blind-ui" value="">'
+            '<fieldset class="cj-rs-field" style="border:0;margin:0;padding:0"><legend>Cards</legend>'
+            '<div class="cj-rs-revs"><label><input type="radio" name="cards" value="objects" checked> One object per '
+            'card <span class="cj-mut">(items CSV)</span></label><label><input type="radio" name="cards" value="tree">'
+            ' Whole tree per card <span class="cj-mut">(from the nesting tree step)</span></label></div></fieldset>'
             '<div class="cj-rs-grid">'
             '<label>Name<input name="name" maxlength="60" required placeholder="Lamellarity check 1" '
             'style="padding:7px 8px;border:1px solid var(--line);border-radius:6px;background:var(--card);'
             'color:var(--fg);font:inherit;font-size:.85rem"></label>'
             f'<label>Label schema<select name="schema" required>{s_opts}</select></label>'
-            '<label>Items CSV<input type="file" name="items" id="rs-obj-items" accept=".csv,text/csv" required></label>'
+            '<label class="rs-only-objects">Items CSV<input type="file" name="items" id="rs-obj-items" '
+            'accept=".csv,text/csv" required></label>'
             f'<label>Objects come from<select name="ps" required>{p_opts}</select></label></div>'
-            '<fieldset class="cj-rs-field" style="border:0;margin:0;padding:0"><legend>Hide from reviewers (blind)'
+            f'<p class="cj-rs-cov" id="rs-obj-tree-note" role="status" hidden><span>'
+            f'{tree_callout(first, trees.get(first))}</span></p>'
+            '<fieldset class="cj-rs-field rs-only-objects" style="border:0;margin:0;padding:0"><legend>Hide from '
+            'reviewers (blind)'
             '</legend><div class="cj-rs-revs" id="rs-obj-blind"><span class="cj-mut">Pick the CSV: its columns '
             'show here, all ticked.</span></div><noscript><span class="cj-mut">Without JavaScript every column '
             'except the object\'s own (image, line, id) is hidden.</span></noscript></fieldset>'
-            '<fieldset class="cj-rs-field" style="border:0;margin:0;padding:0"><legend>Outlines on cards</legend>'
+            '<fieldset class="cj-rs-field rs-only-objects" style="border:0;margin:0;padding:0"><legend>Outlines on '
+            'cards</legend>'
             '<div class="cj-rs-revs"><label><input type="radio" name="outline" value="target" checked> Target EV only'
             '</label><label><input type="radio" name="outline" value="target+contained"> Target + contained '
             '<span class="cj-mut">(shows what is inside, so it hints at the counts)</span></label></div></fieldset>'
@@ -329,7 +394,8 @@ def render_objects_form(tok, schemas, sets, roster, me, error="") -> str:
             f'<div class="cj-rs-revs">{boxes or "No one is on the roster."}</div></fieldset>'
             f'<div class="cj-rs-acts"><button class="cj-rs-btn cj-rs-primary" type="submit"{dis}>Create object set'
             f'</button>{why}<span class="cj-mut">Order shuffled. Exports are for you and admins until the set is '
-            f'closed.</span></div></form>{OBJ_SCRIPT % json.dumps(list(RB.OBJ_KEY_COLS))}</section>')
+            f'closed.</span></div></form>{OBJ_SCRIPT % json.dumps(list(RB.OBJ_KEY_COLS))}'
+            f'<script type="application/json" id="rs-obj-trees">{tree_json}</script>{TREE_SCRIPT}</section>')
 
 
 def render_start(user, pred_rows, admin_parts) -> str:
@@ -345,6 +411,19 @@ def render_start(user, pred_rows, admin_parts) -> str:
         out += admin_parts["forms"]
     out.append("</div>")
     return "".join(out)
+
+
+def _heading(phase, what) -> str:
+    """#80b: the progress page's heading says Done once the build is done (it said "Building" to the end)."""
+    if phase == "done":
+        return f"Done: {what} built"
+    if phase == "failed":
+        return f"{what[:1].upper()}{what[1:]} not built"
+    return f"Building {what}"
+
+
+def progress_title(phase, what) -> str:
+    return _heading(phase, what)
 
 
 PHASE_ROWS = ("checking", "waiting", "predicting", "writing", "done")
@@ -395,7 +474,8 @@ def render_progress(st) -> str:
     refresh = "" if phase in RB.TERMINAL else f'<meta http-equiv="refresh" content="{REFRESH_S}">'
     return (f'{refresh}<div class="cj-rs">{CSS}<a class="cj-rs-back" href="{PREFIX}/">&larr; Start a review</a>'
             f'<section class="cj-rs-sec" aria-labelledby="rs-prog-h" aria-live="polite">'
-            f'<div><h2 id="rs-prog-h">Building review</h2><span class="cj-rs-id">{esc(st["name"])}</span><br>'
+            f'<div><h2 id="rs-prog-h">{esc(_heading(phase, "review"))}</h2>'
+            f'<span class="cj-rs-id">{esc(st["name"])}</span><br>'
             f'<span class="cj-mut">{esc(kind)} · {esc(vs)}</span></div>'
             f'<ol class="cj-rs-ph">{"".join(rows)}</ol><div class="cj-rs-acts">{"".join(acts)}</div></section></div>')
 
@@ -411,6 +491,7 @@ def render_obj_progress(st) -> str:
     phase, failed = st["phase"], st["phase"] == "failed"
     at = st.get("failed_at") if failed else phase
     order = ("checking", "building", "registering", "done")
+    is_tree = st.get("cards") == "tree"
     idx = order.index(at) if at in order else 0
     rows = []
     for i, ph in enumerate(order):
@@ -439,10 +520,12 @@ def render_obj_progress(st) -> str:
                     'you can leave and come back.</span>')
     refresh = "" if phase in ("done", "failed") else f'<meta http-equiv="refresh" content="{REFRESH_S}">'
     n = st.get("n_items")
-    sub = f'{esc(str(st.get("title") or ""))}' + (f" · {n} items" if isinstance(n, int) else "")
+    sub = f'{esc(str(st.get("title") or ""))}' + (f" · {n} {'trees' if is_tree else 'items'}" if isinstance(n, int)
+                                                      else "")
     return (f'{refresh}<div class="cj-rs">{CSS}<a class="cj-rs-back" href="{PREFIX}/">&larr; Start a review</a>'
             f'<section class="cj-rs-sec" aria-labelledby="rs-prog-h" aria-live="polite">'
-            f'<div><h2 id="rs-prog-h">Building object set</h2><span class="cj-rs-id">{esc(st["name"])}</span><br>'
+            f'<div><h2 id="rs-prog-h">{esc(_heading(phase, "object set"))}</h2>'
+            f'<span class="cj-rs-id">{esc(st["name"])}</span><br>'
             f'<span class="cj-mut">{sub}</span></div>'
             f'<ol class="cj-rs-ph">{"".join(rows)}</ol>{probs}<div class="cj-rs-acts">{"".join(acts)}</div>'
             f'</section></div>')
@@ -458,17 +541,23 @@ def parse_b(text) -> dict | None:
 
 
 async def read_objects_form(form):
-    """(fields, CSV bytes, None), or (None, None, (refusal text, status)). Text fields only as text; one file."""
+    """(fields, CSV bytes, None), or (None, None, (refusal text, status)). Text fields only as text; one file.
+    Whole-tree cards (cards=tree, round 15): no CSV (a file sent anyway is not read); CSV bytes None."""
     def one(k):
         v = form.get(k)
         return v if isinstance(v, str) else ""
+    if one("cards") == "tree":
+        fields = {k: one(k) for k in ("t", "name", "schema", "ps", "outline", "blind_ui", "cards")}
+        fields["reviewer"] = [v for v in form.getlist("reviewer") if isinstance(v, str)]
+        fields["blind"] = []
+        return fields, None, None
     up = form.get("items")
     if up is None or isinstance(up, str):
         return None, None, ("Pick the items CSV.", 400)
     data = await up.read(RB.ITEMS_MAX_BYTES + 1)
     if len(data) > RB.ITEMS_MAX_BYTES:
         return None, None, ("The items CSV may be up to 2 MB.", 413)
-    fields = {k: one(k) for k in ("t", "name", "schema", "ps", "outline", "blind_ui")}
+    fields = {k: one(k) for k in ("t", "name", "schema", "ps", "outline", "blind_ui", "cards")}
     fields["reviewer"] = [v for v in form.getlist("reviewer") if isinstance(v, str)]
     fields["blind"] = [v for v in form.getlist("blind") if isinstance(v, str)]
     return fields, data, None
@@ -512,7 +601,9 @@ def routes(ctx) -> list:
         ids = roster_ids(roster) if roster else []
         forms = [render_picker(sets, lv, cov)] + [render_form(p, tok, sets, models, lv, b, cov, ids, me, bool(active))
                                                   for p in RB.PURPOSES]
-        forms.append(render_objects_form(tok, RB.schema_choices(ctx.cfg), RB.ps_choices(ctx.cfg, me), ids, me))
+        own = RB.ps_choices(ctx.cfg, me)
+        trees = {p["id"]: RB.tree_info(RB.predict_root(ctx.cfg) / p["id"]) for p in own}
+        forms.append(render_objects_form(tok, RB.schema_choices(ctx.cfg), own, ids, me, trees=trees))
         return {"forms": forms, "active": active}
 
     def start_page(request: Request):
@@ -589,6 +680,21 @@ def routes(ctx) -> list:
         reviewers, blind_ui, blind = fields["reviewer"], fields["blind_ui"] == "1", fields["blind"]
         user = ctx.user(request)
         name, schema, ps, outline = fields["name"], fields["schema"], fields["ps"], fields["outline"] or "target"
+        if fields.get("cards") == "tree":              # round 15: whole-tree cards (no CSV)
+            def build_tree():
+                ids = set(roster_ids(roster)) if roster else set()
+                info = RB.tree_info(RB.predict_root(ctx.cfg) / ps) if RB.OBJ_PS_RE.match(ps or "") else None
+                job = RB.start_objects(ctx.cfg, user.get("id"), name=name, schema=schema, ps=ps, items_csv=None,
+                                       reviewers=reviewers, roster_ids=ids, cards="tree", tree=info)
+                return job, (info or {}).get("trees")
+            try:
+                job, n_trees = await run_in_threadpool(build_tree)
+            except RB.BuildError as e:
+                busy = "one at a time" in str(e)
+                return refuse(request, f"Not built: {e}.", 409 if busy else 400)
+            PA.event(ctx.cfg.state_dir, request, "object set built", job,
+                     {"schema": schema, "ps": ps, "cards": "tree", "items": n_trees, "reviewers": len(reviewers)})
+            return RedirectResponse(f"{PREFIX}/{quote(job)}", status_code=303)
 
         def build():                                    # the roster read, the CSV check and the start: off the loop
             info = RB.parse_items_csv(data)
@@ -615,12 +721,12 @@ def routes(ctx) -> list:
             if ost is None:
                 return show(request, "Start a review", f'<div class="cj-rs">{CSS}<p class="cj-card">No such build.'
                             f'</p><p><a href="{PREFIX}/">Back</a></p></div>', 404)
-            return show(request, "Building object set", render_obj_progress(ost))
+            return show(request, progress_title(ost["phase"], "object set"), render_obj_progress(ost))
         st = RB.read_status(RB.review_root(ctx.cfg), name) if is_admin(request) else None
         if st is None:
             return show(request, "Start a review", f'<div class="cj-rs">{CSS}<p class="cj-card">No such build.</p>'
                         f'<p><a href="{PREFIX}/">Back</a></p></div>', 404)
-        return show(request, "Building review", render_progress(st))
+        return show(request, progress_title(st["phase"], "review"), render_progress(st))
 
     return [Route(PREFIX + "/", start_page, methods=["GET"]),
             Route(PREFIX + "/build", build, methods=["POST"]),

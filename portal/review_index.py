@@ -28,6 +28,9 @@ and B1's hub call it):
           blind       bool (audits)
           via         owner_via or None (None on audits)
           facets      portal.listing.facets(...) for prediction rows, else {} (B2's helper)
+          tree        (round 15) bool: a whole-tree object set (data.js mode "tree", or review_package.json mode)
+          closed      (round 15) bool: an object set that is closed (review_package.json closed: true, or an
+                      explicit registry status past review: reviews.object_set_closed); its status is "finished"
         Excluded/core duplicates are dropped (the core row opens /review/); dot-folders and folders the multi server
         can't serve are skipped; the sandbox is admin only and absent when access_mode is True.
         show_all=False keeps "Mine": rows with a role, plus (admins) the core package and the sandbox.
@@ -68,7 +71,7 @@ SANDBOX_ID = "sandbox"
 REGISTRY_STATUS = {"built": "not_started", "in_review": "in_progress", "reviewed": "finished", "applied": "applied",
                    "superseded": "finished", "abandoned": "finished"}
 FIELDS = ("id", "kind", "title", "made_from", "owner", "reviewers", "role", "status", "cards", "decided", "n_images",
-          "last", "open_url", "go_url", "mode", "needs_you", "can_assign", "blind", "via", "facets")
+          "last", "open_url", "go_url", "mode", "needs_you", "can_assign", "blind", "via", "facets", "tree", "closed")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 OBJECTS_PREFIX = "pred_obj_"   # contract C4: an object set's folder (served like any pred_ package)
 
@@ -215,10 +218,12 @@ def objects_made_from(meta) -> str:
     return " · ".join(x for x in ("Object set", schema_of(meta), items) if x)
 
 
-def _status(pkg_id, records, applied, decided, cards, last_edit) -> str:
+def _status(pkg_id, records, applied, decided, cards, last_edit, closed=False) -> str:
     reg = (records.get("review_package") or {}).get(pkg_id)
     if isinstance(reg, dict) and _str(reg.get("status_by")) and reg.get("status") in REGISTRY_STATUS:
         return REGISTRY_STATUS[reg["status"]]
+    if closed:                                          # round 15: a closed object set takes no more answers
+        return "finished"
     if pkg_id in applied:
         return "applied"
     if cards is not None and decided is not None and decided >= cards:
@@ -268,7 +273,9 @@ def _row(d: Path, meta: dict, *, user, records, applied, proot, core: bool, hidd
     _, last_edit = REV.edit_stats(d)
     reg = (records.get("review_package") or {}).get(pid)
     built = _epoch(meta.get("built")) or (_epoch(reg.get("built")) if isinstance(reg, dict) else None)
-    status = _status(pid, records, applied, decided, cards, last_edit)
+    closed = kind == "objects" and REV.object_set_closed(meta, reg if isinstance(reg, dict) else None)
+    tree = kind == "objects" and (meta.get("mode") == "tree" or REV.object_mode(d) == "tree")
+    status = _status(pid, records, applied, decided, cards, last_edit, closed)
     ps_dir = Path(proot) / pid[len("pred_"):] if kind == "prediction" and proot else None
     req = _read_json(ps_dir / "request.json") if ps_dir is not None else None
     req = req if isinstance(req, dict) else None
@@ -286,7 +293,7 @@ def _row(d: Path, meta: dict, *, user, records, applied, proot, core: bool, hidd
         "mode": "cards" if cards and decided is not None and decided < cards else "editor",
         "needs_you": bool(role) and status in ("not_started", "in_progress") and not (blind and role == "yours"),
         "can_assign": not core and (is_admin or (bool(owner) and owner == me)),
-        "blind": blind, "via": None if blind else via, "facets": facets,
+        "blind": blind, "via": None if blind else via, "facets": facets, "tree": bool(tree), "closed": bool(closed),
     }
 
 
@@ -313,7 +320,8 @@ def _sandbox_row(host, manifest=None) -> dict:
             "made_from": "Practice copy · edits never ship", "owner": None, "reviewers": [], "role": "",
             "status": "not_started", "cards": None, "decided": None, "n_images": None, "last": None,
             "open_url": sandbox_url(host, manifest), "go_url": f"/reviews/go/{SANDBOX_ID}", "mode": "editor",
-            "needs_you": False, "can_assign": False, "blind": False, "via": None, "facets": {}}
+            "needs_you": False, "can_assign": False, "blind": False, "via": None, "facets": {}, "tree": False,
+            "closed": False}
 
 
 def list_reviews(cfg, user, can_see, *, show_all=False, access_mode=False, host=None, with_facets=True) -> list:

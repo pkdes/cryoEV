@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-14.2";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-14.3";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const h = document.querySelector("header"), inPortal = /^\/review\//.test(location.pathname), v = document.createElement("span");
   v.id = "pageVer"; v.style.cssText = "font-size:11px;color:var(--mute);white-space:nowrap"; v.textContent = "Review page " + PAGE_VERSION;
@@ -14,8 +14,8 @@ addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review p
 });
 </script>
 <style>
-:root{--bg:#f6f6f4;--panel:#fff;--ink:#1d1d1b;--mute:#6b6b66;--line:#dcdcd6;--acc:#2764c5;--warn:#c2410c;color-scheme:light}
-@media (prefers-color-scheme:dark){:root{--bg:#161615;--panel:#20201f;--ink:#ecece8;--mute:#9a9a94;--line:#353532;--acc:#6ea0f0;--warn:#fb923c;color-scheme:dark}}
+:root{--bg:#f6f6f4;--panel:#fff;--ink:#1d1d1b;--mute:#6b6b66;--line:#dcdcd6;--acc:#2764c5;--warn:#c2410c;--accOn:#2764c5;--accOnLine:#2764c5;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#161615;--panel:#20201f;--ink:#ecece8;--mute:#9a9a94;--line:#353532;--acc:#6ea0f0;--warn:#fb923c;--accOn:#1d4ed8;--accOnLine:#93c5fd;color-scheme:dark}}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:13px/1.35 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;overflow:hidden}
 #app{display:grid;grid-template-columns:300px minmax(0,1fr) 250px;width:100%;grid-template-rows:auto 1fr;height:100%}
@@ -23,7 +23,7 @@ header{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:6px;align-items:center;p
 header .sep{width:1px;height:22px;background:var(--line);margin:0 4px}
 button,select,input[type=file]::file-selector-button{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 9px;cursor:pointer}
 button:hover{border-color:var(--acc)}
-button.on,button.quick{background:var(--acc);border-color:var(--acc);color:#fff}
+button.on,button.quick{background:var(--accOn);border-color:var(--accOnLine);color:#fff}
 button.quick{font-weight:600;line-height:1.1;text-align:center}
 button.quick small{display:block;font-size:10px;font-weight:400;opacity:.85}
 #triKeys{padding:4px 10px;text-align:center;font-size:11px;color:var(--mute)}
@@ -144,10 +144,10 @@ body.sandbox #list,body.sandbox #side{top:var(--sbh,0px)}
 #triOpen[hidden]{display:none}
 #thPos{padding:0 12px 2px;font-size:11.5px;color:var(--mute);font-variant-numeric:tabular-nums}
 #aNext{height:48px;border-radius:24px;padding:0 16px;font-size:15px;font-weight:600}
-#aNext.on{background:var(--acc);border-color:var(--acc);color:#fff}
+#aNext.on{background:var(--accOn);border-color:var(--accOnLine);color:#fff}
 #aNext[hidden]{display:none}
 #triBio p.picked{color:#4ade80;font-weight:700;font-size:16px}
-#triChips button.on{background:var(--acc);border-color:var(--acc);color:#fff}
+#triChips button.on{background:var(--accOn);border-color:var(--accOnLine);color:#fff}
 #whoBtn{max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #whoDlg{position:fixed;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.55)}
 #whoDlg[hidden]{display:none}
@@ -184,7 +184,7 @@ button.lowTog.on{background:#f59e0b;border-color:#f59e0b;color:#1c1300;font-weig
 #rejChips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
 #rejChips button{border-radius:16px;min-height:38px;font-size:14px}
 #rejChips button.on{background:#dc2626;border-color:#dc2626;color:#fff}
-#rejChips button.keep.on{background:var(--acc);border-color:var(--acc)}
+#rejChips button.keep.on{background:var(--accOn);border-color:var(--accOnLine)}
 #imgNote{width:100%;min-height:5em;font:inherit;font-size:15px;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;resize:vertical}
 #imgNoteN{font-size:11px;color:var(--mute);text-align:right}
 #imgDlg .row{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}
@@ -293,7 +293,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #oTitle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center;font-weight:600}
 #oWho{max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #oInfoBtn{flex:none;min-height:30px;padding:2px 9px;font-size:13px;font-weight:600;white-space:nowrap;color:var(--acc);border-color:var(--acc);cursor:pointer}
-#oInfoBtn[aria-expanded="true"]{background:var(--acc);color:#fff}
+#oInfoBtn[aria-expanded="true"]{background:var(--accOn);color:#fff}
 #oInfoBtn[hidden],#oInstr[hidden]{display:none}
 @media (max-width:600px){#oInfoBtn .oInfoTx{display:none}#oInfoBtn{min-width:34px;font-size:15px}}
 #oInstr{position:fixed;z-index:31;top:calc(env(safe-area-inset-top,0px) + 52px);right:12px;width:min(460px,calc(100vw - 24px));max-height:min(72vh,600px);display:flex;flex-direction:column;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:12px;box-shadow:0 10px 32px rgba(0,0,0,.4)}
@@ -316,14 +316,14 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #oAttrs .oRow h3 .req.ok{color:#16a34a}
 #oAttrs .oBtns{display:flex;flex-wrap:wrap;gap:7px}
 #oAttrs .oBtns button{min-height:46px;min-width:52px;padding:6px 13px;border-radius:10px;font-size:14.5px;font-weight:600;touch-action:manipulation}
-#oAttrs .oBtns button.on{background:var(--acc);border-color:var(--acc);color:#fff}
+#oAttrs .oBtns button.on{background:var(--accOn);border-color:var(--accOnLine);color:#fff}
 #oAttrs kbd{font:11px ui-monospace,monospace;opacity:.75;margin-left:7px;border:1px solid currentColor;border-radius:4px;padding:0 4px}
 #oAttrs .oNote{display:flex;gap:6px}
 #oAttrs .oNote input{flex:1;min-width:0;min-height:44px;font:inherit;font-size:15px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
 #oOff{color:var(--warn);font-size:12.5px}
 #oFoot{display:flex;align-items:center;gap:10px;padding:8px 12px 10px;border-top:1px solid var(--line);background:var(--panel);flex:none}
 #oFoot button{min-height:46px;border-radius:23px;padding:0 18px;font-size:15px;font-weight:600;touch-action:manipulation}
-#oNext.on{background:var(--acc);border-color:var(--acc);color:#fff}
+#oNext.on{background:var(--accOn);border-color:var(--accOnLine);color:#fff}
 #oSaved{flex:1;text-align:center;font-weight:600;color:var(--mute)}
 #oSaved[data-state="saved"]{color:#16a34a}
 #oKeys{text-align:center;font-size:11.5px;color:var(--mute);padding:0 12px 8px;background:var(--panel);flex:none}
@@ -335,6 +335,18 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #oItems button{display:flex;justify-content:space-between;gap:8px;text-align:left;padding:7px 10px;border-radius:8px;min-height:40px;flex:none}
 #oItems .st{font-size:11.5px;color:var(--mute)}#oItems .done .st{color:#16a34a}
 #oItems .cur{border-color:var(--acc);background:color-mix(in srgb,var(--acc) 16%,var(--panel))}
+#oAttrs .oHelp{margin:-2px 0 7px;font-size:12px;line-height:1.35;color:var(--mute);overflow-wrap:anywhere}
+@media (max-width:600px){#obj .otbar{flex-wrap:wrap;row-gap:2px}#oTitle{order:10;flex:1 1 100%;white-space:normal;text-overflow:clip;overflow-wrap:anywhere;text-align:left;line-height:1.25;font-size:13.5px}}  /* #80c: a long title wraps on its own line */
+/* r15 whole-tree card (D.mode "tree"): one bordered block per node; the current node's block and badge are amber */
+#oAttrs .oNode{border:1px solid var(--line);border-radius:12px;padding:10px 12px 12px;display:flex;flex-direction:column;gap:12px;background:var(--panel);min-width:0;scroll-margin:8px}
+#oAttrs .oNode.cur{border-color:#f59e0b;box-shadow:0 0 0 1px #f59e0b}
+#oAttrs .oNode>h2{margin:0;font-size:14.5px;display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+#oAttrs .oNode>h2 .ndone{margin-left:auto;font-size:12px;font-weight:600;color:var(--warn);white-space:nowrap}
+#oAttrs .oNode>h2 .ndone.fin{color:#16a34a}
+.oBadge{display:inline-flex;align-items:center;justify-content:center;min-width:24px;height:24px;border-radius:12px;padding:0 6px;background:#fff;color:#111;border:1.5px solid #111;font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;flex:none}
+.oBadge.sm{min-width:20px;height:20px;font-size:11.5px;padding:0 4px}
+#oAttrs .oNode.cur>h2 .oBadge:first-child{background:#f59e0b;border-color:#92400e}
+@media (prefers-color-scheme:dark){.oBadge{border-color:#d4d4d0}#oAttrs .oNode.cur>h2 .oBadge:first-child{color:#111}}
 @media (min-width:901px){
   #oMain{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(330px,1fr);grid-template-rows:minmax(0,1fr);overflow:hidden;padding-top:4px}
   #oCard{height:auto;min-height:320px}
@@ -2808,8 +2820,22 @@ function dropRekeyed(file, merged) {
     if (twin) delete dec[k];
   }
 }
+// r15 (K3 / K4): the server takes at most ATTR_PUT_MAX new (pending) attribute decisions per PUT
+// (review_server.ATTR_PUT_MAX). chunkOf: the record with every other entry and the first ATTR_PUT_MAX of them.
+const ATTR_PUT_MAX = 64;
+let closedOn = false;  // an object set the server reported closed (409): nothing more is sent
+const isAttrKey = k => k.startsWith("a:") || k.startsWith("i:a:");
+const pendingAttrs = file => Object.entries((edits[file] && edits[file].dec) || {}).filter(([k, d]) => isAttrKey(k) && d && d.pending === true).map(([k]) => k);
+function chunkOf(rec) {
+  const out = Object.assign({}, rec), dec = {}; let n = 0;
+  for (const [k, d] of Object.entries(rec.dec || {})) {
+    if (isAttrKey(k) && d && d.pending === true) { if (n >= ATTR_PUT_MAX) continue; n++; }
+    dec[k] = d;
+  }
+  out.dec = dec; return out;
+}
 async function sync() {
-  if (!server || syncing) return; syncing = true; let err = false;
+  if (!server || syncing || closedOn) return; syncing = true; let err = false;
   try {
   const blank = new Set([...dirty].filter(f => blankOwn(f).length));
   if (blank.size && !me()) needWho(() => scheduleSync(100));
@@ -2817,14 +2843,25 @@ async function sync() {
   for (const file of [...dirty]) {
     if (blank.has(file)) continue;  // waits for a name
     try {
-      const r = await tfetch("api/edits?f=" + encodeURIComponent(file), {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(edits[file])});
-      if (r.status === 400) { err = true; banner(`The server rejected the edits for ${file}. Export them and tell the lab.`); continue; }
-      if (!r.ok) { err = true; break; }
+      // r15: at most ATTR_PUT_MAX new attribute decisions per PUT (the server's cap): a bigger batch (a whole tree
+      // answered offline) goes in chunks, one PUT each, until none is left. 64 or fewer: the one PUT of before.
+      let stop = false;
+      for (let round = 0, left = pendingAttrs(file).length; ; round++) {
+      const body = left > ATTR_PUT_MAX ? chunkOf(edits[file]) : edits[file];
+      const r = await tfetch("api/edits?f=" + encodeURIComponent(file), {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+      if (r.status === 409 && OBJ) { closedOn = true; OBJ.closed(); stop = true; break; }  // r15 (#80g): a closed set refuses answers
+      if (r.status === 400) { err = true; banner(`The server rejected the edits for ${file}. Export them and tell the lab.`); break; }
+      if (!r.ok) { err = true; stop = true; break; }
       const merged = (await r.json()).edit;  // server merged our record with everyone else's
       dropRekeyed(file, merged);
       noteSrv(file, merged);
       const local = edits[file]; edits[file] = mergeEdit(merged, local);
       if (!newerThan(local, merged)) dirty.delete(file);
+      const now = pendingAttrs(file).length;
+      if (left <= ATTR_PUT_MAX || now === 0 || now >= left || round >= 200) break;
+      left = now;
+      }
+      if (stop) break;
     } catch (e) { err = true; break; }
   }
   } finally { syncing = false; }
@@ -2898,12 +2935,14 @@ window.addEventListener("online", () => scheduleSync(100));
 // Every schema text goes in with textContent; schema keys are matched as plain strings.
 // ======================================================================================================================
 function makeObjectView() {
-  const ATTR_KINDS = ["choice", "ordinal", "bool", "text"], RESERVED = ["ArrowLeft", "ArrowRight", "Enter", "Backspace", "i"];
+  const ATTR_KINDS = ["choice", "ordinal", "bool", "text"], RESERVED = ["ArrowLeft", "ArrowRight", "Enter", "Backspace", "i", "Tab"];
   const txt = (v, max = 40) => String(v == null ? "" : v).slice(0, max);
   const okKey = k => typeof k === "string" && k.length === 1 && !RESERVED.includes(k) && k !== "I";
   const attrs = (SCHEMA && Array.isArray(SCHEMA.object_attrs) ? SCHEMA.object_attrs : [])
     .filter(a => a && typeof a.id === "string" && /^[a-z][a-z0-9_]{0,15}$/.test(a.id) && a.id !== "class" && ATTR_KINDS.includes(a.kind))
     .map(a => ({id: a.id, label: txt(a.label || a.id), kind: a.kind, required: a.required === true,
+      help: typeof a.help === "string" ? a.help.trim().slice(0, 200) : "",  // r15 (K2): a plain-text line under the question
+      applies: a.applies_to === "root" || a.applies_to === "child" ? a.applies_to : "all",  // r15 (K2): tree cards only
       key: okKey(a.key) ? a.key : "",
       max: Math.min(300, Number.isInteger(a.max) && a.max > 0 ? a.max : 300),
       options: (Array.isArray(a.options) ? a.options : []).filter(o => o && (typeof o.v === "string" || typeof o.v === "number"))
@@ -2916,7 +2955,18 @@ function makeObjectView() {
   const required = attrs.filter(a => a.required);
   const byStem = new Map();
   for (const im of D.images || []) { byStem.set(im.file, im); byStem.set(stemOf(im.file), im); }
+  const tree = D.mode === "tree";  // r15 (K3 / K4): whole-tree cards; absent (every set before r15): the one-object card
   const items = (Array.isArray(D.items) ? D.items : []).filter(it => it && typeof it.id === "string" && byStem.has(String(it.image)));
+  if (tree) for (const it of items) {  // it.nodes [{obj, n, parent_n}] -> it._nodes sorted by n, n 1 (the root) first
+    const seen = new Set(), ns = [];
+    for (const x of Array.isArray(it.nodes) ? it.nodes : []) {
+      if (!x || typeof x.obj !== "string" || !/^(g[0-9]+|p[0-9]+|n[0-9a-z]+)$/.test(x.obj) || !Number.isInteger(x.n) || x.n < 1 || seen.has(x.n)) continue;
+      seen.add(x.n); ns.push({obj: x.obj, n: x.n, parent: Number.isInteger(x.parent_n) ? x.parent_n : null});
+    }
+    ns.sort((a, b) => a.n - b.n);
+    if (!ns.length && typeof it.obj === "string") ns.push({obj: it.obj, n: 1, parent: null});
+    it._nodes = ns;
+  }
   const blind = D.blind === true;
   const contained = D.outline_mode === "target+contained";
   const POS_KEY = KEY + ":objpos";
@@ -2928,13 +2978,41 @@ function makeObjectView() {
     const p = $("oInstr"), show = on == null ? p.hidden : !!on;
     p.hidden = !show; $("oInfoBtn").setAttribute("aria-expanded", show ? "true" : "false");
   }
-  const st = {pos: 0, outlines: true, img: null, imgSrc: "", ready: false, undo: [], drawn: []};
+  const st = {pos: 0, outlines: true, img: null, imgSrc: "", ready: false, undo: [], drawn: [], node: 0, badges: [], closed: false};
   const imOf = it => byStem.get(String(it.image));
-  const can = () => capOn("a") && server;
-  const akey = (it, a) => `a:${it.obj}:${a.id}@${me()}`;
-  const mineOf = (it, a) => { const d = me() ? decOf(imOf(it).file, akey(it, a)) : null; return d && d.v != null && d.v !== "" ? d.v : null; };
-  const isDone = it => required.length ? required.every(a => mineOf(it, a) != null) : attrs.some(a => mineOf(it, a) != null);
+  const can = () => capOn("a") && server && !st.closed;
+  // A decision is keyed on an object of the item's image: the item's own object, or (tree cards) one node's object.
+  const okey = (obj, a) => `a:${obj}:${a.id}@${me()}`;
+  const mineAt = (it, obj, a) => { const d = me() ? decOf(imOf(it).file, okey(obj, a)) : null; return d && d.v != null && d.v !== "" ? d.v : null; };
+  const akey = (it, a) => okey(it.obj, a);
+  const mineOf = (it, a) => mineAt(it, it.obj, a);
+  // Tree cards (K2 / K4): a question asked on the root (n 1) or on every other node; "all" on both.
+  const nodeRole = nd => nd.n === 1 ? "root" : "child";
+  const attrsFor = nd => attrs.filter(a => a.applies === "all" || a.applies === nodeRole(nd));
+  const keymapOf = {root: {}, child: {}};  // tree keys apply to the current node: per role, the first claim wins
+  if (tree) for (const r of ["root", "child"]) for (const a of attrs.filter(x => x.applies === "all" || x.applies === r)) {
+    const km = keymapOf[r];
+    if ((a.kind === "bool" || a.kind === "text") && a.key && !km[a.key]) km[a.key] = {a};
+    if (a.kind === "choice" || a.kind === "ordinal") for (const o of a.options) if (o.key && !km[o.key]) km[o.key] = {a, o};
+  }
+  const nodeDone = (it, nd) => {
+    const as = attrsFor(nd), req = as.filter(a => a.required);
+    return req.length ? req.every(a => mineAt(it, nd.obj, a) != null) : as.some(a => mineAt(it, nd.obj, a) != null);
+  };
+  const treeDone = it => {  // done = every required question that applies to every node has an answer (K3 progress)
+    const ns = it._nodes || [];
+    if (!ns.length) return false;
+    const anyReq = ns.some(nd => attrsFor(nd).some(a => a.required));
+    return anyReq ? ns.every(nd => attrsFor(nd).filter(a => a.required).every(a => mineAt(it, nd.obj, a) != null))
+      : ns.some(nd => attrsFor(nd).some(a => mineAt(it, nd.obj, a) != null));
+  };
+  const isDone = it => tree ? treeDone(it) : required.length ? required.every(a => mineOf(it, a) != null) : attrs.some(a => mineOf(it, a) != null);
   const nDone = () => items.filter(isDone).length;
+  const CIRC = n => n >= 1 && n <= 20 ? String.fromCharCode(0x245F + n) : n >= 21 && n <= 35 ? String.fromCharCode(0x3250 + n - 20)
+    : n >= 36 && n <= 50 ? String.fromCharCode(0x32B0 + n - 35) : `(${n})`;
+  const curNode = () => { const it = items[st.pos], ns = it && it._nodes; return ns && ns.length ? ns[Math.min(st.node, ns.length - 1)] : null; };
+  // "parent" in a child's question text names the node it sits in: "Layer of parent" -> "Layer of ①" (K4 mockup)
+  const forNode = (text, nd) => nd && nd.parent != null ? String(text).replace(/\bparent\b/g, CIRC(nd.parent)) : String(text);
   const ringsOf = (im, key) => {  // the package object's outline (normalized rings): g<id> = a counted label, p<k> = unsure
     if (/^g\d+$/.test(key)) { const g = (im.gt || []).find(x => String(x.id) === key.slice(1)); return g ? g.p : null; }
     if (/^p\d+$/.test(key)) { const p = (im.pr || [])[+key.slice(1)]; return p ? p.p : null; }
@@ -2967,6 +3045,7 @@ function makeObjectView() {
       const nx = items[st.pos + 1]; if (nx) (new Image()).src = imOf(nx).src;
     }
     st.drawn = [];
+    if (tree) { st.badges = []; if (st.ready) drawTree(it, im, b); return; }
     if (!st.ready) return;
     const Wi = st.img.naturalWidth, Hi = st.img.naturalHeight, rings = ringsOf(im, String(it.obj)), ring = rings && rings[0];
     const [x0, y0, x1, y1] = cropOf(it, im, ring), cw = (x1 - x0) * Wi, ch = (y1 - y0) * Hi;
@@ -2988,17 +3067,73 @@ function makeObjectView() {
     st.drawn.push(String(it.obj));
   }
 
-  function setAttr(it, a, v) {  // one tap = one saved decision; the same choice again clears it
+  function centroid(rg) {  // a flat normalized ring's area centroid (its vertex mean when the area is ~0)
+    let A = 0, X = 0, Y = 0;
+    for (let i = 0, j = rg.length - 2; i < rg.length; j = i, i += 2) {
+      const c = rg[j] * rg[i + 1] - rg[i] * rg[j + 1]; A += c; X += (rg[j] + rg[i]) * c; Y += (rg[j + 1] + rg[i + 1]) * c;
+    }
+    if (Math.abs(A) > 1e-12) return [X / (3 * A), Y / (3 * A)];
+    let mx = 0, my = 0; for (let i = 0; i < rg.length; i += 2) { mx += rg[i]; my += rg[i + 1]; }
+    return [mx / (rg.length / 2), my / (rg.length / 2)];
+  }
+  function drawTree(it, im, b) {  // every node's outline, then a numbered badge per node (the current one amber)
+    const Wi = st.img.naturalWidth, Hi = st.img.naturalHeight, ns = it._nodes || [], cur = curNode();
+    const root = ns.length ? ringsOf(im, ns[0].obj) : null;
+    const [x0, y0, x1, y1] = cropOf(it, im, root && root[0]), cw = (x1 - x0) * Wi, ch = (y1 - y0) * Hi;
+    const s = Math.min(b.width / cw, b.height / ch), ox = (b.width - cw * s) / 2 - x0 * Wi * s, oy = (b.height - ch * s) / 2 - y0 * Hi * s;
+    cx.imageSmoothingEnabled = true; cx.drawImage(st.img, ox, oy, Wi * s, Hi * s);
+    const P = (x, y) => [x * Wi * s + ox, y * Hi * s + oy];
+    const path = rg => { cx.beginPath(); for (let k = 0; k < rg.length; k += 2) { const [X, Y] = P(rg[k], rg[k + 1]); k ? cx.lineTo(X, Y) : cx.moveTo(X, Y); } cx.closePath(); };
+    const shown = ns.map(nd => ({nd, rings: ringsOf(im, nd.obj)})).filter(x => Array.isArray(x.rings) && x.rings.length);
+    if (st.outlines) {
+      for (const {nd, rings} of shown) {
+        if (nd === cur) continue;
+        cx.strokeStyle = nd.n === 1 ? "#38bdf8" : "#4ade80"; cx.lineWidth = nd.n === 1 ? 2.2 : 1.6;
+        for (const rg of rings) { path(rg); cx.stroke(); }
+      }
+      const c = shown.find(x => x.nd === cur);
+      if (c) { cx.strokeStyle = "#f59e0b"; cx.lineWidth = 2.8; for (const rg of c.rings) { path(rg); cx.stroke(); } }
+    }
+    for (const {nd} of shown) st.drawn.push(nd.obj);
+    // badges: at the outline's centroid; concentric layers share one, so a badge that would cover an earlier one
+    // moves onto its own outline (top first, then round it), so every number stays readable and on its node
+    const R = 11, placed = [];
+    const free = (x, y) => x > R && y > R && x < b.width - R && y < b.height - R && placed.every(q => Math.hypot(q[0] - x, q[1] - y) >= 2 * R + 2);
+    for (const {nd, rings} of shown) {
+      const rg = rings[0], [gx, gy] = centroid(rg);
+      let at = P(gx, gy);
+      if (!free(at[0], at[1])) {
+        const pts = []; for (let k = 0; k < rg.length; k += 2) pts.push(P(rg[k], rg[k + 1]));
+        const cands = [...pts].sort((p, q) => p[1] - q[1]);  // top of the outline first
+        at = cands.find(q => free(q[0], q[1])) || at;
+      }
+      placed.push(at);
+      st.badges.push({n: nd.n, x: Math.round(at[0]), y: Math.round(at[1])});
+    }
+    if (!st.outlines) return;
+    cx.font = "700 12.5px system-ui,-apple-system,Segoe UI,Roboto,sans-serif"; cx.textAlign = "center"; cx.textBaseline = "middle";
+    st.badges.forEach(bd => {
+      const isCur = cur && bd.n === cur.n, w = Math.max(2 * R, cx.measureText(String(bd.n)).width + 10);
+      cx.beginPath(); cx.roundRect ? cx.roundRect(bd.x - w / 2, bd.y - R, w, 2 * R, R) : cx.arc(bd.x, bd.y, R, 0, 2 * Math.PI);
+      cx.fillStyle = isCur ? "#f59e0b" : "#fff"; cx.fill();
+      cx.lineWidth = 1.5; cx.strokeStyle = isCur ? "#92400e" : "#111"; cx.stroke();
+      cx.fillStyle = "#111"; cx.fillText(String(bd.n), bd.x, bd.y + 0.5);
+    });
+  }
+
+  function setAttr(it, a, v, nd) {  // one tap = one saved decision; the same choice again clears it. nd: a tree node
     if (!it || !can()) return;
-    if (!needWho(() => setAttr(it, a, v))) return;
-    const im = imOf(it), e = ensureEdit(im), k = akey(it, a), prev = e.dec[k] ? clone(e.dec[k]) : null;
+    if (!needWho(() => setAttr(it, a, v, nd))) return;
+    const obj = nd ? nd.obj : it.obj;
+    const im = imOf(it), e = ensureEdit(im), k = okey(obj, a), prev = e.dec[k] ? clone(e.dec[k]) : null;
     let nv = v;
     if (a.kind === "text") { nv = String(v == null ? "" : v).trim().slice(0, a.max); if (!nv) nv = null; }
     else if (a.kind === "bool") nv = v ? true : false;
-    else if (mineOf(it, a) === v) nv = null;
+    else if (mineAt(it, obj, a) === v) nv = null;
     if ((prev ? prev.v : null) === nv) return;
+    if (nd) st.node = Math.max(0, (it._nodes || []).indexOf(nd));
     setDec(e, k, nv);
-    st.undo.push({file: im.file, key: k, prev, t: e.dec[k].t, pos: st.pos});
+    st.undo.push({file: im.file, key: k, prev, t: e.dec[k].t, pos: st.pos, node: st.node});
     if (st.undo.length > 200) st.undo.shift();
     touch(im.file); render();
   }
@@ -3007,46 +3142,73 @@ function makeObjectView() {
     const e = edits[u.file], d = e && e.dec[u.key];
     if (!d || d.t !== u.t) return render();
     setDec(e, u.key, u.prev ? u.prev.v : null); touch(u.file);
-    st.pos = u.pos; render();
+    st.pos = u.pos; if (tree) st.node = u.node || 0; render();
   }
   function go(n) {
     if (!items.length) return;
+    const was = st.pos;
     st.pos = Math.max(0, Math.min(items.length - 1, n));
+    if (tree && st.pos !== was) st.node = 0;
     try { localStorage.setItem(POS_KEY, items[st.pos].id); } catch (e) {}
     render();
+    if (tree && st.pos !== was) $("oAttrs").scrollTop = 0;
   }
   function nextOpen() {  // Enter: the next item this reviewer hasn't finished (wrapping), else stay
     for (let k = 1; k <= items.length; k++) { const n = (st.pos + k) % items.length; if (!isDone(items[n])) return go(n); }
     render();
   }
+  function setNode(k, scroll) {  // tree: the current node (Tab, a tap on its block): its block and badge turn amber
+    const it = items[st.pos], ns = it && it._nodes; if (!ns || !ns.length) return;
+    st.node = (k + ns.length) % ns.length;
+    for (const b of $("oAttrs").querySelectorAll(".oNode")) b.classList.toggle("cur", +b.dataset.k === st.node);
+    const blk = $("oAttrs").querySelector(`.oNode[data-k="${st.node}"]`);
+    if (scroll && blk) blk.scrollIntoView({block: "nearest"});
+    draw();
+  }
 
-  function rowFor(it, a, on) {
-    const row = el("div", "oRow"), h = el("h3"); h.dataset.attr = a.id;
-    h.append(el("span", null, a.label));
-    if (a.required) { const ok = mineOf(it, a) != null; h.append(el("span", "req" + (ok ? " ok" : ""), ok ? "✓" : "required")); }
+  function rowFor(it, a, on, nd) {  // nd: a tree node (its own answers, data-node); omitted: the item's object
+    const obj = nd ? nd.obj : it.obj, mine = () => mineAt(it, obj, a), label = nd ? forNode(a.label, nd) : a.label;
+    const row = el("div", "oRow"), h = el("h3"); h.dataset.attr = a.id; if (nd) h.dataset.node = String(nd.n);
+    h.append(el("span", null, label));
+    if (a.required) { const ok = mine() != null; h.append(el("span", "req" + (ok ? " ok" : ""), ok ? "✓" : "required")); }
     row.append(h);
+    if (a.help) row.append(el("p", "oHelp", nd ? forNode(a.help, nd) : a.help));  // r15 (K2): the schema's help line
     if (a.kind === "text") {
       const box = el("div", "oNote"), inp = el("input");
-      inp.type = "text"; inp.maxLength = a.max; inp.dataset.attr = a.id; inp.disabled = !on;
-      inp.placeholder = a.key ? `${a.label} (${a.key}; Enter saves)` : `${a.label} (Enter saves)`;
-      const cur = mineOf(it, a); inp.value = cur == null ? "" : String(cur);
-      inp.onchange = () => setAttr(it, a, inp.value);
+      inp.type = "text"; inp.maxLength = a.max; inp.dataset.attr = a.id; inp.disabled = !on; if (nd) inp.dataset.node = String(nd.n);
+      inp.placeholder = a.key ? `${label} (${a.key}; Enter saves)` : `${label} (Enter saves)`;
+      const cur = mine(); inp.value = cur == null ? "" : String(cur);
+      inp.onchange = () => setAttr(it, a, inp.value, nd);
       inp.onkeydown = ev => {
         if (ev.key === "Enter") { ev.preventDefault(); inp.blur(); }
-        else if (ev.key === "Escape") { const c = mineOf(it, a); inp.value = c == null ? "" : String(c); inp.blur(); }
+        else if (ev.key === "Escape") { const c = mine(); inp.value = c == null ? "" : String(c); inp.blur(); }
         ev.stopPropagation();
       };
       box.append(inp); row.append(box); return row;
     }
     const btns = el("div", "oBtns");
-    const add = (label, key, isOn, fn) => {
+    const add = (lbl, key, isOn, fn) => {
       const b = el("button", isOn ? "on" : ""); b.type = "button"; b.disabled = !on; b.setAttribute("aria-pressed", isOn ? "true" : "false");
-      b.append(document.createTextNode(label)); if (key) b.append(el("kbd", null, key));
+      b.append(document.createTextNode(lbl)); if (key) b.append(el("kbd", null, key));
       b.onclick = fn; btns.append(b);
     };
-    if (a.kind === "bool") { const v = mineOf(it, a) === true; add(v ? `${a.label}: yes` : a.label, a.key, v, () => setAttr(it, a, !v)); }
-    else for (const o of a.options) add(o.label, o.key, mineOf(it, a) === o.v, () => setAttr(it, a, o.v));
+    if (a.kind === "bool") { const v = mine() === true; add(v ? `${label}: yes` : label, a.key, v, () => setAttr(it, a, !v, nd)); }
+    else for (const o of a.options) add(nd ? forNode(o.label, nd) : o.label, o.key, mine() === o.v, () => setAttr(it, a, o.v, nd));
     row.append(btns); return row;
+  }
+  function nodeBlock(it, nd, k, on) {  // tree: one bordered block per node, "① Outer vesicle" / "② Inside ①"
+    const blk = el("section", "oNode" + (k === st.node ? " cur" : "")); blk.dataset.k = String(k); blk.dataset.n = String(nd.n);
+    const h = el("h2"), badge = el("span", "oBadge", String(nd.n));
+    h.append(badge);
+    if (nd.n === 1) h.append(el("span", null, "Outer vesicle"));
+    else { h.append(el("span", null, "Inside")); h.append(el("span", "oBadge sm", nd.parent != null ? String(nd.parent) : "?")); }
+    const ok = nodeDone(it, nd); h.append(el("span", "ndone" + (ok ? " fin" : ""), ok ? "✓ done" : "open"));
+    blk.setAttribute("aria-label", nd.n === 1 ? `Node ${nd.n}, outer vesicle` : `Node ${nd.n}, inside node ${nd.parent}`);
+    blk.append(h);
+    for (const a of attrsFor(nd)) blk.append(rowFor(it, a, on, nd));
+    blk.addEventListener("pointerdown", () => { if (st.node !== k) setNode(k); });
+    blk.addEventListener("focusin", () => { if (st.node !== k) setNode(k); });
+    return blk;
   }
 
   function saved() {
@@ -3059,9 +3221,11 @@ function makeObjectView() {
   function renderList() {
     const box = $("oItems"); box.textContent = "";
     items.forEach((it, n) => {
-      const d = isDone(it), set = attrs.filter(a => mineOf(it, a) != null).length;
+      const d = isDone(it), ns = tree ? it._nodes || [] : null;
+      const set = tree ? ns.filter(nd => nodeDone(it, nd)).length : attrs.filter(a => mineOf(it, a) != null).length;
+      const of = tree ? `${set} of ${ns.length} nodes` : `${set} of ${attrs.length}`;
       const b = el("button", [n === st.pos ? "cur" : "", d ? "done" : ""].join(" ").trim()); b.type = "button"; b.dataset.n = n;
-      b.append(el("span", null, `${n + 1}. item ${txt(it.id, 12)}`), el("span", "st", d ? "done ✓" : set ? `${set} of ${attrs.length}` : "—"));
+      b.append(el("span", null, `${n + 1}. item ${txt(it.id, 12)}`), el("span", "st", d ? "done ✓" : set ? of : "—"));
       box.append(b);
     });
   }
@@ -3084,13 +3248,27 @@ function makeObjectView() {
     if (typing && it) {  // typing a note: leave the rows alone (a pull mid-typing must not wipe it); only the marks
       for (const h of box.querySelectorAll("h3[data-attr]")) {
         const a = attrs.find(x => x.id === h.dataset.attr), r = h.querySelector(".req");
-        if (a && r) { const ok = mineOf(it, a) != null; r.textContent = ok ? "✓" : "required"; r.className = "req" + (ok ? " ok" : ""); }
+        const nd = tree && h.dataset.node ? (it._nodes || []).find(x => String(x.n) === h.dataset.node) : null;
+        if (a && r) { const ok = (nd ? mineAt(it, nd.obj, a) : mineOf(it, a)) != null; r.textContent = ok ? "✓" : "required"; r.className = "req" + (ok ? " ok" : ""); }
+      }
+    } else if (tree) {
+      box.textContent = "";
+      if (!it) box.append(el("p", null, "This object set has no items."));
+      else {
+        if (!on) { const p = el("p", null, st.closed ? "This set is closed: no more answers are saved."
+          : server ? "This review server can't save attributes yet (no “a” in its /api/ping caps). Nothing is saved."
+          : "Open this set from the review server to answer: attributes save only there."); p.id = "oOff"; box.append(p); }
+        const ns = it._nodes || [];
+        if (st.node >= ns.length) st.node = 0;
+        ns.forEach((nd, k) => box.append(nodeBlock(it, nd, k, on)));
+        if (!attrs.length) box.append(el("p", null, "This set's label schema has no object attributes."));
       }
     } else {
       box.textContent = "";
       if (!it) box.append(el("p", null, "This object set has no items."));
       else {
-        if (!on) { const p = el("p", null, server ? "This review server can't save attributes yet (no “a” in its /api/ping caps). Nothing is saved."
+        if (!on) { const p = el("p", null, st.closed ? "This set is closed: no more answers are saved."
+          : server ? "This review server can't save attributes yet (no “a” in its /api/ping caps). Nothing is saved."
           : "Open this set from the review server to answer: attributes save only there."); p.id = "oOff"; box.append(p); }
         for (const a of attrs) box.append(rowFor(it, a, on));
         if (!attrs.length) box.append(el("p", null, "This set's label schema has no object attributes."));
@@ -3110,6 +3288,16 @@ function makeObjectView() {
     else if (k === "i" || k === "I") { st.outlines = !st.outlines; render(); }
     else if (k === "Escape") { $("oList").classList.remove("show"); if (instr) instrOpen(false); }
     else if (k === "?" && instr) { ev.preventDefault(); instrOpen(); }
+    else if (k === "Tab" && tree) { ev.preventDefault(); setNode(st.node + (ev.shiftKey ? -1 : 1), true); }
+    else if (tree) {  // tree: keys answer the current node's questions (a key of a question it isn't asked: nothing)
+      const nd = curNode(), km = nd ? keymapOf[nodeRole(nd)] : null;
+      const hit = km && Object.prototype.hasOwnProperty.call(km, k) ? km[k] : null;
+      if (!hit || !it) return;
+      ev.preventDefault();
+      if (hit.a.kind === "text") { const inp = [...$("oAttrs").querySelectorAll("input[data-attr]")].find(x => x.dataset.attr === hit.a.id && x.dataset.node === String(nd.n)); if (inp && !inp.disabled) inp.focus(); }
+      else if (hit.a.kind === "bool") setAttr(it, hit.a, mineAt(it, nd.obj, hit.a) !== true, nd);
+      else setAttr(it, hit.a, hit.o.v, nd);
+    }
     else {
       const hit = Object.prototype.hasOwnProperty.call(keymap, k) ? keymap[k] : null;
       if (!hit || !it) return;
@@ -3138,6 +3326,9 @@ function makeObjectView() {
     $("oListX").onclick = () => $("oList").classList.remove("show");
     $("oItems").onclick = ev => { const b = ev.target.closest("button[data-n]"); if (b) { go(+b.dataset.n); $("oList").classList.remove("show"); } };
     window.addEventListener("resize", draw);
+    if (tree) {  // the key line of the approved mockup (laptop only: #oKeys is hidden on touch screens)
+      $("oKeys").textContent = "Tab = next node · ← → items · Enter = next unfinished";
+    }
     if (instr) {  // the set's instructions (D.instructions): the button, and the panel once per browser and text
       $("oInstrTx").textContent = instr;
       $("oInfoBtn").hidden = false;
@@ -3149,10 +3340,18 @@ function makeObjectView() {
     }
     render(); connectObjects();
   }
-  return {start, render, key, saved, go, state: () => ({pos: st.pos, n: items.length, done: nDone(), outlines: st.outlines, can: can(),
+  function closed() { if (st.closed) return; st.closed = true; render(); }  // the server answered 409 "set closed"
+  const treeState = () => {
+    const it = items[st.pos], ns = it ? it._nodes || [] : [];
+    return {node: st.node, nodes: ns.map(nd => ({n: nd.n, obj: nd.obj, parent: nd.parent, done: nodeDone(it, nd),
+      attrs: attrsFor(nd).map(a => a.id), mine: Object.fromEntries(attrsFor(nd).map(a => [a.id, mineAt(it, nd.obj, a)]))})),
+      badges: st.badges.map(b => ({...b}))};
+  };
+  return {start, render, key, saved, go, closed, state: () => ({pos: st.pos, n: items.length, done: nDone(), outlines: st.outlines, can: can(),
     item: items[st.pos] ? {...items[st.pos]} : null, attrs: attrs.map(a => a.id), keys: Object.keys(keymap), blind, contained,
-    drawn: [...st.drawn], instr: {has: !!instr, open: !!instr && !$("oInstr").hidden},
-    mine: items[st.pos] ? Object.fromEntries(attrs.map(a => [a.id, mineOf(items[st.pos], a)])) : {}, undo: st.undo.length})};
+    drawn: [...st.drawn], instr: {has: !!instr, open: !!instr && !$("oInstr").hidden}, closed: st.closed,
+    mine: items[st.pos] ? Object.fromEntries(attrs.map(a => [a.id, mineOf(items[st.pos], a)])) : {}, undo: st.undo.length,
+    ...(tree ? {mode: "tree", tree: treeState()} : {})})};
 }
 if (D.kind === "objects") OBJ = makeObjectView();
 // ===================================================== end OBJECT SET CARD =====================================================

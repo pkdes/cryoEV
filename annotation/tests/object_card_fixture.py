@@ -14,7 +14,15 @@ attribute support in annotation/review_server.py.
         GET  /api/claims, /api/people, /api/groups   empty answers
         anything else    the package's files
 
-Used by annotation/tests/test_object_card_browser.py and the round-14 screenshots. Nothing here touches a real
+    build_tree(folder, *, blind=True, big=False, instructions=None) -> data dict          (round 15, contract K3)
+        a whole-tree set: D.mode "tree", D.schema = TREE_SCHEMA (ls_lamellarity_tree_v1 as in K2: applies_to, help),
+        items with nodes [{obj, n, parent_n}] (root n 1, the rest in seeded order; no role / unit / call), and with
+        big=True one item of 30 nodes (the chunked-save test)
+    copy_live(folder, src) -> data dict        a BYTE copy of a live set's data.js + schema.json (never written back)
+    FakeServer(..., attr_cap=64, closed=False, fail=False): attr_cap = the real server's ATTR_PUT_MAX (400 over it),
+        closed = 409 "set closed" on any a: PUT (#80g), fail = 503 on every PUT (an offline server)
+
+Used by annotation/tests/test_object_card_browser.py and the round-14 / 15 screenshots. Nothing here touches a real
 package or server.
 """
 from __future__ import annotations
@@ -47,6 +55,30 @@ SCHEMA = {
         {"id": "outline_wrong", "label": "Outlines wrong", "kind": "bool", "key": "o"},
         {"id": "note", "label": "Note", "kind": "text", "max": 300, "key": "n"}],
     "image_attrs": [], "tags": [], "supersedes": None, "class_mapping": None}
+
+
+HELP_TYPE = ("Count the outer EV's own level only: concentric membranes = the outer membrane plus its own layers; "
+             "each inner vesicle counts as 1.")
+_TYPE_OPTS = [{"v": "single", "label": "Single", "key": "1"}, {"v": "ML", "label": "ML", "key": "2"},
+              {"v": "MV_vesicular", "label": "MV", "key": "3"}, {"v": "ML+MV", "label": "ML+MV", "key": "4"},
+              {"v": "unsure", "label": "Unsure", "key": "0"}]
+TREE_SCHEMA = {
+    "schema": "label_schema/1", "id": "ls_lamellarity_tree_v1", "name": "lamellarity_tree", "version": 1,
+    "maker": "pujan", "description": "Whole-tree lamellarity (fixture copy of contract K2).",
+    "classes": [{"name": "EV", "color": "#4ade80", "key": "1"}],
+    "object_attrs": [
+        {"id": "type", "label": "Type", "kind": "choice", "required": True, "applies_to": "root", "help": HELP_TYPE,
+         "options": _TYPE_OPTS},
+        {"id": "relation", "label": "What is it?", "kind": "choice", "required": True, "applies_to": "child",
+         "help": "A layer hugs its parent all round; an inner vesicle sits free inside it.",
+         "options": [{"v": "layer", "label": "Layer of parent", "key": "l"},
+                     {"v": "inner_vesicle", "label": "Inner vesicle", "key": "v"},
+                     {"v": "not_membrane", "label": "Not a membrane", "key": "x"},
+                     {"v": "duplicate", "label": "Duplicate outline", "key": "d"}]},
+        {"id": "inner_type", "label": "If inner vesicle: its type", "kind": "choice", "applies_to": "child",
+         "options": [{k: v for k, v in o.items() if k != "key"} for o in _TYPE_OPTS]},
+        {"id": "note", "label": "Note", "kind": "text", "max": 300, "key": "n"}],
+    "image_attrs": [], "tags": [], "supersedes": None, "class_mapping": {"EV": "EV"}}
 
 
 def ring(cx, cy, r, w, h, n=28):
@@ -121,11 +153,80 @@ def build(folder, *, blind=True, outline_mode="target", n_items=6, sentinel=None
     return data
 
 
+def build_tree(folder, *, blind=True, big=False, title="Tree check 1", instructions=None, seed=15) -> dict:
+    """A whole-tree object set (round 15, K3): see the module docstring."""
+    folder = Path(folder)
+    (folder / "images").mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(PAGE, folder / "index.html")
+    w, h = 640, 480
+    rnd = random.Random(seed)
+    # {stem: [(cx, cy, r, parent index or None)]}: concentric layers share a centre (their badges must not collide)
+    trees = {
+        "treeA": [(230, 240, 150, None), (230, 240, 128, 0), (190, 210, 34, 1), (275, 275, 28, 1), (300, 190, 18, 1),
+                  (520, 110, 60, None), (520, 110, 44, 5)],
+        "treeB": [(320, 240, 170, None), (250, 200, 48, 0), (250, 200, 36, 1), (390, 290, 40, 0)],
+    }
+    if big:                                            # 1 root + 29 inner vesicles: a 30-node card
+        trees["treeC"] = [(320, 240, 225, None)] + [(160 + 46 * (k % 7), 120 + 52 * (k // 7), 15, 0) for k in range(29)]
+    images, items, ids = [], [], set()
+    for stem, circ in trees.items():
+        _png(folder / "images" / f"{stem}.png", w, h, [(cx, cy, r) for cx, cy, r, _ in circ])
+        gt = [{"id": i + 1, "c": "EV", "p": [ring(cx, cy, r, w, h, n=40)]} for i, (cx, cy, r, _) in enumerate(circ)]
+        images.append({"file": f"{stem}.png", "split": "S1", "w": w, "h": h, "src": f"images/{stem}.png", "gt": gt,
+                       "pr": []})
+        for ri in [i for i, c in enumerate(circ) if c[3] is None]:
+            members = [ri]
+            for i, c in enumerate(circ):              # every descendant of this root (parents come first in the list)
+                if c[3] is not None and c[3] in members:
+                    members.append(i)
+            others = members[1:]
+            rnd.shuffle(others)                        # neutral numbering: root n 1, the rest seeded
+            num = {ri: 1, **{i: k + 2 for k, i in enumerate(others)}}
+            nodes = sorted(({"obj": f"g{i + 1}", "n": num[i],
+                             "parent_n": num[circ[i][3]] if circ[i][3] is not None else None} for i in members),
+                           key=lambda x: x["n"])
+            cx, cy, r, _ = circ[ri]
+            m = r * 1.15
+            iid = f"{rnd.getrandbits(20):05x}"
+            while iid in ids:
+                iid = f"{rnd.getrandbits(20):05x}"
+            ids.add(iid)
+            items.append({"id": iid, "image": stem, "obj": f"g{ri + 1}", "nodes": nodes,
+                          "crop": [round(max(0, cx - m) / w, 5), round(max(0, cy - m) / h, 5),
+                                   round(min(w, cx + m) / w, 5), round(min(h, cy + m) / h, 5)]})
+    rnd.shuffle(items)
+    if big:                                            # the 30-node item first, so a test opens on it
+        items.sort(key=lambda it: -len(it["nodes"]))
+    data = {"id": folder.name, "title": title, "kind": "objects", "mode": "tree",
+            "source": "prediction_set:ps_20261114_abcdef", "run": "fixture", "categories": ["EV"],
+            "schema": TREE_SCHEMA, "items": items, "outline_mode": "target", "blind": bool(blind), "images": images}
+    if instructions is not None:
+        data["instructions"] = instructions
+    (folder / "data.js").write_text("window.REVIEW_DATA = " + json.dumps(data) + ";\n", encoding="utf-8")
+    (folder / "review_package.json").write_text(json.dumps({
+        "kind": "objects", "mode": "tree", "schema": TREE_SCHEMA["id"], "base": "ps_20261114_abcdef",
+        "base_kind": "prediction_set", "n_items": len(items), "blind_cols": [], "reviewers": ["rev1"],
+        "owner": "admin1", "built_by": "portal", "title": title}), encoding="utf-8")
+    return data
+
+
+def copy_live(folder, src) -> dict:
+    """A byte copy of a live set's data.js + schema.json (and the repo page) into folder; the source is only read."""
+    folder, src = Path(folder), Path(src)
+    folder.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(PAGE, folder / "index.html")
+    for name in ("data.js", "schema.json"):
+        (folder / name).write_bytes((src / name).read_bytes())
+    t = (folder / "data.js").read_text(encoding="utf-8")
+    return json.loads(t.split("=", 1)[1].strip().rstrip(";"))
+
+
 class FakeServer:
     """The review server's API, just enough for the object card (see the module docstring)."""
 
-    def __init__(self, folder, caps=("i", "t", "a"), who=None):
+    def __init__(self, folder, caps=("i", "t", "a"), who=None, attr_cap=64, closed=False, fail=False):
         self.folder, self.caps, self.who = Path(folder), list(caps), who
+        self.attr_cap, self.closed, self.fail = attr_cap, closed, fail
         self.records, self.puts, self.t = {}, [], 1_700_000_000_000
         self._lock = threading.Lock()
         outer = self
@@ -164,6 +265,16 @@ class FakeServer:
                     return self._json({"error": "no"}, 404)
                 f = (parse_qs(u.query).get("f") or [""])[0]
                 rec = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                if outer.fail:
+                    return self._json({"error": "down"}, 503)
+                pend = [k for k, d in (rec.get("dec") or {}).items() if (k.startswith("a:") or k.startswith("i:a:"))
+                        and isinstance(d, dict) and d.get("pending") is True]
+                if pend and outer.closed:
+                    return self._json({"error": "set closed"}, 409)
+                if outer.attr_cap is not None and len(pend) > outer.attr_cap:
+                    with outer._lock:
+                        outer.puts.append((f, json.loads(json.dumps(rec))))
+                    return self._json({"error": f"at most {outer.attr_cap} attribute decisions per save"}, 400)
                 with outer._lock:
                     outer.puts.append((f, json.loads(json.dumps(rec))))
                     have = outer.records.setdefault(f, {"dec": {}})
