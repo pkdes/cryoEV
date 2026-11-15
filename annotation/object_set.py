@@ -16,7 +16,7 @@ attributes (labels/schemas.py) instead of whole images.
     python -m annotation.object_set instructions <pkg> (--text TEXT | --file PATH | --clear) [--do]
     python -m annotation.object_set build --tree --ps <ps> --schema ls_lamellarity_tree_v1 [--items <roots.csv>
         --line-col line] [--slug ..] [--seed N] [--owner ..] [--reviewers a,b] [--review-root <dir>] [--do ...]
-    python -m annotation.object_set close <pkg> --by <id> [--do]
+    python -m annotation.object_set close <pkg> --by <id> [--do [--registry <dir>]]
 
 Whole-tree sets (round 15, contract K3; build --tree): items = the nesting_tree v1 unit roots (role outer, vesicle
 depth 0) of <ps>/results/objects.csv (steps.json must list nesting_tree v1 + nesting v1 and hold the file's sha256)
@@ -582,7 +582,7 @@ def table(pkg) -> dict:
     if is_tree(items):
         return tree_table(pkg)
     doc, data = read_schema(pkg), om.read_datajs(pkg)
-    dec = om.decisions(pkg, data)
+    dec = drop_after_close(pkg, om.decisions(pkg, data), 1)
     hist = om.history(pkg)
     attrs = [a["id"] for a in doc.get("object_attrs") or []]
     rids = sorted({k.split("@", 1)[1] for d in dec.values() for k in d} | set(om.package_reviewers(pkg)))
@@ -1163,6 +1163,38 @@ def read_record(pkg) -> dict:
     return rec if isinstance(rec, dict) else {}
 
 
+def close_cutoff_ms(pkg):
+    """The last server_t (ms) an answer can carry and still count: closed_t (whole seconds) + 999 ms; None while the
+    set is open (or closed_t is unreadable)."""
+    from datetime import datetime
+    rec = read_record(pkg)
+    if rec.get("closed") is not True:
+        return None
+    try:
+        return int(datetime.fromisoformat(str(rec.get("closed_t"))).timestamp() * 1000) + 999
+    except (TypeError, ValueError):
+        return None
+
+
+def drop_after_close(pkg, dec: dict, depth: int) -> dict:
+    """#80g: the decisions without any whose server_t is after the close (closed_t + 999 ms): an answer a review
+    server took while the close was being written never reaches an export. dec: {item: {key: decision}} (depth 1)
+    or {item: {node: {key: decision}}} (depth 2)."""
+    cut = close_cutoff_ms(pkg)
+    if cut is None:
+        return dec
+
+    def keep(x):
+        t = x.get("server_t") if isinstance(x, dict) else None
+        return not (rs._num(t) and t > cut)
+
+    def walk(d, n):
+        if n == 0:
+            return {k: x for k, x in d.items() if keep(x)}
+        return {k: walk(v, n - 1) for k, v in d.items()}
+    return walk(dec, depth)
+
+
 def is_closed(pkg) -> bool:
     """#80g: review_package.json closed: true (final: the server then refuses every attribute decision with 409)."""
     return read_record(pkg).get("closed") is True
@@ -1211,7 +1243,7 @@ def tree_table(pkg, unblind=None) -> dict:
     unblind (default: when the set is closed, #80g)."""
     pkg = Path(pkg)
     items, doc, data = read_items(pkg), read_schema(pkg), om.read_datajs(pkg)
-    dec = om.node_decisions(pkg, data)
+    dec = drop_after_close(pkg, om.node_decisions(pkg, data), 2)
     hist = om.history(pkg)
     attrs = [a["id"] for a in doc.get("object_attrs") or []]
     rids = sorted({k.split("@", 1)[1] for d in dec.values() for x in d.values() for k in x}
@@ -1309,7 +1341,25 @@ def _import_tree(rd, cols, schema, items) -> dict:
     by_item = {}
     for r in rows:
         by_item.setdefault(r["item"], []).append(r)
-    for iid, group in by_item.items():
+    want_n = None if items is None else {it["id"]: sorted(nd["n"] for nd in it.get("nodes") or [])
+                                         for it in items.get("items") or []}
+    for iid, group in by_item.items():                 # every node of an item exactly once, a tree rooted at n 1
+        ns = [r.get("node_n") for r in group]
+        if None in ns or len(set(ns)) != len(ns):
+            raise ObjectSetError(f"item {iid}: node_n missing or listed twice ({ns})")
+        if want_n is not None and sorted(ns) != want_n.get(iid):
+            raise ObjectSetError(f"item {iid}: nodes {sorted(ns)}, the set has {want_n.get(iid)}: every node of an "
+                                 "item must be in the file once")
+        par = {r["node_n"]: r.get("parent_n") for r in group}
+        if par.get(1, 0) is not None:
+            raise ObjectSetError(f"item {iid}: no root row (node_n 1 with no parent_n)")
+        for n, pn in par.items():
+            seen = {n}
+            while pn is not None:
+                if pn not in par or pn in seen:
+                    raise ObjectSetError(f"item {iid} node {n}: parent_n chain is not a tree within the item")
+                seen.add(pn)
+                pn = par[pn]
         nodes = [{"n": r["node_n"], "parent_n": r["parent_n"]} for r in group]
         for rid in rids:
             dv = derive_tree(nodes, {r["node_n"]: r.get(f"relation@{rid}") for r in group})
@@ -1346,8 +1396,11 @@ def _tree_coco(pkg, tab, items) -> dict:
 
 def close_set(pkg, by: str, do=False, lock_wait: float = 5.0) -> dict:
     """#80g: close an object set: review_package.json closed: true, closed_by, closed_t (under the package's meta
-    lock, atomic). Final: a closed set is never reopened (refused). Dry run unless do. The portal's POST
-    /reviews/{pkg}/close does the same and adds the registry status line. -> {pkg, closed_by, written}."""
+    lock, atomic), then data.js D.closed = true (only that key changes) so an open card says closed before an answer
+    is tried. Final: a closed set is never reopened (refused). Dry run unless do. The one writer of `closed`: the
+    portal's POST /reviews/{pkg}/close calls it too; both then add the registry status line (registry_closed).
+    -> {pkg, closed_by, written, datajs} (datajs: data.js carries the flag; a data.js this module can't rewrite byte
+    for byte is left alone, the server's 409 still closes the card)."""
     pkg = Path(pkg)
     if not pp.OWNER_RE.match(by or ""):
         raise ObjectSetError(f"bad person id {by!r}")
@@ -1357,7 +1410,7 @@ def close_set(pkg, by: str, do=False, lock_wait: float = 5.0) -> dict:
         raise ObjectSetError(f"{pkg.name}: not an object set")
     if rec.get("closed") is True:
         raise ObjectSetError(f"{pkg.name}: already closed by {rec.get('closed_by')} at {rec.get('closed_t')} (final)")
-    out = {"pkg": str(pkg), "closed_by": by, "written": False}
+    out = {"pkg": str(pkg), "closed_by": by, "written": False, "datajs": False}
     if not do:
         return out
     lk = pp.meta_lock(pkg.parent, pkg.name, lock_wait)
@@ -1369,10 +1422,50 @@ def close_set(pkg, by: str, do=False, lock_wait: float = 5.0) -> dict:
         rec["closed"], rec["closed_by"], rec["closed_t"] = True, by, pp._now()
         _write_atomic(rec_p, (json.dumps(rec, indent=1, ensure_ascii=False)
                               + ("\n" if rtext.endswith("\n") else "")).encode("utf-8"))
+        out["written"] = True
+        out["datajs"] = _datajs_closed(pkg / "data.js")
     finally:
         lk.close()
-    out["written"] = True
     return out
+
+
+def _datajs_closed(djs: Path) -> bool:
+    """data.js D.closed = true, every other byte unchanged (as set_instructions). False when it can't be (no data.js,
+    a format this module can't re-serialize, or a write that failed): the record is what counts."""
+    try:
+        raw = djs.read_bytes()
+        data, kw, tail = _split_datajs(raw)
+        if data.get("closed") is True:
+            return True
+        data["closed"] = True
+        rest = dict(data)
+        rest.pop("closed")
+        before = _split_datajs(raw)[0]
+        before.pop("closed", None)
+        if rest != before:
+            return False
+        _write_atomic(djs, DATAJS_PREFIX + json.dumps(data, **kw).encode("utf-8") + tail)
+        return True
+    except (OSError, ObjectSetError):
+        return False
+
+
+def registry_closed(reg, pkg_id: str, who: str) -> str:
+    """The registry status line for a closed set: review_package <id> -> "reviewed", status_by = the closer (a
+    person: via None). The CLI's close --do and the portal's Close set both call this. -> "written", or why not
+    ("no registry", "not in the registry", "not in people.json", ...); never raises (the set stays closed)."""
+    if not reg:
+        return "no registry"
+    try:
+        from registry import store
+        if store.current("review_package", Path(reg)).get(pkg_id) is None:
+            return "not in the registry"
+        if who not in store.roster():
+            return "not in people.json"
+        store.set_status(pkg_id, "reviewed", who, root=Path(reg), via=None, note="closed")
+        return "written"
+    except Exception as e:                              # noqa: BLE001  the set stays closed either way
+        return f"not written ({type(e).__name__})"
 
 
 # ---------------------------------------------------------------- CLI
@@ -1458,6 +1551,8 @@ def main(argv=None):
                                      "--do)")
     c.add_argument("pkg", type=Path, help="the object set's folder (pred_obj_*)")
     c.add_argument("--by", required=True, help="portal id of whoever closes it (the maker or an admin)")
+    c.add_argument("--registry", type=Path, help="registry folder: with --do, the review_package status line "
+                                                 "\"reviewed\" (status_by --by), as the portal's Close set writes")
     c.add_argument("--do", action="store_true", help="write (default: a dry run that writes nothing)")
     e = sub.add_parser("export", help="decisions -> CSV (+ COCO)")
     e.add_argument("--pkg", required=True, type=Path)
@@ -1519,8 +1614,10 @@ def main(argv=None):
         elif a.cmd == "close":
             r = close_set(a.pkg, a.by, do=a.do)
             if a.do:
+                reg = registry_closed(a.registry, a.pkg.name, a.by)
                 print(f"[OK] {a.pkg.name}: closed by {a.by} (review_package.json closed: true; final). New answers are "
-                      "refused (409); exports now include the hidden columns.")
+                      "refused (409); exports now include the hidden columns. Registry status line \"reviewed\": "
+                      + (reg if a.registry else "not written (no --registry given)"))
             else:
                 print(f"DRY RUN, nothing written: would close {a.pkg.name} as {r['closed_by']} (final: it can't be "
                       "reopened). Run again with --do to close it.")

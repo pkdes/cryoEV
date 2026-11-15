@@ -153,7 +153,8 @@ def build(folder, *, blind=True, outline_mode="target", n_items=6, sentinel=None
     return data
 
 
-def build_tree(folder, *, blind=True, big=False, title="Tree check 1", instructions=None, seed=15) -> dict:
+def build_tree(folder, *, blind=True, big=False, title="Tree check 1", instructions=None, seed=15,
+               closed=False) -> dict:
     """A whole-tree object set (round 15, K3): see the module docstring."""
     folder = Path(folder)
     (folder / "images").mkdir(parents=True, exist_ok=True)
@@ -202,6 +203,8 @@ def build_tree(folder, *, blind=True, big=False, title="Tree check 1", instructi
             "schema": TREE_SCHEMA, "items": items, "outline_mode": "target", "blind": bool(blind), "images": images}
     if instructions is not None:
         data["instructions"] = instructions
+    if closed:
+        data["closed"] = True                     # as object_set.close_set writes it (r15 integration, QC F)
     (folder / "data.js").write_text("window.REVIEW_DATA = " + json.dumps(data) + ";\n", encoding="utf-8")
     (folder / "review_package.json").write_text(json.dumps({
         "kind": "objects", "mode": "tree", "schema": TREE_SCHEMA["id"], "base": "ps_20261114_abcdef",
@@ -224,9 +227,10 @@ def copy_live(folder, src) -> dict:
 class FakeServer:
     """The review server's API, just enough for the object card (see the module docstring)."""
 
-    def __init__(self, folder, caps=("i", "t", "a"), who=None, attr_cap=64, closed=False, fail=False):
+    def __init__(self, folder, caps=("i", "t", "a"), who=None, attr_cap=64, closed=False, fail=False, lock409=0):
         self.folder, self.caps, self.who = Path(folder), list(caps), who
         self.attr_cap, self.closed, self.fail = attr_cap, closed, fail
+        self.lock409 = lock409                    # the next N PUTs: multi_review_server's "open in another server" 409
         self.records, self.puts, self.t = {}, [], 1_700_000_000_000
         self._lock = threading.Lock()
         outer = self
@@ -267,6 +271,10 @@ class FakeServer:
                 rec = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
                 if outer.fail:
                     return self._json({"error": "down"}, 503)
+                if outer.lock409 > 0:
+                    outer.lock409 -= 1
+                    return self._json({"error": "This package is open in another review server: only one may save "
+                                                "to it at a time."}, 409)
                 pend = [k for k, d in (rec.get("dec") or {}).items() if (k.startswith("a:") or k.startswith("i:a:"))
                         and isinstance(d, dict) and d.get("pending") is True]
                 if pend and outer.closed:

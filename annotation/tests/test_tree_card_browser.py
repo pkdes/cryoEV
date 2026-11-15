@@ -49,9 +49,9 @@ def md5(p: Path) -> str:
 
 
 class _Tree(_Browser):
-    def serve_tree(self, *, big=False, width=1280, height=800, **srv_kw):
+    def serve_tree(self, *, big=False, width=1280, height=800, data_closed=False, **srv_kw):
         d = Path(tempfile.mkdtemp(prefix="treecard_")) / "pred_obj_tree_fixture_ab12"
-        data = F.build_tree(d, big=big)
+        data = F.build_tree(d, big=big, closed=data_closed)
         srv = F.FakeServer(d, **srv_kw).start()
         self.addCleanup(srv.close)
         pg = self.page(srv.url + "?who=rev1", width=width, height=height)
@@ -181,6 +181,40 @@ class TreeCardTests(_Tree):
         self.assertEqual(len(srv.puts), n)                                         # nothing sent again
         self.assertEqual(srv.records, {})
 
+
+    def test_other_409_is_retried_not_closed(self):
+        """QC A (rule zero): a 409 that is not {"error": "set closed"} (multi_review_server: the package is open in
+        another review server) keeps the answer and retries, as before r15; the card never says closed."""
+        data, srv, pg = self.serve_tree(lock409=1)
+        pg.keyboard.press("2")
+        for _ in range(40):
+            if srv.puts or srv.lock409 == 0:
+                break
+            pg.wait_for_timeout(100)
+        self.assertEqual(srv.lock409, 0)                                         # the 409 was served
+        self.assertEqual(srv.records, {})
+        self.assertFalse(self.obj(pg)["closed"])
+        self.assertTrue(self.obj(pg)["can"])
+        pg.evaluate("window.dispatchEvent(new Event('online'))")                  # the retry (else in 15 s)
+        for _ in range(40):
+            if srv.records:
+                break
+            pg.wait_for_timeout(100)
+        vals = [d.get("v") for r in srv.records.values() for k, d in r["dec"].items() if k.startswith("a:")]
+        self.assertEqual(vals, ["ML"])                                           # the answer was kept and saved
+        self.assertFalse(self.obj(pg)["closed"])
+        self.assertEqual(pg.query_selector_all("#oOff"), [])                      # no "closed" / offline line
+
+    def test_closed_in_datajs_before_any_answer(self):
+        """QC F: D.closed (object_set.close_set writes it) closes the card at load: no PUT is ever tried."""
+        data, srv, pg = self.serve_tree(data_closed=True)
+        self.assertTrue(self.obj(pg)["closed"])
+        self.assertFalse(self.obj(pg)["can"])
+        self.assertIn("closed", pg.inner_text("#oOff"))
+        pg.keyboard.press("2")
+        pg.evaluate("window.dispatchEvent(new Event('online'))")
+        pg.wait_for_timeout(600)
+        self.assertEqual(srv.puts, [])
 
 @browser
 class ChunkedSaveTests(_Tree):

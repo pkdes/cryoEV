@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-14.3";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-14.4";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const h = document.querySelector("header"), inPortal = /^\/review\//.test(location.pathname), v = document.createElement("span");
   v.id = "pageVer"; v.style.cssText = "font-size:11px;color:var(--mute);white-space:nowrap"; v.textContent = "Review page " + PAGE_VERSION;
@@ -2849,7 +2849,10 @@ async function sync() {
       for (let round = 0, left = pendingAttrs(file).length; ; round++) {
       const body = left > ATTR_PUT_MAX ? chunkOf(edits[file]) : edits[file];
       const r = await tfetch("api/edits?f=" + encodeURIComponent(file), {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
-      if (r.status === 409 && OBJ) { closedOn = true; OBJ.closed(); stop = true; break; }  // r15 (#80g): a closed set refuses answers
+      if (r.status === 409 && OBJ) {  // r15 (#80g): a closed set refuses answers with {"error": "set closed"}
+        let j = null; try { j = await r.json(); } catch (e) {}
+        if (j && j.error === "set closed") { closedOn = true; OBJ.closed(); stop = true; break; }
+      }  // any other 409 (e.g. the package open in another review server): the retry path below, as before r15
       if (r.status === 400) { err = true; banner(`The server rejected the edits for ${file}. Export them and tell the lab.`); break; }
       if (!r.ok) { err = true; stop = true; break; }
       const merged = (await r.json()).edit;  // server merged our record with everyone else's
@@ -2926,6 +2929,8 @@ window.addEventListener("online", () => scheduleSync(100));
 //   D.blind                true: the amber blind banner (a flag only: no column names or values are in data.js)
 //   D.title                the set's name as its maker typed it (the header and the tab title)
 //   D.outline_mode         "target" (default: only the item's own outline) or "target+contained" (+ it.also)
+//   D.closed               (r15, optional) true once the set is closed (object_set.close_set): the card says so and
+//                          sends nothing; absent: open (the server's 409 {"error": "set closed"} also closes it)
 //   D.instructions         (r15 hotfix, optional) the maker's plain-text set instructions (object_set.py instructions):
 //                          an "ⓘ Instructions" button in the top bar opens a panel (textContent, pre-wrap); "?" toggles,
 //                          Esc closes; opened by itself once per browser and text (localStorage). Absent: no change.
@@ -2978,7 +2983,8 @@ function makeObjectView() {
     const p = $("oInstr"), show = on == null ? p.hidden : !!on;
     p.hidden = !show; $("oInfoBtn").setAttribute("aria-expanded", show ? "true" : "false");
   }
-  const st = {pos: 0, outlines: true, img: null, imgSrc: "", ready: false, undo: [], drawn: [], node: 0, badges: [], closed: false};
+  const st = {pos: 0, outlines: true, img: null, imgSrc: "", ready: false, undo: [], drawn: [], node: 0, badges: [], closed: D.closed === true};
+  if (st.closed) closedOn = true;  // D.closed (object_set close_set writes it): closed before any answer is tried
   const imOf = it => byStem.get(String(it.image));
   const can = () => capOn("a") && server && !st.closed;
   // A decision is keyed on an object of the item's image: the item's own object, or (tree cards) one node's object.

@@ -137,6 +137,33 @@ class TreeInfoUnit(unittest.TestCase):
         self.assertIn("would refuse", t["why"])
         self.assertIn("not polygons", t["why"])
 
+    def test_progress_cache_sees_every_save(self):
+        """QC E: card_progress's object-set cache key changes on every save, even when the edits folder's mtime and
+        the record's mtime come out the same (one clock tick): it holds each file's size too."""
+        root = self.tmp / "review"
+        pkg = root / TREE
+        data = OF.build_tree(pkg)
+        it = max(data["items"], key=lambda i: len(i["nodes"]))
+        f = f"{it['image']}.png" if not str(it["image"]).endswith(".png") else it["image"]
+        n = len(data["items"])
+        self.assertEqual(REV.card_progress(pkg), (0, n))
+        ed = pkg / "edits"
+        edit(pkg, f, {"i:note": {"v": "x", "t": 1, "who": "rev1"}})
+        frozen = ed.stat().st_mtime_ns, (ed / f"{f}.json").stat().st_mtime_ns
+        self.assertEqual(REV.card_progress(pkg), (0, n))                          # cached with the note only
+        dec = {}
+        for nd in it["nodes"]:
+            for a in OF.TREE_SCHEMA["object_attrs"]:
+                if a.get("required") and a.get("applies_to") in ("root" if nd["n"] == 1 else "child", "all", None):
+                    dec[f"a:{nd['obj']}:{a['id']}@rev1"] = {"v": a["options"][0]["v"], "t": 2, "who": "rev1"}
+        edit(pkg, f, dec)
+        os.utime(ed / f"{f}.json", ns=(frozen[1], frozen[1]))                      # same tick as the first save
+        os.utime(ed, ns=(frozen[0], frozen[0]))
+        meta = json.loads((pkg / "review_package.json").read_text(encoding="utf-8"))
+        want = 1 if meta.get("reviewers") == ["rev1"] else 0
+        self.assertEqual(REV.card_progress(pkg), (want, n))
+        self.assertNotEqual(REV.edits_sig(ed), None)
+
     def test_tree_schema_flag(self):
         self.assertTrue(RB.is_tree_schema(OF.TREE_SCHEMA))
         self.assertFalse(RB.is_tree_schema(OF.SCHEMA))

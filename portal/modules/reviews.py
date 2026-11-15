@@ -316,6 +316,22 @@ def object_mode(pkg: Path) -> str | None:
     return "tree" if any(isinstance(o, list) for _, o in parsed[0]) else "objects"
 
 
+def edits_sig(edits: Path):
+    """An object set's edits folder as a cache key that changes on every save: the folder's mtime plus each file's
+    (name, mtime_ns, size) (an os.replace over an existing record need not touch the folder's mtime, and two saves
+    can share one mtime tick: the size or the attribute log's length moves). None when there is no folder."""
+    try:
+        sig = [edits.stat().st_mtime_ns]
+        with os.scandir(edits) as it:
+            for e in it:
+                if e.is_file():
+                    st = e.stat()
+                    sig.append((e.name, st.st_mtime_ns, st.st_size))
+    except OSError:
+        return None
+    return (sig[0], hash(tuple(sorted(sig[1:]))))
+
+
 def card_progress(pkg: Path) -> tuple:
     """(cards decided, cards in all) for a package, or (None, None) when its data.js can't be read. Cached by the
     data.js and edits folder mtimes. An object set (round 14): (items done by every reviewer, items)."""
@@ -325,10 +341,7 @@ def card_progress(pkg: Path) -> tuple:
     except OSError:
         return None, None
     if pkg.name.startswith(OBJECTS_PREFIX):            # contract C4: every object set is pred_obj_<slug>_<4hex>
-        try:
-            esig0 = (pkg / "edits").stat().st_mtime_ns
-        except OSError:
-            esig0 = None
+        esig0 = edits_sig(pkg / "edits")
         got = _object_card_progress(pkg, (st.st_mtime_ns, st.st_size), esig0)
         if got is not None:
             return got
@@ -571,20 +584,10 @@ def close_set(root, pkg: Path, who: str, *, lock_wait: float = LOCK_WAIT_S) -> d
 
 
 def registry_closed(reg, pkg_id: str, who: str) -> str:
-    """The registry status line for a closed set: review_package <id> -> "reviewed", status_by = the closer (a
-    person: via None). -> "written", or why not ("no registry", "not in the registry", "not in people.json", ...)."""
-    if not reg:
-        return "no registry"
-    try:
-        from registry import store
-        if store.current("review_package", Path(reg)).get(pkg_id) is None:
-            return "not in the registry"
-        if who not in store.roster():
-            return "not in people.json"
-        store.set_status(pkg_id, "reviewed", who, root=Path(reg), via=None, note="closed in the portal")
-        return "written"
-    except Exception as e:                              # noqa: BLE001  the set stays closed either way
-        return f"not written ({type(e).__name__})"
+    """The registry status line for a closed set: annotation.object_set.registry_closed (the CLI's close writes the
+    same line). -> "written", or why not."""
+    from annotation import object_set as OS
+    return OS.registry_closed(reg, pkg_id, who)
 
 
 def same_name(typed, title) -> bool:

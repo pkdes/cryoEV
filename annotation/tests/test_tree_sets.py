@@ -436,6 +436,87 @@ class TreeServer(unittest.TestCase):
         t2 = OS.to_csv(tab2)
         self.assertEqual(OS.to_csv(OS.import_csv(t2, OS.read_schema(self.srv.pkg), items)), t2)
 
+    # ---- r15 integration (QC B / C / D / F)
+    def test_close_rechecked_under_the_write_lock(self):
+        """QC B: a set closed after the request's first check (while it waited for the write lock) is refused 409 and
+        nothing is written."""
+        calls = []
+
+        def closed(pkg):
+            calls.append(1)
+            return len(calls) > 1                       # open at the first check, closed by the time of the write
+        f = self.file["0001"]
+        target = self.srv.pkg / "edits" / f"{f}.json"
+        with mock.patch.object(rs, "package_closed", closed):
+            code, body = self.answer("0001", "au1", {2: "layer"})
+        self.assertEqual((code, body), (409, {"error": "set closed"}))
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(target.exists())
+
+    def test_export_drops_answers_after_the_close(self):
+        """QC B: an answer stamped after closed_t (+ the second's 999 ms) never reaches the export."""
+        self.assertEqual(self.answer("0001", "au1", {2: "layer", 3: "inner_vesicle"})[0], 200)
+        root = node(self.d, "0001", 1)
+        row = lambda tab: next(r for r in tab["rows"] if r["image"] == "0001" and r["node_n"] == 1)  # noqa: E731
+        self.assertEqual(row(OS.table(self.srv.pkg))["type@au1"], "ML")
+        OS.close_set(self.srv.pkg, "pujan", do=True)
+        self.assertEqual(row(OS.table(self.srv.pkg))["type@au1"], "ML")             # before the close: kept
+        cut = OS.close_cutoff_ms(self.srv.pkg)
+        ef = self.srv.pkg / "edits" / f"{self.file['0001']}.json"
+        rec = json.loads(ef.read_text(encoding="utf-8"))
+        rec["edit"]["dec"][f"a:{root}:type@au1"]["server_t"] = cut + 1               # as if written after the close
+        ef.write_text(json.dumps(rec), encoding="utf-8")
+        self.assertIsNone(row(OS.table(self.srv.pkg))["type@au1"])
+        rec["edit"]["dec"][f"a:{root}:type@au1"]["server_t"] = cut                   # the close's own second: kept
+        ef.write_text(json.dumps(rec), encoding="utf-8")
+        self.assertEqual(row(OS.table(self.srv.pkg))["type@au1"], "ML")
+
+    def test_close_writes_datajs_flag_only(self):
+        """QC F: close_set also sets data.js D.closed (every other key and byte unchanged), so a card opened later
+        says closed before an answer is tried."""
+        before = OS._split_datajs((self.srv.pkg / "data.js").read_bytes())[0]
+        self.assertNotIn("closed", before)
+        r = OS.close_set(self.srv.pkg, "pujan", do=True)
+        self.assertTrue(r["datajs"])
+        after = OS._split_datajs((self.srv.pkg / "data.js").read_bytes())[0]
+        self.assertIs(after.pop("closed"), True)
+        self.assertEqual(after, before)
+
+    def test_cli_close_writes_the_registry_line(self):
+        """QC C: close --do --registry writes the review_package status line through registry_closed (the helper the
+        portal's Close set uses); without --registry it says none was written."""
+        seen = []
+        with mock.patch.object(OS, "registry_closed", lambda reg, pid, who: seen.append((reg, pid, who)) or "written"):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(OS.main(["close", str(self.srv.pkg), "--by", "pujan", "--do", "--registry",
+                                          str(self.tmp / "reg")]), 0)
+        self.assertEqual(seen, [(self.tmp / "reg", self.srv.pkg.name, "pujan")])
+        self.assertIn('Registry status line "reviewed": written', buf.getvalue())
+        from portal.modules import reviews as REV
+        with mock.patch.object(OS, "registry_closed", lambda *a: "via OS"):
+            self.assertEqual(REV.registry_closed("r", "p", "w"), "via OS")             # one helper
+
+    def test_import_refuses_partial_duplicate_or_broken_trees(self):
+        """QC D: every node of an item exactly once, parents inside the item: else ObjectSetError (no KeyError)."""
+        self.assertEqual(self.answer("0001", "au1", {2: "layer", 3: "inner_vesicle"})[0], 200)
+        items = OS.read_items(self.srv.pkg)
+        text = OS.to_csv(OS.table(self.srv.pkg))
+        rows = list(csv.reader(io.StringIO(text)))
+        hdr = rows[0]
+        i_child = next(k for k, r in enumerate(rows) if r[1] == "0001" and r[2] == "2")
+        dup = rows + [rows[i_child]]
+        part = [r for k, r in enumerate(rows) if k != i_child]
+        loop = [list(r) for r in rows]
+        loop[i_child][hdr.index("parent_n")] = "2"
+        for b in (dup, part, loop):
+            buf = io.StringIO()
+            csv.writer(buf, lineterminator="\n").writerows(b)
+            for its in ((items, None) if b is not part else (items,)):    # partial: known only against items.json
+                with self.assertRaises(OS.ObjectSetError):
+                    OS.import_csv(buf.getvalue(), OS.read_schema(self.srv.pkg), its)
+        self.assertEqual(OS.to_csv(OS.import_csv(text, OS.read_schema(self.srv.pkg), items)), text)   # control
+
     def test_blind_http(self):
         self.assertEqual(self.answer("0001", "au1", {2: "layer", 3: "layer"})[0], 200)
         bodies = {}

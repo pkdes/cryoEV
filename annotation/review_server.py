@@ -567,7 +567,7 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
                     who = _request_identity(self, d.get("who"))
                     if who != d.get("who"):
                         d["who"] = who
-            attr_new = None
+            attr_new, pend = None, []
             if any(is_attr_key(k) for k in edit.get("dec") or {}):  # round 14: only bodies with attributes
                 pend = [k for k, d in edit["dec"].items() if is_attr_key(k) and isinstance(d, dict)
                         and d.get("pending") is True]
@@ -597,6 +597,8 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
                         return self._json(400, {"error": why})
             target = edits_dir / f"{file}.json"
             with lock:
+                if pend and schema is not None and package_closed(pkg):  # #80g: closed while this request waited
+                    return self._json(409, {"error": "set closed"})
                 saved = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
                 cur = saved.get("edit")
                 now = int(time.time() * 1000)
