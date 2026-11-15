@@ -7,6 +7,16 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-15 10:40 · Round 15: whole-tree cards, help lines, Close set
+
+- **Whole-tree cards:** an object set can show one card per vesicle tree (the outer EV and every outline inside it, numbered on the image). For each inner outline you answer "layer of the outer EV", "inner vesicle" (and its type), "not a membrane" or "duplicate". Tab moves between outlines on a laptop. Start one from Reviews → Start a review → Object set → "Whole tree per card".
+- **Counting rule on the cards:** count the outer EV's own level only: concentric membranes = the outer membrane plus its own layers; each inner vesicle counts as 1; anything deeper goes in the note.
+- **Help lines:** each question can carry a one-line definition under it (new schemas `ls_lamellarity_v2` and `ls_lamellarity_tree_v1`).
+- **Lamellarity tree step on Results:** a new analysis step (`nesting_tree` v1) splits nested outlines into layers vs inner vesicles, measured at 1440 px; it reproduces the poster numbers exactly (134/134 items, 399/399 outlines). Adding it adds the nesting step automatically.
+- **Close set:** the set's maker or an admin can close an object set (final; type the set name to confirm). Answers are switched off and the blind banner goes away; exports open to everyone with access.
+- **Fixes:** large sets save in chunks; step names on Results no longer break mid-word; the CLI dataset copy checks free disk space first.
+- **Components:** portal / review page 2026-11-14.4 / registry (closed object sets, tree sets) / CLI (`annotation.object_set build --tree`, `close`).
+
 ## 2026-11-14 15:45 · Set instructions on object cards
 
 - **Set instructions:** an object set can carry its maker's instructions (how to count, what to note). Every card shows an "ⓘ Instructions" button in the top bar that opens them in a small panel (phone and laptop; `?` opens and closes it, Esc closes). The panel opens by itself the first time you open the set in a browser, and again if the instructions change.
