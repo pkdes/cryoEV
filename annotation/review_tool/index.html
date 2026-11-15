@@ -3208,7 +3208,8 @@ function makeObjectView() {
     h.append(badge);
     if (nd.n === 1) h.append(el("span", null, "Outer vesicle"));
     else { h.append(el("span", null, "Inside")); h.append(el("span", "oBadge sm", nd.parent != null ? String(nd.parent) : "?")); }
-    const ok = nodeDone(it, nd); h.append(el("span", "ndone" + (ok ? " fin" : ""), ok ? "✓ done" : "open"));
+    const ok = nodeDone(it, nd);
+    if (ok || !st.closed) h.append(el("span", "ndone" + (ok ? " fin" : ""), ok ? "✓ done" : "open"));  // closed: no "open" tag
     blk.setAttribute("aria-label", nd.n === 1 ? `Node ${nd.n}, outer vesicle` : `Node ${nd.n}, inside node ${nd.parent}`);
     blk.append(h);
     for (const a of attrsFor(nd)) blk.append(rowFor(it, a, on, nd));
@@ -3321,7 +3322,7 @@ function makeObjectView() {
   function start() {
     $("app").style.display = "none"; $("tri").hidden = true; $("obj").hidden = false;
     document.title = PKG_TITLE;
-    $("oBlind").hidden = !blind;
+    $("oBlind").hidden = !blind || st.closed;   // a closed set is no longer blind to its maker; the banner would contradict it
     let want = null; try { want = localStorage.getItem(POS_KEY); } catch (e) {}
     const at = want ? items.findIndex(it => it.id === want) : -1;
     st.pos = at >= 0 ? at : Math.max(0, items.findIndex(it => !isDone(it)));
@@ -3346,7 +3347,7 @@ function makeObjectView() {
     }
     render(); connectObjects();
   }
-  function closed() { if (st.closed) return; st.closed = true; render(); }  // the server answered 409 "set closed"
+  function closed() { if (st.closed) return; st.closed = true; $("oBlind").hidden = true; render(); }  // 409 "set closed"
   const treeState = () => {
     const it = items[st.pos], ns = it ? it._nodes || [] : [];
     return {node: st.node, nodes: ns.map(nd => ({n: nd.n, obj: nd.obj, parent: nd.parent, done: nodeDone(it, nd),
