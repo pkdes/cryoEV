@@ -10,15 +10,15 @@
  ],
  "object_attrs": [
   {"id": "type", "label": "Type", "kind": "choice", "required": true, "applies_to": "root",
-   "help": "Its own level: concentric layers make it ML, separate vesicles inside make it MV.",
+   "help": "Its own level: concentric layers make it ML; separate vesicles inside make it MV (multivesicular).",
    "options": [
     {"v": "single", "label": "Single", "key": "1"},
     {"v": "ML", "label": "ML", "key": "2"},
-    {"v": "MV_vesicular", "label": "MV multivesicular", "key": "3"},
+    {"v": "MV_vesicular", "label": "MV", "key": "3"},
     {"v": "ML+MV", "label": "ML+MV", "key": "4"},
     {"v": "unsure", "label": "Unsure", "key": "0"}
    ]},
-  {"id": "relation", "label": "Relation", "kind": "choice", "required": true, "applies_to": "child",
+  {"id": "relation", "label": "What is it?", "kind": "choice", "required": true, "applies_to": "child",
    "help": "Relative to the outline it sits in: one of its own concentric layers, or a separate vesicle inside it.",
    "options": [
     {"v": "layer", "label": "Layer of parent", "key": "l"},
@@ -28,10 +28,11 @@
    ]},
   {"id": "inner_type", "label": "If inner vesicle: its type", "kind": "choice", "required": false,
    "applies_to": "child",
+   "help": "MV = multivesicular: separate vesicles inside it.",
    "options": [
     {"v": "single", "label": "Single"},
     {"v": "ML", "label": "ML"},
-    {"v": "MV_vesicular", "label": "MV multivesicular"},
+    {"v": "MV_vesicular", "label": "MV"},
     {"v": "ML+MV", "label": "ML+MV"},
     {"v": "unsure", "label": "Unsure"}
    ]},

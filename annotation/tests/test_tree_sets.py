@@ -108,6 +108,13 @@ class SchemaFields(unittest.TestCase):
         self.assertEqual([o["v"] for o in a["type"]["options"]], ["single", "ML", "MV_vesicular", "ML+MV", "unsure"])
         self.assertEqual([o["key"] for o in a["type"]["options"]], ["1", "2", "3", "4", "0"])
         self.assertEqual((a["relation"]["applies_to"], a["relation"]["required"]), ("child", True))
+        # r15 integration wording: the page header says "Inside n", so the question is "What is it?"; type's MV
+        # option reads "MV" with the help line saying multivesicular (values unchanged)
+        self.assertEqual(a["relation"]["label"], "What is it?")
+        self.assertEqual([o["label"] for o in a["type"]["options"]], ["Single", "ML", "MV", "ML+MV", "Unsure"])
+        self.assertEqual([o["label"] for o in a["inner_type"]["options"]], ["Single", "ML", "MV", "ML+MV", "Unsure"])
+        self.assertIn("MV (multivesicular)", a["type"]["help"])
+        self.assertIn("multivesicular", a["inner_type"]["help"])
         self.assertEqual([(o["label"], o["key"]) for o in a["relation"]["options"]],
                          [("Layer of parent", "l"), ("Inner vesicle", "v"), ("Not a membrane", "x"),
                           ("Duplicate outline", "d")])

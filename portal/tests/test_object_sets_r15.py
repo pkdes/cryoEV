@@ -31,6 +31,8 @@ import cjtest as T  # noqa: E402
 sys.path.insert(0, str(T.REPO / "annotation" / "tests"))
 import object_card_fixture as OF  # noqa: E402
 from test_reviews_hub import fake_listing  # noqa: E402
+import test_tree_sets as TS  # noqa: E402  (annotation/tests: B2's tree objects.csv fixture)
+from test_object_sets import GOLDEN  # noqa: E402
 from annotation import multi_review_server as MRS  # noqa: E402
 from portal import auth as A  # noqa: E402
 from portal import review_build as RB  # noqa: E402
@@ -54,6 +56,30 @@ def edit(pkg, file, dec):
     tmp = pkg / "edits" / f".{file}.tmp"
     tmp.write_text(json.dumps({"edit": {"dec": {**old, **dec}}}), encoding="utf-8")
     os.replace(tmp, have)
+
+
+def tree_ps(ps_dir: Path, owner=None, name=None, fixture=None, extra_rows=()) -> Path:
+    """A whole-tree-ready prediction set: the golden set (request, images, predictions) under ps_dir's id, with B2's
+    nesting_tree objects.csv fixture (0001 / 0002 / 0003 trees of 3 nodes each; 0001 line 2 a root with no child)."""
+    shutil.copytree(GOLDEN, ps_dir)
+    req = json.loads((ps_dir / "request.json").read_text(encoding="utf-8"))
+    req["ps"] = ps_dir.name
+    if owner:
+        req.update(owner=owner, name=name or f"Run {ps_dir.name[-6:]}")
+    (ps_dir / "request.json").write_text(json.dumps(req), encoding="utf-8")
+    TS.write_results(ps_dir, fixture=TS.FIXTURE if fixture is None else fixture, extra_rows=extra_rows)
+    return ps_dir
+
+
+def tree_row(img, ln, parent, role, vd, **kw):
+    """One objects.csv row as TS.write_results writes it, with extra columns (e.g. exclude_reason)."""
+    r = {c: "" for c in TS.COLS}
+    r.update(image=img, line=ln, pkg_key="", cls=0, conf=0.9, included=1)
+    r.update({"nesting.parent_line": "" if parent is None else parent, "nesting_tree.unit": f"u{img}{ln}",
+              "nesting_tree.role": role, "nesting_tree.vesicle_depth": vd, "nesting_tree.layer_index": 0,
+              "nesting_tree.wide": 0})
+    r.update(kw)
+    return r
 
 
 def write_results(ps_dir: Path, tree_step=True):
@@ -82,13 +108,34 @@ class TreeInfoUnit(unittest.TestCase):
     def test_counts_and_reasons(self):
         ps = self.tmp / "ps_20261114_111111"
         self.assertEqual(RB.tree_info(ps)["ok"], False)                                  # no results at all
-        write_results(ps)
-        self.assertEqual(RB.tree_info(ps), {"ok": True, "why": "", "trees": 2, "nodes": 6, "images": 2})
+        tree_ps(ps)
+        self.assertEqual(RB.tree_info(ps), {"ok": True, "why": "", "trees": 3, "nodes": 9, "images": 3})
         plain = self.tmp / "ps_20261114_222222"
         write_results(plain, tree_step=False)
         t = RB.tree_info(plain)
         self.assertFalse(t["ok"])
         self.assertIn("nesting tree step", t["why"])
+
+    def test_counts_are_the_builds(self):
+        """r15 integration: the callout counts are object_set.tree_plan's, so they equal what the build makes: a
+        rejected image (0002) and a tree holding a line-less (drawn) outline (0003) are left out."""
+        from annotation import object_set as OS
+        ps = self.tmp / "ps_20261114_333333"
+        fx = [f for f in TS.FIXTURE if f[0] != "0002"]
+        extra = [tree_row(i, ln, par, role, vd, exclude_reason="rejected_image")
+                 for i, ln, par, role, vd in TS.FIXTURE if i == "0002"]
+        extra.append(tree_row("0003", "", 1, "lamella", 0))                       # drawn on a reviewed image
+        tree_ps(ps, fixture=fx, extra_rows=extra)
+        plan = OS.tree_plan(ps, "ls_lamellarity_tree_v1")
+        self.assertEqual(plan["keys"], [("0001", 0)])
+        self.assertEqual(RB.tree_info(ps), {"ok": True, "why": "", "trees": 1, "nodes": plan["n_nodes"], "images": 1})
+        self.assertEqual(plan["n_nodes"], 3)
+        bad = self.tmp / "ps_20261114_444444"                                     # a line with no polygon
+        tree_ps(bad, fixture=TS.FIXTURE + [("0003", 7, 0, "lamella", 0)])
+        t = RB.tree_info(bad)
+        self.assertFalse(t["ok"])
+        self.assertIn("would refuse", t["why"])
+        self.assertIn("not polygons", t["why"])
 
     def test_tree_schema_flag(self):
         self.assertTrue(RB.is_tree_schema(OF.TREE_SCHEMA))
@@ -122,6 +169,44 @@ class TreeInfoUnit(unittest.TestCase):
             REV.close_set(root, pkg, "admin1")
         self.assertEqual(json.loads((pkg / "review_package.json").read_text(encoding="utf-8"))["closed_by"], "maker")
         self.assertEqual([p.name for p in pkg.glob(".review_package.json.*")], [])        # no temp file left
+
+    def test_close_set_writes_through_object_set(self):
+        """One code path for `closed` (r15 integration): the portal's close_set calls annotation.object_set.close_set
+        for the file write (do=True, the closer, the lock wait), and maps its refusals to CloseError."""
+        from annotation import object_set as OS
+        root = self.tmp / "review"
+        pkg = root / TREE
+        OF.build_tree(pkg)
+        seen = []
+        real = OS.close_set
+
+        def spy(p, by, do=False, lock_wait=5.0):
+            seen.append((Path(p), by, do, lock_wait))
+            return real(p, by, do=do, lock_wait=lock_wait)
+        with mock.patch.object(OS, "close_set", spy):
+            meta = REV.close_set(root, pkg, "maker", lock_wait=0.5)
+            with self.assertRaises(REV.CloseError) as cm:
+                REV.close_set(root, pkg, "admin1")
+        self.assertEqual(seen[0], (pkg, "maker", True, 0.5))
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(str(cm.exception), "This set is already closed.")
+        self.assertEqual(meta, json.loads((pkg / "review_package.json").read_text(encoding="utf-8")))
+
+    def test_close_set_busy_lock_and_wrong_root(self):
+        from annotation import prediction_package as pp
+        root = self.tmp / "review"
+        pkg = root / TREE
+        OF.build_tree(pkg)
+        lk = pp.meta_lock(root, TREE, 1.0)
+        try:
+            with self.assertRaises(REV.CloseError) as cm:
+                REV.close_set(root, pkg, "maker", lock_wait=0.2)
+            self.assertTrue(cm.exception.busy)
+        finally:
+            lk.close()
+        with self.assertRaises(REV.CloseError):
+            REV.close_set(self.tmp / "elsewhere", pkg, "maker")
+        self.assertNotIn("closed", json.loads((pkg / "review_package.json").read_text(encoding="utf-8")))
 
     def test_tree_builds_go_to_build_tree(self):
         """The portal's builder call: tree=True -> object_set.build_tree (B2) without items_csv / tree."""
@@ -168,12 +253,14 @@ class TreeSetsPortal(unittest.TestCase):
         m1.update(owner="maker", reviewers=["rev1"])
         (cls.one / "review_package.json").write_text(json.dumps(m1), encoding="utf-8")
         (cls.one / ".review_key").write_text("k" * 20, encoding="utf-8")
-        for ps, step in ((PS_TREE, True), (PS_PLAIN, False)):
-            d = cls.predict / ps
-            d.mkdir()
-            (d / "request.json").write_text(json.dumps({"owner": T.USER, "name": f"Run {ps[-6:]}"}), encoding="utf-8")
-            (d / "status.json").write_text(json.dumps({"state": "done", "n_total": 9}), encoding="utf-8")
-            write_results(d, tree_step=step)
+        tree_ps(cls.predict / PS_TREE, owner=T.USER)
+        (cls.predict / PS_TREE / "status.json").write_text(json.dumps({"state": "done", "n_total": 9}),
+                                                           encoding="utf-8")
+        d = cls.predict / PS_PLAIN
+        d.mkdir()
+        (d / "request.json").write_text(json.dumps({"owner": T.USER, "name": f"Run {PS_PLAIN[-6:]}"}), encoding="utf-8")
+        (d / "status.json").write_text(json.dumps({"state": "done", "n_total": 9}), encoding="utf-8")
+        write_results(d, tree_step=False)
         reg = cls.env.registry
         (reg / "defs" / "label_schema").mkdir(parents=True)
         lines = []
@@ -367,7 +454,7 @@ class TreeSetsPortal(unittest.TestCase):
         self.assertIn('<option value="ls_lamellarity_v1">', page)
         blob = re.search(r'<script type="application/json" id="rs-obj-trees">(.*?)</script>', page).group(1)
         trees = json.loads(blob)
-        self.assertEqual(trees[PS_TREE], {"ok": True, "why": "", "trees": 2, "nodes": 6, "images": 2})
+        self.assertEqual(trees[PS_TREE], {"ok": True, "why": "", "trees": 3, "nodes": 9, "images": 3})
         self.assertFalse(trees[PS_PLAIN]["ok"])
         self.assertIn('id="rs-obj-tree-note"', page)
         self.assertIn('class="rs-only-objects"', page)
@@ -405,7 +492,7 @@ class TreeSetsPortal(unittest.TestCase):
                     break
                 time.sleep(0.05)
             self.assertEqual((jst["phase"], jst["pkg"], jst["n_items"], jst["cards"]),
-                             ("done", "pred_obj_tree_check_2_beef", 2, "tree"))
+                             ("done", "pred_obj_tree_check_2_beef", 3, "tree"))
             kw = got[-1]
             self.assertEqual((kw["tree"], kw["items_csv"], kw["schema"], kw["ps_dir"], kw["reviewers"], kw["slug"],
                               kw["title"], kw["built_by"]),
@@ -414,7 +501,7 @@ class TreeSetsPortal(unittest.TestCase):
             self.assertNotIn("blind_cols", kw)
             st, _, page = self.get(loc, "admin")
             self.assertIn("Done: object set built", page)
-            self.assertIn("2 trees", page)
+            self.assertIn("3 trees", page)
             n = len(got)
             for fields, why in (([x for x in base if x[0] != "schema"] + [("schema", "ls_lamellarity_v1")],
                                  "whole-tree label schema"),
@@ -426,7 +513,7 @@ class TreeSetsPortal(unittest.TestCase):
         from portal import audit as PA
         lines = [json.loads(x) for x in PA.audit_path(self.env.state).read_text(encoding="utf-8").splitlines() if x]
         self.assertTrue(any(x.get("action") == "object set built" and (x.get("detail") or {}).get("cards") == "tree"
-                            and x["detail"].get("items") == 2 for x in lines))
+                            and x["detail"].get("items") == 3 for x in lines))
 
 
 if __name__ == "__main__":

@@ -33,6 +33,15 @@ Columns per object (blank for a non-EV outline or one with no pixels):
   call           the unit's call (e.g. MV[ML2,s]) on the unit's first outline; blank on lamella rows
 With no nm/px the rule cannot run: unit, parent_unit, role, layer_index, vesicle_depth, wide and call are blank
 (offset_idx / shape_idx are ratios and are still given).
+
+Measuring raster (param measure_px, user decision 11-14): the rule's thresholds were calibrated on the poster's
+rasters, 1440 px wide (5760 x 4088 images at 1440 x 1022, 1.4724 nm/px). With measure_px = 1440 an image WIDER than
+1440 px has each tree pair's gap stats (median / min / area_ratio) and polar indices measured on the outlines
+rasterised at 1440 px wide: the polygon (poly_px) scaled by s = 1440 / W and filled like the prediction loader
+(int truncation, cv2.fillPoly) on a 1440 x round(H * s) canvas, nm/px divided by s; an object with no polygon has its
+mask resized (nearest). Images 1440 px wide or narrower are measured as they are (never upsampled; the poster did
+the same for its 1440 x 1024 images). The tree itself (which outline is in which) is nesting v1's, at native
+resolution. measure_px = None measures every image at native resolution with nesting v1's own gap stats.
 """
 from __future__ import annotations
 
@@ -42,7 +51,7 @@ from collections import Counter, defaultdict
 from analysis.steps import Step, is_ev, obj_mask
 
 PARAMS = {"rule": "tree_v2", "g_ml_nm": 16, "offset_max": 0.65, "shape_max": 0.35, "gap_min_nm": 1.5,
-          "wide_as_layer": False}
+          "wide_as_layer": False, "measure_px": 1440}
 COLUMNS = ("unit", "parent_unit", "role", "layer_index", "vesicle_depth", "offset_idx", "shape_idx", "wide", "call")
 
 
@@ -175,6 +184,26 @@ def structure(ctx, objs, prior, crops):
     return out
 
 
+def measure_scale(ctx, measure_px):
+    """s = measure_px / W when the image is wider than measure_px, else None (measure at native resolution)."""
+    if not measure_px or not ctx.get("W") or int(ctx["W"]) <= int(measure_px):
+        return None
+    return int(measure_px) / int(ctx["W"])
+
+
+def scaled_mask(ctx, o, s, H2, W2):
+    """The object's outline on the measuring canvas (H2 x W2): its polygon scaled by s and filled like the prediction
+    loader (int truncation of each vertex, cv2.fillPoly), else its mask resized (nearest)."""
+    import cv2
+    import numpy as np
+    m = np.zeros((H2, W2), np.uint8)
+    if o.get("poly_px"):
+        pts = np.array([(int(x * s), int(y * s)) for x, y in o["poly_px"]], np.int32)
+        cv2.fillPoly(m, [pts], 1)
+        return m > 0
+    return cv2.resize(obj_mask(ctx, o).astype(np.uint8), (W2, H2), interpolation=cv2.INTER_NEAREST) > 0
+
+
 def run_image(ctx, objs, prior, params=None):
     from analysis.steps import nesting as N
     p = dict(PARAMS if params is None else params)
@@ -182,12 +211,26 @@ def run_image(ctx, objs, prior, params=None):
     crops = [N.crop(obj_mask(ctx, o)) if is_ev(ctx, o) else None for o in objs]
     out = {c: [None] * len(objs) for c in COLUMNS}
     par_of = structure(ctx, objs, prior, crops)
+    s = measure_scale(ctx, p.get("measure_px"))
+    if s is not None:                                # measure the tree pairs on the measure_px-wide raster
+        W2, H2 = int(p["measure_px"]), int(round(ctx["H"] * s))
+        nm2 = None if nm is None else float(nm) / s
+        want = sorted({k for k in par_of} | {par for par, _ in par_of.values()})
+        mcrops = {k: N.crop(scaled_mask(ctx, objs[k], s, H2, W2)) for k in want}
     edges = []
     for k, (par, entry) in sorted(par_of.items()):
-        off, shp = polar_pair(crops[par], crops[k], nm)
+        if s is None:
+            off, shp = polar_pair(crops[par], crops[k], nm)
+            ar, gmed, gmin = entry["area_ratio"], entry.get("gap_median_nm"), entry.get("gap_min_nm")
+        elif mcrops[par] is None or mcrops[k] is None:   # no pixel left at measure_px: not concentric, no gap
+            off = shp = None
+            ar, gmed, gmin = entry["area_ratio"], float("nan"), float("nan")
+        else:
+            off, shp = polar_pair(mcrops[par], mcrops[k], nm2)
+            st = N.child_stats(mcrops[par], mcrops[k], H2, W2, nm2)
+            ar, gmed, gmin = st["area_ratio"], st["gap_median_nm"], st["gap_min_nm"]
         out["offset_idx"][k], out["shape_idx"][k] = off, shp
-        edges.append({"parent": par, "child": k, "area_ratio": entry["area_ratio"],
-                      "gap_median_nm": entry.get("gap_median_nm"), "gap_min_nm": entry.get("gap_min_nm"),
+        edges.append({"parent": par, "child": k, "area_ratio": ar, "gap_median_nm": gmed, "gap_min_nm": gmin,
                       "offset_idx": off, "shape_idx": shp})
     if nm is None:
         return out                                   # no nm/px: no gap in nm, so no calls
@@ -248,5 +291,6 @@ NESTING_TREE_V1 = Step("nesting_tree", 1, needs=("nesting",), pins={"nesting": 1
                        title="Lamellarity tree",
                        description="ML / MV call for every EV and every vesicle inside it (rule tree v2: a layer "
                                    "is a child with median gap <= 16 nm, offset <= 0.65, shape <= 0.35, min gap "
-                                   ">= 1.5 nm; every other child is an inner vesicle). Adds Nesting.",
+                                   ">= 1.5 nm, measured at 1440 px wide as calibrated; every other child is an "
+                                   "inner vesicle). Adds Nesting.",
                        summary=summary)

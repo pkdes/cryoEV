@@ -19,7 +19,8 @@ Reviews module (CryoEV portal, all roles; round 13, the Reviews hub): every revi
                                          the amber warning and "type the set name to confirm"; a closed set says who
                                          closed it and when. The hub's one 404 for anyone else / any other package
     POST /reviews/<id>/close             t (form token) + confirm (the set's name as the hub shows it, spaces
-                                         normalised); never bearer. close_set(): closed / closed_by / closed_t in
+                                         normalised); never bearer. close_set() (annotation.object_set.close_set
+                                         writes it): closed / closed_by / closed_t in
                                          review_package.json under the meta lock (re-read, temp file + os.replace;
                                          already closed: refused, it is final), then a registry status line
                                          "reviewed" (status_by = the closer; skipped with a note when the registry has
@@ -540,42 +541,33 @@ class CloseError(Exception):
         self.busy = busy
 
 
-def close_set(root, pkg: Path, who: str, *, lock_wait: float = LOCK_WAIT_S, retry_s: float = REPLACE_RETRY_S,
-              now=None) -> dict:
-    """closed: true, closed_by, closed_t into <pkg>/review_package.json: the reviewers' OS lock
-    (<root>/.meta_locks/<pkg>.lock), re-read, temp file + os.replace; every other key kept as read. Final: a set
-    already closed is refused (CloseError). -> the new meta."""
-    from data_utils.oslock import acquire_lock
+def close_set(root, pkg: Path, who: str, *, lock_wait: float = LOCK_WAIT_S) -> dict:
+    """closed: true, closed_by, closed_t into <pkg>/review_package.json, written by annotation.object_set.close_set
+    (one code path for `closed`: the CLI's and the portal's): under the reviewers' OS lock
+    (<root>/.meta_locks/<pkg>.lock), re-read, temp file + os.replace, every other key kept as read. Final: a set
+    already closed is refused (CloseError). `root` must be the folder that holds pkg. -> the new meta."""
+    from annotation import object_set as OS
     pkg = Path(pkg)
+    if Path(root).resolve() != pkg.parent.resolve():
+        raise CloseError("This set is not in the review folder, so it was not closed.")
     try:
-        locks = Path(root) / LOCK_DIR
-        locks.mkdir(exist_ok=True)
-        lk = acquire_lock(locks / f"{pkg.name}.lock", wait=lock_wait)
-    except (OSError, TypeError):
-        lk = None
-    if lk is None:
-        raise CloseError("Someone is changing this set's settings right now. Try again in a moment.", busy=True)
-    try:
-        meta = _read_json(pkg / "review_package.json")
-        if not isinstance(meta, dict):
-            raise CloseError("This set's settings could not be read, so it was not closed.")
-        if meta.get("closed") is True:
-            raise CloseError("This set is already closed.")
-        meta.update(closed=True, closed_by=who, closed_t=(now or datetime.now().astimezone()).isoformat(timespec="seconds"))
-        tmp = pkg / f".review_package.json.{secrets.token_hex(4)}.tmp"
-        try:
-            tmp.write_text(json.dumps(meta, indent=1, ensure_ascii=False), encoding="utf-8")
-            _replace(tmp, pkg / "review_package.json", retry_s)
-        except OSError:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-            raise CloseError("The set's settings are open elsewhere and could not be saved. Try again.",
-                             busy=True) from None
-        return meta
-    finally:
-        lk.close()
+        OS.close_set(pkg, who, do=True, lock_wait=lock_wait)
+    except TimeoutError:
+        raise CloseError("Someone is changing this set's settings right now. Try again in a moment.",
+                         busy=True) from None
+    except OS.ObjectSetError as e:
+        if "already closed" in str(e):
+            raise CloseError("This set is already closed.") from None
+        if "not an object set" in str(e):
+            raise CloseError("This set's settings could not be read, so it was not closed.") from None
+        raise CloseError(f"The set was not closed: {e}.") from None
+    except OSError:
+        raise CloseError("The set's settings are open elsewhere and could not be saved. Try again.",
+                         busy=True) from None
+    meta = _read_json(pkg / "review_package.json")
+    if not isinstance(meta, dict):
+        raise CloseError("This set's settings could not be read back after closing.")
+    return meta
 
 
 def registry_closed(reg, pkg_id: str, who: str) -> str:

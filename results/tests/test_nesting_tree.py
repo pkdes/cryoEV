@@ -19,6 +19,7 @@ import json
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import numpy as np
@@ -33,7 +34,7 @@ from results.tests.test_steps import PS, SynthPS, disc, read_csv  # noqa: E402
 C = importlib.import_module("results.compute")
 
 FINAL = {"rule": "tree_v2", "g_ml_nm": 16, "offset_max": 0.65, "shape_max": 0.35, "gap_min_nm": 1.5,
-         "wide_as_layer": False}
+         "wide_as_layer": False, "measure_px": 1440}
 TRIAL = dict(FINAL, offset_max=0.5, shape_max=0.3)
 
 
@@ -319,6 +320,80 @@ def tree_links(out, objs, prior):
             assert host in {line_of[j] for j in by_unit[out["parent_unit"][k]].values()}
             links.add((host, line_of[k]))
     return links
+
+
+def circle_poly(cx, cy, r, n=180):
+    import math
+    return [[cx + r * math.cos(2 * math.pi * k / n), cy + r * math.sin(2 * math.pi * k / n)] for k in range(n)]
+
+
+def poly_objs(spec, scale):
+    """[(cx, cy, r)] at 1440-px coordinates -> objects at `scale` x that size, each with poly_px and the mask
+    obj_mask rasterises from it (int truncation + fillPoly, as results.compute)."""
+    W = H = 1440 * scale
+    out = []
+    for k, (cx, cy, r) in enumerate(spec):
+        o = {"line": k, "cls": 0, "conf": 0.9, "poly_px": circle_poly(cx * scale, cy * scale, r * scale),
+             "key": f"g{k + 1}"}
+        o["mask"] = ST.obj_mask({"H": H, "W": W}, o)
+        out.append(o)
+    return out
+
+
+class MeasurePx(unittest.TestCase):
+    """measure_px (user decision 11-14): the rule measures gaps / polar at 1440 px wide, as calibrated on the poster.
+    Known answer: a 2880 px image (0.5 nm/px) measured at 1440 gives exactly what the same polygons halved on a
+    1440 px image (1.0 nm/px) give at native resolution; measure_px None measures the 2880 image natively."""
+    # 0: r 300 holding 1: r 286 (a tight layer, ~14 nm at 1440) holding 2: off-centre r 80; 3: lone r 60
+    SPEC = [(600, 600, 300), (601, 600, 286), (400, 600, 60), (1200, 1200, 60)]
+
+    def tree(self, objs, W, nm, params):
+        ctx = {"image": "x", "nm_per_px": nm, "ev_ids": {0}, "H": W, "W": W}
+        prior = {"nesting": ST.STEPS[("nesting", 1)].run_image(ctx, objs, {})}
+        seen = []
+        real = T.build
+
+        def spy(edges, p):
+            seen.extend(edges)
+            return real(edges, p)
+        with unittest.mock.patch.object(T, "build", spy):
+            out = T.run_image(ctx, objs, prior, params)
+        return out, sorted((e["parent"], e["child"], e["gap_median_nm"], e["gap_min_nm"], e["area_ratio"])
+                           for e in seen)
+
+    def test_default_is_1440(self):
+        self.assertEqual(T.PARAMS["measure_px"], 1440)
+        self.assertEqual(ST.STEPS[("nesting_tree", 1)].params["measure_px"], 1440)
+
+    def test_2880_measured_at_1440_equals_native_1440(self):
+        big, small = poly_objs(self.SPEC, 2), poly_objs(self.SPEC, 1)
+        a, ea = self.tree(big, 2880, 0.5, FINAL)
+        b, eb = self.tree(small, 1440, 1.0, dict(FINAL, measure_px=None))
+        self.assertEqual(a, b)
+        self.assertEqual(ea, eb)                       # the gap stats the rule sees are the 1440 raster's
+        self.assertEqual(a["call"][0], "ML2[s]")
+        _, ec = self.tree(big, 2880, 0.5, dict(FINAL, measure_px=None))   # native: nesting v1's own gap stats
+        kids = json.loads(ST.STEPS[("nesting", 1)].run_image({"image": "x", "nm_per_px": 0.5, "ev_ids": {0},
+                                                              "H": 2880, "W": 2880}, big, {})["children"][0])
+        self.assertEqual([e[2] for e in ec if e[0] == 0], [c["gap_median_nm"] for c in kids])
+        self.assertNotEqual(ec, ea)
+
+    def test_narrow_images_are_not_upsampled(self):
+        small = poly_objs(self.SPEC, 1)
+        self.assertEqual(self.tree(small, 1440, 1.0, FINAL), self.tree(small, 1440, 1.0, dict(FINAL, measure_px=None)))
+        self.assertIsNone(T.measure_scale({"W": 1000}, 1440))
+        self.assertEqual(T.measure_scale({"W": 5760}, 1440), 0.25)
+
+    def test_child_gone_at_1440_is_an_inner_vesicle(self):
+        """A mask-only child of one odd pixel vanishes in the nearest resize: no gap, no polar, an inner vesicle."""
+        big = poly_objs(self.SPEC[:1], 2)
+        dot = np.zeros((2880, 2880), bool)
+        dot[1201, 1201] = True
+        big.append({"line": 1, "cls": 0, "conf": 0.9, "poly_px": None, "mask": dot, "key": "g9"})
+        out, edges = self.tree(big, 2880, 0.5, FINAL)
+        self.assertEqual(out["role"], ["outer", "inner_vesicle"])
+        self.assertIsNone(out["offset_idx"][1])
+        self.assertEqual(out["call"][0], "MV[s]")
 
 
 class Recipe(unittest.TestCase):

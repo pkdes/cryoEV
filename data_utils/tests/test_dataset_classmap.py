@@ -193,6 +193,21 @@ class TestDerive(F.Fixture):
         self.assertFalse((self.out / "lv_ds_undet__cm_ev_nonev_v1").exists())
         self.assertEqual([p.name for p in self.out.iterdir() if p.name.startswith(".")], [])    # no temp left
 
+    def test_derive_refuses_without_free_space(self):
+        """#80h: derive checks the free space (1.5 x the parent's images) before building anything: with _free_bytes
+        below derive_space_needed it raises BuildError and build() is never called, no folder is made."""
+        need = D.derive_space_needed(D.registered(self.reg)["lv_ds_undet"])
+        self.assertGreater(need, 0)                                                # control: the parent has images
+        with mock.patch.object(D, "_free_bytes", return_value=need - 1),                 mock.patch.object(D, "build", side_effect=AssertionError("built")) as b:
+            with self.assertRaisesRegex(D.BuildError, "not enough free disk space"):
+                D.derive("lv_ds_undet", "cm_ev_v1", self.reg, self.out, register_it=True, log=lambda *a: None)
+        b.assert_not_called()
+        self.assertFalse((self.out / "lv_ds_undet__cm_ev_v1").exists())
+        self.assertEqual([p.name for p in self.out.iterdir() if p.name.startswith(".")], [])
+        with mock.patch.object(D, "_free_bytes", return_value=need):              # exactly enough: builds
+            D.derive("lv_ds_undet", "cm_ev_v1", self.reg, self.out, log=lambda *a: None)
+        self.assertTrue((self.out / "lv_ds_undet__cm_ev_v1").exists())
+
     def test_derive_builds_in_temp_then_renames(self):
         seen = []
         real = D.build

@@ -1131,12 +1131,16 @@ CARDS = ("objects", "tree")            # Start a review -> Object set: one objec
 _tree_cache: dict = {}
 
 
+TREE_COUNT_SCHEMA = "ls_lamellarity_tree_v1"   # the built-in tree schema tree_info plans with (counts only)
+
+
 def tree_info(ps_dir) -> dict:
     """What a whole-tree set built from this prediction set would hold, for the Start form's callout (counts only):
-    {"ok": bool, "why": text when not ok, "trees": items (roots with at least one nested outline), "nodes": outlines
-    in those trees, "images": images with a tree}. ok needs <ps>/results/steps.json with nesting_tree v1 in its
-    recipe and objects.csv. The counts follow nesting v1's parent_line (each node's smallest container), the tree
-    K3's build uses; annotation/object_set.py (B2) builds and checks the set itself. Cached by the files' mtimes."""
+    {"ok": bool, "why": text when not ok, "trees": items, "nodes": outlines in those trees, "images": images with a
+    tree}. The counts are annotation.object_set.tree_plan's (B2's dry run of the build, with the built-in tree
+    schema), so the callout equals what the build makes: rejected images and trees holding a line-less (drawn)
+    outline are left out the same way, and a set the build would refuse is not ok, with the build's first reason.
+    Cached by the results files' mtimes."""
     rdir = Path(ps_dir) / "results"
     try:
         sig = tuple((rdir / n).stat().st_mtime_ns for n in ("steps.json", "objects.csv"))
@@ -1147,55 +1151,31 @@ def tree_info(ps_dir) -> dict:
         hit = _tree_cache.get(key)
     if hit and hit[0] == sig:
         return dict(hit[1])
-    out = _tree_info(rdir)
+    out = _tree_info(Path(ps_dir))
     with _obj_lock:
         _tree_cache[key] = (sig, out)
     return dict(out)
 
 
-def _tree_info(rdir: Path) -> dict:
+def _tree_info(ps_dir: Path) -> dict:
     none = {"trees": 0, "nodes": 0, "images": 0}
-    doc = _read_json(rdir / "steps.json")
+    doc = _read_json(ps_dir / "results" / "steps.json")
     rec = doc.get("recipe") if isinstance(doc, dict) else None
     if not isinstance(rec, list) or not any(isinstance(e, dict) and (e.get("step"), e.get("version")) == TREE_STEP
                                             for e in rec):
         return {"ok": False, "why": "its results were not computed with the nesting tree step", **none}
+    from annotation import object_set as OS
     try:
-        with open(rdir / "objects.csv", encoding="utf-8", newline="") as fh:
-            rows = list(csv.DictReader(fh))
-    except (OSError, UnicodeDecodeError, csv.Error):
-        return {"ok": False, "why": "its objects table could not be read", **none}
-    if not rows or "nesting.parent_line" not in rows[0] or "nesting.depth" not in rows[0]:
-        return {"ok": False, "why": "its objects table has no nesting columns", **none}
-    by_image: dict = {}
-    for r in rows:
-        if str(r.get("nesting.depth") or "").strip() == "":
-            continue                                    # not measured by nesting (below conf, not an EV)
-        by_image.setdefault(r.get("image"), []).append(r)
-    trees = nodes = images = 0
-    for rs in by_image.values():
-        parent = {str(r.get("line")): str(r.get("nesting.parent_line") or "").strip() for r in rs}
-        kids: dict = {}
-        for ln, par in parent.items():
-            if par:
-                kids.setdefault(par, []).append(ln)
-        t0 = trees
-        for ln, par in parent.items():
-            if par or not kids.get(ln):
-                continue                                # a root (no container) with at least one nested outline
-            trees += 1
-            todo, seen = [ln], set()
-            while todo:
-                x = todo.pop()
-                if x in seen:
-                    continue
-                seen.add(x)
-                todo += kids.get(x, [])
-            nodes += len(seen)
-        images += trees > t0
-    if not trees:
-        return {"ok": False, "why": "no EV in it has another outline inside", **none}
-    return {"ok": True, "why": "", "trees": trees, "nodes": nodes, "images": images}
+        plan = OS.tree_plan(ps_dir, TREE_COUNT_SCHEMA)
+    except (OS.ObjectSetError, ValueError, OSError) as e:
+        text = str(e)
+        if "no unit root with children" in text:
+            return {"ok": False, "why": "no EV in it has another outline inside", **none}
+        lines = [x.strip(" -") for x in text.splitlines() if x.strip(" -")]
+        why = lines[1] if len(lines) > 1 and lines[0].startswith("refused") else (lines[0] if lines else "")
+        return {"ok": False, "why": f"a whole-tree build would refuse it: {why[:200]}", **none}
+    return {"ok": True, "why": "", "trees": len(plan["trees"]), "nodes": plan["n_nodes"],
+            "images": len({t["image"] for t in plan["trees"]})}
 
 
 def ps_choices(cfg, owner) -> list:
