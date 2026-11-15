@@ -15,6 +15,17 @@ Reviews module (CryoEV portal, all roles; round 13, the Reviews hub): every revi
                                          review_package.json (OS lock <review root>/.meta_locks/<id>.lock, re-read, temp
                                          file + os.replace), one audit line "reviewers changed" {added, removed}, 303 to
                                          the hub with a flash. Self-logged: portal/app.py SELF_LOGGED.
+    GET  /reviews/<id>/close             (round 15, #80g / K4) the Close set dialog: an object set's maker or an admin;
+                                         the amber warning and "type the set name to confirm"; a closed set says who
+                                         closed it and when. The hub's one 404 for anyone else / any other package
+    POST /reviews/<id>/close             t (form token) + confirm (the set's name as the hub shows it, spaces
+                                         normalised); never bearer. close_set(): closed / closed_by / closed_t in
+                                         review_package.json under the meta lock (re-read, temp file + os.replace;
+                                         already closed: refused, it is final), then a registry status line
+                                         "reviewed" (status_by = the closer; skipped with a note when the registry has
+                                         no line for the set or the closer is not in people.json). One audit line
+                                         "object set closed" {registry}. 303 to the hub with a flash. Self-logged:
+                                         portal/app.py SELF_LOGGED (PM)
     GET  /reviews/<id>/export.csv        an object set's answers (round 14, contract C4: annotation/object_set.export,
     GET  /reviews/<id>/export.json       csv / COCO with attributes): admins and the set's maker; anyone who may open it
                                          only once the set is closed (closed: true, or a registry status past review).
@@ -33,7 +44,9 @@ Rules:
     (cfg.review_package). The same serving() gates /review/<id>/ in portal/app.py.
   - Audits (blind compare packages) show counts only: no owner, reviewers, who decided or decoy counts.
   - Object sets (round 14, pred_obj_*): their own kind tab ("Object sets", shown when there is one); progress =
-    items on which every assigned reviewer has set every required attribute (object_progress).
+    items on which every assigned reviewer has set every required attribute (object_progress). Whole-tree sets
+    (round 15, data.js mode "tree"): an item is done when every assigned reviewer has answered every required
+    question that applies to every node (applies_to root = node n 1, child = the others); a "whole tree" tag.
   - Cards = card_progress(): the Quick check queue as the tool builds it in its default mode (flagged objects):
     predictions flagged u at or above data.js cand_conf (0.35 without it), labels flagged u. Decided = the card's own
     decision is set (not a September seed), or its image is rejected. Cached per package by data.js and the edits
@@ -169,9 +182,16 @@ _objcards: dict = {}
 OBJECTS_PREFIX = "pred_obj_"
 
 
+def _applies(a) -> str:
+    v = a.get("applies_to") if isinstance(a, dict) else None
+    return v if v in ("root", "child") else "all"
+
+
 def object_items(data: dict):
     """(items, required attribute ids) of an object set's data.js: items = [(image file, package object key)], in
-    data.js order; None when it is not an object set. An item whose image is not in data.js images is left out."""
+    data.js order; None when it is not an object set. An item whose image is not in data.js images is left out.
+    A whole-tree set (round 15, data.js mode "tree", K3): items = [(image file, [(node object key, [required
+    attribute ids that apply to the node])])], the root being node n 1 (applies_to root / child / all)."""
     if not isinstance(data, dict) or data.get("kind") != "objects" or not isinstance(data.get("items"), list):
         return None
     files = {}
@@ -180,12 +200,24 @@ def object_items(data: dict):
             files[im["file"]] = im["file"]
             files.setdefault(re.sub(r"\.(png|jpe?g|tiff?)$", "", im["file"], flags=re.I), im["file"])
     items = []
-    for it in data["items"]:
-        if isinstance(it, dict) and isinstance(it.get("obj"), str) and files.get(str(it.get("image"))):
-            items.append((files[str(it["image"])], it["obj"]))
     schema = data.get("schema") if isinstance(data.get("schema"), dict) else {}
     req = [a["id"] for a in schema.get("object_attrs") or []
            if isinstance(a, dict) and isinstance(a.get("id"), str) and a.get("required") is True]
+    if data.get("mode") == "tree":
+        attrs = [a for a in schema.get("object_attrs") or [] if isinstance(a, dict) and isinstance(a.get("id"), str)]
+        need = {r: [a["id"] for a in attrs if a.get("required") is True and _applies(a) in ("all", r)]
+                for r in ("root", "child")}
+        for it in data["items"]:
+            if not (isinstance(it, dict) and files.get(str(it.get("image"))) and isinstance(it.get("nodes"), list)):
+                continue
+            nodes = [(nd["obj"], need["root" if nd.get("n") == 1 else "child"]) for nd in it["nodes"]
+                     if isinstance(nd, dict) and isinstance(nd.get("obj"), str) and isinstance(nd.get("n"), int)]
+            if nodes:
+                items.append((files[str(it["image"])], nodes))
+        return items, req
+    for it in data["items"]:
+        if isinstance(it, dict) and isinstance(it.get("obj"), str) and files.get(str(it.get("image"))):
+            items.append((files[str(it["image"])], it["obj"]))
     return items, req
 
 
@@ -222,6 +254,14 @@ def object_progress(pkg: Path, items, required, reviewers) -> tuple:
     done = 0
     for file, obj in items:
         ans = recs.get(file) or {}
+        if isinstance(obj, list):                      # a whole tree (round 15): every node's own questions
+            if any(req for _, req in obj):
+                ok = all(who <= ans.get((o, a), set()) for o, req in obj for a in req)
+            else:
+                objs = {o for o, _ in obj}
+                ok = all(any(r in rids for (o, _), rids in ans.items() if o in objs) for r in who)
+            done += ok
+            continue
         if required:
             ok = all(who <= ans.get((obj, a), set()) for a in required)
         else:
@@ -262,6 +302,17 @@ def _object_card_progress(pkg: Path, dsig, esig) -> tuple | None:
     with _lock:
         _objcards[key] = ((dsig, esig, msig), got, parsed)
     return got
+
+
+def object_mode(pkg: Path) -> str | None:
+    """"tree" for a whole-tree object set, "objects" for a one-object set, None otherwise (round 15). Read from
+    card_progress's cache (call that first); review_package.json `mode` "tree" counts too."""
+    with _lock:
+        hit = _objcards.get(str(Path(pkg)))
+    parsed = hit[2] if hit else None
+    if parsed is None:
+        return None
+    return "tree" if any(isinstance(o, list) for _, o in parsed[0]) else "objects"
 
 
 def card_progress(pkg: Path) -> tuple:
@@ -482,6 +533,97 @@ def write_reviewers(root, pkg: Path, add=(), remove=(), *, allowed=None, lock_wa
         lk.close()
 
 
+# ---------------------------------------------------------------- Close set (round 15, #80g / K4)
+class CloseError(Exception):
+    def __init__(self, text: str, busy: bool = False):
+        super().__init__(text)
+        self.busy = busy
+
+
+def close_set(root, pkg: Path, who: str, *, lock_wait: float = LOCK_WAIT_S, retry_s: float = REPLACE_RETRY_S,
+              now=None) -> dict:
+    """closed: true, closed_by, closed_t into <pkg>/review_package.json: the reviewers' OS lock
+    (<root>/.meta_locks/<pkg>.lock), re-read, temp file + os.replace; every other key kept as read. Final: a set
+    already closed is refused (CloseError). -> the new meta."""
+    from data_utils.oslock import acquire_lock
+    pkg = Path(pkg)
+    try:
+        locks = Path(root) / LOCK_DIR
+        locks.mkdir(exist_ok=True)
+        lk = acquire_lock(locks / f"{pkg.name}.lock", wait=lock_wait)
+    except (OSError, TypeError):
+        lk = None
+    if lk is None:
+        raise CloseError("Someone is changing this set's settings right now. Try again in a moment.", busy=True)
+    try:
+        meta = _read_json(pkg / "review_package.json")
+        if not isinstance(meta, dict):
+            raise CloseError("This set's settings could not be read, so it was not closed.")
+        if meta.get("closed") is True:
+            raise CloseError("This set is already closed.")
+        meta.update(closed=True, closed_by=who, closed_t=(now or datetime.now().astimezone()).isoformat(timespec="seconds"))
+        tmp = pkg / f".review_package.json.{secrets.token_hex(4)}.tmp"
+        try:
+            tmp.write_text(json.dumps(meta, indent=1, ensure_ascii=False), encoding="utf-8")
+            _replace(tmp, pkg / "review_package.json", retry_s)
+        except OSError:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise CloseError("The set's settings are open elsewhere and could not be saved. Try again.",
+                             busy=True) from None
+        return meta
+    finally:
+        lk.close()
+
+
+def registry_closed(reg, pkg_id: str, who: str) -> str:
+    """The registry status line for a closed set: review_package <id> -> "reviewed", status_by = the closer (a
+    person: via None). -> "written", or why not ("no registry", "not in the registry", "not in people.json", ...)."""
+    if not reg:
+        return "no registry"
+    try:
+        from registry import store
+        if store.current("review_package", Path(reg)).get(pkg_id) is None:
+            return "not in the registry"
+        if who not in store.roster():
+            return "not in people.json"
+        store.set_status(pkg_id, "reviewed", who, root=Path(reg), via=None, note="closed in the portal")
+        return "written"
+    except Exception as e:                              # noqa: BLE001  the set stays closed either way
+        return f"not written ({type(e).__name__})"
+
+
+def same_name(typed, title) -> bool:
+    norm = lambda t: " ".join(str(t or "").split()).casefold()  # noqa: E731
+    return bool(norm(title)) and norm(typed) == norm(title)
+
+
+def render_close(pkg_id, title, meta, token_html, error="", tree=False) -> str:
+    """The Close set dialog (maker or admin). Closed: who closed it and when, no form."""
+    act = f"{PREFIX}/{esc(pkg_id)}/close"
+    tree = '<span class="cj-rv-tag">whole tree</span>' if tree or meta.get("mode") == "tree" else ""
+    head = (f'<div><h1 id="cj-rv-close-h">Close {esc(title)}</h1><div class="cj-rv-line cj-mut" style="margin-top:6px">'
+            f'{_chip("objects")}{tree}'
+            f'<span>{esc(pkg_id)}</span></div></div>')
+    if meta.get("closed") is True:
+        when = esc(str(meta.get("closed_t") or "")[:16].replace("T", " "))
+        body = (f'<p class="cj-rv-note" role="status">Closed by {esc(str(meta.get("closed_by") or "someone"))}'
+                f'{" on " + when if when else ""}. Closing is final.</p>')
+    else:
+        err = f'<p class="cj-rv-note cj-rv-warn" role="alert">{esc(error)}</p>' if error else ""
+        body = (f'<p class="cj-rv-amber" role="note">Closing is final. No one can answer after this, and exports then '
+                f'include the hidden columns and the rule\'s calls. Type the set name to confirm.</p>{err}'
+                f'<form method="post" action="{act}">{token_html}'
+                f'<label for="cj-rv-confirm">Set name<input type="text" id="cj-rv-confirm" name="confirm" '
+                f'maxlength="80" autocomplete="off" required placeholder="{esc(title)}"></label>'
+                f'<div class="cj-rv-acts" style="margin-top:14px"><a class="cj-rv-btn2" href="{PREFIX}/">Cancel</a>'
+                f'<button class="cj-rv-danger" type="submit">Close set</button></div></form>')
+    return (STYLE + f'<div class="cj-rv"><section class="cj-rv-dlg" aria-labelledby="cj-rv-close-h">{head}{body}'
+            '</section></div>')
+
+
 # ---------------------------------------------------------------- the hub page (styles inline: /cj/ serves a fixed set)
 STYLE = """<style>
 .cj-rv{display:flex;flex-direction:column;gap:26px}
@@ -563,6 +705,24 @@ STYLE = """<style>
 .cj-rv-add button{padding:6px 14px;border-radius:6px;border:1px solid var(--acc);background:var(--card);color:var(--acc);
   font:inherit;font-weight:600;cursor:pointer}
 @media (max-width:640px){.cj-rv-th{display:none}.cj-rv-c1{flex-basis:100%}.cj-rv h1{font-size:1.6rem}}
+@media (max-width:899px){.cj-rv-th{display:none}}
+@media (min-width:900px){.cj-rv-row{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,1fr) minmax(0,1.2fr)
+  minmax(0,1.2fr) minmax(0,.8fr) minmax(0,.8fr) 6.5rem}.cj-rv-c7{margin-left:0;justify-self:end}}
+.cj-rv-closed{border-style:solid;color:var(--fg)}
+.cj-rv-dlg{max-width:560px;background:var(--card);border:1px solid var(--line);border-radius:12px;display:flex;
+  flex-direction:column;gap:14px;padding:18px;box-shadow:0 8px 24px var(--cj-shadow)}
+.cj-rv-dlg h1{font-size:1.3rem;overflow-wrap:anywhere}
+.cj-rv-amber{margin:0;padding:10px 12px;border-radius:8px;border:1px solid #f59e0b;background:#fef3c7;color:#78350f;
+  font-weight:500}
+@media (prefers-color-scheme:dark){.cj-rv-amber{background:#3b2a06;color:#fcd34d}}
+:root[data-theme="dark"] .cj-rv-amber{background:#3b2a06;color:#fcd34d}
+:root[data-theme="light"] .cj-rv-amber{background:#fef3c7;color:#78350f}
+.cj-rv-dlg label{display:flex;flex-direction:column;gap:6px;font-weight:600}
+.cj-rv-dlg input[type=text]{padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--card);
+  color:var(--fg);font:inherit;min-width:0}
+.cj-rv-dlg .cj-rv-acts{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:flex-end}
+.cj-rv-danger{padding:8px 16px;border-radius:6px;border:1px solid #b45309;background:#b45309;color:#fff;font:inherit;
+  font-weight:600;cursor:pointer}
 </style>"""
 
 HUB_EMPTY = "No reviews yet. Start one from a finished prediction set, or ask an admin."
@@ -634,7 +794,7 @@ def _card(r, me) -> str:
     else:
         opens = (f"opens {where}Quick check · {cards_text(open_cards)} open" if r["mode"] == "cards"
                  else f"opens {where}the Editor · no open cards")
-    tag = '<span class="cj-rv-tag">blind</span>' if blind else ""
+    tag = ('<span class="cj-rv-tag">blind</span>' if blind else "") + _obj_tags(r)
     last = "—" if blind else _when(r["last"], built=r["status"] == "not_started")
     return (f'<article class="cj-rv-card"><div class="cj-rv-line">{_chip(r["kind"])}{tag}'
             f'<span class="cj-rv-push cj-mut">{esc(last)}</span></div>'
@@ -643,10 +803,18 @@ def _card(r, me) -> str:
             f'<a class="cj-rv-btn cj-rv-push" href="{esc(r["go_url"])}">Continue →</a></div></article>')
 
 
+def _obj_tags(r) -> str:
+    """Round 15: a whole-tree set's tag and a closed set's tag (object sets only)."""
+    if r.get("kind") != "objects":
+        return ""
+    return (('<span class="cj-rv-tag">whole tree</span>' if r.get("tree") else "")
+            + ('<span class="cj-rv-tag cj-rv-closed">closed</span>' if r.get("closed") else ""))
+
+
 def _row_html(r) -> str:
     kind, blind = r["kind"], r["blind"]
     tags = ('<span class="cj-rv-tag">blind</span>' if blind else "") + \
-        ('<span class="cj-rv-lab">lab network only</span>' if kind == "sandbox" else "")
+        ('<span class="cj-rv-lab">lab network only</span>' if kind == "sandbox" else "") + _obj_tags(r)
     if blind:
         owner, revs = "hidden (blind)", "hidden (blind)"
     elif kind == "sandbox":
@@ -659,6 +827,8 @@ def _row_html(r) -> str:
     assign = f'<a href="{PREFIX}/{esc(r["id"])}/reviewers">Assign</a>' if r.get("can_assign") else ""
     if kind == "objects" and r.get("can_assign"):       # owner or admin: the maker's export (blind columns joined)
         assign += f' <a href="{PREFIX}/{esc(r["id"])}/export.csv">Export CSV</a>'
+        if not r.get("closed"):                          # round 15 (#80g): Close set, final
+            assign += f' <a href="{PREFIX}/{esc(r["id"])}/close">Close set</a>'
     last = "—" if blind or kind == "sandbox" else _when(r["last"], built=r["status"] == "not_started")
     label = "Open /review/" if r["open_url"] == "/review/" else ("Open ↗" if kind == "sandbox" else "Open")
     return (f'<div class="cj-rv-row"><div class="cj-rv-c1"><div class="cj-rv-line">{_chip(kind)}'
@@ -1003,6 +1173,72 @@ def routes(ctx) -> list:
             "Content-Disposition": f'attachment; filename="{hit[0].name}.{ext}"', "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff"})
 
+    def close_hit(request):
+        """(package folder, review_package.json, hub row) of an object set this viewer may close (the maker or an
+        admin: resolve()), else None."""
+        hit = resolve(request)
+        if hit is None or RI.kind_of(hit[0].name, hit[1], hit[0]) != "objects":
+            return None
+        row = next((r for r in rows_for(request, with_facets=False) if r["id"] == hit[0].name), None)
+        return (hit[0], hit[1], row)
+
+    def close_title(hit) -> str:
+        return (hit[2] or {}).get("title") or hit[1].get("title") or hit[0].name
+
+    def close_page(request, hit, error="", status=200):
+        body = render_close(hit[0].name, close_title(hit), hit[1], AD.hidden_token(token(request)), error,
+                            tree=bool((hit[2] or {}).get("tree")))
+        return show(request, "Close set", body, status)
+
+    def close_get(request: Request):
+        hit = close_hit(request)
+        return missing(request) if hit is None else close_page(request, hit)
+
+    def close_run(request, body, too_big, ctype):
+        """The Close POST after its body is read (a worker thread: the meta lock wait, os.replace retries and the
+        registry append never run on the event loop)."""
+        hit = close_hit(request)
+        if hit is None:
+            return missing(request)
+        if request.scope.get("cj_auth") == "bearer":    # never an agent token
+            return close_page(request, hit, "Not with an agent token.", 403)
+        if too_big:
+            return close_page(request, hit, "That form is too large.", 413)
+        if ctype != "application/x-www-form-urlencoded":
+            return close_page(request, hit, "Send the form from this page.", 415)
+        try:
+            form = parse_qs(body.decode("utf-8"), max_num_fields=10)
+        except (UnicodeDecodeError, ValueError):
+            return close_page(request, hit, "That form could not be read.", 400)
+        if not hmac.compare_digest((form.get("t") or [""])[0].encode(), token(request).encode()):
+            return close_page(request, hit, "This form is out of date. Open it again and retry.", 403)
+        if hit[1].get("closed") is True:
+            return close_page(request, hit, "", 409)
+        if not same_name((form.get("confirm") or [""])[0], close_title(hit)):
+            return close_page(request, hit, "The name does not match, so the set was not closed.", 400)
+        who = ctx.user(request).get("id")
+        try:
+            close_set(RES.review_root(ctx.cfg), hit[0], who)
+        except CloseError as e:
+            fresh = _read_json(hit[0] / "review_package.json")
+            return close_page(request, (hit[0], fresh if isinstance(fresh, dict) else hit[1], hit[2]), str(e),
+                              409 if e.busy or "already" in str(e) else 400)
+        reg = registry_closed(getattr(ctx.cfg, "registry", None), hit[0].name, who)
+        PA.event(ctx.cfg.state_dir, request, "object set closed", hit[0].name, {"registry": reg})
+        note = "" if reg == "written" else f" (registry line {reg})"
+        tok = AD.flash_put(AD.binding(request), f"Closed {close_title(hit)}. No more answers are taken{note}.")
+        return RedirectResponse(f"{PREFIX}/?f={quote(tok)}", status_code=303)
+
+    async def close_post(request: Request):
+        ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        buf, too_big = bytearray(), False
+        async for chunk in request.stream():
+            buf += chunk
+            if len(buf) > MAX_FORM:
+                too_big = True
+                break
+        return await run_in_threadpool(close_run, request, bytes(buf), too_big, ctype)
+
     async def export_csv(request: Request):
         return await run_in_threadpool(export_run, request, "csv")
 
@@ -1013,5 +1249,7 @@ def routes(ctx) -> list:
             Route(PREFIX + "/go/{pkg_id}", go, methods=["GET"]),
             Route(PREFIX + "/{pkg_id}/export.csv", export_csv, methods=["GET"]),
             Route(PREFIX + "/{pkg_id}/export.json", export_json, methods=["GET"]),
+            Route(PREFIX + "/{pkg_id}/close", close_get, methods=["GET"]),
+            Route(PREFIX + "/{pkg_id}/close", close_post, methods=["POST"]),
             Route(PREFIX + "/{pkg_id}/reviewers", reviewers_get, methods=["GET"]),
             Route(PREFIX + "/{pkg_id}/reviewers", reviewers_post, methods=["POST"])]

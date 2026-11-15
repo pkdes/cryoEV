@@ -1057,7 +1057,7 @@ OBJ_PHASES = ("checking", "building", "registering", "done", "failed")
 OBJ_PHASE_TEXT = {"checking": "Checking the items", "building": "Building the set", "registering": "Recording it",
                   "done": "Done", "failed": "Failed"}
 OBJ_STATUS_KEYS = ("name", "phase", "failed_at", "pkg", "problems", "n_items", "title", "by", "started", "updated",
-                   "finished")
+                   "finished", "cards")
 OBJ_PROBLEMS_MAX = 3
 _PATHISH = re.compile(r"[A-Za-z]:[\\/]\S*|(?:/[^\s/]+){2,}")
 _obj_running: set = set()              # job names whose thread runs in this process (a restart: none)
@@ -1105,15 +1105,97 @@ def object_slug(name: str) -> str:
     return slug or "set"
 
 
+def is_tree_schema(s) -> bool:
+    """A label schema for whole-tree cards (round 15, K2): some object attribute says applies_to root / child."""
+    attrs = s.get("object_attrs") if isinstance(s, dict) else None
+    return isinstance(attrs, list) and any(isinstance(a, dict) and a.get("applies_to") in ("root", "child")
+                                           for a in attrs)
+
+
 def schema_choices(cfg) -> list:
-    """[{id, name, version}] of the registered / shipped label schemas (portal/modules/data/labelmeta.py)."""
+    """[{id, name, version, tree}] of the registered / shipped label schemas (portal/modules/data/labelmeta.py).
+    tree (round 15): a whole-tree schema (is_tree_schema); the Start form offers it only for whole-tree cards."""
     from portal.modules.data import labelmeta as LM
     out = []
     for sid, s in LM.list_schemas(registry_root(cfg)).items():
         v = s.get("version")
         out.append({"id": sid, "name": str(s.get("name") or sid),
-                    "version": v if isinstance(v, int) and not isinstance(v, bool) else None})
+                    "version": v if isinstance(v, int) and not isinstance(v, bool) else None,
+                    "tree": is_tree_schema(s)})
     return out
+
+
+# ---------------------------------------------------------------- whole-tree cards (round 15, K3 / K4)
+TREE_STEP = ("nesting_tree", 1)        # K1: the tree rule step a whole-tree set is built from
+CARDS = ("objects", "tree")            # Start a review -> Object set: one object per card | whole tree per card
+_tree_cache: dict = {}
+
+
+def tree_info(ps_dir) -> dict:
+    """What a whole-tree set built from this prediction set would hold, for the Start form's callout (counts only):
+    {"ok": bool, "why": text when not ok, "trees": items (roots with at least one nested outline), "nodes": outlines
+    in those trees, "images": images with a tree}. ok needs <ps>/results/steps.json with nesting_tree v1 in its
+    recipe and objects.csv. The counts follow nesting v1's parent_line (each node's smallest container), the tree
+    K3's build uses; annotation/object_set.py (B2) builds and checks the set itself. Cached by the files' mtimes."""
+    rdir = Path(ps_dir) / "results"
+    try:
+        sig = tuple((rdir / n).stat().st_mtime_ns for n in ("steps.json", "objects.csv"))
+    except OSError:
+        return {"ok": False, "why": "no results with the nesting tree step yet", "trees": 0, "nodes": 0, "images": 0}
+    key = str(rdir)
+    with _obj_lock:
+        hit = _tree_cache.get(key)
+    if hit and hit[0] == sig:
+        return dict(hit[1])
+    out = _tree_info(rdir)
+    with _obj_lock:
+        _tree_cache[key] = (sig, out)
+    return dict(out)
+
+
+def _tree_info(rdir: Path) -> dict:
+    none = {"trees": 0, "nodes": 0, "images": 0}
+    doc = _read_json(rdir / "steps.json")
+    rec = doc.get("recipe") if isinstance(doc, dict) else None
+    if not isinstance(rec, list) or not any(isinstance(e, dict) and (e.get("step"), e.get("version")) == TREE_STEP
+                                            for e in rec):
+        return {"ok": False, "why": "its results were not computed with the nesting tree step", **none}
+    try:
+        with open(rdir / "objects.csv", encoding="utf-8", newline="") as fh:
+            rows = list(csv.DictReader(fh))
+    except (OSError, UnicodeDecodeError, csv.Error):
+        return {"ok": False, "why": "its objects table could not be read", **none}
+    if not rows or "nesting.parent_line" not in rows[0] or "nesting.depth" not in rows[0]:
+        return {"ok": False, "why": "its objects table has no nesting columns", **none}
+    by_image: dict = {}
+    for r in rows:
+        if str(r.get("nesting.depth") or "").strip() == "":
+            continue                                    # not measured by nesting (below conf, not an EV)
+        by_image.setdefault(r.get("image"), []).append(r)
+    trees = nodes = images = 0
+    for rs in by_image.values():
+        parent = {str(r.get("line")): str(r.get("nesting.parent_line") or "").strip() for r in rs}
+        kids: dict = {}
+        for ln, par in parent.items():
+            if par:
+                kids.setdefault(par, []).append(ln)
+        t0 = trees
+        for ln, par in parent.items():
+            if par or not kids.get(ln):
+                continue                                # a root (no container) with at least one nested outline
+            trees += 1
+            todo, seen = [ln], set()
+            while todo:
+                x = todo.pop()
+                if x in seen:
+                    continue
+                seen.add(x)
+                todo += kids.get(x, [])
+            nodes += len(seen)
+        images += trees > t0
+    if not trees:
+        return {"ok": False, "why": "no EV in it has another outline inside", **none}
+    return {"ok": True, "why": "", "trees": trees, "nodes": nodes, "images": images}
 
 
 def ps_choices(cfg, owner) -> list:
@@ -1134,8 +1216,13 @@ def ps_choices(cfg, owner) -> list:
 def _object_set_build(**kw):
     """annotation/object_set.build (B3, contract C4), called with its own keyword arguments: ps_dir, items_csv,
     schema, review_root, image_col, line_col, particle_col, blind_cols, outline_mode, slug, owner, reviewers,
-    registry_root, built_by, title. -> the package folder."""
+    registry_root, built_by, title. -> the package folder. Whole-tree cards (round 15, K3): ps_dir, items_csv=None,
+    schema, review_root, tree=True, slug, owner, reviewers, registry_root, built_by, title: these go to B2's
+    object_set.build_tree(ps_dir, schema, review_root, slug=, owner=, reviewers=, registry_root=, built_by=, title=)."""
     from annotation import object_set as OS
+    if kw.pop("tree", False):
+        kw.pop("items_csv", None)
+        return OS.build_tree(**kw)
     return OS.build(**kw)
 
 
@@ -1196,11 +1283,20 @@ def read_obj_status(cfg, job) -> dict | None:
     return st
 
 
-def start_objects(cfg, owner, *, name, schema, ps, items_csv: bytes, blind_cols=(), outline_mode="target",
+def start_objects(cfg, owner, *, name, schema, ps, items_csv: bytes | None, blind_cols=(), outline_mode="target",
                   reviewers=(), roster_ids=None, schemas=None, sets=None, build=None, register=None, now=None,
-                  background=True) -> str:
+                  background=True, cards="objects", tree=None) -> str:
     """Check, then start building an object set (a background thread unless background=False). -> the job name
-    (obj_<stamp>_<4hex>; its progress page is /reviews/start/<job>). Raises BuildError (nothing started)."""
+    (obj_<stamp>_<4hex>; its progress page is /reviews/start/<job>). Raises BuildError (nothing started).
+    cards "tree" (round 15, K3): whole-tree cards from the prediction set's nesting_tree results; no items CSV, no
+    blind columns or outline choice (every node of a tree is outlined); the schema must be a whole-tree schema.
+    The builder then gets tree=True and items_csv=None (object_set.build, B2). tree: tree_info's result (tests)."""
+    if cards not in CARDS:
+        raise BuildError("pick one object per card or a whole tree per card")
+    if cards == "tree":
+        return _start_tree(cfg, owner, name=name, schema=schema, ps=ps, reviewers=reviewers, roster_ids=roster_ids,
+                           schemas=schemas, sets=sets, build=build, register=register, now=now,
+                           background=background, tree=tree)
     if not isinstance(owner, str) or not PID_RE.match(owner):
         raise BuildError("your portal id can't own a review package")
     if not isinstance(name, str) or not OBJ_NAME_RE.match(name.strip()):
@@ -1258,7 +1354,65 @@ def start_objects(cfg, owner, *, name, schema, ps, items_csv: bytes, blind_cols=
     return job
 
 
-def _run_objects(cfg, job, kw, items: Path, lock, build, register):
+def _start_tree(cfg, owner, *, name, schema, ps, reviewers, roster_ids, schemas, sets, build, register, now,
+                background, tree):
+    """start_objects for whole-tree cards (round 15): the same checks and lock, no CSV."""
+    if not isinstance(owner, str) or not PID_RE.match(owner):
+        raise BuildError("your portal id can't own a review package")
+    if not isinstance(name, str) or not OBJ_NAME_RE.match(name.strip()):
+        raise BuildError("give the set a name (letters, digits, spaces, at most 60)")
+    schemas = schema_choices(cfg) if schemas is None else schemas
+    entry = next((s for s in schemas if s.get("id") == schema), None) if isinstance(schema, str) else None
+    if entry is None or not OBJ_SCHEMA_RE.match(schema):
+        raise BuildError("pick a registered label schema")
+    if not entry.get("tree"):
+        raise BuildError("whole-tree cards need a whole-tree label schema (questions for the outer vesicle and for "
+                         "each outline inside it)")
+    sets = ps_choices(cfg, owner) if sets is None else sets
+    if not isinstance(ps, str) or not OBJ_PS_RE.match(ps) or ps not in {s["id"] for s in sets}:
+        raise BuildError("pick a finished prediction set")
+    revs = list(dict.fromkeys(str(r) for r in reviewers or ()))
+    if len(revs) > MAX_REVIEWERS or any(not PID_RE.match(r) for r in revs):
+        raise BuildError(f"reviewers must be portal ids (at most {MAX_REVIEWERS})")
+    if roster_ids is not None and any(r not in roster_ids for r in revs):
+        raise BuildError("reviewers must be people from the roster")
+    rr = review_root(cfg)
+    if rr is None or not Path(rr).is_dir():
+        raise BuildError("the review folder is not configured on this portal")
+    ps_dir = Path(predict_root(cfg)) / ps
+    if not ps_dir.is_dir():
+        raise BuildError("that prediction set's folder is not on this computer")
+    info = tree_info(ps_dir) if tree is None else tree
+    if not info.get("ok"):
+        raise BuildError(f"no whole trees in that prediction set ({info.get('why') or 'no nesting tree results'}); "
+                         "add the nesting tree step under Results, Change recipe")
+    bdir = building_dir(rr)
+    bdir.mkdir(exist_ok=True)
+    lock = acquire_lock(bdir / OBJ_LOCK, 2.0)
+    if lock is None:
+        raise BuildError("another object set is being built; one at a time")
+    try:
+        job = f"obj_{(now or datetime.now()).strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(2)}"
+        (state_root(cfg) / OBJ_SUB / job).mkdir(parents=True)
+        write_obj_status(cfg, job, phase="checking", pkg=None, problems=[], n_items=info.get("trees"),
+                         title=name.strip(), by=owner, started=_now(), finished=None, failed_at=None, cards="tree")
+        kw = dict(ps_dir=ps_dir, items_csv=None, schema=schema, review_root=Path(rr), tree=True,
+                  slug=object_slug(name), owner=owner, reviewers=revs, registry_root=registry_root(cfg),
+                  built_by="portal", title=name.strip())
+        with _obj_lock:
+            _obj_running.add(job)
+    except BaseException:
+        lock.close()
+        raise
+    args = (cfg, job, kw, None, lock, build or _object_set_build, register or _object_set_register)
+    if background:
+        threading.Thread(target=_run_objects, args=args, name=f"objset-{job}", daemon=True).start()
+    else:
+        _run_objects(*args)
+    return job
+
+
+def _run_objects(cfg, job, kw, items: Path | None, lock, build, register):
     """The build thread: object_set.build, then register; the status after each step; the CSV deleted at the end
     (success or not); the lock released last."""
     pkg = None
@@ -1288,7 +1442,8 @@ def _run_objects(cfg, job, kw, items: Path, lock, build, register):
         pass
     finally:
         try:
-            items.unlink()
+            if items is not None:                      # a whole-tree set has no CSV
+                items.unlink()
         except OSError:
             pass
         with _obj_lock:
