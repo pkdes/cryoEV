@@ -62,6 +62,11 @@ X-CJ-User; a standalone review_server has none and answers 403) that is one of t
 only on the objects of that image's items (and their `also`). GET /api/edits of a package with a schema.json holds
 only the requester's own attribute decisions (none without an identity): reviewers never see each other's answers;
 the admin export reads the files. The history logs a key only when its saved entry changed (a resend logs nothing).
+Round 15 (contract K3, additive: a one-object set behaves exactly as before): in a whole-tree set (data.js mode
+"tree") an item's accepted objects are its nodes; an attribute's applies_to ("root" = node n 1, "child" = the others,
+absent / "all" = every node) is checked against the node (400 otherwise). #80g: when review_package.json has
+closed: true (read per request), every PUT carrying a new (pending) a: / i:a: decision is answered 409
+{"error": "set closed"} (a body that only echoes saved copies still saves its other keys: the echoes are dropped).
 
 Usage:
   python annotation/review_server.py --package "../CryoAI/annotation review/cryoai_v4_review"
@@ -303,6 +308,21 @@ def check_attrs(edit: dict, schema):
     return None
 
 
+def check_applies(keys, schema, roles: dict):
+    """Round 15 (K3): each new attribute decision's attribute applies to its node's role (roles {obj: "root" |
+    "child"}). -> an error text, or None."""
+    S = _labels_schemas()
+    for k in keys:
+        p = parse_attr_key(k)
+        if p is None or p[0] is None:
+            continue
+        a = S.attr(schema, p[1])
+        role = roles.get(p[0])
+        if a is not None and role is not None and not S.applies(a, role):
+            return f"{p[1]!r} is not asked of this node (applies to {a.get('applies_to')})"
+    return None
+
+
 def append_attr_log(edits_dir: Path, file: str, keys, merged: dict, cur=None):
     """edits/_attr_log.jsonl += {t, who, key, v, file} per attribute decision this save stamped (call under the
     package write lock). cur: the saved record before this save; a key whose merged entry equals its saved one (a
@@ -362,7 +382,42 @@ def object_targets(pkg: Path):
         s = out.setdefault(f, set())
         s.add(str(it.get("obj")))
         s.update(str(x) for x in it.get("also") or [])
+        s.update(str(n.get("obj")) for n in it.get("nodes") or [] if isinstance(n, dict))   # round 15: tree nodes
     return out
+
+
+def node_roles(pkg: Path):
+    """{image file: {node obj: "root" | "child"}} for a whole-tree set (data.js kind "objects", mode "tree": node n 1
+    is the root), else None (no applies_to check: every attribute applies)."""
+    try:
+        data = json.loads((Path(pkg) / "data.js").read_text(encoding="utf-8").split("=", 1)[1].strip().rstrip(";"))
+    except (OSError, ValueError, IndexError):
+        return None
+    if not isinstance(data, dict) or data.get("kind") != "objects" or data.get("mode") != "tree":
+        return None
+    by_stem = {}
+    for im in data.get("images") or []:
+        f = str(im.get("file") or "")
+        by_stem[f] = f
+        by_stem[Path(f).stem] = f
+    out = {}
+    for it in data.get("items") or []:
+        f = by_stem.get(str(it.get("image")))
+        if f is None:
+            continue
+        for n in it.get("nodes") or []:
+            if isinstance(n, dict):
+                out.setdefault(f, {})[str(n.get("obj"))] = "root" if n.get("n") == 1 else "child"
+    return out
+
+
+def package_closed(pkg: Path) -> bool:
+    """#80g: <pkg>/review_package.json has closed: true (read per request: the portal's Close writes it)."""
+    try:
+        rec = json.loads((Path(pkg) / RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(rec, dict) and rec.get("closed") is True
 
 
 def own_attrs_only(edit: dict, who):
@@ -388,6 +443,7 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
     lock = _write_lock(edits_dir)
     schema = package_schema(pkg)  # round 14: attribute decisions only for a package with a schema.json
     targets = object_targets(pkg) if schema is not None else None  # an object set: a: only on its items' objects
+    roles = node_roles(pkg) if schema is not None else None        # round 15: a whole-tree set's applies_to check
     roster = {p.get("id") for p in people if isinstance(p, dict) and isinstance(p.get("id"), str)}
 
     def active_claims(now):
@@ -515,6 +571,8 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
             if any(is_attr_key(k) for k in edit.get("dec") or {}):  # round 14: only bodies with attributes
                 pend = [k for k, d in edit["dec"].items() if is_attr_key(k) and isinstance(d, dict)
                         and d.get("pending") is True]
+                if pend and schema is not None and package_closed(pkg):   # #80g: a closed set takes no new answers
+                    return self._json(409, {"error": "set closed"})     # (echoed saved copies are dropped anyway)
                 if pend and schema is not None:
                     who = trusted_identity(self)
                     if who is None:
@@ -533,6 +591,10 @@ def make_handler(pkg: Path, key: str, valid_files: set, pkg_id: str = "", people
                     allowed = targets.get(file, set())
                     if any((parse_attr_key(k) or (None,))[0] not in allowed | {None} for k in attr_new):
                         return self._json(400, {"error": "attribute decisions only on this set's objects"})
+                if roles is not None:                                 # round 15: applies_to per node
+                    why = check_applies(attr_new, schema, roles.get(file, {}))
+                    if why:
+                        return self._json(400, {"error": why})
             target = edits_dir / f"{file}.json"
             with lock:
                 saved = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}

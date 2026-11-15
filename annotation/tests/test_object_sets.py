@@ -67,7 +67,8 @@ def build_set(root: Path, rows=None, blind=("gap_nm", "secret"), mode="target", 
 # ---------------------------------------------------------------- schemas (C2)
 class Schemas(unittest.TestCase):
     def test_builtins_valid(self):
-        self.assertEqual(S.builtin_ids(), ["ls_lamellarity_v1", "ls_legacy_v1"])
+        self.assertEqual(S.builtin_ids(), ["ls_lamellarity_tree_v1", "ls_lamellarity_v1", "ls_lamellarity_v2",
+                                           "ls_legacy_v1"])
         for sid in S.builtin_ids():
             self.assertEqual(S.validate(S.load(sid)), [])
 
@@ -504,11 +505,12 @@ class ObjectSet(unittest.TestCase):
         self.assertEqual(list((self.tmp / GOLDEN.name).rglob("adopted")), [])
 
     def test_blind_values_shown_by_meta_refused(self):
-        """QC 7: a blind column whose values the built package shows anyway (review_meta: nm/px, session) is
-        refused after the build, numbers compared by value; nothing is left in the review root."""
+        """QC 7: a blind column whose values the built package shows anyway (review_meta: session, names) is
+        refused after the build, numbers compared by value; nothing is left in the review root. Round 15 #80f: the
+        named calibration fields (nm/px here) are exempt (test_tree_sets.BlindExemptions has the count sentinel)."""
         ps = golden_ps(self.tmp)
         (self.tmp / "review").mkdir()
-        for n, val in enumerate(("1.4724", "1.47240", "golden", "GOLDEN", "Golden", "0001.PNG",
+        for n, val in enumerate(("golden", "GOLDEN", "Golden", "0001.PNG",
                                  "olden_00")):          # QC C: case, NFC, and a substring of a shown name
             src = items_csv(self.tmp / f"b{n}.csv", [("0001", 0, 1, val)])
             with self.assertRaises(OS.ObjectSetError) as cm, contextlib.redirect_stdout(io.StringIO()):
@@ -516,11 +518,12 @@ class ObjectSet(unittest.TestCase):
                          seed=1, owner="pujan")
             self.assertIn("shows anyway", str(cm.exception))
         self.assertEqual(list((self.tmp / "review").iterdir()), [])
-        # control: a value nothing shows builds
-        src = items_csv(self.tmp / "ok.csv", [("0001", 0, 1, "4.25")])
-        with contextlib.redirect_stdout(io.StringIO()):
-            OS.build(ps, src, "ls_lamellarity_v1", self.tmp / "review", line_col="line", blind_cols=("secret",),
-                     seed=1, owner="pujan")
+        # control: a value nothing shows builds; so does the image's nm/px (#80f: a named field, exempt)
+        for n, val in enumerate(("4.25", "1.4724", "1.47240")):
+            src = items_csv(self.tmp / f"ok{n}.csv", [("0001", 0, 1, val)])
+            with contextlib.redirect_stdout(io.StringIO()):
+                OS.build(ps, src, "ls_lamellarity_v1", self.tmp / "review", line_col="line", blind_cols=("secret",),
+                         seed=1, owner="pujan")
 
     def test_title_and_blind_flag(self):
         """QC 4: data.js carries D.title (the maker's name) and D.blind (a flag, never the column names); the record

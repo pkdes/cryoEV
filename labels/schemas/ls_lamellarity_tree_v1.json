@@ -1,0 +1,44 @@
+{
+ "schema": "label_schema/1",
+ "id": "ls_lamellarity_tree_v1",
+ "name": "lamellarity_tree",
+ "version": 1,
+ "maker": "pujan",
+ "description": "Whole-tree cards (round 15): every outline of a nested EV is numbered. The outer vesicle (1) gets its type; every other outline says what it is relative to the outline it sits in. The outer vesicle's membrane and inner-vesicle counts are derived at export from those answers, not asked.",
+ "classes": [
+  {"name": "EV", "color": "#4ade80", "key": "1"}
+ ],
+ "object_attrs": [
+  {"id": "type", "label": "Type", "kind": "choice", "required": true, "applies_to": "root",
+   "help": "Its own level: concentric layers make it ML, separate vesicles inside make it MV.",
+   "options": [
+    {"v": "single", "label": "Single", "key": "1"},
+    {"v": "ML", "label": "ML", "key": "2"},
+    {"v": "MV_vesicular", "label": "MV multivesicular", "key": "3"},
+    {"v": "ML+MV", "label": "ML+MV", "key": "4"},
+    {"v": "unsure", "label": "Unsure", "key": "0"}
+   ]},
+  {"id": "relation", "label": "Relation", "kind": "choice", "required": true, "applies_to": "child",
+   "help": "Relative to the outline it sits in: one of its own concentric layers, or a separate vesicle inside it.",
+   "options": [
+    {"v": "layer", "label": "Layer of parent", "key": "l"},
+    {"v": "inner_vesicle", "label": "Inner vesicle", "key": "v"},
+    {"v": "not_membrane", "label": "Not a membrane", "key": "x"},
+    {"v": "duplicate", "label": "Duplicate outline", "key": "d"}
+   ]},
+  {"id": "inner_type", "label": "If inner vesicle: its type", "kind": "choice", "required": false,
+   "applies_to": "child",
+   "options": [
+    {"v": "single", "label": "Single"},
+    {"v": "ML", "label": "ML"},
+    {"v": "MV_vesicular", "label": "MV multivesicular"},
+    {"v": "ML+MV", "label": "ML+MV"},
+    {"v": "unsure", "label": "Unsure"}
+   ]},
+  {"id": "note", "label": "Note", "kind": "text", "max": 300, "key": "n", "applies_to": "all"}
+ ],
+ "image_attrs": [],
+ "tags": [],
+ "supersedes": null,
+ "class_mapping": null
+}
