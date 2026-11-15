@@ -96,6 +96,10 @@ class Helpers(unittest.TestCase):
     def test_parse_recipe_form(self):
         self.assertEqual(R.parse_recipe_form([]), [("roles", 1)])
         self.assertEqual(R.parse_recipe_form(["nesting:1"]), [("roles", 1), ("nesting", 1)])
+        # round 15: picking the tree step adds nesting (pinned v1), listed after it
+        self.assertEqual(R.parse_recipe_form(["nesting_tree:1"]), [("roles", 1), ("nesting", 1), ("nesting_tree", 1)])
+        self.assertEqual(R.parse_recipe_form(["nesting_tree:1", "nesting:1"]),
+                         [("roles", 1), ("nesting", 1), ("nesting_tree", 1)])
         for bad in (["roles:1"], ["nesting:9"], ["x"], ["nesting:one"]):
             with self.assertRaises(ValueError, msg=bad):
                 R.parse_recipe_form(bad)
@@ -178,6 +182,14 @@ class Page(unittest.TestCase):
         self.assertIn("stamped with step versions", page)
         self.assertNotIn("Change recipe (admin)", page)                     # owner, not admin
         self.assertIn("Change recipe (admin)", self.page(DONE, "admin"))
+        # #80e: text columns' headers carry the left-align class, like their cells
+        self.assertIn('<th scope="col" class="cj-results-l">Settings</th>', page)
+        self.assertIn('<th scope="col" class="cj-results-l">Summary</th>', page)
+        self.assertIn('<th scope="col" class="cj-results-l">Sample</th>', page)
+        # round 15: the tree step is offered after nesting and says it adds nesting
+        admin = self.page(DONE, "admin")
+        self.assertLess(admin.index('value="nesting:1"'), admin.index('value="nesting_tree:1"'))
+        self.assertIn("Adds Nesting.", admin)
 
     def test_old_results_say_update(self):
         page = self.page(OLD)
@@ -238,6 +250,12 @@ class Page(unittest.TestCase):
         while not calls and time.time() - t0 < 10:
             time.sleep(0.05)
         self.assertEqual(calls, [[("roles", 1), ("nesting", 1)]])
+        st, _, _ = self.post(f"/results/{DONE}/recipe", "admin", b"step=nesting_tree%3A1")   # nesting added
+        self.assertEqual(st, 303)
+        t0 = time.time()
+        while len(calls) < 2 and time.time() - t0 < 10:
+            time.sleep(0.05)
+        self.assertEqual(calls[1], [("roles", 1), ("nesting", 1), ("nesting_tree", 1)])
 
     def test_recipe_runs_the_engine_and_update_keeps_it(self):
         st, _, _ = self.post(f"/results/{TODO}/recipe", "admin", b"step=nesting%3A1")

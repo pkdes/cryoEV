@@ -72,7 +72,7 @@ is null unless something was refused.
 
 Analysis steps (round 14, contract C5). compute(..., recipe=None) runs the recipe's steps (analysis/steps; default
 roles v1 = the roles_for rule above, so the counts take their roles from the roles step) on each image's accepted
-outlines, and write_results writes, in this order, per_image.csv, per_sample.csv, objects.csv (one row per outline:
+outlines (each step object carries its package `key`, round 15), and write_results writes, in this order, per_image.csv, per_sample.csv, objects.csv (one row per outline:
 image, line = 0-based line of the prediction .txt, pkg_key = the review package's g<id> / p<k>, cls, conf, included,
 exclude_reason in conf / no_diameter / rejected_image / refused_sample / non_ev, then <step>.<column>), steps.json
 (the recipe stamp + objects.csv sha256) and results.json last. included = 1 for the outlines the counts use (EVs and
@@ -485,9 +485,9 @@ def _object_rows(image, objs, step_out, steps, m, lines) -> list:
     return rows
 
 
-def _resolve_keys(rows: list, pkg: dict, order: list) -> None:
-    """pkg_key per row (g<COCO id> / p<k>, or the reviewed object's own n<uid>) and, for an object known only by its
-    package key, its line. COCO ids run over images.csv in file order (prediction_package._build_into)."""
+def _key_maps(pkg: dict, order: list) -> tuple[dict, dict]:
+    """({image: COCO id offset}, {image: {line: package key}}) for the package keys. COCO ids run over images.csv
+    in file order (prediction_package._build_into)."""
     offset, start = {}, 0
     for image in order:
         offset[image] = start
@@ -497,21 +497,49 @@ def _resolve_keys(rows: list, pkg: dict, order: list) -> None:
         d = {line: f"g{offset.get(image, 0) + n + 1}" for n, line in labels.items()}
         d.update({line: f"p{k}" for k, line in cands.items()})
         by_image[image] = d
+    return offset, by_image
+
+
+def _pkg_key(image, line, key, pkg: dict, maps: tuple) -> tuple:
+    """(line, pkg_key) of one object: its package key (g<COCO id> / p<k>, or the reviewed object's own n<uid>) and,
+    for an object known only by its package key, its line."""
+    offset, by_image = maps
+    labels, cands = pkg.get(image, ({}, {}))
+    if key and line is None:
+        if key[:1] == "g" and key[1:].isdigit():
+            line = labels.get(int(key[1:]) - 1 - offset.get(image, 0))
+        elif key[:1] == "p" and key[1:].isdigit():
+            line = cands.get(int(key[1:]))
+    return line, (by_image.get(image, {}).get(line) if line is not None else key)
+
+
+def _resolve_keys(rows: list, pkg: dict, order: list) -> None:
+    """pkg_key per row (g<COCO id> / p<k>, or the reviewed object's own n<uid>) and, for an object known only by its
+    package key, its line. COCO ids run over images.csv in file order (prediction_package._build_into)."""
+    maps = _key_maps(pkg, order)
     for r in rows:
-        labels, cands = pkg.get(r["image"], ({}, {}))
-        key = r.pop("_key")
-        if key and r["line"] is None:
-            if key[:1] == "g" and key[1:].isdigit():
-                r["line"] = labels.get(int(key[1:]) - 1 - offset.get(r["image"], 0))
-            elif key[:1] == "p" and key[1:].isdigit():
-                r["line"] = cands.get(int(key[1:]))
-        r["pkg_key"] = by_image.get(r["image"], {}).get(r["line"]) if r["line"] is not None else key
+        r["line"], r["pkg_key"] = _pkg_key(r["image"], r["line"], r.pop("_key"), pkg, maps)
+
+
+def _prepass_keys(ps_dir: Path, pred_dir: Path, rows: list) -> tuple[dict, tuple]:
+    """(pkg, key maps) for the whole set before any step runs, so step objects carry their package `key` (round 15
+    K1: tree rows map on reviewed images). Reads each prediction .txt once more (a missing one is skipped, as in
+    the main loop)."""
+    pkg = {}
+    for r in rows:
+        try:
+            pkg[r["image"]] = _package_lines(_prediction_lines(pred_dir, r["image"]))
+        except (OSError, UnicodeDecodeError):
+            pass
+    return pkg, _key_maps(pkg, _images_csv_order(ps_dir))
 
 
 def steps_summary(rows: list, steps) -> dict:
-    """{step name: summary text} over the counted objects (included = 1)."""
+    """{step name: summary text} over the counted objects (included = 1). Each step's summary rows carry its own
+    columns un-prefixed, plus the whole objects.csv row (image, line, other steps' `<step>.<column>`)."""
     inc = [r for r in rows if r.get("included") == 1]
-    return {st.name: st.summary([{c: r.get(f"{st.name}.{c}") for c in st.columns} for r in inc]) for st in steps}
+    return {st.name: st.summary([{**r, **{c: r.get(f"{st.name}.{c}") for c in st.columns}} for r in inc])
+            for st in steps}
 
 
 # ---- entry points -----------------------------------------------------------------------------------------
@@ -566,6 +594,9 @@ def compute(ps_dir, reviewed_json=None, recipe=None) -> dict:
     load, to_mask, roles_for, compute_morphology = _chain()
     pred_dir = ps_dir / "p" / model / "predictions"
     per_image, objects, pkg = {}, [], {}
+    # step objects carry their package key (round 15): known up front only with a pre-pass over the .txt files,
+    # which the default recipe skips (its steps never read keys)
+    pre_pkg, maps = _prepass_keys(ps_dir, pred_dir, rows) if not ST.is_default(steps) else ({}, None)
     for r in rows:
         image = r["image"]
         nm = _nm_per_px(r)
@@ -597,7 +628,8 @@ def compute(ps_dir, reviewed_json=None, recipe=None) -> dict:
                 unsure = entry["n_candidates_open"] if entry and entry.get("n_candidates_open") is not None else n_cand
             # the analysis steps (roles first), then the counts with the roles step's roles
             ctx = {"image": image, "nm_per_px": nm, "ev_ids": ev_ids, "H": h, "W": w}
-            sobjs = [{"line": o.line, "cls": o.cls, "conf": o.conf, "poly_px": o.poly, "mask": o.mask} for o in objs]
+            sobjs = [{"line": o.line, "cls": o.cls, "conf": o.conf, "poly_px": o.poly, "mask": o.mask,
+                      "key": _pkg_key(image, o.line, o.key, pre_pkg, maps)[1] if maps else o.key} for o in objs]
             prior = {}
             for st in steps:
                 prior[st.name] = st.run_image(ctx, sobjs, prior)
