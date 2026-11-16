@@ -269,6 +269,47 @@ class MultiIdentity(unittest.TestCase):
         self.assertEqual(json.loads(body)["claims"].get("0003.png|g3"), "pujan")
 
 
+def get_headers(port, path, headers):
+    """-> (status, {lower-case header: value}, body) of a GET."""
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        c.request("GET", path, headers=headers)
+        r = c.getresponse()
+        return r.status, {k.lower(): v for k, v in r.getheaders()}, r.read()
+    finally:
+        c.close()
+
+
+class DataJsNoStore(unittest.TestCase):
+    """r16a stage 2: the multi server sends data.js no-store (keys added later, e.g. tools/add_hires.py "hi", reach
+    the next page load), with the page's ?h= query too; other files keep review_server's caching. Control: the same
+    package through review_server.py still says max-age=86400 for data.js (ClassicControl: review_server unchanged)."""
+    setUpClass, tearDownClass = MultiIdentity.__dict__["setUpClass"], MultiIdentity.__dict__["tearDownClass"]  # its package and server
+
+    def test_data_js_no_store_with_query(self):
+        h = {"X-Review-Key": self.key}
+        data_bytes = (self.pkg / "data.js").read_bytes()
+        for q in ("", "?h=493271", "?v=1&h=2"):
+            st, hd, body = get_headers(self.port, f"/{self.pkg.name}/data.js{q}", h)
+            self.assertEqual((st, hd.get("cache-control")), (200, "no-store"), q)
+            self.assertEqual(body, data_bytes)
+        img = self.data["images"][0]["src"]
+        st, hd, _ = get_headers(self.port, f"/{self.pkg.name}/{img}", h)
+        self.assertEqual((st, hd.get("cache-control")), (200, "max-age=86400"))  # images: as before
+        st, hd, _ = get_headers(self.port, f"/{self.pkg.name}/data.js/../index.html", h)
+        self.assertNotEqual(st, 200)  # the query/path handling is the server's, unchanged
+
+    def test_classic_server_keeps_max_age(self):
+        handler = rs.make_handler(self.pkg, self.key, {im["file"] for im in self.data["images"]}, self.data["id"], [], False)
+        srv = serve(ThreadingHTTPServer(("127.0.0.1", 0), handler))
+        try:
+            st, hd, _ = get_headers(srv.server_address[1], "/data.js?h=1", {"X-Review-Key": self.key})
+            self.assertEqual((st, hd.get("cache-control")), (200, "max-age=86400"))
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+
 class ClassicControl(unittest.TestCase):
     """review_server.py (the real review on :8766; the sandbox is the same handler with sandbox on) is untouched: with
     the key AND an X-CJ-User header, it serves index.html exactly as on disk and saves the page's own who."""

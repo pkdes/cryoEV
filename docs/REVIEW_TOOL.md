@@ -135,10 +135,13 @@ When a prediction is selected, the selection box shows its class, `pr[k].c` (opt
 
 ## Image contrast (☼, round 16a, display only)
 Every view has a **☼** (◐ stays Low conf) button in its top bar (Editor header, Quick check bar, object-set bar). It opens a small panel:
-**Brightness**, **Contrast**, **Gamma** sliders, **Auto** and **Reset**.
+**Brightness**, **Contrast**, **Gamma** sliders, **Auto**, **Smooth** and **Reset**.
 - **Auto** stretches the darkest 0.5 % to black and the brightest 0.5 % to white, measured over what is on screen: the
   Editor's current view (zoom in and the levels follow the region), or the card's crop. Brightness / contrast / gamma
   apply on top. Off by default; once on it stays on.
+- **Smooth** (stage 2) softens the grain: a Gaussian blur of 0.75 px of the drawn image (a 5-tap kernel in the page,
+  computed once per image; on a page that can't read pixels, the canvas filter `blur()`; hidden where neither works).
+  Off by default.
 - Settings are per reviewer, in this browser (localStorage `cryoev-review:contrast:<who>`). Reset = the image as
   delivered. The button is lit while anything is set.
 - **Display only:** the page draws a lookup-table copy of the image (an offscreen canvas at the image's natural size,
@@ -146,6 +149,26 @@ Every view has a **☼** (◐ stays Low conf) button in its top bar (Editor head
   are the same with it on or off (`test_review_r16a_browser.py` checks the bodies and the export).
 - A page opened from a file (a zip copy) can't read the image's pixels: there the panel offers brightness and
   contrast only (a canvas filter), and says so.
+- The lookup-table copy is rebuilt only when the settings, the image or Auto's levels change; a redraw of the same
+  view (a save, a pull) reuses it.
+
+## Sharper images (2x, round 16a stage 2)
+`tools/add_hires.py` adds, per image, `images/<stem>.hi.jpg` (2880 px wide, grayscale, q90) and `"hi"`, `"hi_w"`,
+`"hi_h"` in `data.js` (keys added only; the server's `images/` allow-list serves the file with the same key gate).
+- **Drawing:** the page loads an image's 2x file lazily (never preloaded; one per view; dropped when the view moves on)
+  and, once loaded, draws it into the base image's rectangle. The Editor loads it once the view shows more than 1
+  screen pixel per image pixel; Quick check, object and tree cards load it for the card shown. A 2x file whose shape
+  doesn't match the base image is not used.
+- **Unchanged:** W / H and every pixel rule (simplify, minimum area, zoom limits, focus span, the cards' zoom steps)
+  use the base image; outlines are normalized. Decisions, PUT bodies and exports are the same with the 2x image or
+  without (`test_review_r16a_browser.py` `HiEditorTests`, `HiObjectCardTests`).
+- **Contrast** is computed from the pixels drawn (the 2x image once it is drawn).
+- **nm/px:** Image info's "nm/px here" is the level drawn (`nm_per_px x W / 2x width`, "sharper image"). Cards show
+  no nm/px or scale readout (a blind set's cards never do).
+- **Mixed and old sets:** images without `hi` (older `data.js`, or images add_hires skipped) draw the base image as
+  before.
+- **Caching:** `multi_review_server.py` serves `data.js` with `Cache-Control: no-store`, so keys added later reach the
+  next page load (`review_server.py`, and the :8766 audit on it, are unchanged: `max-age=86400`).
 
 ## Cards (phone)
 Narrow screens open the cards automatically. "Editor" goes back.
@@ -495,7 +518,10 @@ python -m unittest discover -s annotation/tests -v
   exactly, settings per reviewer and remembered; a tainted canvas falls back without errors; object and tree cards
   draw with contrast and the tree card keeps Tab; #24 Accept names the picked class (fun on and off); #25a a mouse
   drag pans (no decision, zoom or peek), touch and pen still swipe; #25b Editor Tab / Shift+Tab, not on a focused
-  control.
+  control. Stage 2: PUT bodies the same with the 2x image drawn or not (Editor: accept, vertex drag, reclass,
+  freehand; object cards: answers), with a control that it was drawn; a mixed set and old images; nm/px of the level
+  drawn; no nm/px on blind cards; Smooth on (in the contrast PUT / export test), Reset, hidden when unsupported; no
+  table rebuild on redraws. `make_fixture.build_hi` and `object_card_fixture.build(hi=...)` make the 2x fixtures.
 - `test_review_reject_lowconf.py` (round 7): `valid_edit` for the new keys, `/api/ping` caps, the HEAD (00a1921)
   `valid_edit` refusing them; two devices merged per key; a class change keeping the tag; `effective_labels`,
   `is_edited`, `is_rejected`, `_is_checked`, the spot check; `reviewed.json` fields only when set; `apply_review_edits`

@@ -25,6 +25,7 @@ from PIL import Image
 HERE = Path(__file__).resolve().parent
 TEMPLATE = HERE.parent / "review_tool" / "index.html"
 W, H = 360, 256
+_CIRCLES = []  # [b, a, c, d] of the last build (build_hi draws the same circles at 2x)
 CATEGORIES = ["EV", "Incomplete", "Low conf EV", "MV", "Overlapping", "inner", "non-EV"]  # old export order
 
 
@@ -37,10 +38,10 @@ def ring(cx, cy, r, n=20):
     return out
 
 
-def image(seed, circles):
+def image(seed, circles, scale=1):
     rng = np.random.default_rng(seed)
-    im = rng.normal(150, 12, (H, W))
-    yy, xx = np.mgrid[:H, :W]
+    im = rng.normal(150, 12, (H * scale, W * scale))
+    yy, xx = np.mgrid[:H * scale, :W * scale] / scale
     for cx, cy, r in circles:
         d = np.hypot(xx - cx, yy - cy)
         im[np.abs(d - r) < 1.6] -= 70  # membrane
@@ -53,6 +54,7 @@ def build(out: Path):
     b = [(90, 120, 35), (250, 110, 26), (180, 210, 14), (300, 210, 18)]
     c = [(120, 100, 30), (260, 150, 22)]
     d = [(90, 90, 26), (200, 130, 22), (300, 190, 18)]
+    _CIRCLES[:] = [b, a, c, d]
     # Package order is B, A, C, D (fg + fp: 3, 2, 0, 0, as build_review_package.py sorts). The "most flags" rank
     # is fg + fp + fx: A 4, B 3, C 0, D 0, so it differs from package order. D's only flags are flc (3), which
     # are shown but must not rank: if they counted, D would sort before C.
@@ -91,6 +93,24 @@ def build(out: Path):
             "created": "2026-10-29T00:00:00", "categories": CATEGORIES, "images": images}
     (out / "data.js").write_text("window.REVIEW_DATA = " + json.dumps(data, separators=(",", ":")) + ";\n", encoding="utf-8")
     shutil.copy(TEMPLATE, out / "index.html")  # not committed: always the current template
+    return data
+
+
+HI_FILES = ("fixA_new.png", "fixB_old.png")  # a mixed set: these two get a 2x image, fixC / fixD keep 1x only
+
+
+def build_hi(out: Path, files=HI_FILES):
+    """The fixture plus 2x ("hi") images for `files`, as tools/add_hires.py writes them (round 16a stage 2):
+    images/<stem>.hi.jpg (grayscale, q90, 2x the base size, the same circles) and "hi", "hi_w", "hi_h" in data.js."""
+    data = build(out)
+    circles = dict(zip(["fixB_old.png", "fixA_new.png", "fixC_old.png", "fixD_new.png"], _CIRCLES))
+    for k, im in enumerate(data["images"]):
+        if im["file"] not in files:
+            continue
+        rel = f"images/{Path(im['file']).stem}.hi.jpg"
+        image(100 + k, circles[im["file"]], scale=2).save(out / rel, quality=90)
+        im.update(hi=rel, hi_w=2 * W, hi_h=2 * H)
+    (out / "data.js").write_text("window.REVIEW_DATA = " + json.dumps(data, separators=(",", ":")) + ";\n", encoding="utf-8")
     return data
 
 

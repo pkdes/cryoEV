@@ -105,7 +105,9 @@ def _png(path: Path, w, h, circles):
 
 
 def build(folder, *, blind=True, outline_mode="target", n_items=6, sentinel=None, title="Lamellarity check 1",
-          instructions=None) -> dict:
+          instructions=None, hi=()) -> dict:
+    """hi: image stems ("imgA", "imgB") that also get a 2x image (round 16a stage 2: images/<stem>.hi.jpg and data.js
+    "hi", "hi_w", "hi_h", as tools/add_hires.py writes them)."""
     folder = Path(folder)
     (folder / "images").mkdir(parents=True, exist_ok=True)
     shutil.copyfile(PAGE, folder / "index.html")
@@ -138,6 +140,10 @@ def build(folder, *, blind=True, outline_mode="target", n_items=6, sentinel=None
         ids.add(iid)
         items.append({"id": iid, "image": stem, "obj": obj, "crop": crop(cx, cy, r)})
     rnd.shuffle(items)
+    for stem, im, circ in (("imgA", img_a, a_circ), ("imgB", img_b, b_circ)):
+        if stem in hi:
+            _png(folder / "images" / f"{stem}.hi.jpg", 2 * w, 2 * h, [(2 * x, 2 * y, 2 * r) for x, y, r in circ])
+            im.update(hi=f"images/{stem}.hi.jpg", hi_w=2 * w, hi_h=2 * h)
     data = {"id": folder.name, "title": title, "kind": "objects", "source": "prediction_set:ps_20261114_abcdef",
             "run": "fixture", "categories": ["EV"], "schema": SCHEMA, "items": items, "outline_mode": outline_mode,
             "blind": bool(blind), "images": [img_a, img_b]}   # a flag only (QC 4): no column names in data.js

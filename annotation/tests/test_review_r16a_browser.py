@@ -26,6 +26,7 @@ from PIL import Image
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import make_fixture  # noqa: E402
 import object_card_fixture as OF  # noqa: E402
 import test_review_tool_browser as trb  # noqa: E402
 from test_object_card_browser import _Browser  # noqa: E402
@@ -118,11 +119,11 @@ class ContrastTests(trb.Base):
         self.addCleanup(srv_on.close)
         base_srv = self.srv
         off, exp_off, vc_off, _ = self.edits_and_bodies(base_srv, None, "vcsame")
-        on, exp_on, vc_on, page = self.edits_and_bodies(srv_on, settings("vcsame", b=20, c=30, g=1.4, auto=True), "vcsame")
+        on, exp_on, vc_on, page = self.edits_and_bodies(srv_on, settings("vcsame", b=20, c=30, g=1.4, auto=True, smooth=True), "vcsame")
         self.srv = base_srv
         # control: contrast was off in the first run and really applied (a lookup table, Auto levels) in the second
         self.assertIsNone(vc_off["last"])
-        self.assertTrue(vc_on["auto"] and vc_on["last"] and "lo" in vc_on["last"], vc_on)
+        self.assertTrue(vc_on["auto"] and vc_on["last"] and "lo" in vc_on["last"] and vc_on["last"]["smooth"], vc_on)
         self.assertTrue(page.evaluate("document.getElementById('vcBtn').classList.contains('on')"))
         self.assertEqual(sorted(off), ["fixB_old.png"])
         self.assertEqual(on, off)
@@ -195,7 +196,7 @@ class ContrastTests(trb.Base):
         self.assertTrue(page.is_hidden("#vcAuto") and page.is_hidden("#vcG"))
         self.assertTrue(page.is_visible("#vcTaint"))
         set_range(page, "#vcB", 60)
-        self.assertEqual(self.state(page)["vc"]["last"], {"filter": True})
+        self.assertEqual(self.state(page)["vc"]["last"], {"filter": True, "smooth": False})
         self.assertGreater(self.pick_px(page, *right)[0], before[0] + 10)  # ctx.filter brightness applied
         page.click("#toTri")  # the cards draw through the same path
         page.wait_for_function("__review.state().tri.ready")
@@ -314,6 +315,175 @@ class ObjectCardContrastTests(_Browser):
                 pg.keyboard.press("Tab")
                 self.assertEqual(pg.evaluate("__review.obj().tree.node"), n0 + 1)
             self.assertEqual(self.errors, [])
+
+
+# ---------------------------------------------------------------- stage 2: the 2x ("hi") images and Smooth
+NKEY = re.compile(r'"n[0-9a-z]{6,}"')  # a drawn shape's random key
+
+
+def last_puts(page_bodies):
+    return {f: json.loads(NKEY.sub('"nNEW"', json.dumps(strip(b), sort_keys=True))) for f, b in page_bodies.items()}
+
+
+def grab_puts(bodies):
+    def setup(context, page):
+        def on(req):
+            if req.method == "PUT" and "/api/edits" in req.url:
+                bodies[re.search(r"[?&]f=([^&]+)", req.url).group(1)] = json.loads(req.post_data)
+        page.on("request", on)
+    return setup
+
+
+def meta_cap(nm):
+    """/api/ping lists the m cap and /api/meta gives every image nm_per_px = nm (what review_meta reads from images.csv)."""
+    def setup(context, page):
+        def ping(r):
+            j = r.fetch().json()
+            r.fulfill(status=200, content_type="application/json", body=json.dumps(dict(j, caps=sorted(set(j.get("caps", [])) | {"m"}))))
+        page.route(re.compile(r".*/api/ping(\?.*)?$"), ping)
+        page.route(re.compile(r".*/api/meta(\?.*)?$"), lambda r: r.fulfill(status=200, content_type="application/json", body=json.dumps(
+            {"package": {}, "images": {f: {"nm_per_px": nm} for f in ("fixA_new.png", "fixB_old.png", "fixC_old.png", "fixD_new.png")}})))
+    return setup
+
+
+@browser
+class HiEditorTests(trb.Base):
+    @classmethod
+    def make_server(cls):
+        return LiveServer(build=make_fixture.build_hi)  # fixA / fixB with a 2x image, fixC / fixD without (a mixed set)
+
+    def flow(self, page):
+        """The same Editor edits: accept a prediction, drag one of its vertices, reclass it, then a freehand shape."""
+        f = "fixB_old.png"
+        self.go(page, f)
+        ring = self.image(f)["pr"][1]["p"][0]
+        trb.EditAcceptTests.zoom_on(self, page, ring)
+        self.click_obj(page, ring)
+        page.keyboard.press("a")
+        x, y = self.scr(page, ring[22], ring[23])
+        page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x + 20, y - 20, steps=5); page.mouse.up()
+        time.sleep(0.6)
+        page.keyboard.press("2")
+        page.keyboard.press("f")
+        page.keyboard.press("d")
+        self.stroke(page, 0.3, 0.3, 20)
+        self.synced(page)
+
+    def test_put_bodies_same_with_and_without_hi(self):
+        runs = {}
+        for name, build in (("hi", None), ("plain", make_fixture.build)):
+            srv = self.srv if build is None else LiveServer(build=build)
+            if build is not None:
+                self.addCleanup(srv.close)
+            base, self.srv = self.srv, srv
+            bodies = {}
+            page = self.open("&who=hiput&mode=editor", setup=grab_puts(bodies), **DESK)
+            self.flow(page)
+            runs[name] = (last_puts(bodies), self.state(page)["hi"], self.state(page)["W"])
+            self.srv = base
+        # control: the 2x image really was drawn in one run (and not in the other), at the base image's W
+        self.assertEqual(runs["hi"][1]["editor"], "images/fixB_old.hi.jpg")
+        self.assertEqual(runs["hi"][1]["level"], 720)
+        self.assertIsNone(runs["plain"][1]["editor"])
+        self.assertEqual(runs["hi"][2], runs["plain"][2])
+        self.assertEqual(runs["hi"][0], runs["plain"][0])
+        dec = runs["hi"][0]["fixB_old.png"]["dec"]
+        self.assertEqual(dec["p1"]["v"], "add:Low conf EV")
+        self.assertIn("nNEW", dec)
+
+    def test_mixed_set_lazy_and_nm_per_px(self):
+        hi_req = []
+
+        def log(context, page):
+            page.on("request", lambda r: ".hi." in r.url and hi_req.append(r.url.split("/")[-1].split("?")[0]))
+        page = self.open("&who=hinm&mode=editor", setup=both(log, meta_cap(1.47)), **DESK)
+        page.wait_for_function("__review.meta() !== null")
+        info = lambda: page.evaluate("(() => { for (const dt of document.querySelectorAll('#infoBox dt')) "
+                                     "if (dt.textContent === 'Pixel size') return dt.nextElementSibling.textContent; })()")
+        self.go(page, "fixC_old.png")  # no hi: the 1x level
+        page.mouse.move(600, 400)
+        page.mouse.wheel(0, -600)
+        time.sleep(0.3)
+        self.assertIsNone(self.state(page)["hi"]["editor"])
+        self.assertEqual(info(), "1.47 nm/px here")
+        self.go(page, "fixB_old.png")  # hi: drawn once loaded; nm/px of the 2x image
+        page.wait_for_function("__review.state().hi.editor === 'images/fixB_old.hi.jpg'")
+        self.assertEqual(info(), "0.735 nm/px here · sharper image")
+        self.assertEqual(self.state(page)["W"], 360)  # pixel rules: the base image
+        self.go(page, "fixC_old.png")
+        self.assertEqual(info(), "1.47 nm/px here")
+        # never preloaded: only the images opened asked for their 2x image (fixA, the first one, and fixB)
+        self.assertTrue(set(hi_req) <= {"fixA_new.hi.jpg", "fixB_old.hi.jpg"}, hi_req)
+        self.assertIn("fixB_old.hi.jpg", hi_req)
+
+    def test_old_data_js_and_redraws_reuse_the_table(self):
+        page = self.open("&who=hiold&mode=editor", setup=settings("hiold", auto=True, smooth=True), **DESK)
+        self.go(page, "fixD_new.png")  # an image without hi keys, as in every data.js before stage 2
+        self.assertIsNone(self.state(page)["hi"]["editor"])
+        page.wait_for_function("__review.state().vc.builds > 0")
+        n = self.state(page)["vc"]["builds"]
+        for _ in range(10):  # redraws (a save, a pull) of the same view: no new lookup table or histogram
+            page.evaluate("__review.render()")
+        self.assertEqual(self.state(page)["vc"]["builds"], n)
+
+    def test_smooth_toggle_and_hidden_when_unsupported(self):
+        page = self.open("&who=smo&mode=editor", **DESK)
+        page.click("#vcBtn")
+        self.assertTrue(page.is_visible("#vcSmooth"))
+        page.click("#vcSmooth")
+        self.assertTrue(self.state(page)["vc"]["smooth"] and self.state(page)["vc"]["last"]["smooth"])
+        page.click("#vcReset")
+        self.assertFalse(self.state(page)["vc"]["smooth"])
+        # a page that can't read pixels and has no canvas filter (Safari < 18 on a file:// copy): no Smooth
+        nofilter = ("Object.defineProperty(CanvasRenderingContext2D.prototype, 'filter', {configurable: true, get() { return undefined; }, set(v) {}});"
+                    "(() => { const g = CanvasRenderingContext2D.prototype.getImageData; CanvasRenderingContext2D.prototype.getImageData = "
+                    "function (...a) { if (!this.canvas.isConnected) throw new DOMException('tainted', 'SecurityError'); return g.apply(this, a); }; })();")
+        page2 = self.open("&who=smo2&mode=editor", setup=lambda c, p: p.add_init_script(nofilter), **DESK)
+        page2.click("#vcBtn")
+        set_range(page2, "#vcB", 30)  # the first non-default draw finds the canvas tainted
+        st = self.state(page2)["vc"]
+        self.assertTrue(st["taint"] and not st["smoothOk"])
+        self.assertTrue(page2.is_hidden("#vcSmooth"))
+
+    def test_quick_check_card_draws_hi(self):
+        page = self.open("&who=hicard&mode=cards", **trb.PhoneTests.PHONE)
+        page.wait_for_function("__review.state().tri.ready")
+        st = self.state(page)["tri"]
+        im = self.srv.data["images"][st["queue"][st["pos"]]["i"]]
+        self.assertEqual(im["file"], "fixA_new.png")  # most flags first: an image with hi
+        page.wait_for_function("__review.state().hi.tri === 'images/fixA_new.hi.jpg'")
+        self.assertEqual(self.state(page)["tri"]["xf"]["Wi"], 360)  # Wi / Hi: the base image's
+
+
+@browser
+class HiObjectCardTests(_Browser):
+    def answers(self, hi):
+        d = Path(tempfile.mkdtemp(prefix="hi_obj_")) / "pred_obj_fixture_ab12"
+        OF.build(d, hi=hi)
+        srv = OF.FakeServer(d).start()
+        self.addCleanup(srv.close)
+        pg = self.page(srv.url + "?who=rev1", width=390, height=844)
+        pg.wait_for_function("window.__review && __review.obj() && __review.state().server", timeout=15000)
+        seen = []
+        for _ in range(6):
+            it = self.obj(pg)["item"]
+            if it["image"] == "imgA" and hi:
+                pg.wait_for_function("__review.obj().hi === 'images/imgA.hi.jpg'")
+                seen.append(it["id"])
+            for k in ("2", "s", "z"):
+                pg.keyboard.press(k)
+            pg.keyboard.press("ArrowRight")
+        pg.wait_for_function("__review.state().dirty === 0", timeout=10000)
+        self.assertNotIn("nm/px", pg.inner_text("#obj"))  # a blind set: no nm/px or scale readout on its cards
+        self.assertEqual(self.errors, [])
+        return {f: strip(r) for f, r in srv.records.items()}, seen
+
+    def test_answers_same_with_and_without_hi(self):
+        plain, _ = self.answers(())
+        hi, seen = self.answers(("imgA",))
+        self.assertTrue(seen)  # control: the 2x image was drawn on imgA's cards
+        self.assertEqual(hi, plain)
+        self.assertTrue(any(k.startswith("a:") for r in hi.values() for k in r["dec"]))
 
 
 if __name__ == "__main__":

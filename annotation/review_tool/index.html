@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-16.1";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-16.2";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const h = document.querySelector("header"), inPortal = /^\/review\//.test(location.pathname), v = document.createElement("span");
   v.id = "pageVer"; v.style.cssText = "font-size:11px;color:var(--mute);white-space:nowrap"; v.textContent = "Review page " + PAGE_VERSION;
@@ -569,7 +569,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
   <div class="vcRow"><label for="vcB">Brightness</label><input type="range" id="vcB" min="-100" max="100" step="1" value="0"><output id="vcBo">0</output></div>
   <div class="vcRow"><label for="vcC">Contrast</label><input type="range" id="vcC" min="-100" max="100" step="1" value="0"><output id="vcCo">0</output></div>
   <div class="vcRow" id="vcGRow"><label for="vcG">Gamma</label><input type="range" id="vcG" min="0.3" max="3" step="0.05" value="1"><output id="vcGo">1.00</output></div>
-  <div class="vcBtns"><button id="vcAuto" type="button" aria-pressed="false" title="Stretch the darkest 0.5 % to black and the brightest 0.5 % to white, over what is on screen">Auto</button><button id="vcReset" type="button" title="Back to the image as delivered">Reset</button></div>
+  <div class="vcBtns"><button id="vcAuto" type="button" aria-pressed="false" title="Stretch the darkest 0.5 % to black and the brightest 0.5 % to white, over what is on screen">Auto</button><button id="vcSmooth" type="button" aria-pressed="false" title="Soften the grain: a slight blur (0.75 image px) of what is drawn">Smooth</button><button id="vcReset" type="button" title="Back to the image as delivered">Reset</button></div>
   <p id="vcNote">Only how the image looks on this screen: your decisions and outlines are the same either way. Saved in this browser, for you.</p>
   <p id="vcTaint" hidden>This copy of the page can't read the image's pixels (opened from a file), so Auto and gamma are off here.</p>
 </div>
@@ -1011,27 +1011,31 @@ function handles(rings) {  // the white vertex handles of the selection; selecte
     ctx.beginPath(); ctx.arc(x, y, on ? 5.5 : 3.5, 0, 7); ctx.fill(); ctx.stroke();
   } });
 }
-// ---------- viewer contrast (r16a P1): display only ----------
-// Brightness / contrast / gamma, and Auto (a 0.5-99.5 % stretch over what is on screen: the Editor's view, a card's
-// crop), per reviewer in localStorage. vcDraw is the only way the four image draw sites (Editor, Quick check card,
-// object card, tree card) draw the image. It applies a 256-entry lookup table to a copy of the image (an offscreen
-// canvas at the image's natural size, at most 16 Mpx: the iOS limit), cached per image and redone only when the table
-// changes, and draws the copy into the image's own rectangle: W / H, outlines, decisions and exports never see it.
+// ---------- viewer contrast (r16a P1) and the 2x images (r16a stage 2): display only ----------
+// Brightness / contrast / gamma, Auto (a 0.5-99.5 % stretch over what is on screen: the Editor's view, a card's crop)
+// and Smooth (a Gaussian blur of 0.75 px of the drawn image), per reviewer in localStorage. vcDraw is the only way
+// the four image draw sites (Editor, Quick check card, object card, tree card) draw the image. It applies a 256-entry
+// lookup table to a copy of the image (an offscreen canvas at the drawn image's natural size, at most 16 Mpx: the iOS
+// limit), cached per image and redone only when the settings, the image or Auto's levels change (never per frame),
+// and draws the copy into the base image's own rectangle: W / H, outlines, decisions and exports never see it.
 // Settings at their defaults: the plain drawImage, as before. A page that can't read pixels (file://: a tainted
-// canvas) falls back to ctx.filter brightness / contrast, without Auto or gamma; any other error draws the plain image.
-const VC_MAX_PX = 16e6, VC0 = {b: 0, c: 0, g: 1, auto: false};
+// canvas) falls back to ctx.filter brightness / contrast / blur, without Auto or gamma; any other error draws the plain
+// image. The 2x image (data.js im.hi, tools/add_hires.py) is drawn instead of the base image once it has loaded, into
+// the same rectangle; every pixel rule keeps the base image's size.
+const VC_MAX_PX = 16e6, VC0 = {b: 0, c: 0, g: 1, auto: false, smooth: false}, SMOOTH_PX = 0.75;
 let vc = {...VC0}, vcWho = null, vcTaint = false, vcLast = null;
-const vcCache = new Map();  // image -> {w, h, src, lum, cv, cx, out, key}: the 3 most recently drawn images
+const vcCache = new Map();  // image -> {w, h, f, src, lum, cv, cx, out, key, sm, rk, lohi}: the 2 most recently drawn images
 const vcFilterOk = (() => { try { return typeof document.createElement("canvas").getContext("2d").filter === "string"; } catch (e) { return false; } })();
 const vcNum = (v, lo, hi, d) => typeof v === "number" && isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d;
 const vcKey = () => "cryoev-review:contrast:" + (me() || "-");
-const vcIdentity = () => !vc.auto && vc.b === 0 && vc.c === 0 && vc.g === 1;
+const vcIdentity = () => !vc.auto && !vc.smooth && vc.b === 0 && vc.c === 0 && vc.g === 1;
 const vcCf = () => vc.c >= 0 ? 1 + vc.c / 50 : 1 + vc.c / 100;  // contrast -100..100 -> a slope of 0..3
+const vcSmoothOk = () => !vcTaint || vcFilterOk;  // pixels: a blur in the page; else the canvas filter; else no Smooth
 function vcLoad() {
   vcWho = me(); vc = {...VC0};
   try {
     const j = JSON.parse(localStorage.getItem(vcKey()) || "null");
-    if (j && typeof j === "object") vc = {b: vcNum(j.b, -100, 100, 0), c: vcNum(j.c, -100, 100, 0), g: vcNum(j.g, 0.3, 3, 1), auto: j.auto === true};
+    if (j && typeof j === "object") vc = {b: vcNum(j.b, -100, 100, 0), c: vcNum(j.c, -100, 100, 0), g: vcNum(j.g, 0.3, 3, 1), auto: j.auto === true, smooth: j.smooth === true};
   } catch (e) {}
 }
 function vcSave() { try { localStorage.setItem(vcKey(), JSON.stringify(vc)); } catch (e) {} }
@@ -1053,20 +1057,38 @@ function vcEntry(img) {  // the image's pixels, read once (getImageData throws o
   const cx2 = cv2.getContext("2d", {willReadFrequently: true}); cx2.drawImage(img, 0, 0, w, h);
   const src = cx2.getImageData(0, 0, w, h).data, lum = new Uint8Array(w * h);
   for (let i = 0, j = 0; j < lum.length; i += 4, j++) lum[j] = (src[i] * 77 + src[i + 1] * 150 + src[i + 2] * 29) >> 8;
-  e = {w, h, src, lum, cv: cv2, cx: cx2, out: cx2.createImageData(w, h), key: ""};
+  e = {w, h, f, src, lum, cv: cv2, cx: cx2, out: cx2.createImageData(w, h), key: "", sm: null, rk: "", lohi: [0, 255]};
   vcCache.set(img, e);
-  while (vcCache.size > 3) { const [k, old] = vcCache.entries().next().value; old.cv.width = old.cv.height = 0; vcCache.delete(k); }  // iOS frees canvas memory late
+  while (vcCache.size > 2) { const [k, old] = vcCache.entries().next().value; old.cv.width = old.cv.height = 0; vcCache.delete(k); }  // iOS frees canvas memory late
   return e;
+}
+function vcBlur(e) {  // Smooth: the image's pixels blurred (Gaussian, sigma SMOOTH_PX source px; separable, 5 taps), once per image
+  if (e.sm) return e.sm;
+  const s = Math.max(0.3, SMOOTH_PX * e.f), k = [-2, -1, 0, 1, 2].map(x => Math.exp(-x * x / (2 * s * s))), n = k.reduce((a, b) => a + b, 0);
+  const K = k.map(v => v / n), w = e.w, h = e.h, src = e.src, tmp = new Float32Array(w * h * 3), out = new Uint8ClampedArray(src.length);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) for (let c = 0; c < 3; c++) {
+    let a = 0; for (let t = -2; t <= 2; t++) a += K[t + 2] * src[(y * w + Math.min(w - 1, Math.max(0, x + t))) * 4 + c];
+    tmp[(y * w + x) * 3 + c] = a;
+  }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const o = (y * w + x) * 4;
+    for (let c = 0; c < 3; c++) { let a = 0; for (let t = -2; t <= 2; t++) a += K[t + 2] * tmp[(Math.min(h - 1, Math.max(0, y + t)) * w + x) * 3 + c]; out[o + c] = a; }
+    out[o + 3] = src[o + 3];
+  }
+  return (e.sm = out);
 }
 function vcStretch(e, r) {  // Auto: the 0.5 / 99.5 % levels of the image inside r (normalized [x0, y0, x1, y1]), sampled
   const cl = (v, n) => Math.min(n, Math.max(0, v));
   const x0 = cl(Math.floor(r[0] * e.w), e.w), y0 = cl(Math.floor(r[1] * e.h), e.h), x1 = cl(Math.ceil(r[2] * e.w), e.w), y1 = cl(Math.ceil(r[3] * e.h), e.h);
-  if (x1 <= x0 || y1 <= y0) return [0, 255];
+  const rk = [x0, y0, x1, y1].join();
+  if (rk === e.rk) return e.lohi;  // the same region as the last draw (a redraw, a save): no new histogram
+  e.rk = rk;
+  if (x1 <= x0 || y1 <= y0) return (e.lohi = [0, 255]);
   const step = Math.max(1, Math.ceil(Math.sqrt((x1 - x0) * (y1 - y0) / 65536))), hist = new Uint32Array(256); let n = 0;
   for (let y = y0; y < y1; y += step) for (let x = x0, o = y * e.w + x0; x < x1; x += step, o += step) { hist[e.lum[o]]++; n++; }
   const at = q => { let acc = 0; const t = q * n; for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc > t) return v; } return 255; };
   const lo = at(0.005), hi = at(0.995);
-  return hi > lo ? [lo, hi] : [0, 255];
+  return (e.lohi = hi > lo ? [lo, hi] : [0, 255]);
 }
 function vcDraw(c2, im, dx, dy, dw, dh, vw, vh) {  // draw image `im` at (dx, dy, dw, dh) on a view vw x vh (css px), as this viewer set it
   if (vcIdentity()) { c2.drawImage(im, dx, dy, dw, dh); return; }
@@ -1076,32 +1098,58 @@ function vcDraw(c2, im, dx, dy, dw, dh, vw, vh) {  // draw image `im` at (dx, dy
       try { e = vcEntry(im); } catch (err) { vcTaint = true; vcSync(); }  // a tainted canvas (SecurityError): the filter fallback
       if (e) {
         const [lo, hi] = vc.auto ? vcStretch(e, [-dx / dw, -dy / dh, (vw - dx) / dw, (vh - dy) / dh]) : [0, 255];
-        const key = [lo, hi, vc.b, vc.c, vc.g].join();
+        const key = [lo, hi, vc.b, vc.c, vc.g, vc.smooth].join();
         if (e.key !== key) {
-          const L = vcLut(lo, hi), s = e.src, o = e.out.data;
+          const L = vcLut(lo, hi), s = vc.smooth ? vcBlur(e) : e.src, o = e.out.data;
           for (let i = 0; i < s.length; i += 4) { o[i] = L[s[i]]; o[i + 1] = L[s[i + 1]]; o[i + 2] = L[s[i + 2]]; o[i + 3] = s[i + 3]; }
-          e.cx.putImageData(e.out, 0, 0); e.key = key;
+          e.cx.putImageData(e.out, 0, 0); e.key = key; vcBuilds++;
         }
-        vcLast = {lo, hi, w: e.w, h: e.h};
+        vcLast = {lo, hi, w: e.w, h: e.h, smooth: vc.smooth};
         c2.drawImage(e.cv, dx, dy, dw, dh); return;
       }
     }
-    if (vcTaint && vcFilterOk && (vc.b || vc.c)) {
-      vcLast = {filter: true};
-      c2.filter = `brightness(${1 + vc.b / 100}) contrast(${vcCf()})`;
+    if (vcTaint && vcFilterOk && (vc.b || vc.c || vc.smooth)) {
+      const blur = vc.smooth ? SMOOTH_PX * dw / (im.naturalWidth || dw) : 0;  // in screen px: 0.75 source px
+      vcLast = {filter: true, smooth: vc.smooth};
+      c2.filter = `brightness(${1 + vc.b / 100}) contrast(${vcCf()})` + (blur ? ` blur(${blur.toFixed(2)}px)` : "");
       try { c2.drawImage(im, dx, dy, dw, dh); } finally { c2.filter = "none"; }
       return;
     }
   } catch (err) { try { c2.filter = "none"; } catch (e2) {} }
   c2.drawImage(im, dx, dy, dw, dh);
 }
-function vcSync() {  // the panel shows the settings; the ◐ buttons are lit while anything is set
+let vcBuilds = 0;  // how many times a lookup-table copy was rebuilt (tests: never per frame)
+// The 2x image of a package image (data.js hi, images/<stem>.hi.jpg). One slot per view (Editor, card, object card):
+// loaded lazily when wanted (never preloaded), one at a time, dropped when the view moves to another image. Used only
+// once loaded and only if its shape matches the base image (else the outlines would not sit on it).
+const HI_RE = /^images\/[^/\\]+\.(?:jpe?g|png)$/i;
+const hiSrc = im => im && typeof im.hi === "string" && HI_RE.test(im.hi) && !im.hi.includes("..") ? im.hi : null;
+function hiOf(slot, im, want, base) {  // the slot's loaded 2x image for `im` (base: its loaded base image), or null
+  const src = hiSrc(im);
+  if (slot.src !== src) { hiDrop(slot); slot.src = src; }
+  if (src && want && !slot.img && !slot.bad) {
+    const h = new Image(); slot.img = h;
+    h.onload = () => { if (slot.img === h) { slot.ready = true; if (slot.onready) slot.onready(); } };
+    h.onerror = () => { if (slot.img === h) slot.bad = true; };
+    h.src = src;
+  }
+  if (!slot.ready || !base || !base.naturalWidth) return null;
+  const h = slot.img, ra = h.naturalWidth / h.naturalHeight, rb = base.naturalWidth / base.naturalHeight;
+  if (!(Math.abs(ra / rb - 1) < 0.01)) { slot.bad = true; slot.ready = false; return null; }
+  return h;
+}
+function hiDrop(slot) { if (slot.img) slot.img.onload = slot.img.onerror = null; slot.src = undefined; slot.img = null; slot.ready = false; slot.bad = false; }
+const edHi = {onready: () => draw()};  // the Editor's slot (the cards' and the object view's are in their blocks)
+let edLevel = 0;  // the natural width of the image the Editor drew last: its nm/px readout follows it
+function vcSync() {  // the panel shows the settings; the ☼ buttons are lit while anything is set
   $("vcB").value = vc.b; $("vcBo").textContent = (vc.b > 0 ? "+" : "") + vc.b;
   $("vcC").value = vc.c; $("vcCo").textContent = (vc.c > 0 ? "+" : "") + vc.c;
   $("vcG").value = vc.g; $("vcGo").textContent = vc.g.toFixed(2);
   $("vcAuto").classList.toggle("on", vc.auto); $("vcAuto").setAttribute("aria-pressed", String(vc.auto));
   $("vcAuto").textContent = vc.auto ? "Auto: on" : "Auto";
-  $("vcAuto").hidden = vcTaint; $("vcGRow").hidden = vcTaint; $("vcTaint").hidden = !vcTaint;
+  $("vcSmooth").classList.toggle("on", vc.smooth); $("vcSmooth").setAttribute("aria-pressed", String(vc.smooth));
+  $("vcSmooth").textContent = vc.smooth ? "Smooth: on" : "Smooth";
+  $("vcAuto").hidden = vcTaint; $("vcGRow").hidden = vcTaint; $("vcTaint").hidden = !vcTaint; $("vcSmooth").hidden = !vcSmoothOk();
   $("vcB").disabled = $("vcC").disabled = vcTaint && !vcFilterOk;
   ["vcBtn", "triVc", "oVc"].forEach(id => $(id).classList.toggle("on", !vcIdentity()));
 }
@@ -1116,6 +1164,7 @@ $("vcB").oninput = () => vcSet("b", vcNum(+$("vcB").value, -100, 100, 0));
 $("vcC").oninput = () => vcSet("c", vcNum(+$("vcC").value, -100, 100, 0));
 $("vcG").oninput = () => vcSet("g", vcNum(+$("vcG").value, 0.3, 3, 1));
 $("vcAuto").onclick = () => vcSet("auto", !vc.auto);
+$("vcSmooth").onclick = () => vcSet("smooth", !vc.smooth);
 $("vcReset").onclick = () => { vc = {...VC0}; vcSave(); vcSync(); vcRedraw(); };
 $("vcClose").onclick = () => vcOpen(false);
 ["vcBtn", "triVc", "oVc"].forEach(id => { $(id).onclick = () => vcOpen(); });
@@ -1125,7 +1174,11 @@ function draw() {
   ctx.clearRect(0, 0, r.width, r.height);
   if (!imgReady) return;
   ctx.imageSmoothingEnabled = view.s < 2;
-  vcDraw(ctx, img, view.ox, view.oy, W * view.s, H * view.s, r.width, r.height);
+  // r16a stage 2: the 2x image, loaded once the view shows more than 1 screen px per image px, drawn into the same
+  // rectangle (W, H and every pixel rule stay the base image's)
+  const hi = hiOf(edHi, curImg(), view.s * (window.devicePixelRatio || 1) > 1, img), src = hi || img;
+  if (src.naturalWidth !== edLevel) { edLevel = src.naturalWidth; renderInfo(); }  // nm/px follows the level drawn
+  vcDraw(ctx, src, view.ox, view.oy, W * view.s, H * view.s, r.width, r.height);
   const im = curImg(), flags = $("showFlags").checked;
   if ($("showPr").checked) {
     im.pr.forEach((p, k) => {  // a flag stays drawn until someone decides on the object
@@ -1349,7 +1402,7 @@ function renderChips() {
 // ---------- actions ----------
 function go(i) {
   if (i < 0 || i >= D.images.length) return;
-  cur = i; sel = null; draft = null; imgReady = false; hideToast();
+  cur = i; sel = null; draft = null; imgReady = false; hideToast(); hiDrop(edHi);
   const im = curImg();
   img = new Image(); img.onload = () => { W = img.naturalWidth; H = img.naturalHeight; imgReady = true; fit(); };
   img.onerror = () => banner(`Could not load ${im.src}. Keep the images/ folder next to index.html.`);
@@ -1538,7 +1591,9 @@ function renderInfo() {  // Editor side panel: what is known about the open imag
   if (typeof mm.grid === "number") row("Grid", String(mm.grid));
   row("Defocus", withUnit(mm.defocus_um, 2, " µm"));
   row("Magnification", typeof mm.mag === "number" ? mm.mag.toLocaleString("en-US") + "×" : null);
-  row("Pixel size", [withUnit(mm.pixel_A, 3, " Å/px acquired"), withUnit(mm.nm_per_px, 4, " nm/px here")].filter(Boolean).join(" · ") || null);
+  // nm/px here = of the image drawn now: the 2x image (r16a stage 2) has nm_per_px x W / its width
+  const lvl = edLevel && imgReady && edLevel !== W ? W / edLevel : 1, nmHere = typeof mm.nm_per_px === "number" ? mm.nm_per_px * lvl : null;
+  row("Pixel size", [withUnit(mm.pixel_A, 3, " Å/px acquired"), withUnit(nmHere, 4, " nm/px here"), lvl !== 1 ? "sharper image" : ""].filter(Boolean).join(" · ") || null);
   row("Dose", withUnit(mm.dose, 2, " e⁻/Å²"));
   row("Exposure", withUnit(mm.exposure_s, 2, " s"));
   row("Acquired", typeof mm.acquired === "string" ? mm.acquired.replace("T", " ") : null);
@@ -2014,6 +2069,7 @@ $("importFile").onchange = async ev => {
 // Its queue is labels flagged x (class disagrees) or lc / of class Low conf EV, or every label.
 const tcv = $("tcv"), tctx = tcv.getContext("2d"), card = $("card");
 const tri = {queue: [], pos: 0, zoom: 0, undo: [], img: null, imgI: -1, ready: false, hideOutline: false, held: false, mode: "tri"};
+const triHi = {onready: () => { if (!$("tri").hidden) triDraw(); }};  // the card's 2x image (a card is a crop: always wanted)
 try { tri.mode = localStorage.getItem("cryoev-review:triMode") === "cls" ? "cls" : "tri"; } catch (e) {}
 { const m = new URLSearchParams(location.search).get("mode"); if (m === "classes" || m === "cls") tri.mode = "cls"; else if (m === "cards") tri.mode = "tri"; }
 const clsMode = () => tri.mode === "cls";
@@ -2246,7 +2302,7 @@ function openTri() {
 }
 function closeTri() {
   if (tri.busy) return;  // the card is flying off (#19): its decision lands first; Editor / Esc after that
-  $("tri").hidden = true; try { localStorage.setItem("cryoev-review:mode", "editor"); } catch (e) {}
+  $("tri").hidden = true; hiDrop(triHi); try { localStorage.setItem("cryoev-review:mode", "editor"); } catch (e) {}
   document.title = PKG_TITLE;
   const c = tri.queue[tri.pos];
   if (!c) { resize(); return; }
@@ -2535,7 +2591,7 @@ function triDraw() {
   const wkey = caseId(c) + ":" + tri.zoom; if (tri.wtKey !== wkey) { tri.wt = null; tri.wtKey = wkey; }  // wheel / pinch zoom resets with the card / zoom step
   if (tri.wt) { s *= tri.wt.k; ox = ox * tri.wt.k + tri.wt.tx; oy = oy * tri.wt.k + tri.wt.ty; }
   tctx.imageSmoothingEnabled = s < 2;
-  vcDraw(tctx, tri.img, ox, oy, Wi * s, Hi * s, box.width, box.height);
+  vcDraw(tctx, hiOf(triHi, im, true, tri.img) || tri.img, ox, oy, Wi * s, Hi * s, box.width, box.height);  // r16a: the 2x image once loaded
   const ring = rg => { tctx.beginPath(); for (let k = 0; k < rg.length; k += 2) { const X = rg[k] * Wi * s + ox, Y = rg[k+1] * Hi * s + oy; k ? tctx.lineTo(X, Y) : tctx.moveTo(X, Y); } tctx.closePath(); };
   const col = c.kind === "p" ? "#facc15" : "#e879f9", pad = 12, L = 10;
   const bx0 = x0 * Wi * s + ox - pad, by0 = y0 * Hi * s + oy - pad, bx1 = x1 * Wi * s + ox + pad, by1 = y1 * Hi * s + oy + pad;
@@ -3213,6 +3269,7 @@ function makeObjectView() {
   }
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
   const cv = $("ocv"), cx = cv.getContext("2d");
+  const oHi = {onready: () => draw()};  // the card's 2x image (r16a stage 2): loaded for the card shown, drawn once loaded
 
   function draw() {
     const it = items[st.pos], b = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
@@ -3232,7 +3289,7 @@ function makeObjectView() {
     const Wi = st.img.naturalWidth, Hi = st.img.naturalHeight, rings = ringsOf(im, String(it.obj)), ring = rings && rings[0];
     const [x0, y0, x1, y1] = cropOf(it, im, ring), cw = (x1 - x0) * Wi, ch = (y1 - y0) * Hi;
     const s = Math.min(b.width / cw, b.height / ch), ox = (b.width - cw * s) / 2 - x0 * Wi * s, oy = (b.height - ch * s) / 2 - y0 * Hi * s;
-    cx.imageSmoothingEnabled = true; vcDraw(cx, st.img, ox, oy, Wi * s, Hi * s, b.width, b.height);
+    cx.imageSmoothingEnabled = true; vcDraw(cx, hiOf(oHi, im, true, st.img) || st.img, ox, oy, Wi * s, Hi * s, b.width, b.height);
     if (!st.outlines || !rings) return;
     const path = rg => { cx.beginPath(); for (let k = 0; k < rg.length; k += 2) { const X = rg[k] * Wi * s + ox, Y = rg[k + 1] * Hi * s + oy; k ? cx.lineTo(X, Y) : cx.moveTo(X, Y); } cx.closePath(); };
     if (contained && Array.isArray(it.also)) {  // the objects the builder found inside the target (it.also): thinner, green
@@ -3263,7 +3320,7 @@ function makeObjectView() {
     const root = ns.length ? ringsOf(im, ns[0].obj) : null;
     const [x0, y0, x1, y1] = cropOf(it, im, root && root[0]), cw = (x1 - x0) * Wi, ch = (y1 - y0) * Hi;
     const s = Math.min(b.width / cw, b.height / ch), ox = (b.width - cw * s) / 2 - x0 * Wi * s, oy = (b.height - ch * s) / 2 - y0 * Hi * s;
-    cx.imageSmoothingEnabled = true; vcDraw(cx, st.img, ox, oy, Wi * s, Hi * s, b.width, b.height);
+    cx.imageSmoothingEnabled = true; vcDraw(cx, hiOf(oHi, im, true, st.img) || st.img, ox, oy, Wi * s, Hi * s, b.width, b.height);
     const P = (x, y) => [x * Wi * s + ox, y * Hi * s + oy];
     const path = rg => { cx.beginPath(); for (let k = 0; k < rg.length; k += 2) { const [X, Y] = P(rg[k], rg[k + 1]); k ? cx.lineTo(X, Y) : cx.moveTo(X, Y); } cx.closePath(); };
     const shown = ns.map(nd => ({nd, rings: ringsOf(im, nd.obj)})).filter(x => Array.isArray(x.rings) && x.rings.length);
@@ -3530,7 +3587,7 @@ function makeObjectView() {
       attrs: attrsFor(nd).map(a => a.id), mine: Object.fromEntries(attrsFor(nd).map(a => [a.id, mineAt(it, nd.obj, a)]))})),
       badges: st.badges.map(b => ({...b}))};
   };
-  return {start, render, key, saved, go, closed, redraw: draw, state: () => ({pos: st.pos, n: items.length, done: nDone(), outlines: st.outlines, can: can(),
+  return {start, render, key, saved, go, closed, redraw: draw, state: () => ({hi: oHi.ready ? oHi.src : null, pos: st.pos, n: items.length, done: nDone(), outlines: st.outlines, can: can(),
     item: items[st.pos] ? {...items[st.pos]} : null, attrs: attrs.map(a => a.id), keys: Object.keys(keymap), blind, contained,
     drawn: [...st.drawn], instr: {has: !!instr, open: !!instr && !$("oInstr").hidden}, closed: st.closed,
     mine: items[st.pos] ? Object.fromEntries(attrs.map(a => [a.id, mineOf(items[st.pos], a)])) : {}, undo: st.undo.length,
@@ -3556,7 +3613,8 @@ window.__review = {D, CATS, obj: () => OBJ && OBJ.state(), effGt, gtOf, mergeEdi
   meta: () => meta, groups: () => groups, openGroup, stepSample, loadMeta, triGo: n => { tri.pos = n; tri.zoom = 0; tri.picked = null; triRender(); }, render: () => { renderList(); renderSide(); draw(); if (!$("tri").hidden) triRender(); }, state: () => ({mode, sel, curCls, redrawKey, cur, vsel: [...vSel()], order, view: {...view}, W, H, imgReady, server, dirty: dirty.size,
   who: me(), tri: {mode: tri.mode, pos: tri.pos, queue: tri.queue, ready: tri.ready, picked: tri.picked || null, zoom: tri.zoom, wk: tri.wt ? tri.wt.k : 1, xfs: tri.xf ? tri.xf.s : 0, hist: (tri.hist || []).length,
   histIds: (tri.hist || []).slice(), busy: !!tri.busy, xf: tri.xf ? {...tri.xf} : null,
-  adj: tri.adj ? {ring: tri.adj.ring.slice(), sel: [...tri.adj.sel].map(k => k / 2).sort((a, b) => a - b), undo: tri.adj.undo.length, msg: tri.adj.msg} : null}, fun: funOn(), vc: {...vc, taint: vcTaint, last: vcLast ? {...vcLast} : null, cached: vcCache.size}})};  // for annotation/tests
+  adj: tri.adj ? {ring: tri.adj.ring.slice(), sel: [...tri.adj.sel].map(k => k / 2).sort((a, b) => a - b), undo: tri.adj.undo.length, msg: tri.adj.msg} : null}, fun: funOn(), vc: {...vc, taint: vcTaint, last: vcLast ? {...vcLast} : null, cached: vcCache.size, builds: vcBuilds, smoothOk: vcSmoothOk()},
+  hi: {editor: edHi.ready ? edHi.src : null, editorLoading: !!edHi.img && !edHi.ready, tri: triHi.ready ? triHi.src : null, level: edLevel}})};  // for annotation/tests
 })();
 </script>
 </body>
