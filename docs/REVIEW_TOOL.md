@@ -133,8 +133,8 @@ The selection and the Redraw target follow the object's decision key, not its po
 
 When a prediction is selected, the selection box shows its class, `pr[k].c` (optional).
 
-## Image contrast (◐, round 16a, display only)
-Every view has a **◐** button in its top bar (Editor header, Quick check bar, object-set bar). It opens a small panel:
+## Image contrast (☼, round 16a, display only)
+Every view has a **☼** (◐ stays Low conf) button in its top bar (Editor header, Quick check bar, object-set bar). It opens a small panel:
 **Brightness**, **Contrast**, **Gamma** sliders, **Auto** and **Reset**.
 - **Auto** stretches the darkest 0.5 % to black and the brightest 0.5 % to white, measured over what is on screen: the
   Editor's current view (zoom in and the levels follow the region), or the card's crop. Brightness / contrast / gamma
