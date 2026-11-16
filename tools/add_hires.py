@@ -238,7 +238,7 @@ def _md5_tree(pkg: Path) -> dict:
     for p in sorted(pkg.rglob("*")):
         rel = p.relative_to(pkg).as_posix()
         if (not p.is_file() or rel.startswith("edits/") or rel in ("data.js", "hires_manifest.json")
-                or rel.endswith(".hi.jpg") or rel.endswith(".tmp") or "/." in "/" + rel):
+                or rel.endswith(".hi.jpg") or rel.startswith("images/c_") or rel.endswith(".tmp") or "/." in "/" + rel):
             continue                                    # dot-files/folders: locks and the key (never rewritten)
         out[rel] = hashlib.md5(p.read_bytes()).hexdigest()
     return out
@@ -295,6 +295,71 @@ def write(P: dict, quality=90, lock_wait=5.0) -> dict:
     return {"written": len(passing), "md5_files_checked": len(before)}
 
 
+CHI_KEYS = ("chi", "chi_box", "chi_w", "chi_h")
+CHI_PAD = 1.5                # the crop covers it.crop expanded this much about its centre (card zoom / pan room)
+ITEM_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def chi_box(crop) -> list:
+    x0, y0, x1, y1 = crop
+    cx, cy, hw, hh = (x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) * CHI_PAD / 2, (y1 - y0) * CHI_PAD / 2
+    return [round(max(0.0, cx - hw), 6), round(max(0.0, cy - hh), 6), round(min(1.0, cx + hw), 6),
+            round(min(1.0, cy + hh), 6)]
+
+
+def write_crops(P: dict, quality=90, lock_wait=5.0) -> dict:
+    """Round 16b: per object-set item, a full-resolution crop of the source (images/c_<item id>.jpg) + data.js item
+    keys chi / chi_box / chi_w / chi_h. Only items on images that passed the alignment control. Additive, as write()."""
+    pkg = Path(P["pkg"])
+    if not P["control"]["ok"]:
+        raise HiresError(f"control failed: {P['control']['why']}")
+    ok_files = {r["file"] for r in P["rows"] if r["status"] == "pass"}
+    before = _md5_tree(pkg)
+    n, skipped = 0, []
+    lk = pp.meta_lock(pkg.parent, pkg.name, lock_wait)
+    try:
+        djs = pkg / "data.js"
+        raw = djs.read_bytes()
+        data, kw, tail = OS._split_datajs(raw)
+        orig, _, _ = OS._split_datajs(raw)
+        file_of = {Path(im["file"]).stem: im["file"] for im in data["images"]}
+        src_cache = {}
+        for it in data.get("items", []):
+            f = file_of.get(str(it.get("image")).split(".")[0])
+            iid = str(it.get("id", ""))
+            c = it.get("crop")
+            if f not in ok_files or not ITEM_ID_RE.match(iid) or not (isinstance(c, list) and len(c) == 4
+                                                                       and max(c) <= 1.5 and c[2] > c[0] and c[3] > c[1]):
+                skipped.append(iid)
+                continue
+            if f not in src_cache:
+                src_cache.clear()
+                with Image.open(P["_src"][f]) as s0:
+                    src_cache[f] = s0.convert("L")
+            s = src_cache[f]
+            box = chi_box(c)
+            px = (round(box[0] * s.width), round(box[1] * s.height), round(box[2] * s.width), round(box[3] * s.height))
+            im = s.crop(px)
+            rel = f"images/c_{iid}.jpg"
+            OS._write_atomic(pkg / rel, _jpeg(im, quality))
+            it.update(chi=rel, chi_box=box, chi_w=im.width, chi_h=im.height)
+            n += 1
+        check, base = json.loads(json.dumps(data)), orig
+        for d in (check, base):
+            for it in d.get("items", []):
+                for k in CHI_KEYS:
+                    it.pop(k, None)
+        if check != base:
+            raise HiresError("internal: data.js would change beyond the chi keys; refused")
+        OS._write_atomic(djs, OS.DATAJS_PREFIX + json.dumps(data, **kw).encode("utf-8") + tail)
+    finally:
+        lk.close()
+    after = _md5_tree(pkg)
+    if before != after:
+        raise HiresError("md5 proof FAILED: other files changed")
+    return {"crops": n, "skipped": len(skipped)}
+
+
 def preview(P: dict, out_dir: Path, quality=90, n=2):
     out_dir.mkdir(parents=True, exist_ok=True)
     done = []
@@ -316,6 +381,8 @@ def main(argv=None) -> int:
     ap.add_argument("--only", help="comma-separated image stems")
     ap.add_argument("--preview", help="write the first 2 passing hi images here (not into the package)")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--item-crops", action="store_true",
+                    help="object sets: full-resolution crops per item (images/c_<id>.jpg + chi keys) instead of 2x images")
     ap.add_argument("--do", action="store_true")
     a = ap.parse_args(argv)
     only = set(a.only.split(",")) if a.only else None
@@ -336,7 +403,9 @@ def main(argv=None) -> int:
         if a.preview:
             for p in preview(P, Path(a.preview), a.quality):
                 print("preview:", p)
-        if a.do:
+        if a.do and a.item_crops:
+            print(json.dumps(write_crops(P, a.quality)))
+        elif a.do:
             print(json.dumps(write(P, a.quality)))
         else:
             print("dry run: nothing written to the package (add --do)")
