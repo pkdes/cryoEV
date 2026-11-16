@@ -297,6 +297,7 @@ def write(P: dict, quality=90, lock_wait=5.0) -> dict:
 
 CHI_KEYS = ("chi", "chi_box", "chi_w", "chi_h")
 CHI_PAD = 1.5                # the crop covers it.crop expanded this much about its centre (card zoom / pan room)
+CHI_MAX = 1536               # px: a larger crop is shrunk to this side (big items are already large on screen; phone memory)
 ITEM_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
@@ -340,6 +341,9 @@ def write_crops(P: dict, quality=90, lock_wait=5.0) -> dict:
             box = chi_box(c)
             px = (round(box[0] * s.width), round(box[1] * s.height), round(box[2] * s.width), round(box[3] * s.height))
             im = s.crop(px)
+            if max(im.size) > CHI_MAX:
+                k = CHI_MAX / max(im.size)
+                im = im.resize((max(1, round(im.width * k)), max(1, round(im.height * k))), Image.LANCZOS)
             rel = f"images/c_{iid}.jpg"
             OS._write_atomic(pkg / rel, _jpeg(im, quality))
             it.update(chi=rel, chi_box=box, chi_w=im.width, chi_h=im.height)

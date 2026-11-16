@@ -7,6 +7,12 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-16 16:40 · Smooth strength slider
+
+- **Smooth** is now a 0–3 slider (0 = off) in the ☼ panel. At full resolution about 1.5–2.5 shows membranes best. An earlier "Smooth on" setting loads as 1.
+- Full-resolution card crops are capped at 1536 px (only large items shrink, which are already big on screen), so contrast and Auto work on every card and phones use less memory.
+- **Components:** review page 2026-11-16.4 / CLI (`tools/add_hires.py --item-crops`, 1536 px cap).
+
 ## 2026-11-16 16:05 · Full-resolution crops on object cards
 
 - **Object and tree cards** now draw each item's crop at the original's full resolution (5760 px wide, 0.37 nm/px), so small EVs are no longer magnified 4–11× on a phone. Added to the ML/MV set (145 of 155 items; 10 sit on images uploaded at 1440 px). Outlines and answers are unchanged.
