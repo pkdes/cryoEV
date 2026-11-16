@@ -7,6 +7,15 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-16 15:10 · Round 16a: sharper review images, contrast controls, review fixes
+
+- **Sharper images:** sets can now carry a 2× copy of each image (2880 px, 0.74 nm/px instead of 1.47). The review page draws it when you zoom in the Editor and always on cards. Outlines and answers are unchanged. Added to the ML/MV object set (44 of 49 images) and the HEK spot-check (32 of 32); `python tools/add_hires.py <set> [--source <folder>] --do` adds them to other sets after an alignment check.
+- **Image contrast (☼):** brightness, contrast, gamma, Auto (stretches what you're looking at) and Smooth (light denoise) in the Editor, Quick check and object/tree cards. Only how the image looks on your screen changes; your choices are remembered in your browser.
+- **Quick check:** after you pick a class, Accept names that class (#24). With a mouse, dragging the card pans it instead of deciding (#25).
+- **Editor:** Tab / Shift+Tab steps through the objects in the image (#25).
+- **Reviews list:** shows images next to cards ("1 of 5 cards · 32 images") (#26).
+- **Components:** review page 2026-11-16.2 / review server (data.js always fresh) / portal (Reviews list) / CLI (`tools/add_hires.py`).
+
 ## 2026-11-15 10:40 · Round 15: whole-tree cards, help lines, Close set
 
 - **Whole-tree cards:** an object set can show one card per vesicle tree (the outer EV and every outline inside it, numbered on the image). For each inner outline you answer "layer of the outer EV", "inner vesicle" (and its type), "not a membrane" or "duplicate". Tab moves between outlines on a laptop. Start one from Reviews → Start a review → Object set → "Whole tree per card".
