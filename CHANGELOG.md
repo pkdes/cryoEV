@@ -7,6 +7,12 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-16 16:05 · Full-resolution crops on object cards
+
+- **Object and tree cards** now draw each item's crop at the original's full resolution (5760 px wide, 0.37 nm/px), so small EVs are no longer magnified 4–11× on a phone. Added to the ML/MV set (145 of 155 items; 10 sit on images uploaded at 1440 px). Outlines and answers are unchanged.
+- `python tools/add_hires.py <object set> --item-crops --do` adds them to other object sets, with the same alignment check.
+- **Components:** review page 2026-11-16.3 / CLI (`tools/add_hires.py --item-crops`).
+
 ## 2026-11-16 15:10 · Round 16a: sharper review images, contrast controls, review fixes
 
 - **Sharper images:** sets can now carry a 2× copy of each image (2880 px, 0.74 nm/px instead of 1.47). The review page draws it when you zoom in the Editor and always on cards. Outlines and answers are unchanged. Added to the ML/MV object set (44 of 49 images) and the HEK spot-check (32 of 32); `python tools/add_hires.py <set> [--source <folder>] --do` adds them to other sets after an alignment check.
