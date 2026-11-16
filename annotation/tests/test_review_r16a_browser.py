@@ -196,7 +196,7 @@ class ContrastTests(trb.Base):
         self.assertTrue(page.is_hidden("#vcAuto") and page.is_hidden("#vcG"))
         self.assertTrue(page.is_visible("#vcTaint"))
         set_range(page, "#vcB", 60)
-        self.assertEqual(self.state(page)["vc"]["last"], {"filter": True, "smooth": False})
+        self.assertEqual(self.state(page)["vc"]["last"], {"filter": True, "smooth": 0})
         self.assertGreater(self.pick_px(page, *right)[0], before[0] + 10)  # ctx.filter brightness applied
         page.click("#toTri")  # the cards draw through the same path
         page.wait_for_function("__review.state().tri.ready")
@@ -418,6 +418,7 @@ class HiEditorTests(trb.Base):
 
     def test_old_data_js_and_redraws_reuse_the_table(self):
         page = self.open("&who=hiold&mode=editor", setup=settings("hiold", auto=True, smooth=True), **DESK)
+        self.assertEqual(self.state(page)["vc"]["smooth"], 1)  # r16a's saved "smooth": true reads as strength 1.0
         self.go(page, "fixD_new.png")  # an image without hi keys, as in every data.js before stage 2
         self.assertIsNone(self.state(page)["hi"]["editor"])
         page.wait_for_function("__review.state().vc.builds > 0")
@@ -429,9 +430,12 @@ class HiEditorTests(trb.Base):
     def test_smooth_toggle_and_hidden_when_unsupported(self):
         page = self.open("&who=smo&mode=editor", **DESK)
         page.click("#vcBtn")
-        self.assertTrue(page.is_visible("#vcSmooth"))
-        page.click("#vcSmooth")
-        self.assertTrue(self.state(page)["vc"]["smooth"] and self.state(page)["vc"]["last"]["smooth"])
+        self.assertTrue(page.is_visible("#vcS"))
+        self.assertEqual(page.inner_text("#vcSo"), "off")
+        set_range(page, "#vcS", 2)  # r16c: a strength in full-res px: sigma = 2 x (px per base px) / 4 in the drawn image
+        st, k = self.state(page)["vc"], self.state(page)["hi"]["level"] / 360  # fixA: the 2x image once loaded (k = 2)
+        self.assertEqual((st["smooth"], st["last"]["sigma"]), (2, 2 * k / 4))
+        self.assertEqual(page.inner_text("#vcSo"), "2.00")
         page.click("#vcReset")
         self.assertFalse(self.state(page)["vc"]["smooth"])
         # a page that can't read pixels and has no canvas filter (Safari < 18 on a file:// copy): no Smooth
@@ -443,7 +447,15 @@ class HiEditorTests(trb.Base):
         set_range(page2, "#vcB", 30)  # the first non-default draw finds the canvas tainted
         st = self.state(page2)["vc"]
         self.assertTrue(st["taint"] and not st["smoothOk"])
-        self.assertTrue(page2.is_hidden("#vcSmooth"))
+        self.assertTrue(page2.is_hidden("#vcSRow"))
+        # no canvas filter but readable pixels: the separable kernel in the page, so the slider stays
+        page3 = self.open("&who=smo3&mode=editor", setup=lambda c, p: p.add_init_script(nofilter.split(";(() =>")[0] + ";"), **DESK)
+        page3.click("#vcBtn")
+        self.assertTrue(page3.is_visible("#vcS"))
+        set_range(page3, "#vcS", 3)
+        st = self.state(page3)["vc"]
+        k = self.state(page3)["hi"]["level"] / 360
+        self.assertTrue(not st["taint"] and st["last"]["sigma"] == 3 * k / 4 and st["builds"] > 0, st)
 
     def test_quick_check_card_draws_hi(self):
         page = self.open("&who=hicard&mode=cards", **trb.PhoneTests.PHONE)
