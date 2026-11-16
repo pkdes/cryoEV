@@ -250,10 +250,19 @@ class ListTests(World):
         self.assertEqual(adm["made_from"], "Blind comparison · 4 images")
         self.assertEqual(RI._blind_title(None), "Blind audit")
 
+    def test_bar_shows_images(self):
+        """#26: the progress shows images next to cards; one image is singular; no count -> cards only (control)."""
+        r = dict(self.rows(user("bas"))[PRED_A], cards=5, decided=1, mode="cards")
+        self.assertIn("1 of 5 cards · 32 images<", REV._bar(dict(r, n_images=32)))
+        self.assertIn("1 of 5 cards · 1 image<", REV._bar(dict(r, n_images=1)))
+        self.assertIn("1 of 5 cards<", REV._bar(dict(r, n_images=None)))                  # control
+        self.assertIn(">4 images<", REV._bar(dict(r, cards=None, n_images=4)))             # no card count yet
+        self.assertIn(">—<", REV._bar(dict(r, cards=None, n_images=None)))
+
     def test_one_card_is_singular(self):
         """fixer 15: "1 card", "0 of 1 card", "1 image"; plurals otherwise (control)."""
         from portal import app as APP
-        r = dict(self.rows(user("bas"))[PRED_A], cards=1, decided=0, mode="cards")
+        r = dict(self.rows(user("bas"))[PRED_A], cards=1, decided=0, mode="cards", n_images=None)
         self.assertIn("0 of 1 card<", REV._bar(r))
         self.assertIn("Quick check · 1 card open", REV._card(r, "bas"))
         self.assertIn("0 of 2 cards<", REV._bar(dict(r, cards=2)))                        # control

@@ -747,15 +747,24 @@ def cards_text(n, kind=None) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
 
 
+def images_text(r) -> str:
+    """" · 32 images" from the hub row's n_images (#26: the list said only cards), else ""."""
+    n = r.get("n_images")
+    if not isinstance(n, int) or isinstance(n, bool):
+        return ""
+    return f" · {n} image{'' if n == 1 else 's'}"
+
+
 def _bar(r) -> str:
     if r.get("cards") is None:
-        return '<span class="cj-rv-prog">—</span>'
+        imgs = images_text(r)
+        return f'<span class="cj-rv-prog">{imgs[3:] if imgs else "—"}</span>'
     d, t = r.get("decided") or 0, r["cards"]
     pct = 0 if not t else max(1.5 if d else 0, round(1000 * d / t) / 10)
     return (f'<span class="cj-rv-bar-wrap"><span class="cj-rv-bar" role="progressbar" aria-valuemin="0" '
             f'aria-valuemax="{t}" aria-valuenow="{d}" aria-label="{"items done by every reviewer" if r.get("kind") == "objects" else "cards decided"}">'
             f'<span style="width:{pct}%"></span></span><span class="cj-rv-prog">{d} of {cards_text(t, r.get("kind"))}'
-            f'</span></span>')
+            f'{images_text(r)}</span></span>')
 
 
 def _chip(kind) -> str:
