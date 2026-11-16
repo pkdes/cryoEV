@@ -368,7 +368,8 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #triVc,#oVc{font-size:19px;flex:none}
 #triVc{width:40px;height:40px}
 #triVc.on,#oVc.on{background:var(--accOn);border-color:var(--accOnLine);color:#fff}
-@media (max-width:480px){#triVc{width:34px;height:34px;font-size:16px}}
+@media (max-width:480px){#triVc{width:34px;height:34px;font-size:16px}#tri .logo b{display:block;font-size:22px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#tri .logo.nofun b{font-size:18px}}  /* the bar holds one more button: the logo gives way */
+@media (max-width:600px){#vcPop{top:auto;bottom:calc(10px + env(safe-area-inset-bottom,0px))}}  /* a phone: at the bottom, the image above stays in view */
 </style>
 </head>
 <body>
