@@ -139,9 +139,11 @@ Every view has a **☼** (◐ stays Low conf) button in its top bar (Editor head
 - **Auto** stretches the darkest 0.5 % to black and the brightest 0.5 % to white, measured over what is on screen: the
   Editor's current view (zoom in and the levels follow the region), or the card's crop. Brightness / contrast / gamma
   apply on top. Off by default; once on it stays on.
-- **Smooth** (stage 2) softens the grain: a Gaussian blur of 0.75 px of the drawn image (a 5-tap kernel in the page,
-  computed once per image; on a page that can't read pixels, the canvas filter `blur()`; hidden where neither works).
-  Off by default.
+- **Smooth** (r16c: a slider, 0-3, 0 = off) softens the grain: a Gaussian blur whose sigma is in full-resolution
+  pixels (the item crops); the 2x image gets sigma / 2 and the 1440 base image sigma / 4, so the look matches. It runs
+  on the cached copy (the canvas `blur()` filter, else a separable kernel of radius ceil(3 sigma)), once per image and
+  strength; on a page that can't read pixels, the screen-space canvas filter; hidden where neither works. Saved
+  r16a settings with Smooth on read as 1.0.
 - Settings are per reviewer, in this browser (localStorage `cryoev-review:contrast:<who>`). Reset = the image as
   delivered. The button is lit while anything is set.
 - **Display only:** the page draws a lookup-table copy of the image (an offscreen canvas at the image's natural size,
