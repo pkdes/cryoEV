@@ -205,7 +205,10 @@ class RecordsUnchangedControl(unittest.TestCase):
                 time.sleep(0.6)
                 page.keyboard.press("2")
                 self.synced(page)
-                self.result = {k: {"v": d["v"], "p": d.get("p"), "who": d["who"]} for k, d in self.saved_dec(F).items()}
+                # p rounded to 1e-6 (~0.001 image px): the dragged vertex comes from a mouse position, so any change in
+                # the header's height (r16a: the ◐ button wraps it at 1280 px) moves it by float noise (~1e-8)
+                rnd = lambda p: [[round(v, 6) for v in r] for r in p] if p else p
+                self.result = {k: {"v": d["v"], "p": rnd(d.get("p")), "who": d["who"]} for k, d in self.saved_dec(F).items()}
 
         T.setUpClass()
         try:
