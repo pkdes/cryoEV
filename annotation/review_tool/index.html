@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-16.2";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-16.3";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const h = document.querySelector("header"), inPortal = /^\/review\//.test(location.pathname), v = document.createElement("span");
   v.id = "pageVer"; v.style.cssText = "font-size:11px;color:var(--mute);white-space:nowrap"; v.textContent = "Review page " + PAGE_VERSION;
@@ -3270,6 +3270,20 @@ function makeObjectView() {
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
   const cv = $("ocv"), cx = cv.getContext("2d");
   const oHi = {onready: () => draw()};  // the card's 2x image (r16a stage 2): loaded for the card shown, drawn once loaded
+  // r16b: the item's native-resolution crop (data.js items[].chi, chi_box = the normalized image box it covers; from
+  // tools/add_hires.py). Loaded lazily for the item shown, dropped when the item changes; drawn over the base / 2x
+  // image into the rectangle chi_box maps to under the card's transform, through vcDraw (contrast, Auto from the
+  // visible part of the crop, Smooth of 0.75 crop px). Outlines, W / H and every pixel rule stay on the base image.
+  const oChi = {onready: () => draw()};
+  const chiBox = it => { const c = it && it.chi_box; return Array.isArray(c) && c.length === 4 && c.every(v => typeof v === "number" && isFinite(v) && v >= 0 && v <= 1) && c[2] > c[0] && c[3] > c[1] ? c : null; };
+  function drawChi(it, Wi, Hi, s, ox, oy, b) {
+    const box = chiBox(it); hiOf(oChi, {hi: box ? it.chi : null}, true, null);  // a new item (or none): the old crop is dropped
+    const h = box && oChi.ready ? oChi.img : null;
+    if (!h) return;
+    const dw = (box[2] - box[0]) * Wi * s, dh = (box[3] - box[1]) * Hi * s;
+    if (!(Math.abs((h.naturalWidth / h.naturalHeight) / (dw / dh) - 1) < 0.02)) return;  // not the box's shape: not drawn
+    vcDraw(cx, h, ox + box[0] * Wi * s, oy + box[1] * Hi * s, dw, dh, b.width, b.height);
+  }
 
   function draw() {
     const it = items[st.pos], b = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
@@ -3290,6 +3304,7 @@ function makeObjectView() {
     const [x0, y0, x1, y1] = cropOf(it, im, ring), cw = (x1 - x0) * Wi, ch = (y1 - y0) * Hi;
     const s = Math.min(b.width / cw, b.height / ch), ox = (b.width - cw * s) / 2 - x0 * Wi * s, oy = (b.height - ch * s) / 2 - y0 * Hi * s;
     cx.imageSmoothingEnabled = true; vcDraw(cx, hiOf(oHi, im, true, st.img) || st.img, ox, oy, Wi * s, Hi * s, b.width, b.height);
+    drawChi(it, Wi, Hi, s, ox, oy, b);
     if (!st.outlines || !rings) return;
     const path = rg => { cx.beginPath(); for (let k = 0; k < rg.length; k += 2) { const X = rg[k] * Wi * s + ox, Y = rg[k + 1] * Hi * s + oy; k ? cx.lineTo(X, Y) : cx.moveTo(X, Y); } cx.closePath(); };
     if (contained && Array.isArray(it.also)) {  // the objects the builder found inside the target (it.also): thinner, green
@@ -3321,6 +3336,7 @@ function makeObjectView() {
     const [x0, y0, x1, y1] = cropOf(it, im, root && root[0]), cw = (x1 - x0) * Wi, ch = (y1 - y0) * Hi;
     const s = Math.min(b.width / cw, b.height / ch), ox = (b.width - cw * s) / 2 - x0 * Wi * s, oy = (b.height - ch * s) / 2 - y0 * Hi * s;
     cx.imageSmoothingEnabled = true; vcDraw(cx, hiOf(oHi, im, true, st.img) || st.img, ox, oy, Wi * s, Hi * s, b.width, b.height);
+    drawChi(it, Wi, Hi, s, ox, oy, b);
     const P = (x, y) => [x * Wi * s + ox, y * Hi * s + oy];
     const path = rg => { cx.beginPath(); for (let k = 0; k < rg.length; k += 2) { const [X, Y] = P(rg[k], rg[k + 1]); k ? cx.lineTo(X, Y) : cx.moveTo(X, Y); } cx.closePath(); };
     const shown = ns.map(nd => ({nd, rings: ringsOf(im, nd.obj)})).filter(x => Array.isArray(x.rings) && x.rings.length);
@@ -3587,7 +3603,7 @@ function makeObjectView() {
       attrs: attrsFor(nd).map(a => a.id), mine: Object.fromEntries(attrsFor(nd).map(a => [a.id, mineAt(it, nd.obj, a)]))})),
       badges: st.badges.map(b => ({...b}))};
   };
-  return {start, render, key, saved, go, closed, redraw: draw, state: () => ({hi: oHi.ready ? oHi.src : null, pos: st.pos, n: items.length, done: nDone(), outlines: st.outlines, can: can(),
+  return {start, render, key, saved, go, closed, redraw: draw, state: () => ({hi: oHi.ready ? oHi.src : null, chi: oChi.ready && chiBox(items[st.pos]) && oChi.src === items[st.pos].chi ? oChi.src : null, pos: st.pos, n: items.length, done: nDone(), outlines: st.outlines, can: can(),
     item: items[st.pos] ? {...items[st.pos]} : null, attrs: attrs.map(a => a.id), keys: Object.keys(keymap), blind, contained,
     drawn: [...st.drawn], instr: {has: !!instr, open: !!instr && !$("oInstr").hidden}, closed: st.closed,
     mine: items[st.pos] ? Object.fromEntries(attrs.map(a => [a.id, mineOf(items[st.pos], a)])) : {}, undo: st.undo.length,
