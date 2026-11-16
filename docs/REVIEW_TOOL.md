@@ -100,6 +100,7 @@ Display only. A decision with `seed` (`september:<v4 file>:<v4 key>`, written by
 | Redraw the selected outline | `E` or "Redraw outline", then draw with `D` or `V`. Class, id and decision key are kept |
 | Move / add / delete a vertex | Drag a handle (the outline follows live) / click the selected outline / right-click a handle (phone: double-tap) |
 | Pan / zoom | Drag empty space. In Draw / Vertex: right, middle or Alt-drag, or two fingers. Wheel / pinch; `F` fits |
+| Next / previous object | `Tab` / `Shift+Tab` (round 16a #25b): selects the next shown object on this image (labels and not-yet-accepted predictions, in reading order of their centres) and centres it, as "Open in editor" does. Select mode only; while a button or field has the focus, Tab moves the focus as usual. Object sets keep their own Tab |
 | Other | `Del` delete · `Z` undo · `R` reviewed + next · `N`/`P` next/prev · `T` predictions · `H` all outlines · `Esc` cancel |
 
 A selected prediction shows its state (not decided / accepted as … / rejected, with who) and big **Accept** / **Reject** buttons under it. U4 (2026-11-02) changed `A`: it used to accept as the current class; it now uses the predicted class, and "Accept as `<current class>`" is a second button when the two differ.
@@ -132,6 +133,20 @@ The selection and the Redraw target follow the object's decision key, not its po
 
 When a prediction is selected, the selection box shows its class, `pr[k].c` (optional).
 
+## Image contrast (◐, round 16a, display only)
+Every view has a **◐** button in its top bar (Editor header, Quick check bar, object-set bar). It opens a small panel:
+**Brightness**, **Contrast**, **Gamma** sliders, **Auto** and **Reset**.
+- **Auto** stretches the darkest 0.5 % to black and the brightest 0.5 % to white, measured over what is on screen: the
+  Editor's current view (zoom in and the levels follow the region), or the card's crop. Brightness / contrast / gamma
+  apply on top. Off by default; once on it stays on.
+- Settings are per reviewer, in this browser (localStorage `cryoev-review:contrast:<who>`). Reset = the image as
+  delivered. The button is lit while anything is set.
+- **Display only:** the page draws a lookup-table copy of the image (an offscreen canvas at the image's natural size,
+  capped at 16 Mpx) into the image's own rectangle. W / H, outlines, pixel rules, decisions, PUT bodies and exports
+  are the same with it on or off (`test_review_r16a_browser.py` checks the bodies and the export).
+- A page opened from a file (a zip copy) can't read the image's pixels: there the panel offers brightness and
+  contrast only (a canvas filter), and says so.
+
 ## Cards (phone)
 Narrow screens open the cards automatically. "Editor" goes back.
 - **Header:** short image name (`<sample> · square<n> hole<m>`, else the file stem; full name on hover), "object n of m" for that image, "card p of N", and the order.
@@ -140,7 +155,8 @@ Narrow screens open the cards automatically. "Editor" goes back.
 - **auto-next** (default **off**, remembered in localStorage `cryoev-review:autoNext`). It applies to class picks: the class buttons, the triage class chips and keys `1`–`8`.
   - Off: the card stays. The chosen class is highlighted, and a green "✓ class …" line shows the card's decision. **Next →** (or `N`, ↑, swipe up; in class review also swipe left) moves on, with no decision. A server pull doesn't move you off a card you just picked on.
   - On: a pick moves to the next card, as before.
-  - Swipes, ✓ / ♥ / ✕ and "Save shape" always move on. After a pick on the card they **only** move on: they never overwrite the pick.
+  - Swipes, ✓ / ♥ / ✕ and "Save shape" always move on. After a pick on the card they **only** move on: they never overwrite the pick. On a prediction card, Accept's label and hover text then name the picked class ("Accept ✓ as MV"; round 16a #24).
+- **Mouse (round 16a #25a):** on a computer, dragging the card with the mouse **pans** the (zoomed) image; it never decides. Decide with the buttons or keys. A plain click still steps the zoom, press-and-hold (without moving) still peeks without outlines, the wheel zooms. The pan resets with the card or the zoom step. Touch and pen keep swipe-to-decide.
 - **Two reviewers:** when the server refuses a card's claim (someone else has it), the page moves on. Cards poll every 5 s for claims and decisions, and leave a card that is now someone else's or was decided elsewhere. The card you just picked on is never left this way. The screen re-renders only when something on it changed.
 
 The mode menu has two modes:
@@ -474,6 +490,12 @@ python -m unittest discover -s annotation/tests -v
 - Real packages are copied to a temp folder and never written.
   - September v4, searched in order: `$CRYOEV_REVIEW_PACKAGE`, then `CryoAI/annotation review/cryoai_v4_review` beside the repo, then the Box copy.
   - Pre-lipo, searched in order: `$CRYOEV_PRELIPO_PACKAGE`, then `CryoAI-laptop/review/prelipo_v5F5_review`.
+- `test_review_r16a_browser.py` (round 16a): contrast on vs off gives the same PUT bodies and export (control: the
+  contrast was really applied); Auto brightens a faint image and follows a zoomed-in region, Reset restores it
+  exactly, settings per reviewer and remembered; a tainted canvas falls back without errors; object and tree cards
+  draw with contrast and the tree card keeps Tab; #24 Accept names the picked class (fun on and off); #25a a mouse
+  drag pans (no decision, zoom or peek), touch and pen still swipe; #25b Editor Tab / Shift+Tab, not on a focused
+  control.
 - `test_review_reject_lowconf.py` (round 7): `valid_edit` for the new keys, `/api/ping` caps, the HEAD (00a1921)
   `valid_edit` refusing them; two devices merged per key; a class change keeping the tag; `effective_labels`,
   `is_edited`, `is_rejected`, `_is_checked`, the spot check; `reviewed.json` fields only when set; `apply_review_edits`

@@ -48,6 +48,16 @@ def launch(p):
     return None
 
 
+def touch_swipe(page, x, y, dx, dy=0, steps=8, sel="#tcv", kind="touch"):
+    """A one-finger swipe on the card (round 16a #25a: a mouse drag on the card pans, so swipes are touch / pen)."""
+    js = ("([sel, typ, kind, x, y]) => document.querySelector(sel).dispatchEvent(new PointerEvent(typ, {pointerId: 7, "
+          "pointerType: kind, isPrimary: true, clientX: x, clientY: y, bubbles: true, cancelable: true}))")
+    page.evaluate(js, [sel, "pointerdown", kind, x, y])
+    for k in range(1, steps + 1):
+        page.evaluate(js, [sel, "pointermove", kind, x + dx * k / steps, y + dy * k / steps])
+    page.evaluate(js, [sel, "pointerup", kind, x + dx, y + dy])
+
+
 def toast_text(page):
     """The Editor's "Accepted (edited) — Undo" message, whitespace-normalized (its parts are flex items)."""
     return re.sub(r"\s*—\s*", " — ", page.inner_text("#edToast")).strip()
@@ -690,7 +700,7 @@ class PhoneTests(Base):
         c1 = st["tri"]["queue"][st["tri"]["pos"]]
         card = page.locator("#tcv").bounding_box()
         x, y = card["x"] + card["width"] / 2, card["y"] + card["height"] / 2
-        page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x - 160, y, steps=8); page.mouse.up()
+        touch_swipe(page, x, y, -160)
         page.wait_for_function(f"__review.state().tri.pos !== {st['tri']['pos']}")
         time.sleep(0.5)
         self.assertNotIn(c1["key"], self.saved_dec(self.srv.data["images"][c1["i"]]["file"]))
@@ -995,7 +1005,7 @@ class QcFixTests(CardBase):
                 box = page.locator("#tcv").bounding_box()
                 x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
                 dx = 160 if how == "swipe-right" else -160
-                page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x + dx, y, steps=8); page.mouse.up()
+                touch_swipe(page, x, y, dx)
             page.wait_for_function(f"__review.state().tri.pos !== {pos}")
             time.sleep(0.3)
             self.synced(page)

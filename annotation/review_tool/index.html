@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-14.4";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-16.1";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const h = document.querySelector("header"), inPortal = /^\/review\//.test(location.pathname), v = document.createElement("span");
   v.id = "pageVer"; v.style.cssText = "font-size:11px;color:var(--mute);white-space:nowrap"; v.textContent = "Review page " + PAGE_VERSION;
@@ -352,6 +352,23 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
   #oCard{height:auto;min-height:320px}
   #oAttrs{overflow:auto;padding-right:4px}
 }
+/* r16a P1 viewer contrast (display only): the ◐ button in each view's top bar opens #vcPop */
+#vcPop{position:fixed;z-index:46;right:10px;top:52px;width:min(330px,calc(100vw - 20px));background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:12px;padding:10px 12px 12px;box-shadow:0 8px 30px rgba(0,0,0,.35)}
+#vcPop[hidden],#vcPop [hidden]{display:none!important}
+#vcPop h2{margin:0 0 4px;font-size:15px;display:flex;justify-content:space-between;align-items:center;gap:8px}
+#vcPop .vcRow{display:grid;grid-template-columns:82px minmax(0,1fr) 42px;align-items:center;gap:6px;min-height:40px}
+#vcPop .vcRow label{font-size:14px}
+#vcPop input[type=range]{width:100%;height:40px;margin:0;accent-color:var(--acc)}
+#vcPop output{font-variant-numeric:tabular-nums;text-align:right;color:var(--mute);font-size:12.5px}
+#vcPop .vcBtns{display:flex;gap:8px;margin-top:8px}
+#vcPop .vcBtns button{flex:1;min-height:40px;font-size:14px;font-weight:600}
+#vcClose{min-width:40px;min-height:40px;font-size:15px}
+#vcPop p{margin:8px 0 0;color:var(--mute);font-size:12px}
+#vcBtn{font-size:15px;line-height:1.1}
+#triVc,#oVc{font-size:19px;flex:none}
+#triVc{width:40px;height:40px}
+#triVc.on,#oVc.on{background:var(--accOn);border-color:var(--accOnLine);color:#fff}
+@media (max-width:480px){#triVc{width:34px;height:34px;font-size:16px}}
 </style>
 </head>
 <body>
@@ -378,6 +395,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
   <label class="tg"><input type="checkbox" id="showFlags" checked> Flags</label>
   <label class="tg" title="Tint the selected object (off by default: the outline alone keeps the object visible)"><input type="checkbox" id="showFill"> Fill</label>
   <label class="tg" title="Tag labels whose decision was carried from the September review"><input type="checkbox" id="showSept" checked> Sept</label>
+  <button id="vcBtn" type="button" title="Image brightness / contrast (display only)" aria-controls="vcPop" aria-expanded="false">◐</button>
   <span class="sep"></span>
   <button id="reviewed" title="Marks this image as done. It does not apply anything to a label set by itself.">✓ Reviewed</button>
   <button id="export" title="Download all edits as JSON">Export</button>
@@ -425,6 +443,8 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
     <li><kbd>1</kbd>–<kbd>8</kbd> or a class chip: reclass the selection; also the class for new shapes</li>
     <li id="helpL" hidden><kbd>L</kbd> Low conf tag on the selection, on / off (still counted; a selected unsure outline is accepted as low conf). Its note and the image's reject / note are in this panel</li>
     <li id="helpI" hidden>Image reject and note: <kbd>Z</kbd> doesn't undo them. Change them in their dialog (the <b>Not rejected</b> chip un-rejects)</li>
+    <li><kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> next / previous object on this image (selected and centred)</li>
+    <li>◐ (top bar): brightness, contrast, gamma and Auto for how the image looks here (display only)</li>
     <li><kbd>N</kbd>/<kbd>P</kbd> next/prev · <kbd>R</kbd> reviewed · <kbd>Z</kbd> undo · <kbd>T</kbd> toggle <span id="helpT">predictions</span> · <kbd>H</kbd> hide/show all outlines</li>
   </ul>
   <h3>Saving</h3>
@@ -440,6 +460,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
     <div class="logo nofun" id="logoPlain"><b>Quick check</b></div>
     <button id="triBack" class="round" title="Back to the previous card, its decision stays editable (B or Backspace)" disabled>←</button>
     <button id="triUndo" class="round" title="Rewind (Z)">↺</button>
+    <button id="triVc" class="round" type="button" title="Image brightness / contrast (display only)" aria-controls="vcPop" aria-expanded="false">◐</button>
     <button id="triSet" class="round" title="Settings">⚙</button>
   </div>
   <div class="tfil">
@@ -498,6 +519,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
     <span id="oPos"></span><span id="oItem"></span>
     <span id="oTitle"></span>
     <span id="oSync" class="badge">local only</span>
+    <button id="oVc" class="round" type="button" title="Image brightness / contrast (display only)" aria-controls="vcPop" aria-expanded="false">◐</button>
     <button id="oInfoBtn" class="badge" type="button" title="The set's instructions (?)" aria-controls="oInstr" aria-expanded="false" hidden>ⓘ<span class="oInfoTx"> Instructions</span></button>
     <button id="oWho" class="badge" title="Your reviewer name">👤</button>
   </div>
@@ -540,6 +562,15 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
   <h2 id="setTitle">Settings <button id="setClose" type="button" title="Close (Esc)">✕</button></h2>
   <label class="tg"><input type="checkbox" id="funMode"> Fun mode</label>
   <p>Off: a plain Quick check (no app names, pop-ups or jokes; Reject ✕ · Low conf · Accept ✓). Saved in this browser only. Your decisions are the same either way.</p>
+</div>
+<div id="vcPop" role="dialog" aria-labelledby="vcTitle" hidden>
+  <h2><span id="vcTitle">Image contrast</span><button id="vcClose" type="button" title="Close (Esc)">✕</button></h2>
+  <div class="vcRow"><label for="vcB">Brightness</label><input type="range" id="vcB" min="-100" max="100" step="1" value="0"><output id="vcBo">0</output></div>
+  <div class="vcRow"><label for="vcC">Contrast</label><input type="range" id="vcC" min="-100" max="100" step="1" value="0"><output id="vcCo">0</output></div>
+  <div class="vcRow" id="vcGRow"><label for="vcG">Gamma</label><input type="range" id="vcG" min="0.3" max="3" step="0.05" value="1"><output id="vcGo">1.00</output></div>
+  <div class="vcBtns"><button id="vcAuto" type="button" aria-pressed="false" title="Stretch the darkest 0.5 % to black and the brightest 0.5 % to white, over what is on screen">Auto</button><button id="vcReset" type="button" title="Back to the image as delivered">Reset</button></div>
+  <p id="vcNote">Only how the image looks on this screen: your decisions and outlines are the same either way. Saved in this browser, for you.</p>
+  <p id="vcTaint" hidden>This copy of the page can't read the image's pixels (opened from a file), so Auto and gamma are off here.</p>
 </div>
 <div id="whoDlg" role="dialog" aria-modal="true" aria-labelledby="whoTitle" hidden>
   <div class="box">
@@ -979,12 +1010,121 @@ function handles(rings) {  // the white vertex handles of the selection; selecte
     ctx.beginPath(); ctx.arc(x, y, on ? 5.5 : 3.5, 0, 7); ctx.fill(); ctx.stroke();
   } });
 }
+// ---------- viewer contrast (r16a P1): display only ----------
+// Brightness / contrast / gamma, and Auto (a 0.5-99.5 % stretch over what is on screen: the Editor's view, a card's
+// crop), per reviewer in localStorage. vcDraw is the only way the four image draw sites (Editor, Quick check card,
+// object card, tree card) draw the image. It applies a 256-entry lookup table to a copy of the image (an offscreen
+// canvas at the image's natural size, at most 16 Mpx: the iOS limit), cached per image and redone only when the table
+// changes, and draws the copy into the image's own rectangle: W / H, outlines, decisions and exports never see it.
+// Settings at their defaults: the plain drawImage, as before. A page that can't read pixels (file://: a tainted
+// canvas) falls back to ctx.filter brightness / contrast, without Auto or gamma; any other error draws the plain image.
+const VC_MAX_PX = 16e6, VC0 = {b: 0, c: 0, g: 1, auto: false};
+let vc = {...VC0}, vcWho = null, vcTaint = false, vcLast = null;
+const vcCache = new Map();  // image -> {w, h, src, lum, cv, cx, out, key}: the 3 most recently drawn images
+const vcFilterOk = (() => { try { return typeof document.createElement("canvas").getContext("2d").filter === "string"; } catch (e) { return false; } })();
+const vcNum = (v, lo, hi, d) => typeof v === "number" && isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d;
+const vcKey = () => "cryoev-review:contrast:" + (me() || "-");
+const vcIdentity = () => !vc.auto && vc.b === 0 && vc.c === 0 && vc.g === 1;
+const vcCf = () => vc.c >= 0 ? 1 + vc.c / 50 : 1 + vc.c / 100;  // contrast -100..100 -> a slope of 0..3
+function vcLoad() {
+  vcWho = me(); vc = {...VC0};
+  try {
+    const j = JSON.parse(localStorage.getItem(vcKey()) || "null");
+    if (j && typeof j === "object") vc = {b: vcNum(j.b, -100, 100, 0), c: vcNum(j.c, -100, 100, 0), g: vcNum(j.g, 0.3, 3, 1), auto: j.auto === true};
+  } catch (e) {}
+}
+function vcSave() { try { localStorage.setItem(vcKey(), JSON.stringify(vc)); } catch (e) {} }
+function vcLut(lo, hi) {  // value -> shown value: Auto's stretch (lo, hi), then gamma, contrast about mid-grey, brightness
+  const L = new Uint8ClampedArray(256), cf = vcCf(), ig = 1 / vc.g, span = Math.max(1, hi - lo);
+  for (let v = 0; v < 256; v++) {
+    let x = Math.min(1, Math.max(0, (v - lo) / span));
+    x = (Math.pow(x, ig) - 0.5) * cf + 0.5 + vc.b / 200;
+    L[v] = Math.round(x * 255);
+  }
+  return L;
+}
+function vcEntry(img) {  // the image's pixels, read once (getImageData throws on a tainted canvas: the caller falls back)
+  let e = vcCache.get(img);
+  if (e) { vcCache.delete(img); vcCache.set(img, e); return e; }
+  const nw = img.naturalWidth, nh = img.naturalHeight; if (!nw || !nh) return null;
+  const f = Math.min(1, Math.sqrt(VC_MAX_PX / (nw * nh))), w = Math.max(1, Math.floor(nw * f)), h = Math.max(1, Math.floor(nh * f));
+  const cv2 = document.createElement("canvas"); cv2.width = w; cv2.height = h;
+  const cx2 = cv2.getContext("2d", {willReadFrequently: true}); cx2.drawImage(img, 0, 0, w, h);
+  const src = cx2.getImageData(0, 0, w, h).data, lum = new Uint8Array(w * h);
+  for (let i = 0, j = 0; j < lum.length; i += 4, j++) lum[j] = (src[i] * 77 + src[i + 1] * 150 + src[i + 2] * 29) >> 8;
+  e = {w, h, src, lum, cv: cv2, cx: cx2, out: cx2.createImageData(w, h), key: ""};
+  vcCache.set(img, e);
+  while (vcCache.size > 3) { const [k, old] = vcCache.entries().next().value; old.cv.width = old.cv.height = 0; vcCache.delete(k); }  // iOS frees canvas memory late
+  return e;
+}
+function vcStretch(e, r) {  // Auto: the 0.5 / 99.5 % levels of the image inside r (normalized [x0, y0, x1, y1]), sampled
+  const cl = (v, n) => Math.min(n, Math.max(0, v));
+  const x0 = cl(Math.floor(r[0] * e.w), e.w), y0 = cl(Math.floor(r[1] * e.h), e.h), x1 = cl(Math.ceil(r[2] * e.w), e.w), y1 = cl(Math.ceil(r[3] * e.h), e.h);
+  if (x1 <= x0 || y1 <= y0) return [0, 255];
+  const step = Math.max(1, Math.ceil(Math.sqrt((x1 - x0) * (y1 - y0) / 65536))), hist = new Uint32Array(256); let n = 0;
+  for (let y = y0; y < y1; y += step) for (let x = x0, o = y * e.w + x0; x < x1; x += step, o += step) { hist[e.lum[o]]++; n++; }
+  const at = q => { let acc = 0; const t = q * n; for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc > t) return v; } return 255; };
+  const lo = at(0.005), hi = at(0.995);
+  return hi > lo ? [lo, hi] : [0, 255];
+}
+function vcDraw(c2, im, dx, dy, dw, dh, vw, vh) {  // draw image `im` at (dx, dy, dw, dh) on a view vw x vh (css px), as this viewer set it
+  if (vcIdentity()) { c2.drawImage(im, dx, dy, dw, dh); return; }
+  try {
+    if (!vcTaint) {
+      let e = null;
+      try { e = vcEntry(im); } catch (err) { vcTaint = true; vcSync(); }  // a tainted canvas (SecurityError): the filter fallback
+      if (e) {
+        const [lo, hi] = vc.auto ? vcStretch(e, [-dx / dw, -dy / dh, (vw - dx) / dw, (vh - dy) / dh]) : [0, 255];
+        const key = [lo, hi, vc.b, vc.c, vc.g].join();
+        if (e.key !== key) {
+          const L = vcLut(lo, hi), s = e.src, o = e.out.data;
+          for (let i = 0; i < s.length; i += 4) { o[i] = L[s[i]]; o[i + 1] = L[s[i + 1]]; o[i + 2] = L[s[i + 2]]; o[i + 3] = s[i + 3]; }
+          e.cx.putImageData(e.out, 0, 0); e.key = key;
+        }
+        vcLast = {lo, hi, w: e.w, h: e.h};
+        c2.drawImage(e.cv, dx, dy, dw, dh); return;
+      }
+    }
+    if (vcTaint && vcFilterOk && (vc.b || vc.c)) {
+      vcLast = {filter: true};
+      c2.filter = `brightness(${1 + vc.b / 100}) contrast(${vcCf()})`;
+      try { c2.drawImage(im, dx, dy, dw, dh); } finally { c2.filter = "none"; }
+      return;
+    }
+  } catch (err) { try { c2.filter = "none"; } catch (e2) {} }
+  c2.drawImage(im, dx, dy, dw, dh);
+}
+function vcSync() {  // the panel shows the settings; the ◐ buttons are lit while anything is set
+  $("vcB").value = vc.b; $("vcBo").textContent = (vc.b > 0 ? "+" : "") + vc.b;
+  $("vcC").value = vc.c; $("vcCo").textContent = (vc.c > 0 ? "+" : "") + vc.c;
+  $("vcG").value = vc.g; $("vcGo").textContent = vc.g.toFixed(2);
+  $("vcAuto").classList.toggle("on", vc.auto); $("vcAuto").setAttribute("aria-pressed", String(vc.auto));
+  $("vcAuto").textContent = vc.auto ? "Auto: on" : "Auto";
+  $("vcAuto").hidden = vcTaint; $("vcGRow").hidden = vcTaint; $("vcTaint").hidden = !vcTaint;
+  $("vcB").disabled = $("vcC").disabled = vcTaint && !vcFilterOk;
+  ["vcBtn", "triVc", "oVc"].forEach(id => $(id).classList.toggle("on", !vcIdentity()));
+}
+function vcRedraw() { if (OBJ) OBJ.redraw(); else { draw(); if (!$("tri").hidden) triDraw(); } }
+function vcSet(k, v) { vc[k] = v; vcSave(); vcSync(); vcRedraw(); }
+function vcOpen(on) {
+  const p = $("vcPop"); p.hidden = on === undefined ? !p.hidden : !on;
+  ["vcBtn", "triVc", "oVc"].forEach(id => $(id).setAttribute("aria-expanded", String(!p.hidden)));
+}
+function vcWhoChanged() { if (me() !== vcWho) { vcLoad(); vcSync(); vcRedraw(); } }  // settings are per reviewer
+$("vcB").oninput = () => vcSet("b", vcNum(+$("vcB").value, -100, 100, 0));
+$("vcC").oninput = () => vcSet("c", vcNum(+$("vcC").value, -100, 100, 0));
+$("vcG").oninput = () => vcSet("g", vcNum(+$("vcG").value, 0.3, 3, 1));
+$("vcAuto").onclick = () => vcSet("auto", !vc.auto);
+$("vcReset").onclick = () => { vc = {...VC0}; vcSave(); vcSync(); vcRedraw(); };
+$("vcClose").onclick = () => vcOpen(false);
+["vcBtn", "triVc", "oVc"].forEach(id => { $(id).onclick = () => vcOpen(); });
+vcLoad(); vcSync();
 function draw() {
   const r = stage.getBoundingClientRect();
   ctx.clearRect(0, 0, r.width, r.height);
   if (!imgReady) return;
   ctx.imageSmoothingEnabled = view.s < 2;
-  ctx.drawImage(img, view.ox, view.oy, W * view.s, H * view.s);
+  vcDraw(ctx, img, view.ox, view.oy, W * view.s, H * view.s, r.width, r.height);
   const im = curImg(), flags = $("showFlags").checked;
   if ($("showPr").checked) {
     im.pr.forEach((p, k) => {  // a flag stays drawn until someone decides on the object
@@ -1171,7 +1311,7 @@ function renderSide() {
       lb.title = `Add it as a ${pc} label with the Low conf tag: counted, reported as low conf. One undo step (Z)`; lb.onclick = acceptLow;
       box.append(lb);
     }
-    if (pc !== curCls) { const b = document.createElement("button"); b.textContent = `Accept as ${curCls}`; b.onclick = () => acceptPred(curCls); box.append(b); }
+    if (pc !== curCls) { const b = document.createElement("button"); b.textContent = `Accept as ${curCls}`; b.title = `Add it as a ${curCls} label`; b.onclick = () => acceptPred(curCls); box.append(b); }
     if (prEditable(im, sel.i)) box.insertAdjacentHTML("beforeend", `<div class="tip">Or drag a white handle (click the outline: add a point; right-click a point: delete it): that accepts it with the edited outline.</div>`);
   }
 }
@@ -1789,8 +1929,15 @@ document.addEventListener("keydown", ev => {
   if (!$("imgDlg").hidden) { if (ev.key === "Escape") closeImg(); return; }  // the image's reject / note: no hotkeys
   if (!$("grpDlg").hidden) { if (ev.key === "Escape") closeGroup(); return; }  // a sample / montage action: no hotkeys
   if (!$("setPop").hidden) { if (ev.key === "Escape") $("setPop").hidden = true; return; }  // settings open: no hotkeys
+  if (!$("vcPop").hidden && (ev.key === "Escape" || $("vcPop").contains(ev.target))) { if (ev.key === "Escape") vcOpen(false); return; }  // the contrast panel: its sliders take the keys
   if (OBJ) return OBJ.key(ev);  // an object set: its own keys (the OBJECT SET CARD block)
   if (!$("tri").hidden) return triKey(ev);
+  if (ev.key === "Tab") {  // #25b: unless a control has the focus (then Tab moves the focus, as always)
+    const a = document.activeElement, t = a ? a.tagName : "";
+    if (ev.ctrlKey || ev.altKey || ev.metaKey || /^(BUTTON|INPUT|SELECT|TEXTAREA|A|SUMMARY)$/.test(t) || (a && a.isContentEditable)) return;
+    if (tabObj(ev.shiftKey ? -1 : 1)) ev.preventDefault();
+    return;
+  }
   if (ev.target.tagName === "SELECT" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "INPUT" && ev.target.type !== "checkbox" && ev.target.type !== "range") return;
   const k = ev.key;
   if (k === "Escape") { draft = null; if (mode !== "select") setMode("select"); else if (vSel().size) { vsel.clear(); draw(); } else { sel = null; renderSide(); draw(); } }
@@ -2117,10 +2264,13 @@ function triRender() {
   // a prediction-only card (not September's, not picked on yet): Accept / Reject are labelled pills, the primary actions
   const big = !clsMode() && !!c && c.kind === "p" && !seedOf(D.images[c.i].file, c.key) && !pickedHere(c);
   // Fun mode off: every card's buttons are the labelled pills, "Reject ✕ · Low conf · Accept ✓" (.nofun)
-  const pill = big || (!fun && !clsMode() && !!c);
+  // #24: after a class pick on a prediction card, Accept keeps that pick (it only moves on): its label and title name
+  // the class picked, not the predicted one
+  const pickCls = !clsMode() && !!c && c.kind === "p" && pickedHere(c) ? (/^add:(.*)$/.exec(decV(edits[D.images[c.i].file], c.key) || "") || [])[1] || null : null;
+  const pill = big || !!pickCls || (!fun && !clsMode() && !!c);
   $("triActions").classList.toggle("pcard", pill);
   $("aYes").innerHTML = clsMode() ? "✓" : (pill ? '<span class="fun">✓ Accept</span>' : '<span class="fun">♥</span>') + '<span class="nofun">Accept ✓</span>'
-    + (big ? `<small>as ${esc(cardPredCls(c))}</small>` : "");
+    + (big || pickCls ? `<small>as ${esc(pickCls || cardPredCls(c))}</small>` : "");
   $("aNope").innerHTML = (pill ? '<span class="fun">✕ Reject</span>' : '<span class="fun">✕</span>') + '<span class="nofun">Reject ✕</span>';
   const lowNow = renderLowBtn(c, big, pill);
   renderTriList();
@@ -2159,7 +2309,7 @@ function triRender() {
     const p = im.pr[c.k], conf = p.s.toFixed(2), pc = cardPredCls(c);
     bio.innerHTML = `<h2>Vesicle?, <span>${conf}</span></h2>${pickedLine(im, c)}<p class="fun quip">${makeBio(im, c, {conf, cls: "EV", sample: esc(sample), diam, frac, nested: nestedCount(im, c, caseRing(c), parseFloat($("triConf").value))})}</p>` +
       `<small>⌀ ~${diam} px · ${esc(sample)} · ${esc(im.split)} set${p.c ? ` · model: ${esc(p.c)}` : ""}</small>`;
-    $("aYes").title = sept ? "Swipe right: confirm the September decision" : `Accept: add as ${pc} (A, Enter, →, swipe right)`;
+    $("aYes").title = sept ? "Swipe right: confirm the September decision" : pickCls ? `Accept: added as ${pickCls}, next card (A, Enter, →, swipe right)` : `Accept: add as ${pc} (A, Enter, →, swipe right)`;
     $("aNope").title = "Reject: not a vesicle (X, ←, swipe left)";
     CATS.filter(cl => cl !== pc).forEach(cl => chip(cl, decV(edits[im.file], c.key) === "add:" + cl ? "on" : "", () => tri.adj ? saveAdjust(cl) : pick("add", cl, `added as ${cl}`)));
   } else {
@@ -2384,7 +2534,7 @@ function triDraw() {
   const wkey = caseId(c) + ":" + tri.zoom; if (tri.wtKey !== wkey) { tri.wt = null; tri.wtKey = wkey; }  // wheel / pinch zoom resets with the card / zoom step
   if (tri.wt) { s *= tri.wt.k; ox = ox * tri.wt.k + tri.wt.tx; oy = oy * tri.wt.k + tri.wt.ty; }
   tctx.imageSmoothingEnabled = s < 2;
-  tctx.drawImage(tri.img, ox, oy, Wi * s, Hi * s);
+  vcDraw(tctx, tri.img, ox, oy, Wi * s, Hi * s, box.width, box.height);
   const ring = rg => { tctx.beginPath(); for (let k = 0; k < rg.length; k += 2) { const X = rg[k] * Wi * s + ox, Y = rg[k+1] * Hi * s + oy; k ? tctx.lineTo(X, Y) : tctx.moveTo(X, Y); } tctx.closePath(); };
   const col = c.kind === "p" ? "#facc15" : "#e879f9", pad = 12, L = 10;
   const bx0 = x0 * Wi * s + ox - pad, by0 = y0 * Hi * s + oy - pad, bx1 = x1 * Wi * s + ox + pad, by1 = y1 * Hi * s + oy + pad;
@@ -2574,7 +2724,10 @@ tcv.addEventListener("pointerdown", ev => {
   tptr.set(ev.pointerId, cardXY(ev));
   if (tptr.size === 2) return cardPinchStart();
   if (tptr.size > 2 || tri.pinch) return;
-  if (tri.adj) return adjPtr(ev, 0); g0 = {x: ev.clientX, y: ev.clientY, drag: false}; tri.held = false;
+  if (tri.adj) return adjPtr(ev, 0);
+  // #25a: a mouse drags the (zoomed) image around instead of swiping: its decisions are the buttons and keys. Touch
+  // and pen keep swipe-to-decide. The pan lives in tri.wt, so it resets with the card / zoom step like the wheel zoom.
+  g0 = {x: ev.clientX, y: ev.clientY, drag: false, pan: ev.pointerType === "mouse", wt: tri.wt ? {...tri.wt} : {k: 1, tx: 0, ty: 0}}; tri.held = false;
   pressT = setTimeout(() => { if (g0 && !g0.drag) { tri.held = true; tri.peekPrev = tri.hideOutline; tri.hideOutline = true; triDraw(); } }, 350);
 });
 tcv.addEventListener("pointermove", ev => {
@@ -2583,6 +2736,11 @@ tcv.addEventListener("pointermove", ev => {
   if (tri.adj) return adjPtr(ev, 1);
   if (!g0) return;
   const dx = ev.clientX - g0.x, dy = ev.clientY - g0.y;
+  if (g0.pan) {  // #25a mouse pan: past 4 px it is a pan, never a peek or a zoom click
+    if (!g0.drag && Math.hypot(dx, dy) > 4) { g0.drag = true; clearTimeout(pressT); }
+    if (g0.drag) { tri.wt = {k: g0.wt.k, tx: g0.wt.tx + dx, ty: g0.wt.ty + dy}; triDraw(); }
+    return;
+  }
   if (!g0.drag && Math.hypot(dx, dy) > 12 && !tri.held) { g0.drag = true; clearTimeout(pressT); }
   if (!g0.drag) return;
   card.style.transition = ""; card.style.transform = `translate(${dx}px, ${dy}px) rotate(${dx / 25}deg)`;
@@ -2595,9 +2753,10 @@ tcv.addEventListener("pointerup", ev => {
   if (tri.pinch) { if (tptr.size < 2) tri.pinch = null; g0 = null; return; }
   if (tri.adj) return adjPtr(ev, 2);
   clearTimeout(pressT); if (!g0) return;
-  const dx = ev.clientX - g0.x, dy = ev.clientY - g0.y, wasDrag = g0.drag; g0 = null;
+  const dx = ev.clientX - g0.x, dy = ev.clientY - g0.y, wasDrag = g0.drag, wasPan = g0.pan; g0 = null;
   if (tri.held) { tri.held = false; tri.hideOutline = tri.peekPrev; triDraw(); return; }
   if (!wasDrag) { tri.zoom = (tri.zoom + 1) % ZOOMS.length; triDraw(); return; }
+  if (wasPan) return;  // #25a: a mouse drag only pans
   if (dy < -90 && Math.abs(dy) > Math.abs(dx)) flyOff(dx, -1200, advance);
   else if ((dx > 90 || (dx < -90 && !clsMode())) && !needWho()) cardReset(true);
   else if (dx > 90) { const c = tri.queue[tri.pos]; flyOff(card.getBoundingClientRect().width * 1.5, dy, swipeYes); if (c && !pickedHere(c)) toast(c.kind === "p" ? brand().match : brand().keep, c.kind === "p" ? "added as " + cardPredCls(c) : "label kept"); }
@@ -2705,7 +2864,7 @@ function doneWho(v, src) {
 }
 function showWho() {
   const t = "👤 " + (me() ? dispName(me()) : "set name");
-  $("whoBtn").textContent = t; $("triWho").textContent = t;
+  $("whoBtn").textContent = t; $("triWho").textContent = t; vcWhoChanged();
   $("whoBtn").title = $("triWho").title = me() ? `Saved with your edits as "${me()}". Tap to change` : "Pick your name before editing";
   if (LOCKED_WHO) $("whoBtn").title = $("triWho").title = `Signed in to the portal as "${LOCKED_WHO}": saved with your edits`;
 }
@@ -2742,27 +2901,43 @@ function focusObj(i, key) {  // load image i in the Editor, select object `key` 
   go(i);
   const want = img, focus = () => {
     if (cur !== i || img !== want) return;  // superseded by another go()
-    const im = curImg(), s = selFor(im, key);
-    let ring = s && s.kind === "gt" ? findKey(gtOf(im), key).p[0] : s ? im.pr[s.i].p[0] : null;
-    if (s && s.kind === "pr") {  // make sure the prediction is drawn: predictions on, slider at or below its score
-      $("showPr").checked = true; const sc = im.pr[s.i].s;
-      if (sc < conf()) { $("conf").value = String(Math.max(0.25, Math.floor(sc * 20) / 20)); $("confOut").textContent = conf().toFixed(2); }
-    } else if (s) $("showGt").checked = true;
-    if (!s) {  // deleted since: centre where it was, say so
-      const o = /^g\d+$/.test(key) ? im.gt.find(g => g.id === +key.slice(1)) : null; ring = o ? o.p[0] : null;
-      $("hint").style.display = "block"; $("hint").textContent = `Object ${key} is not on this image now (deleted or undone)`; setTimeout(hint, 5000);
-    }
-    if (ring) {
-      const [x0, y0, x1, y1] = ringBox(ring);
-      const b = stage.getBoundingClientRect(), span = Math.max((x1 - x0) * W, (y1 - y0) * H, 40) * 4;
-      view.s = Math.min(b.width, b.height) / span;
-      view.ox = b.width / 2 - (x0 + x1) / 2 * W * view.s; view.oy = b.height / 2 - (y0 + y1) / 2 * H * view.s;
-    }
-    sel = s; renderSide(); draw();
+    centreObj(key);
     const u = new URL(location.href);  // a reload stays where the reviewer has moved since (k= is left alone)
     if (u.searchParams.has("img")) { ["img", "obj", "mode"].forEach(k => u.searchParams.delete(k)); try { history.replaceState(history.state, "", u.toString()); } catch (e) {} }
   };
   img.addEventListener("load", () => setTimeout(focus, 0), {once: true});
+}
+function centreObj(key) {  // focusObj on the image already shown (and #25b Tab): select object `key` and centre it
+  const im = curImg(), s = selFor(im, key);
+  let ring = s && s.kind === "gt" ? findKey(gtOf(im), key).p[0] : s ? im.pr[s.i].p[0] : null;
+  if (s && s.kind === "pr") {  // make sure the prediction is drawn: predictions on, slider at or below its score
+    $("showPr").checked = true; const sc = im.pr[s.i].s;
+    if (sc < conf()) { $("conf").value = String(Math.max(0.25, Math.floor(sc * 20) / 20)); $("confOut").textContent = conf().toFixed(2); }
+  } else if (s) $("showGt").checked = true;
+  if (!s) {  // deleted since: centre where it was, say so
+    const o = /^g\d+$/.test(key) ? im.gt.find(g => g.id === +key.slice(1)) : null; ring = o ? o.p[0] : null;
+    $("hint").style.display = "block"; $("hint").textContent = `Object ${key} is not on this image now (deleted or undone)`; setTimeout(hint, 5000);
+  }
+  if (ring) {
+    const [x0, y0, x1, y1] = ringBox(ring);
+    const b = stage.getBoundingClientRect(), span = Math.max((x1 - x0) * W, (y1 - y0) * H, 40) * 4;
+    view.s = Math.min(b.width, b.height) / span;
+    view.ox = b.width / 2 - (x0 + x1) / 2 * W * view.s; view.oy = b.height / 2 - (y0 + y1) / 2 * H * view.s;
+  }
+  sel = s; renderSide(); draw();
+}
+// #25b Editor Tab / Shift+Tab: the next / previous object shown on this image (labels and predictions not accepted
+// yet, in reading order of their centres), selected and centred as focusObj does. Only in Select mode with nothing being drawn.
+function tabObj(d) {
+  if (!imgReady || mode !== "select" || draft || redrawKey != null) return false;
+  const im = curImg(), list = [], mid = r => { const [x0, y0, x1, y1] = ringBox(r); return [(x0 + x1) / 2, (y0 + y1) / 2]; };
+  if ($("showGt").checked) gtOf(im).forEach(g => { if (g.p && g.p[0]) list.push({key: selKey(g), at: mid(g.p[0])}); });
+  if ($("showPr").checked) im.pr.forEach((p, k) => { if (p.s >= conf() && !list.some(o => o.key === "p" + k)) list.push({key: "p" + k, at: mid(p.p[0])}); });
+  if (!list.length) return false;
+  list.sort((a, b) => a.at[1] - b.at[1] || a.at[0] - b.at[0]);
+  const now = sel ? (sel.kind === "gt" ? sel.key : "p" + sel.i) : null, n = list.findIndex(o => o.key === now);
+  const next = n < 0 ? (d > 0 ? 0 : list.length - 1) : (n + d + list.length) % list.length;
+  centreObj(list[next].key); return true;
 }
 function parseDeep() {  // ?img=<file>&obj=<decision key> (img may also be the file's stem)
   const q = new URLSearchParams(location.search), f = q.get("img"); if (!f) return null;
@@ -3056,7 +3231,7 @@ function makeObjectView() {
     const Wi = st.img.naturalWidth, Hi = st.img.naturalHeight, rings = ringsOf(im, String(it.obj)), ring = rings && rings[0];
     const [x0, y0, x1, y1] = cropOf(it, im, ring), cw = (x1 - x0) * Wi, ch = (y1 - y0) * Hi;
     const s = Math.min(b.width / cw, b.height / ch), ox = (b.width - cw * s) / 2 - x0 * Wi * s, oy = (b.height - ch * s) / 2 - y0 * Hi * s;
-    cx.imageSmoothingEnabled = true; cx.drawImage(st.img, ox, oy, Wi * s, Hi * s);
+    cx.imageSmoothingEnabled = true; vcDraw(cx, st.img, ox, oy, Wi * s, Hi * s, b.width, b.height);
     if (!st.outlines || !rings) return;
     const path = rg => { cx.beginPath(); for (let k = 0; k < rg.length; k += 2) { const X = rg[k] * Wi * s + ox, Y = rg[k + 1] * Hi * s + oy; k ? cx.lineTo(X, Y) : cx.moveTo(X, Y); } cx.closePath(); };
     if (contained && Array.isArray(it.also)) {  // the objects the builder found inside the target (it.also): thinner, green
@@ -3087,7 +3262,7 @@ function makeObjectView() {
     const root = ns.length ? ringsOf(im, ns[0].obj) : null;
     const [x0, y0, x1, y1] = cropOf(it, im, root && root[0]), cw = (x1 - x0) * Wi, ch = (y1 - y0) * Hi;
     const s = Math.min(b.width / cw, b.height / ch), ox = (b.width - cw * s) / 2 - x0 * Wi * s, oy = (b.height - ch * s) / 2 - y0 * Hi * s;
-    cx.imageSmoothingEnabled = true; cx.drawImage(st.img, ox, oy, Wi * s, Hi * s);
+    cx.imageSmoothingEnabled = true; vcDraw(cx, st.img, ox, oy, Wi * s, Hi * s, b.width, b.height);
     const P = (x, y) => [x * Wi * s + ox, y * Hi * s + oy];
     const path = rg => { cx.beginPath(); for (let k = 0; k < rg.length; k += 2) { const [X, Y] = P(rg[k], rg[k + 1]); k ? cx.lineTo(X, Y) : cx.moveTo(X, Y); } cx.closePath(); };
     const shown = ns.map(nd => ({nd, rings: ringsOf(im, nd.obj)})).filter(x => Array.isArray(x.rings) && x.rings.length);
@@ -3354,7 +3529,7 @@ function makeObjectView() {
       attrs: attrsFor(nd).map(a => a.id), mine: Object.fromEntries(attrsFor(nd).map(a => [a.id, mineAt(it, nd.obj, a)]))})),
       badges: st.badges.map(b => ({...b}))};
   };
-  return {start, render, key, saved, go, closed, state: () => ({pos: st.pos, n: items.length, done: nDone(), outlines: st.outlines, can: can(),
+  return {start, render, key, saved, go, closed, redraw: draw, state: () => ({pos: st.pos, n: items.length, done: nDone(), outlines: st.outlines, can: can(),
     item: items[st.pos] ? {...items[st.pos]} : null, attrs: attrs.map(a => a.id), keys: Object.keys(keymap), blind, contained,
     drawn: [...st.drawn], instr: {has: !!instr, open: !!instr && !$("oInstr").hidden}, closed: st.closed,
     mine: items[st.pos] ? Object.fromEntries(attrs.map(a => [a.id, mineOf(items[st.pos], a)])) : {}, undo: st.undo.length,
@@ -3380,7 +3555,7 @@ window.__review = {D, CATS, obj: () => OBJ && OBJ.state(), effGt, gtOf, mergeEdi
   meta: () => meta, groups: () => groups, openGroup, stepSample, loadMeta, triGo: n => { tri.pos = n; tri.zoom = 0; tri.picked = null; triRender(); }, render: () => { renderList(); renderSide(); draw(); if (!$("tri").hidden) triRender(); }, state: () => ({mode, sel, curCls, redrawKey, cur, vsel: [...vSel()], order, view: {...view}, W, H, imgReady, server, dirty: dirty.size,
   who: me(), tri: {mode: tri.mode, pos: tri.pos, queue: tri.queue, ready: tri.ready, picked: tri.picked || null, zoom: tri.zoom, wk: tri.wt ? tri.wt.k : 1, xfs: tri.xf ? tri.xf.s : 0, hist: (tri.hist || []).length,
   histIds: (tri.hist || []).slice(), busy: !!tri.busy, xf: tri.xf ? {...tri.xf} : null,
-  adj: tri.adj ? {ring: tri.adj.ring.slice(), sel: [...tri.adj.sel].map(k => k / 2).sort((a, b) => a - b), undo: tri.adj.undo.length, msg: tri.adj.msg} : null}, fun: funOn()})};  // for annotation/tests
+  adj: tri.adj ? {ring: tri.adj.ring.slice(), sel: [...tri.adj.sel].map(k => k / 2).sort((a, b) => a - b), undo: tri.adj.undo.length, msg: tri.adj.msg} : null}, fun: funOn(), vc: {...vc, taint: vcTaint, last: vcLast ? {...vcLast} : null, cached: vcCache.size}})};  // for annotation/tests
 })();
 </script>
 </body>
