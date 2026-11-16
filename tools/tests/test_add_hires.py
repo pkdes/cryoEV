@@ -74,6 +74,24 @@ class AddHires(unittest.TestCase):
             self.assertFalse(im.info.get("exif"))
         self.assertTrue((self.pkg / "hires_manifest.json").is_file())
 
+    def test_item_crops_are_additive_and_full_res(self):
+        """r16b: an item gets a full-res crop of its 1.5x-padded box; data.js changes only by the chi keys."""
+        self.data["items"] = [{"id": "g1", "image": "0001", "crop": [0.4, 0.4, 0.6, 0.6]},
+                              {"id": "bad/../x", "image": "0002", "crop": [0.1, 0.1, 0.2, 0.2]}]
+        (self.pkg / "data.js").write_bytes(OS.DATAJS_PREFIX + json.dumps(self.data, separators=(",", ":")).encode()
+                                           + b";\n")
+        out = AH.write_crops(AH.plan(self.pkg, ps_dir=self.ps, width=720))
+        self.assertEqual((out["crops"], out["skipped"]), (1, 1))
+        data, _, _ = OS._split_datajs((self.pkg / "data.js").read_bytes())
+        it = data["items"][0]
+        self.assertEqual((it["chi"], it["chi_box"]), ("images/c_g1.jpg", [0.35, 0.35, 0.65, 0.65]))
+        with Image.open(self.pkg / it["chi"]) as im:
+            self.assertEqual(im.size, (360, 256))                         # 0.3 of the 1200x852 source, full res
+        for x in data["items"]:
+            for k in AH.CHI_KEYS:
+                x.pop(k, None)
+        self.assertEqual(data, self.data)
+
     def test_wrong_source_fails_alignment(self):
         """negative: image 1's package JPEG replaced by image 2's -> 0001 fails, the others pass (control)."""
         shutil.copy(self.pkg / "images" / "0002.jpg", self.pkg / "images" / "0001.jpg")
