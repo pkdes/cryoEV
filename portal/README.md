@@ -280,6 +280,24 @@ python -m portal.app --auth access --port 8448 [--access-config <path>] [--state
 - **Logs:** refusals with a reason and `Cf-Connecting-IP` (IP-shaped values only); the token is never logged. The
   access log adds `cf=<ip>`.
 
+**Guests (round 17, `portal/guests.py`; off by default)**
+- **Enable:** add `"guest_email_domains": ["<domain>"]` to the private `cloudflare_access.json` (file only, no env
+  override; never put the domain in the repo), allow that domain in the Cloudflare Access policy, restart the
+  access portal. Its start log says `[cj] guests: ON for N domain(s)`. A malformed value refuses to start.
+- **Who:** a verified JWT whose email is on no active roster entry and whose domain is **exactly** a configured one
+  (sub-domains and look-alikes refused) gets a roster entry once: id `guest-<8 hex of sha256(email)>`, role
+  `guest`, `auto: true`. Same id on later visits. Key mode never makes or admits guests.
+- **What:** role `guest` is not in `auth.ROLES`: no module, nav, agent token or key link. The Gate lets a guest reach
+  only home (which lists, or redirects to, the sets open to guests), the shell's `/cj/` files and
+  `/review/<pkg id>/...` of a package with `"open_to": "guests"` in `review_package.json`; everything else is 403,
+  and a package not open to guests gets the same 404 as an unknown id. Opening an open set adds the guest's id to its
+  `reviewers` (meta lock), so the review server takes their object-set answers.
+- **Open / close a set:** `python -m portal.guests open --package <review root>/<pkg id>` (`close`, or
+  `list --root <review root>`). Add the lab reviewers first: once a guest joins, only listed reviewers can answer.
+- **Revoke a guest:** `python -m portal.auth revoke --id guest-xxxxxxxx` (or Admin > People > Revoke). Never delete the
+  entry: a deleted guest is made again on their next visit; a revoked one stays out. Removing the domain from the
+  config (and restarting) stops new guests; existing guest entries keep working until revoked.
+
 ## Uptime
 - **Portal process down:** the laptop's job monitor can watch it. Add `--portal http://127.0.0.1:8770/healthz` (key mode) and `--portal http://127.0.0.1:8448/healthz` (Cloudflare access mode) to the `monitor` service's argv (the example config has both) and set env `CRYOEV_NTFY_TOPIC` for it. After 2 failed checks it sends one ntfy, and one more on recovery (docs/JOBS.md, Portal uptime probes).
 - **Laptop asleep, off or offline:** the monitor runs on that laptop, so it cannot report this. Turn on the **Cloudflare Tunnel Health Alert** (Cloudflare dashboard -> Zero Trust -> Notifications, email destination: `<your email>`) for the tunnel that serves `<portal hostname>`.

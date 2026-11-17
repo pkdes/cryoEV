@@ -58,6 +58,8 @@ from data_utils.oslock import acquire_lock  # noqa: E402
 COOKIE = "__Host-cj_session"
 SESSION_S = 30 * 86400            # 30 days
 ROLES = ("admin", "advanced", "basic")   # admin > advanced > basic; modules list every role they allow
+GUEST_ROLE = "guest"     # round 17: below basic and NOT in ROLES (no module, token, key link or reviewer pick takes it);
+                         # access mode only, made by portal/guests.py, opens only review sets open_to "guests"
 ID_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,39}")
 RESERVED_IDS = frozenset({"cli", "-"})   # audit actors that are never a person (the token CLI, anonymous)
 EMAIL_RE = re.compile(r"(?=.{3,254}\Z)[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+")
@@ -141,8 +143,8 @@ class Roster:
 
     @staticmethod
     def usable_access(p) -> bool:
-        """Access mode's `usable`: not revoked, a known role and an email (no key needed)."""
-        return (bool(p) and not p.get("revoked") and p.get("role") in ROLES
+        """Access mode's `usable`: not revoked, a known role (or GUEST_ROLE) and an email (no key needed)."""
+        return (bool(p) and not p.get("revoked") and (p.get("role") in ROLES or p.get("role") == GUEST_ROLE)
                 and isinstance(p.get("email"), str) and bool(p["email"].strip()))
 
     def match_email(self, email: str):

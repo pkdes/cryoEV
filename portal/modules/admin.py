@@ -293,7 +293,7 @@ def is_admin(p) -> bool:
 def public_person(p: dict, email: bool = False) -> dict:
     """The only fields that ever leave this module: never key_sha256 (or anything else in the entry). `email` adds
     the sign-in email (the People page; /admin/api/people keeps its shape)."""
-    out = {"id": str(p.get("id")), "role": p.get("role") if p.get("role") in A.ROLES else None,
+    out = {"id": str(p.get("id")), "role": p.get("role") if p.get("role") in A.ROLES + (A.GUEST_ROLE,) else None,
            "state": "revoked" if p.get("revoked") else ("active" if usable_any(p) else "not usable"),
            "added": _s(p.get("added")), "revoked": _s(p.get("revoked")), "role_changed": _s(p.get("role_changed"))}
     if email:
