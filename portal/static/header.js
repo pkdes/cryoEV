@@ -111,7 +111,7 @@
       nav.appendChild(a);
     });
     bar.appendChild(nav);
-    if (me && me.id) {   // Feedback: on every page; the page it was clicked on is prefilled (path only, never the query)
+    if (me && me.id && me.role !== 'guest') {   // Feedback (not for guests, round 17: a 403 for them): on every page; the page it was clicked on is prefilled (path only, never the query)
       var fb = el('a', 'cj-feedback-link', 'Feedback');
       fb.href = '/feedback/?page=' + encodeURIComponent(location.pathname);
       fb.title = 'Report a bug or suggest something';
@@ -182,7 +182,7 @@
       .then(function (r) {
         var mods = (r[1] || {}).modules || [], me = r[2] || {};
         fill(bar, r[0], mods, me);
-        getJSON('/cj/version.json').then(function (ver) { stamp(ver, bar); }, function () {});
+        if (me.role !== 'guest') getJSON('/cj/version.json').then(function (ver) { stamp(ver, bar); }, function () {});
         hideSrv();
         var hist = mods.filter(function (m) { return m.id === 'history'; })[0];
         if (!hist || (hist.roles || []).indexOf(me.role) < 0) return null;   // the snapshot is History's data

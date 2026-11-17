@@ -193,9 +193,10 @@ class ReviewProxy:
         return None, None
 
     async def handle(self, request: Request, user: str, key=None, prefix: str | None = None,
-                     up_path: str = "") -> Response:
+                     up_path: str = "", body: bytes | None = None) -> Response:
         """Proxy one request. Per call (the multi-package server): `key` (else the proxy's own), `prefix` (the URL
-        space it answers under, else the proxy's own) and `up_path` (the upstream's path prefix, e.g. /<pkg id>)."""
+        space it answers under, else the proxy's own) and `up_path` (the upstream's path prefix, e.g. /<pkg id>).
+        `body` (round 17, a guest's rebuilt edit): sent instead of the request's own body, with its own length."""
         key = self.key if key is None else key
         prefix = self.prefix if prefix is None else prefix.rstrip("/")
         scope = request.scope
@@ -208,10 +209,14 @@ class ReviewProxy:
             return error_page(400, "Bad request", "That path is not allowed.")
         query = strip_k(scope.get("query_string", b"").decode("latin-1"))
         url = self.upstream + up_path + sub + (f"?{query}" if query else "")
-        content, err = await self._body(request)
-        if err is not None:
-            return err
-        headers = request_headers(scope["headers"], key, user)
+        if body is not None:
+            content = body
+            headers = [(n, v) for n, v in request_headers(scope["headers"], key, user) if n != "content-length"]
+        else:
+            content, err = await self._body(request)
+            if err is not None:
+                return err
+            headers = request_headers(scope["headers"], key, user)
         if isinstance(content, bytes) and content and not any(n == "content-length" for n, _ in headers):
             headers.append(("content-length", str(len(content))))
         if self.client is None:

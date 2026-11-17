@@ -452,6 +452,7 @@ def served_packages(cfg, user: dict, can_see) -> list:
 
 # ---------------------------------------------------------------- reviewers (owner or admin; review_package.json)
 MAX_REVIEWERS = 20
+GUEST_MAX_REVIEWERS = 500     # round 17: joined guests on one package (they don't count toward MAX_REVIEWERS)
 MAX_FORM = 4096
 LOCK_DIR = ".meta_locks"
 LOCK_WAIT_S = 2.0
@@ -534,8 +535,15 @@ def write_reviewers(root, pkg: Path, add=(), remove=(), *, allowed=None, lock_wa
         added = [a for a in new if a not in old]
         removed = [r for r in old if r not in new]
         cap = MAX_REVIEWERS if cap is None else cap     # looked up per call (a test may lower it)
-        if added and len(new) > cap:                # the cap stops adding only: an over-cap list can still be trimmed
+        # round 17: joined guests (portal/guests.py ids) never count toward the lab cap; they have their own
+        from portal.guests import GUEST_ID_RE
+        lab = [r for r in new if not GUEST_ID_RE.match(r)]
+        guests = len(new) - len(lab)
+        # the caps stop adding only: an over-cap list can still be trimmed
+        if any(not GUEST_ID_RE.match(a) for a in added) and len(lab) > cap:
             raise ReviewersError(f"A review can have at most {cap} reviewers.")
+        if any(GUEST_ID_RE.match(a) for a in added) and guests > GUEST_MAX_REVIEWERS:
+            raise ReviewersError(f"A review can have at most {GUEST_MAX_REVIEWERS} guests.")
         if not added and not removed:
             return [], []
         meta["reviewers"] = new
@@ -555,17 +563,16 @@ def write_reviewers(root, pkg: Path, add=(), remove=(), *, allowed=None, lock_wa
         lk.close()
 
 
-GUEST_MAX_REVIEWERS = 500     # round 17: reviewers (lab + joined guests) on a package open to guests
 
 
 def join_guest(root, pkg: Path, gid: str) -> bool:
     """Round 17: add guest `gid` to <pkg>'s reviewers (write_reviewers: meta lock, re-read, atomic), only while the
-    file still says open_to "guests". -> True when added. Raises ReviewersError."""
+    file, as re-read under the lock, is guests.joinable (open to guests, not closed, at least one lab reviewer).
+    -> True when added. Raises ReviewersError."""
     from portal import guests as G
     if not isinstance(gid, str) or not G.GUEST_ID_RE.match(gid):
         raise ReviewersError("Not a guest id.")
-    added, _ = write_reviewers(root, pkg, add=[gid], cap=GUEST_MAX_REVIEWERS,
-                               only_if=G.is_open)
+    added, _ = write_reviewers(root, pkg, add=[gid], only_if=G.joinable)
     return bool(added)
 
 

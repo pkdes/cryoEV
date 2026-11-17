@@ -68,7 +68,8 @@ class DomainRule(unittest.TestCase):
         self.assertEqual(G.parse_domains(None), ())
         self.assertEqual(G.parse_domains([" Example.EDU ", "example.edu"]), ("example.edu",))
         for bad in ("example.edu", [""], ["*.example.edu"], ["@example.edu"], ["https://example.edu"],
-                    ["example.edu/x"], ["example.edu:443"], ["exa mple.edu"], ["examplе.edu"], [1], ["edu"]):
+                    ["example.edu/x"], ["example.edu:443"], ["exa mple.edu"], ["examplе.edu"], [1], ["edu"],
+                    ["gmail.com"], ["Outlook.com"], ["yahoo.com"], ["hotmail.com"], ["icloud.com"]):
             with self.assertRaises(ValueError, msg=bad):
                 G.parse_domains(bad)
 
@@ -89,8 +90,11 @@ class DomainRule(unittest.TestCase):
         a = G.guest_id("Ann@Example.edu")
         self.assertEqual(a, G.guest_id("ann@example.edu"))
         self.assertRegex(a, G.GUEST_ID_RE)
-        self.assertNotEqual(a, G.guest_id("ann+x@example.edu"))
+        self.assertEqual(a, G.guest_id("ann+x@example.edu"))                  # +tag dropped: one per mailbox
+        self.assertEqual(a, G.guest_id("ANN+Other+Tag@example.edu"))
+        self.assertRegex(a, r"\Aguest-[0-9a-f]{16}\Z")
         self.assertTrue(A.id_ok(a))
+        self.assertIsNone(G.canonical("+x@example.edu"))
 
     def test_load_config(self):
         tmp = Path(tempfile.mkdtemp(prefix="cj_guest_cfg_"))
@@ -175,6 +179,43 @@ class RosterEntry(unittest.TestCase):
         self.assertEqual(sorted(ids), sorted({G.guest_id(e) for e in emails}))       # one each, none lost
         self.assertEqual(sorted(set(out)), sorted(ids))
         self.assertEqual([f for f in os.listdir(self.env.tmp) if f.endswith(".tmp")], [])
+
+    def test_plus_tag_is_the_same_guest(self):
+        p = G.ensure_guest(self.env.roster, "ann+one@example.edu", (DOM,))
+        self.assertEqual(p["email"], "ann@example.edu")
+        self.assertEqual(G.ensure_guest(self.env.roster, "ann+two@example.edu", (DOM,))["id"], p["id"])
+        self.assertEqual(len([q for q in people(self.env.roster) if q.get("role") == "guest"]), 1)
+        A.revoke(self.env.roster, p["id"])                                   # revoked: no +tag way back in
+        self.assertIsNone(G.ensure_guest(self.env.roster, "ann+three@example.edu", (DOM,)))
+
+    def test_caps(self):
+        from datetime import datetime
+        day = datetime(2026, 11, 17, 12, 0)
+        with mock.patch.object(G, "MAX_GUESTS_PER_DAY", 3):
+            for i in range(3):
+                G.ensure_guest(self.env.roster, f"d{i}@example.edu", (DOM,), now=day)
+            before = md5(self.env.roster)
+            with self.assertRaises(G.GuestRefused):
+                G.ensure_guest(self.env.roster, "d9@example.edu", (DOM,), now=day)
+            self.assertEqual(md5(self.env.roster), before)
+            G.ensure_guest(self.env.roster, "d9@example.edu", (DOM,), now=datetime(2026, 11, 18, 9, 0))  # next day
+            self.assertIsNotNone(G.ensure_guest(self.env.roster, "d0@example.edu", (DOM,), now=day))     # known: ok
+        with mock.patch.object(G, "MAX_GUESTS", 4):
+            A.revoke(self.env.roster, G.guest_id("d1@example.edu"))           # revoked ones still count
+            with self.assertRaises(G.GuestRefused):
+                G.ensure_guest(self.env.roster, "new@example.edu", (DOM,))
+
+    def test_known_or_revoked_needs_no_lock(self):
+        p = G.ensure_guest(self.env.roster, "ann@example.edu", (DOM,))
+        G.ensure_guest(self.env.roster, "rev@example.edu", (DOM,))
+        A.revoke(self.env.roster, G.guest_id("rev@example.edu"))
+        known = list(A.Roster(self.env.roster).people().values())
+        with mock.patch.object(A, "acquire_lock", side_effect=AssertionError("locked")):
+            self.assertEqual(G.ensure_guest(self.env.roster, "ann@example.edu", (DOM,), known)["id"], p["id"])
+            self.assertIsNone(G.ensure_guest(self.env.roster, "rev@example.edu", (DOM,), known))
+            self.assertIsNone(G.ensure_guest(self.env.roster, "rev+x@example.edu", (DOM,), known))
+            with self.assertRaises(AssertionError):                           # a new email does take the lock
+                G.ensure_guest(self.env.roster, "brand-new@example.edu", (DOM,), known)
 
     def test_lock_busy_changes_nothing(self):
         before = md5(self.env.roster)
@@ -279,9 +320,7 @@ class GuestPortal(unittest.TestCase):
         hits = [p for p in people(self.env.roster) if p.get("email") == "first@example.edu"]
         self.assertEqual(len(hits), 1)
         self.assertTrue(hits[0]["auto"])
-        st, me2 = self.me("first+evh@example.edu")                                     # plus-addressing: its own guest
-        self.assertEqual((st, me2["role"]), (200, "guest"))
-        self.assertNotEqual(me2["id"], me["id"])
+        self.assertEqual(self.me("first+evh@example.edu"), (200, me))                  # +tag: the same guest
 
     def test_existing_people_unaffected(self):
         st, me = self.me("alice@example.org")
@@ -361,7 +400,7 @@ class GuestPortal(unittest.TestCase):
         self.assertEqual(st, 303)
         self.assertEqual(T.hget(h, "location"), f"/review/{self.open_pkg.name}/")
         from portal import app as APP
-        sets = APP.guest_sets(self.cfg, {"id": "guest-00000000", "role": "guest"})
+        sets = APP.guest_sets(self.cfg, {"id": "guest-0000000000000000", "role": "guest"})
         self.assertEqual([s[0] for s in sets], [self.open_pkg.name])
         body = APP.render_guest_home(sets).encode()
         self.assertNotIn(self.closed_pkg.name.encode(), body)
@@ -374,7 +413,8 @@ class GuestPortal(unittest.TestCase):
         self.assertEqual(st, 200, body)
         self.assertNotIn(b"@example.org", body)
         meta = json.loads((self.open_pkg / "review_package.json").read_text(encoding="utf-8"))
-        self.assertEqual(meta["reviewers"], ["alice", "kate", gid])
+        self.assertEqual(meta["reviewers"][:2], ["alice", "kate"])
+        self.assertIn(gid, meta["reviewers"])
         self.assertEqual(meta["open_to"], "guests")
         st, _, page = self.g(f"/review/{self.open_pkg.name}/app/", email, headers={"Sec-Fetch-Dest": "iframe"})
         self.assertEqual(st, 200)
@@ -417,13 +457,183 @@ class GuestPortal(unittest.TestCase):
             shutil.rmtree(tmp_pkg, ignore_errors=True)
 
 
+class GuestTool(unittest.TestCase):
+    """QC round 17 fix 1/2/4/8/9: what a guest may do inside an open set's tool, and when they may join."""
+
+    setUpClass = classmethod(GuestPortal.setUpClass.__func__)
+    tearDownClass = classmethod(GuestPortal.tearDownClass.__func__)
+    g = GuestPortal.g
+
+    def meta(self, pkg):
+        return json.loads((pkg / "review_package.json").read_text(encoding="utf-8"))
+
+    def tool(self, email, sub, method="GET", body=None, pkg=None):
+        h = {"Sec-Fetch-Dest": "iframe"}
+        if method not in ("GET", "HEAD"):
+            h.update({"Origin": ORIGIN, "Content-Type": "application/json"})
+        data = json.dumps(body).encode() if isinstance(body, (dict, list)) else body
+        return self.g(f"/review/{(pkg or self.open_pkg).name}/app/{sub}", email, method=method, headers=h, body=data)
+
+    def put(self, email, body, f="0001.png", pkg=None):
+        return self.tool(email, f"api/edits?f={f}", "PUT", body, pkg)
+
+    def obj(self, pkg=None):
+        return next(it["obj"] for it in load_data(pkg or self.open_pkg)["items"] if it["image"] == "0001")
+
+    def join(self, email, pkg=None):
+        self.assertEqual(self.g(f"/review/{(pkg or self.open_pkg).name}/", email)[0], 200)
+
+    def test_reads_allowed_others_refused(self):
+        e = "reader@example.edu"
+        self.join(e)
+        img = sorted(f.name for f in (self.open_pkg / "images").iterdir())[0]
+        for sub in ("", "index.html", "data.js", "api/ping", "api/meta", "api/edits", f"images/{img}"):
+            st, _, body = self.tool(e, sub)
+            self.assertEqual(st, 200, (sub, body[:200]))
+        self.assertEqual(self.tool(e, "data.js", "HEAD")[0], 200)
+        for sub in ("api/people", "api/claims", "api/groups", "review_package.json", "schema.json", ".review_key",
+                    "edits/_attr_log.jsonl", "edits/0001.png.json", "images/../data.js", "images/", "API/People",
+                    "api/people/", "api%2fpeople", "api/edits/x", "nope"):
+            st, _, body = self.tool(e, sub)
+            self.assertEqual(st, 403, (sub, st, body[:200]))
+            self.assertTrue(b"Guests can only answer" in body or FORBIDDEN in body, sub)   # tool rule or the Gate
+        # control: a lab reviewer still reaches what guests can't
+        self.assertEqual(self.tool("alice@example.org", "api/claims")[0], 200)
+
+    def test_writes_refused_but_attribute_answers(self):
+        e = "writer@example.edu"
+        gid = G.guest_id(e)
+        self.join(e)
+        ok = {f"a:{self.obj()}:type@x": {"v": "ML", "t": 3000, "pending": True}}
+        for body in ({"t": 3000, "dec": {"i:reject": {"v": "reject:empty", "t": 3000, "pending": True}}},
+                     {"t": 3000, "dec": {"i:note": {"v": "guest note", "t": 3000, "pending": True}}},
+                     {"t": 3000, "dec": {"g1": {"v": "del", "t": 3000, "pending": True}}},
+                     {"t": 3000, "dec": {"g1": "del"}},                                       # a bare-string decision
+                     {"t": 3000, "dec": {**ok, "i:note": {"v": "x", "t": 3000, "pending": True}}},   # mixed: all refused
+                     {"t": 3000, "dec": {}}, {"t": 3000}, [1], "x", b"not json", b"",
+                     {"t": 3000, "dec": {"i:note": {"v": "echo", "t": 1, "who": "alice"}}}):     # nothing to answer
+            st, _, out = self.put(e, body)
+            self.assertEqual(st, 403, (body, out[:200]))
+        for method, sub in (("POST", "api/group?who=x"), ("POST", "api/claim?c=0001.png|g1"), ("DELETE", "api/edits"),
+                            ("PUT", "api/group"), ("POST", "api/edits?f=0001.png")):
+            st, _, out = self.tool(e, sub, method, {"action": "comment", "kind": "sample", "sample": "s", "reason": "x"})
+            self.assertEqual(st, 403, (method, sub, out[:200]))
+        # gt / gtT / reviewedT and other people's keys are dropped; the attribute answer is saved under the guest
+        alice_note = {"i:note": {"v": "alice says fine", "t": 1500, "pending": True}}
+        self.assertEqual(self.put("alice@example.org", {"t": 1500, "dec": alice_note})[0], 200)
+        body = {"t": 3000, "gt": [], "gtT": 3000, "reviewedT": 3000,
+                "dec": {**ok, "i:note": {"v": "guest overwrote", "t": 9000, "who": "alice"},
+                        f"a:{self.obj()}:type@alice": {"v": "ML", "t": 9000, "who": "alice"}}}
+        st, _, out = self.put(e, body)
+        self.assertEqual(st, 200, out)
+        st, _, out = self.tool("alice@example.org", "api/edits")
+        rec = json.loads(out)["0001.png"]
+        self.assertEqual(rec["dec"]["i:note"]["v"], "alice says fine")
+        self.assertFalse(rec.get("reviewedT"))                                # the guest's reviewedT was dropped
+        self.assertFalse(rec.get("reviewed"))
+        self.assertNotIn(f"a:{self.obj()}:type@{gid}", rec["dec"])            # alice never sees the guest's answer
+        st, _, out = self.tool(e, "api/edits")
+        self.assertEqual(json.loads(out)["0001.png"]["dec"][f"a:{self.obj()}:type@{gid}"]["v"], "ML")
+
+    def _copy(self, name, **meta):
+        pkg = self.review / name
+        shutil.copytree(self.open_pkg, pkg)
+        m = self.meta(pkg)
+        m["reviewers"] = ["alice", "kate"]
+        m.update(meta)
+        (pkg / "review_package.json").write_text(json.dumps(m), encoding="utf-8")
+        self.addCleanup(shutil.rmtree, pkg, True)
+        return pkg
+
+    def test_path_tricks_never_reach_a_closed_set(self):
+        """QC probe 01: case, dot, encoded and traversal variants of a closed set's path; other doors and methods."""
+        e = "paths@example.edu"
+        self.join(e)
+        cp, op = self.closed_pkg.name, self.open_pkg.name
+        for path in (f"/review/{cp.upper()}/", f"/review/{cp}./", f"/review/{cp}%2e/", f"/review/{cp}%20/",
+                     f"/review/{cp}/app/", f"/review/{cp}//app/data.js", f"/review/{op}/../{cp}/",
+                     f"/review/{op}/app/../../{cp}/app/data.js", f"/review/{op}/app/..%2f..%2f{cp}/data.js",
+                     f"/review/{op}/app/%2e%2e/{cp}/data.js", f"/review/{op}/app/%252e%252e%252f{cp}/data.js",
+                     "/review/app/", "/review/APP/", "/review/app%2f", "/review//", "//review/app/",
+                     "/history/live/live.json", "/cj/cryoev_client.py", "/cj/version.json", "/cj/../admin/"):
+            st, _, body = self.g(path, e)
+            self.assertIn(st, (403, 404), path)
+            self.assertNotIn(b"REVIEW_DATA", body, path)
+        for m in ("HEAD", "OPTIONS", "PATCH", "TRACE", "DELETE"):
+            self.assertIn(self.g("/admin/", e, method=m)[0], (403, 405), m)
+
+    def test_empty_reviewers_never_locked_out(self):
+        pkg = self._copy("pred_obj_noreviewers_set_abcd", reviewers=[])
+        with self.assertRaises(ValueError):                                    # can't be opened with no reviewers
+            G.set_open(pkg, True)
+        self.assertEqual(G.main(["open", "--package", str(pkg)]), 1)
+        self.join("lock@example.edu", pkg)                                     # opened by hand anyway: no join
+        self.assertEqual(self.meta(pkg)["reviewers"], [])
+        with self.assertRaises(REV.ReviewersError):
+            REV.join_guest(self.review, pkg, G.guest_id("lock@example.edu"))
+        m = self.meta(pkg)                                                     # only guests listed: still no join
+        m["reviewers"] = [G.guest_id("someone@example.edu")]
+        (pkg / "review_package.json").write_text(json.dumps(m), encoding="utf-8")
+        with self.assertRaises(REV.ReviewersError):
+            REV.join_guest(self.review, pkg, G.guest_id("lock@example.edu"))
+
+    def test_closed_set_no_join(self):
+        pkg = self._copy("pred_obj_closedset_set_abcd", closed=True)
+        with self.assertRaises(REV.ReviewersError):
+            REV.join_guest(self.review, pkg, G.guest_id("late@example.edu"))
+        self.assertTrue(G.joinable({"open_to": "guests", "reviewers": ["alice"]}))
+        self.assertFalse(G.joinable({"open_to": "guests", "reviewers": ["alice"], "closed": True}))
+
+    def test_guests_dont_count_toward_cap(self):
+        pkg = self._copy("pred_obj_capped_set_beef")
+        for i in range(REV.MAX_REVIEWERS + 5):
+            self.assertTrue(REV.join_guest(self.review, pkg, f"guest-{i:016x}"))
+        self.assertEqual(REV.write_reviewers(self.review, pkg, add=["adv"]), (["adv"], []))   # the owner still adds
+        with mock.patch.object(REV, "GUEST_MAX_REVIEWERS", REV.MAX_REVIEWERS + 5):
+            with self.assertRaises(REV.ReviewersError):
+                REV.join_guest(self.review, pkg, "guest-" + "f" * 16)
+        with mock.patch.object(REV, "MAX_REVIEWERS", 3):                      # the lab cap: lab people only
+            with self.assertRaises(REV.ReviewersError):
+                REV.write_reviewers(self.review, pkg, add=["boss"])
+
+    def test_join_only_on_shell_and_failures_cached(self):
+        pkg = self._copy("pred_obj_joinonce_set_abcd")
+        e = "shell@example.edu"
+        gid = G.guest_id(e)
+        self.assertEqual(self.tool(e, "data.js", pkg=pkg)[0], 200)            # a tool read never joins
+        self.assertNotIn(gid, self.meta(pkg)["reviewers"])
+        calls = []
+        real = REV.join_guest
+
+        def failing(*a, **k):
+            calls.append(a)
+            raise REV.ReviewersError("busy", busy=True)
+        with mock.patch.object(REV, "join_guest", failing):
+            self.join(e, pkg)
+            self.join(e, pkg)                                                  # cached failure: not retried
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn(gid, self.meta(pkg)["reviewers"])
+        self.assertIs(REV.join_guest, real)
+
+    def test_revoked_guest_warning_rate_limited(self):
+        st, me = GuestPortal.me(self, "noisy@example.edu")
+        self.assertEqual(st, 200)
+        A.revoke(self.env.roster, me["id"])
+        with self.assertLogs("cj", level="WARNING") as cm:
+            for _ in range(5):
+                self.assertEqual(self.g("/cj/me.json", "noisy@example.edu")[0], 403)
+            import logging
+            logging.getLogger("cj").warning("end marker")
+        self.assertEqual(sum("revoked or blocked" in r for r in cm.output), 1)
+
+
 class MayOpen(unittest.TestCase):
     def test_rules(self):
         can_see = lambda u, o: u.get("role") == "admin" or u.get("id") == o            # noqa: E731
-        g = {"id": "guest-0123abcd", "role": "guest"}
+        g = {"id": "guest-0123abcd0123abcd", "role": "guest"}
         self.assertTrue(REV.may_open(g, {"open_to": "guests"}, can_see))
         for meta in ({}, {"open_to": "Guests"}, {"open_to": ["guests"]}, {"open_to": True},
-                     {"reviewers": ["guest-0123abcd"]}, {"owner": "guest-0123abcd"}):
+                     {"reviewers": ["guest-0123abcd0123abcd"]}, {"owner": "guest-0123abcd0123abcd"}):
             self.assertFalse(REV.may_open(g, meta, can_see), meta)
         b = {"id": "bob", "role": "basic"}                                               # others: unchanged
         self.assertFalse(REV.may_open(b, {"open_to": "guests"}, can_see))
