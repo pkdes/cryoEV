@@ -155,6 +155,7 @@ STATIC = {"cj.css": "text/css; charset=utf-8", "header.js": "text/javascript; ch
           "brand.json": "application/json"}
 GUEST_WARN_S = 600.0              # round 17: one refusal warning per guest email per 10 min
 GUEST_WARN_MAX = 2048
+GUEST_EDIT_MAX = 1 << 20          # a guest's PUT api/edits body, read in full before it is rebuilt
 GUEST_JOIN_RETRY_S = 300.0        # a failed guest join is not retried for this long (per package and guest)
 REVIEW_BASE = "/review"           # the real review: shell at /review/, tool proxied at /review/app/
 MANIFEST = HERE / "modules.json"
@@ -1409,8 +1410,7 @@ def guest_edit_body(raw: bytes):
     attrs = {k: d for k, d in dec.items() if RS.is_attr_key(k)}
     if not attrs:
         return None
-    t = edit.get("t", 0)
-    return json.dumps({"t": t, "dec": attrs}).encode("utf-8")
+    return json.dumps({"t": 0, "dec": attrs}).encode("utf-8")   # t 0: the guest's t never reaches the record
 
 
 def guest_path_ok(path: str, method: str, access_door: bool) -> bool:
@@ -1519,12 +1519,12 @@ def pred_mount(proxy: P.ReviewProxy, root: Path | None, title: str = "Review", r
         if request.method in ("GET", "HEAD"):
             return None if guest_tool_read_ok(sub) else M.no_store(JSONResponse(GUEST_TOOL_DENIED, status_code=403))
         if request.method == "PUT" and sub == "api/edits":
-            raw = b""
+            raw = bytearray()
             async for chunk in request.stream():
                 raw += chunk
-                if len(raw) > proxy.max_body:
-                    break
-            body = guest_edit_body(raw) if len(raw) <= proxy.max_body else None
+                if len(raw) > GUEST_EDIT_MAX:
+                    return M.no_store(JSONResponse({"error": "body too large"}, status_code=413))
+            body = await asyncio.to_thread(guest_edit_body, bytes(raw))
             if body is not None:
                 return body
         return M.no_store(JSONResponse(GUEST_TOOL_DENIED, status_code=403))
