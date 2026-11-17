@@ -1,0 +1,27 @@
+{
+ "schema": "label_schema/1",
+ "id": "ls_evh_match_v1",
+ "name": "evh_match",
+ "version": 1,
+ "maker": "pujan",
+ "description": "eVHarmony (round 17): one object question, is this candidate a real vesicle? yes / no / unsure. consent is answered once per reviewer, on the set's first item only (the page's reveal after 10 answers): yes = count my answers; absent or no = do not.",
+ "classes": [
+  {"name": "EV", "color": "#4ade80", "key": "1"}
+ ],
+ "object_attrs": [
+  {"id": "match", "label": "Match?", "kind": "choice", "required": true,
+   "help": "Swipe right = a real vesicle, left = not a vesicle, up = unsure.",
+   "options": [
+    {"v": "yes", "label": "Real vesicle", "key": "y"},
+    {"v": "no", "label": "Not a vesicle", "key": "n"},
+    {"v": "unsure", "label": "It's complicated", "key": "u"}
+   ]},
+  {"id": "consent", "label": "Count my answers", "kind": "choice",
+   "help": "Asked once, on the set's first item: yes = these answers may be used.",
+   "options": [{"v": "yes", "label": "Yes"}, {"v": "no", "label": "No"}]}
+ ],
+ "image_attrs": [],
+ "tags": [],
+ "supersedes": null,
+ "class_mapping": null
+}

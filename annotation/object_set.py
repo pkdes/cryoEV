@@ -10,7 +10,7 @@ attributes (labels/schemas.py) instead of whole images.
     python -m annotation.object_set build --ps <CryoAI-laptop>/predict/<ps> --items <items.csv> --schema <ls id | file>
         [--image-col image] (--line-col line | --particle-col particle_id) [--blind-cols c1,c2]
         [--outline-mode target|target+contained] [--slug <name>] [--seed N] [--owner <id>] [--reviewers a,b]
-        [--review-root <dir>] [--do [--register --registry <dir>]]
+        [--review-root <dir>] [--do [--register --registry <dir>]] [--app evharmony] [--first-items N]
     python -m annotation.object_set export --pkg <pkg> --out <file.csv> [--coco <file.json>]
     python -m annotation.object_set import --pkg <pkg> --csv <file.csv>
     python -m annotation.object_set instructions <pkg> (--text TEXT | --file PATH | --clear) [--do]
@@ -28,6 +28,13 @@ outline that has no prediction line (drawn / reshaped on a reviewed image) is sk
 a:<node obj>:<attr>@<rid>; applies_to (root = n 1, child = the others) is checked by the server. Export (tree_table):
 one row per (item, node) with each reviewer's derived tree (derive_tree); the hidden columns only once the set is
 closed. close (#80g): review_package.json closed: true (final); review_server then answers every a: PUT with 409.
+
+App skin and gold-first order (round 17, eVHarmony; both additive, absent = byte-identical to before):
+  --app evharmony   data.js D.app = "evharmony" (the page's joke dating-app skin on the object card; the page reads it
+                    from data.js only) and review_package.json `app`.
+  --first-items N   the first N items CSV rows stay first in the order (shuffled among themselves), then the rest
+                    (shuffled): every reviewer sees the same order, so N known-answer ("gold") items come first for
+                    everyone. items.json `first_items` = N.
 
 instructions (r15 hotfix) sets the maker's set instructions, plain text (<= 2000 characters, NFC, no control
 characters but newlines; CRLF -> LF), shown on every object card behind an "Instructions" button: data.js
@@ -92,6 +99,7 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,29}$")
 ITEMS = "items.json"
 SCHEMA_FILE = rs.SCHEMA_FILE
 OUTLINE_MODES = ("target", "target+contained")
+APPS = ("evharmony",)              # round 17: data.js D.app (a page skin); absent = the plain object card
 CONTAIN = 0.99                    # target+contained: >= 99 % of the object's pixels inside the target (poster rule)
 CROP_PAD, CROP_MIN_1440 = 1.6, 60  # crop side = 1.6 x the target's longer side, >= 60 px at 1440 wide (poster)
 MAX_ITEMS = 2000
@@ -303,13 +311,20 @@ def plan(ps_dir, items_csv, schema, image_col="image", line_col=None, particle_c
 
 def build(ps_dir, items_csv, schema, review_root, image_col="image", line_col=None, particle_col=None,
           blind_cols=(), outline_mode="target", slug=None, seed=None, owner=None, reviewers=(),
-          registry_root=None, width=1440, quality=72, built_by="cli", title=None, instructions=None) -> Path:
+          registry_root=None, width=1440, quality=72, built_by="cli", title=None, instructions=None, app=None,
+          first_items=0) -> Path:
     """Build the object set (module doc) under review_root. -> its folder. Registering is separate (register()).
     title: the set's name as its maker typed it (data.js D.title and the record's title; default the slug).
     instructions: the set instructions (clean_instructions; None or empty = none, the data.js of before)."""
     instructions = clean_instructions(instructions) if instructions is not None else ""
     P = plan(ps_dir, items_csv, schema, image_col, line_col, particle_col, blind_cols, outline_mode, registry_root)
     P["instructions"] = instructions
+    if app is not None and app not in APPS:
+        raise ObjectSetError(f"app must be one of {APPS}")
+    first_items = int(first_items or 0)
+    if not 0 <= first_items <= len(P["keys"]):
+        raise ObjectSetError(f"--first-items {first_items}: must be 0..{len(P['keys'])} (the number of items)")
+    P["app"], P["first_items"] = app, first_items
     owner = owner or P["req"].get("owner")
     if not pp.OWNER_RE.match(owner or ""):
         raise ObjectSetError(f"bad owner {owner!r}")
@@ -476,7 +491,14 @@ def _build_into(out, final, P, owner, reviewers, seed, width, quality, built_by,
 
     rng = random.Random(seed)
     order = list(range(len(P["keys"])))
-    rng.shuffle(order)
+    nf = P.get("first_items") or 0
+    if nf:                              # round 17: rows 1..N first (shuffled among themselves), then the rest
+        head, tail = order[:nf], order[nf:]
+        rng.shuffle(head)
+        rng.shuffle(tail)
+        order = head + tail
+    else:
+        rng.shuffle(order)
     used, items, pub = set(), [], []
     for k in order:
         img, ln = P["keys"][k]
@@ -502,13 +524,16 @@ def _build_into(out, final, P, owner, reviewers, seed, width, quality, built_by,
             "title": title or pid, "blind": bool(P["blind"]), "items": pub, "images": images}
     if P.get("instructions"):           # only when given: a set without them is byte-identical to before
         data["instructions"] = P["instructions"]
+    if P.get("app"):                    # round 17: only when given (the page's skin)
+        data["app"] = P["app"]
     brp.write_packages(out, data, part_size=0, zip_it=False)
     (out / SCHEMA_FILE).write_bytes(S.canonical_bytes(doc))
     pp._write_json(out / ITEMS, {
         "schema": "object_items/1", "package": pid, "seed": seed, "source": {
             "file": P["items_name"], "sha256": P["sha256"]},
         "columns": P["cols"], "image_col": P["image_col"], "key_col": P["key_col"], "key_kind": P["key_kind"],
-        "blind_cols": P["blind"], "outline_mode": mode, "label_schema": doc["id"], "items": items})
+        "blind_cols": P["blind"], "outline_mode": mode, "label_schema": doc["id"],
+        **({"first_items": nf} if nf else {}), "items": items})
     pp._write_json(out / "labels.coco.json", coco, indent=None)
     pp._write_json(out / pp.META, {"schema": "prediction_package/1", "kind": "objects", "package": pid,
                                    "prediction_set": P["ps_id"], "model": P["model"], "owner": owner,
@@ -524,6 +549,8 @@ def registry_record(pkg, data, built, doc, P, owner, reviewers, built_by="cli") 
     rec = _record(pkg, data, built, doc, P, owner, reviewers, built_by)
     if P.get("instructions"):
         rec["instructions"], rec["instructions_t"] = P["instructions"], built
+    if P.get("app"):
+        rec["app"] = P["app"]
     return rec
 
 
@@ -1537,6 +1564,10 @@ def main(argv=None):
     b.add_argument("--registry", type=Path, help="registry folder (only with --register; never a default)")
     b.add_argument("--do", action="store_true", help="build it (default: a dry run that writes nothing)")
     b.add_argument("--register", action="store_true", help="with --do: append the review_package line to --registry")
+    b.add_argument("--app", choices=APPS, help="round 17: a page skin (data.js D.app); default none")
+    b.add_argument("--first-items", type=int, default=0, metavar="N",
+                   help="round 17: the first N items CSV rows come first in every reviewer's order (shuffled among "
+                        "themselves), then the rest")
     bi = b.add_mutually_exclusive_group()
     bi.add_argument("--instructions", help=f"set instructions shown on every card (plain text, <= {INSTR_MAX} chars)")
     bi.add_argument("--instructions-file", type=Path, help="the set instructions from a UTF-8 text file")
@@ -1589,7 +1620,7 @@ def main(argv=None):
                 a.review_root = config.laptop_root() / "review"
             pkg = build(a.ps, a.items, a.schema, a.review_root, a.image_col, a.line_col, a.particle_col, blind,
                         a.outline_mode, a.slug, a.seed, a.owner, revs, a.registry, title=a.title,
-                        instructions=instr)
+                        instructions=instr, app=a.app, first_items=a.first_items)
             if a.register:
                 register(pkg, a.registry)
                 print(f"[OK] registered {pkg.name} in {a.registry}")

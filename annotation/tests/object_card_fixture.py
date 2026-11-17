@@ -20,7 +20,8 @@ attribute support in annotation/review_server.py.
         big=True one item of 30 nodes (the chunked-save test)
     copy_live(folder, src) -> data dict        a BYTE copy of a live set's data.js + schema.json (never written back)
     FakeServer(..., attr_cap=64, closed=False, fail=False): attr_cap = the real server's ATTR_PUT_MAX (400 over it),
-        closed = 409 "set closed" on any a: PUT (#80g), fail = 503 on every PUT (an offline server)
+        closed = 409 "set closed" on any a: PUT (#80g), fail = 503 on every PUT (an offline server); meta (r17) = the
+        GET /api/meta answer (default: 404)
 
 Used by annotation/tests/test_object_card_browser.py and the round-14 / 15 screenshots. Nothing here touches a real
 package or server.
@@ -233,9 +234,11 @@ def copy_live(folder, src) -> dict:
 class FakeServer:
     """The review server's API, just enough for the object card (see the module docstring)."""
 
-    def __init__(self, folder, caps=("i", "t", "a"), who=None, attr_cap=64, closed=False, fail=False, lock409=0):
+    def __init__(self, folder, caps=("i", "t", "a"), who=None, attr_cap=64, closed=False, fail=False, lock409=0,
+                 meta=None):
         self.folder, self.caps, self.who = Path(folder), list(caps), who
         self.attr_cap, self.closed, self.fail = attr_cap, closed, fail
+        self.meta = meta                          # r17: a dict served as GET /api/meta (None: 404, as before)
         self.lock409 = lock409                    # the next N PUTs: multi_review_server's "open in another server" 409
         self.records, self.puts, self.t = {}, [], 1_700_000_000_000
         self._lock = threading.Lock()
@@ -265,6 +268,8 @@ class FakeServer:
                         return self._json(json.loads(json.dumps(outer.records)))
                 if u.path == "/api/claims":
                     return self._json({"claims": {}})
+                if u.path == "/api/meta" and outer.meta is not None:
+                    return self._json(outer.meta)
                 if u.path in ("/api/people", "/api/groups", "/api/meta"):
                     return self._json({}, 404)
                 return super().do_GET()

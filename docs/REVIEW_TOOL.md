@@ -471,6 +471,42 @@ Start a review -> Object set); the package layout and the blind rule are in `ann
 - **Blind columns:** a whole-tree set's hidden `nesting_tree` columns are in its export only after Close. A one-object
   set's blind columns are in its export (to the maker) before Close too: unchanged by rule zero (the live set).
 
+## eVHarmony (round 17, `D.app = "evharmony"`)
+A joke dating-app skin over a one-question object set, so lab members can label vesicle candidates. It is on only when
+the set's `data.js` says `D.app = "evharmony"` on a one-object set (never from a URL parameter); every other set is
+unchanged.
+
+- **Build** (the prediction set is a parameter; `ps_20261113_c547fe` was only the first test set):
+  ```bash
+  python tools/evh_items.py --ps <CryoAI-laptop>/predict/<ps> --out evh_items.csv [--lo 0.25 --hi 0.5 --gold 40 --seed 17]
+  python -m annotation.object_set build --ps <CryoAI-laptop>/predict/<ps> --items evh_items.csv       --schema tools/evh/ls_evh_match_v1.json --line-col line --slug evh --title "eVHarmony beta"       --app evharmony --first-items 40 [--review-root <dir>] --do
+  ```
+  `evh_items.py` writes every candidate (`lo <= conf < hi`, any class) with columns image, line, conf, gold; the first
+  `--gold` rows are a confidence-stratified pick (one seeded pick per equal-count conf bin). `--first-items N` keeps
+  the first N CSV rows first in the order for everyone (shuffled among themselves), then the rest (shuffled):
+  `items.json` `first_items`. They become **gold** once the set's owner answers them.
+- **Schema** `ls_evh_match_v1` (a file, `tools/evh/ls_evh_match_v1.json`, not a built-in, so the registry's built-in
+  list is unchanged): `match` (required: yes = real vesicle, no = not a vesicle, unsure = "It's complicated"; keys
+  y / n / u) and `consent` (yes / no, optional).
+- **Consent** is the `consent` answer on the set's **first item** (`a:<items[0].obj>:consent@<rid>`): an ordinary
+  attribute decision, so it is credited, only the reviewer sees their own, and the export carries it as
+  `consent@<rid>` (on that item's row). No server change. Absent or no = not counted.
+- **Page:** a splash once per browser ("Create your profile" = a nickname kept in this browser, display only; the
+  identity stays the signed-in / chosen reviewer); the brand header (`BRANDS`, tap the logo to cycle); a bio quip on
+  each card; a size line (`~87 nm`, the outline's area-equivalent diameter from the base image's nm/px in
+  `/api/meta`) only when nm/px is known and the set has no blind columns. Swipe right / left / up (touch, pen), the
+  three buttons, or → y / ← n / ↑ u answer `match` through the usual attribute save and the next open card comes; a
+  mouse drag pans; Backspace undoes. Hidden: the item list, item id, title and reviewer chips (Instructions and ☼
+  stay). ☼ starts on Auto + Smooth 2 when the viewer has no saved contrast setting (display only).
+- **Reveal:** after the reviewer's 10th answer: "Plot twist: you just reviewed 10 vesicle candidates for the CryoEV
+  model. A few cards had known answers. Count my answers? [Yes] [No]", then "Keep swiping". Esc = later: offered again
+  after the next answer until answered.
+- **Scoring:** `python -m annotation.object_set export --pkg <set> --out evh.csv`, then
+  `python tools/evh_score.py --csv evh.csv --gold <owner id> [--out scores.csv]`: per reviewer the gold items
+  answered, unsure (excluded, reported), agreement %, consent, and pass (>= 80 % on >= 20 scored gold). Answers
+  without consent = yes are never used.
+- **Not in v1:** a leaderboard (the server returns each reviewer only their own answers).
+
 ## Tests
 ```bash
 python -m unittest discover -s annotation/tests -v

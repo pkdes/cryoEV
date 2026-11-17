@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-16.4";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-17.1";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const h = document.querySelector("header"), inPortal = /^\/review\//.test(location.pathname), v = document.createElement("span");
   v.id = "pageVer"; v.style.cssText = "font-size:11px;color:var(--mute);white-space:nowrap"; v.textContent = "Review page " + PAGE_VERSION;
@@ -328,6 +328,45 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #oSaved[data-state="saved"]{color:#16a34a}
 #oKeys{text-align:center;font-size:11.5px;color:var(--mute);padding:0 12px 8px;background:var(--panel);flex:none}
 @media (hover:none) and (pointer:coarse){#oKeys{display:none!important}}
+/* round 17 eVHarmony (D.app "evharmony", object sets only): the joke skin; every rule is under #obj.evh or an evh id */
+#oEvh[hidden],#oBio[hidden],#oMatch[hidden],#evhSplash[hidden],#evhReveal[hidden],#evhRvAsk[hidden],#evhRvDone[hidden]{display:none}
+#obj.evh{--hot:#0f766e;--hot2:#b45309}
+#obj.evh #oListBtn,#obj.evh #oItem,#obj.evh #oWho,#obj.evh #oSync,#obj.evh #oTitle{display:none}
+#obj.evh .otbar{justify-content:space-between}
+#oEvh{display:flex;align-items:center;gap:8px;padding:0 12px 4px}
+#oEvh .logo{flex:1;text-align:center;line-height:1.05;cursor:pointer;user-select:none}
+#oEvh .logo b,#evhSplash h1{font:900 30px/1.05 system-ui,sans-serif;letter-spacing:-.03em;background:linear-gradient(90deg,var(--hot),var(--hot2));-webkit-background-clip:text;background-clip:text;color:transparent}
+#oEvh .logo small{display:block;color:var(--ink);opacity:.85;font-size:13px;font-weight:600;margin-top:2px}
+#oEvhNick{font-size:12.5px;font-weight:600;color:var(--mute);max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#obj.evh #ocv{touch-action:none}
+#oBio{position:absolute;left:0;right:0;bottom:0;padding:28px 14px 10px;background:linear-gradient(transparent,rgba(0,0,0,.78));color:#fff;pointer-events:none}
+#oBio p{margin:0;font-size:14px;line-height:1.35;text-shadow:0 1px 3px #000}
+#oBio .size{margin-top:3px;font-weight:700;font-size:13px;opacity:.9}
+#oStamp{position:absolute;top:18px;right:14px;padding:2px 10px;border:3px solid currentColor;border-radius:8px;font:900 22px/1.2 system-ui,sans-serif;transform:rotate(12deg);opacity:0;pointer-events:none;color:#16a34a}
+#oStamp.no{left:14px;right:auto;transform:rotate(-12deg);color:#dc2626}
+#oStamp.unsure{left:50%;right:auto;transform:translateX(-50%);color:#d97706}
+#oMatch{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;z-index:6}
+#oMatch b{font:italic 900 32px/1.1 system-ui,sans-serif;text-align:center;padding:0 20px;background:linear-gradient(90deg,var(--hot),var(--hot2));-webkit-background-clip:text;background-clip:text;color:transparent;filter:drop-shadow(0 2px 6px rgba(0,0,0,.5))}
+#oMatch.pop{animation:pop .9s ease-out forwards}
+#oAttrs .evhBtns{display:flex;gap:8px}
+#oAttrs .evhBtns button{flex:1;min-height:52px;border-radius:26px;font-size:15px;font-weight:700;touch-action:manipulation;padding:4px 6px}
+#oAttrs .evhBtns .nope{color:#dc2626;border-color:#dc2626}
+#oAttrs .evhBtns .meh{color:#b45309;border-color:#d97706}
+#oAttrs .evhBtns .like{color:#16a34a;border-color:#16a34a}
+#oAttrs .evhBtns button.on{color:#fff;background:linear-gradient(90deg,var(--hot),var(--hot2));border-color:transparent}
+#oAttrs .evhEmpty{text-align:center;font-weight:700;font-size:16px;margin:0}
+#evhSplash,#evhReveal{position:absolute;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;padding:16px;background:color-mix(in srgb,var(--bg) 70%,transparent);backdrop-filter:blur(3px)}
+#evhSplash .box,#evhReveal .box{width:min(420px,100%);background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:18px;padding:20px 18px;box-shadow:0 12px 40px rgba(0,0,0,.35);text-align:center}
+#evhSplash h1{margin:0;font-size:38px}
+#evhSplash .tag{margin:4px 0 14px;font-weight:600}
+#evhSplash label{display:block;text-align:left;font-size:12.5px;color:var(--mute);margin:10px 0 4px}
+#evhNick{width:100%;min-height:44px;font:inherit;font-size:16px;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:6px 10px}
+#evhSplash button,#evhReveal button{min-height:48px;border-radius:24px;padding:0 22px;font-size:16px;font-weight:700;margin-top:14px}
+#evhGo,#evhRvYes,#evhRvKeep{color:#fff;border-color:transparent;background:linear-gradient(90deg,var(--hot),var(--hot2))}
+#evhReveal h2{margin:0 0 8px;font-size:22px}
+#evhReveal p{font-size:15px;line-height:1.45;margin:0}
+#evhReveal .row{display:flex;gap:10px;justify-content:center}
+#evhReveal .row[hidden]{display:none}
 #oList{position:fixed;left:0;top:0;bottom:0;z-index:30;width:min(300px,85vw);display:none;flex-direction:column;background:var(--panel);border-right:1px solid var(--line);box-shadow:0 0 24px rgba(0,0,0,.45)}
 #oList.show{display:flex}
 #oList .tlh{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--mute);border-bottom:1px solid var(--line)}
@@ -524,15 +563,26 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
     <button id="oInfoBtn" class="badge" type="button" title="The set's instructions (?)" aria-controls="oInstr" aria-expanded="false" hidden>ⓘ<span class="oInfoTx"> Instructions</span></button>
     <button id="oWho" class="badge" title="Your reviewer name">👤</button>
   </div>
+  <div id="oEvh" hidden><div class="logo" id="oEvhLogo" title="Tap to switch app"><b id="oEvhName"></b><small id="oEvhTag"></small></div><span id="oEvhNick"></span></div>
   <div id="oInstr" role="dialog" aria-labelledby="oInstrH" hidden><div class="oih"><h2 id="oInstrH">Instructions</h2><button id="oInstrX" type="button" title="Close (Esc or ?)">✕</button></div><div id="oInstrTx"></div></div>
   <div id="oBar" role="progressbar" aria-label="items done by you" aria-valuemin="0"><i></i></div>
   <div id="oBlind" role="note" hidden>Blind set · measured sizes and gaps are hidden until it's closed</div>
   <div id="oMain">
-    <div id="oCard"><canvas id="ocv"></canvas><button id="oOutl" title="Show / hide the outline (i)">Outlines on · i</button></div>
+    <div id="oCard"><canvas id="ocv"></canvas><button id="oOutl" title="Show / hide the outline (i)">Outlines on · i</button><div id="oStamp"></div><div id="oBio" hidden></div></div>
     <div id="oAttrs"></div>
   </div>
   <div id="oFoot"><button id="oPrev" title="Previous item (←)">← back</button><span id="oSaved" role="status"></span><button id="oNext" title="Next item (→)">next →</button></div>
   <div id="oKeys">← → move · Enter = next unlabelled · Backspace = undo · i = outline on/off</div>
+  <div id="oMatch" hidden></div>
+  <div id="evhSplash" role="dialog" aria-modal="true" aria-labelledby="evhSpH" hidden><div class="box">
+    <h1 id="evhSpH">eVHarmony</h1><p class="tag">Find your perfect membrane match</p>
+    <p>Swipe right on real vesicles, left on everything else, up when it's complicated.</p>
+    <label for="evhNick">Your dating name (just for show)</label><input id="evhNick" type="text" maxlength="24" autocomplete="off" placeholder="e.g. BilayerBabe">
+    <button id="evhGo" type="button">Create your profile</button></div></div>
+  <div id="evhReveal" role="dialog" aria-modal="true" aria-labelledby="evhRvH" hidden><div class="box">
+    <h2 id="evhRvH">One more thing… 💘</h2><p id="evhRvTx"></p>
+    <div class="row" id="evhRvAsk"><button id="evhRvYes" type="button">Yes</button><button id="evhRvNo" type="button">No</button></div>
+    <div class="row" id="evhRvDone" hidden><button id="evhRvKeep" type="button">Keep swiping</button></div></div></div>
 </section>
 <div id="imgDlg" role="dialog" aria-modal="true" aria-labelledby="imgDlgTitle" hidden>
   <div class="box">
@@ -1038,7 +1088,8 @@ const vcSmoothOk = () => !vcTaint || vcFilterOk;  // pixels: a blur in the page;
 function vcLoad() {
   vcWho = me(); vc = {...VC0};
   try {
-    const j = JSON.parse(localStorage.getItem(vcKey()) || "null");
+    const raw = localStorage.getItem(vcKey()), j = JSON.parse(raw || "null");
+    if (raw == null && D.kind === "objects" && D.app === "evharmony") vc = {...VC0, auto: true, smooth: 2};  // r17: eVHarmony's low-contrast cards start on Auto + Smooth 2 (no saved setting only)
     if (j && typeof j === "object") vc = {b: vcNum(j.b, -100, 100, 0), c: vcNum(j.c, -100, 100, 0), g: vcNum(j.g, 0.3, 3, 1), auto: j.auto === true, smooth: j.smooth === true ? 1 : vcNum(j.smooth, 0, 3, 0)};  // r16a's on / off: true = 1
   } catch (e) {}
 }
@@ -2169,9 +2220,9 @@ function nestedCount(im, c, ring, th) {  // objects whose centre sits inside thi
 
 // Swipe-app skins: tap the logo to cycle. Only the name, colours and copy change.
 const BRANDS = [
-  {name: "eVHarmony", tag: "Find your perfect membrane match", hot: "#0f766e", hot2: "#b45309", hotD: "#2dd4bf", hotD2: "#fbbf24", match: "It's Compatible! 💚", keep: "Still compatible 💞", empty: "No more compatible vesicles nearby 💔"},
-  {name: "Gridr", tag: "Who's on your grid tonight?", hot: "#a16207", hot2: "#c2410c", hotD: "#facc15", hotD2: "#fb923c", match: "Same grid, same vibe 😉", keep: "Still on your grid 😘", empty: "Nobody else on this grid 💔"},
-  {name: "cryonder", tag: "swipe right on your perfect bilayer", hot: "#be123c", hot2: "#c2410c", hotD: "#fb7185", hotD2: "#fdba74", match: "It's a Membrane Match! 💚", keep: "Still a match 💞", empty: "You've seen everyone nearby 💔"},
+  {name: "eVHarmony", tag: "Find your perfect membrane match", hot: "#0f766e", hot2: "#b45309", hotD: "#2dd4bf", hotD2: "#fbbf24", match: "It's Compatible! 💚", keep: "Still compatible 💞", empty: "No more compatible vesicles nearby 💔", nope: "Not my type 👋", maybe: "It's complicated 🤷"},
+  {name: "Gridr", tag: "Who's on your grid tonight?", hot: "#a16207", hot2: "#c2410c", hotD: "#facc15", hotD2: "#fb923c", match: "Same grid, same vibe 😉", keep: "Still on your grid 😘", empty: "Nobody else on this grid 💔", nope: "Left on read 👋", maybe: "Situationship 🤷"},
+  {name: "cryonder", tag: "swipe right on your perfect bilayer", hot: "#be123c", hot2: "#c2410c", hotD: "#fb7185", hotD2: "#fdba74", match: "It's a Membrane Match! 💚", keep: "Still a match 💞", empty: "You've seen everyone nearby 💔", nope: "Nope 👋", maybe: "It's complicated 🤷"},
 ];
 let brandI = 0; try { brandI = +(localStorage.getItem("cryoev-review:brand") || 0) % BRANDS.length; } catch (e) {}
 const brand = () => BRANDS[brandI];
@@ -3235,7 +3286,13 @@ function makeObjectView() {
     const p = $("oInstr"), show = on == null ? p.hidden : !!on;
     p.hidden = !show; $("oInfoBtn").setAttribute("aria-expanded", show ? "true" : "false");
   }
-  const st = {pos: 0, outlines: true, img: null, imgSrc: "", ready: false, undo: [], drawn: [], node: 0, badges: [], closed: D.closed === true};
+  const st = {pos: 0, outlines: true, img: null, imgSrc: "", ready: false, undo: [], drawn: [], node: 0, badges: [], closed: D.closed === true,
+    px: 0, py: 0};  // px / py: the eVHarmony mouse pan (r17); always 0 on every other set
+  const evh = D.app === "evharmony" && !tree;  // round 17 eVHarmony skin (the evh* functions below); from data.js only
+  const EVH = {splash: "cryoev-review:evh:splash", nick: "cryoev-review:evh:nick", at: 10};
+  const evhMatch = evh ? attrs.find(a => a.id === "match" && a.kind === "choice") || null : null;
+  const evhConsent = evh ? attrs.find(a => a.id === "consent" && a.kind === "choice") || null : null;
+  const eh = {meta: null, busy: false, g: null, toastT: null};
   if (st.closed) closedOn = true;  // D.closed (object_set close_set writes it): closed before any answer is tried
   const imOf = it => byStem.get(String(it.image));
   const can = () => capOn("a") && server && !st.closed;
@@ -3322,7 +3379,7 @@ function makeObjectView() {
     if (!st.ready) return;
     const Wi = st.img.naturalWidth, Hi = st.img.naturalHeight, rings = ringsOf(im, String(it.obj)), ring = rings && rings[0];
     const [x0, y0, x1, y1] = cropOf(it, im, ring), cw = (x1 - x0) * Wi, ch = (y1 - y0) * Hi;
-    const s = Math.min(b.width / cw, b.height / ch), ox = (b.width - cw * s) / 2 - x0 * Wi * s, oy = (b.height - ch * s) / 2 - y0 * Hi * s;
+    const s = Math.min(b.width / cw, b.height / ch), ox = (b.width - cw * s) / 2 - x0 * Wi * s + st.px, oy = (b.height - ch * s) / 2 - y0 * Hi * s + st.py;
     cx.imageSmoothingEnabled = true; const osrc = hiOf(oHi, im, true, st.img) || st.img;
     vcDraw(cx, osrc, ox, oy, Wi * s, Hi * s, b.width, b.height, osrc.naturalWidth / Wi);
     drawChi(it, Wi, Hi, s, ox, oy, b);
@@ -3426,6 +3483,7 @@ function makeObjectView() {
     const was = st.pos;
     st.pos = Math.max(0, Math.min(items.length - 1, n));
     if (tree && st.pos !== was) st.node = 0;
+    if (st.pos !== was) st.px = st.py = 0;
     try { localStorage.setItem(POS_KEY, items[st.pos].id); } catch (e) {}
     render();
     if (tree && st.pos !== was) $("oAttrs").scrollTop = 0;
@@ -3548,14 +3606,17 @@ function makeObjectView() {
         if (!on) { const p = el("p", null, st.closed ? "This set is closed: no more answers are saved."
           : server ? "This review server can't save attributes yet (no “a” in its /api/ping caps). Nothing is saved."
           : "Open this set from the review server to answer: attributes save only there."); p.id = "oOff"; box.append(p); }
-        for (const a of attrs) box.append(rowFor(it, a, on));
+        if (evh) evhRows(it, on, box);
+        else for (const a of attrs) box.append(rowFor(it, a, on));
         if (!attrs.length) box.append(el("p", null, "This set's label schema has no object attributes."));
       }
     }
+    if (evh) evhBio(it);
     if ($("oList").classList.contains("show")) renderList();
     saved(); draw();
   }
   function key(ev) {
+    if (evh) return evhKey(ev);
     if (ev.target.tagName === "INPUT" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "SELECT") return;
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
     const k = ev.key, it = items[st.pos];
@@ -3589,6 +3650,7 @@ function makeObjectView() {
     if (!location.protocol.startsWith("http")) return render();
     try { await pull(); await loadCaps(); server = true; syncBadge(); sync(); } catch (e) { syncBadge(); }
     render();
+    if (evh && server) { if (items[st.pos] && isDone(items[st.pos])) nextOpen(); evhMeta(); evhOffer(); }  // a swipe app opens on an open card
   }
   function start() {
     $("app").style.display = "none"; $("tri").hidden = true; $("obj").hidden = false;
@@ -3616,7 +3678,173 @@ function makeObjectView() {
       let seen = null; try { seen = localStorage.getItem(INSTR_KEY); } catch (e) {}
       if (seen !== instrSig()) { instrOpen(true); try { localStorage.setItem(INSTR_KEY, instrSig()); } catch (e) {} }
     }
+    if (evh) evhStart();
     render(); connectObjects();
+  }
+  // ---- round 17: eVHarmony. Only when D.app === "evharmony" (object_set build --app evharmony; read from data.js
+  // only, never a URL parameter) on a one-object set: a joke dating-app skin over the one-question schema
+  // (tools/evh/ls_evh_match_v1.json). Swipe right / left / up (touch, pen), the three buttons or the keys
+  // (→ y, ← n, ↑ u) = match yes / no / unsure, saved as a:<obj>:match@<me> through setDec like any tap; a mouse
+  // drag pans the image (as r16a's cards). Consent is the "consent" attribute on items[0]'s object
+  // (a:<items[0].obj>:consent@<me>): the reveal from this reviewer's 10th answer asks once (Esc = later: offered
+  // again after the next answer while unanswered). The nickname is display only (localStorage); the identity stays
+  // the signed-in / chosen who. Size line: only when the set is not blind and /api/meta gives the image's nm/px
+  // (the base image's: data.js w x h). Absent: none of this runs.
+  function evhNick() { try { return localStorage.getItem(EVH.nick) || ""; } catch (e) { return ""; } }
+  function evhBrand() {
+    applyBrand();  // the shared skins (BRANDS; the logo cycles them, as on the Quick check cards)
+    const b = brand(), dark = window.matchMedia("(prefers-color-scheme: dark)").matches, o = $("obj");
+    $("oEvhName").textContent = b.name; $("oEvhTag").textContent = b.tag;
+    o.style.setProperty("--hot", dark ? b.hotD : b.hot); o.style.setProperty("--hot2", dark ? b.hotD2 : b.hot2);
+    const n = evhNick(); $("oEvhNick").textContent = n ? "💘 " + n : "";
+    document.title = b.name;
+  }
+  async function evhMeta() {  // nm/px per image (the base image's); never on a blind set
+    if (blind || !capOn("m")) return;
+    try {
+      const r = await tfetch("api/meta", {cache: "no-store"});
+      if (r.ok) { const j = await r.json(); if (j && j.images && typeof j.images === "object") { eh.meta = j.images; render(); } }
+    } catch (e) {}
+  }
+  function evhSize(it) {  // the outline's area-equivalent diameter in nm, rounded; null when not shown
+    if (blind || !eh.meta || !it) return null;
+    const im = imOf(it), m = eh.meta[im.file], npx = m && typeof m.nm_per_px === "number" && isFinite(m.nm_per_px) && m.nm_per_px > 0 ? m.nm_per_px : null;
+    const rings = ringsOf(im, String(it.obj)), rg = rings && rings[0];
+    if (!npx || !Array.isArray(rg) || rg.length < 6 || !(im.w > 0) || !(im.h > 0)) return null;
+    let A = 0;
+    for (let i = 0, j = rg.length - 2; i < rg.length; j = i, i += 2) A += (rg[j] * rg[i + 1] - rg[i] * rg[j + 1]) * im.w * im.h;
+    const d = 2 * Math.sqrt(Math.abs(A) / 2 / Math.PI) * npx;
+    return isFinite(d) && d > 0 ? Math.round(d) : null;
+  }
+  function evhBio(it) {
+    const box = $("oBio");
+    if (!it) { box.hidden = true; return; }
+    const im = imOf(it), d = evhSize(it);
+    const q = makeBio(im, {kind: "p", key: String(it.obj)}, {conf: "a solid maybe", cls: "EV", sample: esc(im.split || "the lab"), diam: "", frac: 0.05, nested: 0});
+    box.innerHTML = `<p class="quip">${q}</p>`;  // makeBio: fixed copy + escaped values (as on the Quick check cards)
+    if (d) box.append(el("p", "size", `~${d} nm`));
+    box.hidden = false;
+  }
+  function evhRows(it, on, box) {
+    if (!evhMatch) { box.append(el("p", null, "This set has no match question.")); return; }
+    if (nDone() >= items.length) box.append(el("p", "evhEmpty", brand().empty));
+    const row = el("div", "evhBtns"), cur = mineOf(it, evhMatch);
+    for (const [v, cls, lbl] of [["no", "nope", "✕ Nope"], ["unsure", "meh", "🤷 It's complicated"], ["yes", "like", "♥ Match"]]) {
+      const o = evhMatch.options.find(x => x.v === v), b = el("button", cls + (cur === v ? " on" : ""), lbl);
+      b.type = "button"; b.dataset.v = v; b.disabled = !on || !o; b.title = o ? o.label : "";
+      b.setAttribute("aria-pressed", cur === v ? "true" : "false");
+      b.onclick = () => evhAnswer(v); row.append(b);
+    }
+    box.append(row);
+    if (evhMatch.help) box.append(el("p", "oHelp", evhMatch.help));
+  }
+  function evhToast(v) {
+    const m = $("oMatch"), b = brand();
+    m.textContent = ""; m.append(el("b", null, v === "yes" ? b.match : v === "no" ? (b.nope || "Nope") : (b.maybe || "It's complicated")));
+    m.hidden = false; m.classList.remove("pop"); void m.offsetWidth; m.classList.add("pop");
+    clearTimeout(eh.toastT); eh.toastT = setTimeout(() => { m.hidden = true; }, 900);
+  }
+  function evhStamp(v, op) {
+    const s = $("oStamp");
+    s.className = v === "yes" ? "" : v; s.textContent = v === "yes" ? "MATCH" : v === "no" ? "NOPE" : "IT'S COMPLICATED";
+    s.style.opacity = op;
+  }
+  function evhCardReset(animate) { const c = $("oCard"); c.style.transition = animate ? "transform .2s" : ""; c.style.transform = ""; $("oStamp").style.opacity = 0; }
+  function evhAnswer(v) {  // one answer = one saved a:<obj>:match@<me>; then the card flies off and the next open one comes
+    const it = items[st.pos];
+    if (!it || !evhMatch || eh.busy || !evhMatch.options.some(o => o.v === v)) return;
+    if (!can()) { evhCardReset(true); return render(); }
+    if (!needWho(() => evhAnswer(v))) { evhCardReset(true); return; }
+    const im = imOf(it), e = ensureEdit(im), k = okey(it.obj, evhMatch), prev = e.dec[k] ? clone(e.dec[k]) : null;
+    if (mineOf(it, evhMatch) !== v) {
+      setDec(e, k, v);
+      st.undo.push({file: im.file, key: k, prev, t: e.dec[k].t, pos: st.pos, node: 0});
+      if (st.undo.length > 200) st.undo.shift();
+      touch(im.file);
+    }
+    evhToast(v); evhStamp(v, 1);
+    const c = $("oCard"), w = c.getBoundingClientRect().width, [dx, dy] = v === "yes" ? [w * 1.5, 0] : v === "no" ? [-w * 1.5, 0] : [0, -1200];
+    eh.busy = true;
+    c.style.transition = "transform .24s ease-in"; c.style.transform = `translate(${dx}px, ${dy}px) rotate(${dx / 25}deg)`;
+    setTimeout(() => {
+      evhCardReset(false); eh.busy = false;
+      if (items[st.pos] !== it) return render();
+      if (items.some(x => !isDone(x))) nextOpen(); else render();
+      evhOffer();
+    }, 240);
+  }
+  const evhConsentV = () => evhConsent && items.length && me() ? mineOf(items[0], evhConsent) : null;
+  function evhOffer() {  // the reveal: from the 10th answer on, while this reviewer hasn't answered it
+    if (!evhConsent || !can() || !me() || !$("evhSplash").hidden || evhConsentV() != null) return;
+    const n = nDone();
+    if (n < EVH.at) return;
+    $("evhRvTx").textContent = `Plot twist: you just reviewed ${n} vesicle candidates for the CryoEV model. A few cards had known answers. Count my answers?`;
+    $("evhRvAsk").hidden = false; $("evhRvDone").hidden = true; $("evhReveal").hidden = false;
+  }
+  function evhConsentSet(v) {
+    const it = items[0];
+    if (!it || !evhConsent || !can()) return;
+    if (!needWho(() => evhConsentSet(v))) return;
+    const im = imOf(it), e = ensureEdit(im);
+    setDec(e, okey(it.obj, evhConsent), v); touch(im.file);
+    $("evhRvTx").textContent = v === "yes" ? "Thank you! Your answers will count. Keep swiping as long as you like."
+      : "No problem: your answers won't be counted. Keep swiping just for fun.";
+    $("evhRvAsk").hidden = true; $("evhRvDone").hidden = false; $("evhRvKeep").focus();
+  }
+  function evhSplashDone() {
+    const n = $("evhNick").value.replace(/[\u0000-\u001f\u007f<>&]/g, "").trim().slice(0, 24);
+    try { if (n) localStorage.setItem(EVH.nick, n); localStorage.setItem(EVH.splash, "1"); } catch (e) {}
+    $("evhSplash").hidden = true; evhBrand(); evhOffer();
+  }
+  function evhKey(ev) {
+    if (!$("evhSplash").hidden) { if (ev.key === "Enter" || ev.key === "Escape") { ev.preventDefault(); evhSplashDone(); } return; }
+    if (!$("evhReveal").hidden) { if (ev.key === "Escape") $("evhReveal").hidden = true; return; }  // later: offered again after the next answer
+    if (ev.target.tagName === "INPUT" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "SELECT") return;
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    const k = ev.key;
+    const v = k === "ArrowRight" || k === "y" || k === "Y" ? "yes" : k === "ArrowLeft" || k === "n" || k === "N" ? "no"
+      : k === "ArrowUp" || k === "u" || k === "U" ? "unsure" : null;
+    if (v) { ev.preventDefault(); return evhAnswer(v); }
+    if (k === "Enter") { ev.preventDefault(); nextOpen(); }
+    else if (k === "Backspace") { ev.preventDefault(); undo(); }
+    else if (k === "i" || k === "I") { st.outlines = !st.outlines; render(); }
+    else if (k === "Escape") { if (instr) instrOpen(false); }
+    else if (k === "?" && instr) { ev.preventDefault(); instrOpen(); }
+  }
+  function evhStart() {
+    $("obj").classList.add("evh"); $("oEvh").hidden = false;
+    $("oKeys").textContent = "→ match · ← nope · ↑ it's complicated · Backspace = undo · i = outline" + (instr ? " · ? = instructions" : "");
+    evhBrand();
+    $("oEvhLogo").onclick = () => { brandI = (brandI + 1) % BRANDS.length; try { localStorage.setItem("cryoev-review:brand", brandI); } catch (e) {} evhBrand(); render(); };
+    $("evhGo").onclick = evhSplashDone;
+    $("evhRvYes").onclick = () => evhConsentSet("yes"); $("evhRvNo").onclick = () => evhConsentSet("no");
+    $("evhRvKeep").onclick = () => { $("evhReveal").hidden = true; };
+    try { window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", evhBrand); } catch (e) {}
+    let seen = null; try { seen = localStorage.getItem(EVH.splash); } catch (e) {}
+    if (seen !== "1") { $("evhSplash").hidden = false; $("evhNick").value = evhNick(); }
+    // gestures on the card: a touch / pen swipe answers; a mouse drag pans (r16a #25a); a tap does nothing
+    const card = $("oCard");
+    cv.addEventListener("pointerdown", e => {
+      if (eh.busy || !e.isPrimary) return;
+      try { cv.setPointerCapture(e.pointerId); } catch (x) {}
+      eh.g = {x: e.clientX, y: e.clientY, pan: e.pointerType === "mouse", px: st.px, py: st.py, drag: false};
+    });
+    cv.addEventListener("pointermove", e => {
+      const g = eh.g; if (!g) return;
+      const dx = e.clientX - g.x, dy = e.clientY - g.y;
+      if (!g.drag && Math.hypot(dx, dy) > (g.pan ? 4 : 12)) g.drag = true;
+      if (!g.drag) return;
+      if (g.pan) { st.px = g.px + dx; st.py = g.py + dy; draw(); return; }
+      card.style.transition = ""; card.style.transform = `translate(${dx}px, ${dy}px) rotate(${dx / 25}deg)`;
+      evhStamp(dy < -60 && Math.abs(dy) > Math.abs(dx) ? "unsure" : dx > 0 ? "yes" : "no", Math.min(1, Math.max(Math.abs(dx), -dy) / 100));
+    });
+    cv.addEventListener("pointerup", e => {
+      const g = eh.g; eh.g = null; if (!g || !g.drag || g.pan) return;
+      const dx = e.clientX - g.x, dy = e.clientY - g.y;
+      const v = dy < -90 && Math.abs(dy) > Math.abs(dx) ? "unsure" : dx > 90 ? "yes" : dx < -90 ? "no" : null;
+      if (v) evhAnswer(v); else evhCardReset(true);
+    });
+    cv.addEventListener("pointercancel", () => { eh.g = null; evhCardReset(true); });
   }
   function closed() { if (st.closed) return; st.closed = true; $("oBlind").hidden = true; render(); }  // 409 "set closed"
   const treeState = () => {
@@ -3629,7 +3857,9 @@ function makeObjectView() {
     item: items[st.pos] ? {...items[st.pos]} : null, attrs: attrs.map(a => a.id), keys: Object.keys(keymap), blind, contained,
     drawn: [...st.drawn], instr: {has: !!instr, open: !!instr && !$("oInstr").hidden}, closed: st.closed,
     mine: items[st.pos] ? Object.fromEntries(attrs.map(a => [a.id, mineOf(items[st.pos], a)])) : {}, undo: st.undo.length,
-    ...(tree ? {mode: "tree", tree: treeState()} : {})})};
+    ...(tree ? {mode: "tree", tree: treeState()} : {}),
+    ...(evh ? {app: "evharmony", evh: {consent: evhConsentV(), reveal: !$("evhReveal").hidden, splash: !$("evhSplash").hidden,
+      size: items[st.pos] ? evhSize(items[st.pos]) : null, nick: evhNick(), pan: [st.px, st.py], bio: $("oBio").textContent}} : {})})};
 }
 if (D.kind === "objects") OBJ = makeObjectView();
 // ===================================================== end OBJECT SET CARD =====================================================
