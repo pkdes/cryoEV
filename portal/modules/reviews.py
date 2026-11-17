@@ -36,7 +36,8 @@ Reviews module (CryoEV portal, all roles; round 13, the Reviews hub): every revi
 Rules:
   - Access = may_open(): review_package.json `owner` via ctx.can_see (admins all, others their own), or the person's
     id in its `reviewers` list. Checked before a row is built or rendered, so a package that is not yours leaves no
-    trace in the page (id, name or owner). Reviewers: owner or admin only (ctx.can_see on the owner, not may_open),
+    trace in the page (id, name or owner). A guest (round 17, portal/guests.py): only open_to "guests" packages, and
+    opening one adds them to its reviewers (join_guest). Reviewers: owner or admin only (ctx.can_see on the owner, not may_open),
     and the package is resolved exactly like portal.app pred_mount.lookup, never the portal's real-review package.
   - Only what the Open link can open: served_packages() = the portal route's id rule (portal/app.py PRED_ID_RE), a
     key, and what the multi server serves: serving() = multi_review_server.serving() (its prefixes: pred_, plus lab_
@@ -375,9 +376,12 @@ def card_progress(pkg: Path) -> tuple:
 
 
 def may_open(user: dict, meta: dict, can_see) -> bool:
-    """The package's owner (ctx.can_see: admins all, others their own) or a person in its `reviewers` list."""
+    """The package's owner (ctx.can_see: admins all, others their own) or a person in its `reviewers` list. A guest
+    (round 17, portal/guests.py): ONLY a package with open_to "guests", whatever its owner or reviewers say."""
     if not user or not isinstance(meta, dict):
         return False
+    if user.get("role") == "guest":
+        return meta.get("open_to") == "guests"
     owner = meta.get("owner")
     if isinstance(owner, str) and owner and can_see(user, owner):
         return True
@@ -448,6 +452,7 @@ def served_packages(cfg, user: dict, can_see) -> list:
 
 # ---------------------------------------------------------------- reviewers (owner or admin; review_package.json)
 MAX_REVIEWERS = 20
+GUEST_MAX_REVIEWERS = 500     # round 17: joined guests on one package (they don't count toward MAX_REVIEWERS)
 MAX_FORM = 4096
 LOCK_DIR = ".meta_locks"
 LOCK_WAIT_S = 2.0
@@ -494,11 +499,12 @@ def _replace(tmp: Path, dest: Path, retry_s: float = REPLACE_RETRY_S) -> None:
 
 
 def write_reviewers(root, pkg: Path, add=(), remove=(), *, allowed=None, lock_wait: float = LOCK_WAIT_S,
-                    retry_s: float = REPLACE_RETRY_S) -> tuple:
+                    retry_s: float = REPLACE_RETRY_S, cap: int | None = None, only_if=None) -> tuple:
     """Change only `reviewers` in <pkg>/review_package.json: OS lock <root>/.meta_locks/<pkg>.lock, re-read the file,
     apply remove then add, write a temp file in the same folder and os.replace it (retried on PermissionError).
     Every other key is kept as read. allowed = the ids `add` may hold (the roster). -> (added, removed) as applied.
-    Raises ReviewersError for a refused change (unknown id, the audit's owner, over MAX_REVIEWERS, busy, unreadable)."""
+    Raises ReviewersError for a refused change (unknown id, the audit's owner, over `cap`, busy, unreadable, or
+    `only_if(meta)` false: checked on the file as re-read under the lock)."""
     from data_utils.oslock import acquire_lock
     from portal import titles as TT
     pkg = Path(pkg)
@@ -518,6 +524,8 @@ def write_reviewers(root, pkg: Path, add=(), remove=(), *, allowed=None, lock_wa
         meta = _read_json(pkg / "review_package.json")
         if not isinstance(meta, dict):
             raise ReviewersError("This review's settings could not be read, so nothing was changed.")
+        if only_if is not None and not only_if(meta):
+            raise ReviewersError("This review can't take that change now.")
         old = [r for r in meta["reviewers"] if isinstance(r, str)] if isinstance(meta.get("reviewers"), list) else []
         owner = meta.get("owner") if isinstance(meta.get("owner"), str) else None
         if TT.is_blind(meta, pkg) and owner and owner in add:
@@ -526,8 +534,16 @@ def write_reviewers(root, pkg: Path, add=(), remove=(), *, allowed=None, lock_wa
         new += [a for a in add if a not in new]
         added = [a for a in new if a not in old]
         removed = [r for r in old if r not in new]
-        if added and len(new) > MAX_REVIEWERS:      # the cap stops adding only: an over-cap list can still be trimmed
-            raise ReviewersError(f"A review can have at most {MAX_REVIEWERS} reviewers.")
+        cap = MAX_REVIEWERS if cap is None else cap     # looked up per call (a test may lower it)
+        # round 17: joined guests (portal/guests.py ids) never count toward the lab cap; they have their own
+        from portal.guests import GUEST_ID_RE
+        lab = [r for r in new if not GUEST_ID_RE.match(r)]
+        guests = len(new) - len(lab)
+        # the caps stop adding only: an over-cap list can still be trimmed
+        if any(not GUEST_ID_RE.match(a) for a in added) and len(lab) > cap:
+            raise ReviewersError(f"A review can have at most {cap} reviewers.")
+        if any(GUEST_ID_RE.match(a) for a in added) and guests > GUEST_MAX_REVIEWERS:
+            raise ReviewersError(f"A review can have at most {GUEST_MAX_REVIEWERS} guests.")
         if not added and not removed:
             return [], []
         meta["reviewers"] = new
@@ -545,6 +561,19 @@ def write_reviewers(root, pkg: Path, add=(), remove=(), *, allowed=None, lock_wa
         return added, removed
     finally:
         lk.close()
+
+
+
+
+def join_guest(root, pkg: Path, gid: str) -> bool:
+    """Round 17: add guest `gid` to <pkg>'s reviewers (write_reviewers: meta lock, re-read, atomic), only while the
+    file, as re-read under the lock, is guests.joinable (open to guests, not closed, at least one lab reviewer).
+    -> True when added. Raises ReviewersError."""
+    from portal import guests as G
+    if not isinstance(gid, str) or not G.GUEST_ID_RE.match(gid):
+        raise ReviewersError("Not a guest id.")
+    added, _ = write_reviewers(root, pkg, add=[gid], only_if=G.joinable)
+    return bool(added)
 
 
 # ---------------------------------------------------------------- Close set (round 15, #80g / K4)

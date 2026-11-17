@@ -10,7 +10,9 @@ ONLY that verified JWT; key links and session cookies are off on its port (porta
 - Keys: https://<team>.cloudflareaccess.com/cdn-cgi/access/certs, fetched in a worker thread with a timeout, cached,
   refetched on an unknown `kid` (or after KEYS_TTL_S) at most once per REFETCH_S. No usable keys = everyone refused.
 - Config: ~/.cryoev/cloudflare_access.json {"team", "aud", "host"} (or --access-config <path>); env CJ_ACCESS_TEAM,
-  CJ_ACCESS_AUD, CJ_ACCESS_HOST override it. Missing = access mode refuses to start.
+  CJ_ACCESS_AUD, CJ_ACCESS_HOST override it. Missing = access mode refuses to start. Optional (round 17, file only):
+  "guest_email_domains": ["example.edu"] lets unlisted emails at exactly those domains in as guests (portal/guests.py);
+  a malformed value refuses to start.
 PyJWT is imported here only, so key mode runs without it. Tokens are never logged.
 """
 from __future__ import annotations
@@ -60,6 +62,7 @@ class AccessConfig:
     team: str           # <team>.cloudflareaccess.com
     aud: str            # the Access application's AUD tag
     host: str           # the public host name, e.g. portal.example.org
+    guest_domains: tuple = ()   # round 17 (portal/guests.py): `guest_email_domains` in the FILE only; () = no guests
 
     @property
     def issuer(self) -> str:
@@ -91,6 +94,12 @@ def load_config(path: Path | None = None, env=None) -> AccessConfig:
         raise ConfigError("Cloudflare access config: `aud` is not an Access AUD tag")
     if not HOST_RE.fullmatch(vals["host"]):
         raise ConfigError("Cloudflare access config: `host` must be a bare host name (no scheme, port or path)")
+    from portal import guests as G
+    doc, _ = access_config.read_file(path)
+    try:
+        vals["guest_domains"] = G.parse_domains(doc.get(G.CONFIG_KEY))
+    except ValueError as e:
+        raise ConfigError(f"Cloudflare access config: {e}") from None
     return AccessConfig(**vals)
 
 

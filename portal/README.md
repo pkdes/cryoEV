@@ -280,6 +280,34 @@ python -m portal.app --auth access --port 8448 [--access-config <path>] [--state
 - **Logs:** refusals with a reason and `Cf-Connecting-IP` (IP-shaped values only); the token is never logged. The
   access log adds `cf=<ip>`.
 
+**Guests (round 17, `portal/guests.py`; off by default)**
+- **Enable:** add `"guest_email_domains": ["<domain>"]` to the private `cloudflare_access.json` (file only, no env
+  override; never put the domain in the repo), allow that domain in the Cloudflare Access policy, restart the
+  access portal. Its start log says `[cj] guests: ON for N domain(s)`. A malformed value, or a public mail domain
+  (gmail.com, outlook.com, yahoo.com, hotmail.com, icloud.com, ...), refuses to start.
+- **Cloudflare login method for the guest domain: the email one-time PIN, or an identity provider that verifies the
+  email** (Google for a Google Workspace domain). Never a method that lets someone type an unverified email: the
+  portal trusts the JWT's `email` claim.
+- **Who:** a verified JWT whose email is on no roster entry and whose domain is **exactly** a configured one
+  (sub-domains and look-alikes refused) gets a roster entry once: id `guest-<16 hex of sha256(email)>`, role
+  `guest`, `auto: true`. `+tags` are dropped first (`ann+x@` = `ann@`: one guest per mailbox). Same id on later
+  visits. At most 200 auto guests in all and 50 new a day. Key mode never makes or admits guests.
+- **What:** role `guest` is not in `auth.ROLES`: no module, nav, agent token or key link. The Gate lets a guest reach
+  only home (which lists, or redirects to, the sets open to guests), the shell's `/cj/` files and
+  `/review/<pkg id>/...` of a package with `"open_to": "guests"` in `review_package.json`; everything else is 403,
+  and a package not open to guests gets the same 404 as an unknown id. In the tool a guest may only read the page,
+  `data.js`, images and `api/ping|meta|edits`, and PUT `api/edits` with attribute answers (the body is rebuilt to
+  those; a pending non-attribute decision is 403). Groups, claims, people and everything else: 403.
+- Opening an open set's page adds the guest's id to its `reviewers` (meta lock) while the set is open, not closed
+  and has at least one lab reviewer, so the review server takes their answers. Guests don't count toward the
+  20-reviewer cap (their own cap: 500 a set).
+- **Open / close a set:** `python -m portal.guests open --package <review root>/<pkg id>` (`close`, or
+  `list --root <review root>`). `open` refuses a set with no reviewers: add the lab reviewers first.
+- **Revoke a guest:** `python -m portal.auth revoke --id guest-<16 hex>` (or Admin > People > Revoke). Never delete the
+  entry: a deleted guest is made again on their next visit; a revoked one stays out. Removing a guest from a set's
+  reviewers does not stick (they rejoin on their next visit): revoke them, or close the set to guests. Removing the
+  domain from the config (and restarting) stops new guests; existing guest entries keep working until revoked.
+
 ## Uptime
 - **Portal process down:** the laptop's job monitor can watch it. Add `--portal http://127.0.0.1:8770/healthz` (key mode) and `--portal http://127.0.0.1:8448/healthz` (Cloudflare access mode) to the `monitor` service's argv (the example config has both) and set env `CRYOEV_NTFY_TOPIC` for it. After 2 failed checks it sends one ntfy, and one more on recovery (docs/JOBS.md, Portal uptime probes).
 - **Laptop asleep, off or offline:** the monitor runs on that laptop, so it cannot report this. Turn on the **Cloudflare Tunnel Health Alert** (Cloudflare dashboard -> Zero Trust -> Notifications, email destination: `<your email>`) for the tunnel that serves `<portal hostname>`.

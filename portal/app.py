@@ -153,6 +153,9 @@ INCLUDES = b'<link rel="stylesheet" href="/cj/cj.css">\n<script src="/cj/header.
 STATIC = {"cj.css": "text/css; charset=utf-8", "header.js": "text/javascript; charset=utf-8",
           "live.js": "text/javascript; charset=utf-8", "review.js": "text/javascript; charset=utf-8",
           "brand.json": "application/json"}
+GUEST_WARN_S = 600.0              # round 17: one refusal warning per guest email per 10 min
+GUEST_WARN_MAX = 2048
+GUEST_JOIN_RETRY_S = 300.0        # a failed guest join is not retried for this long (per package and guest)
 REVIEW_BASE = "/review"           # the real review: shell at /review/, tool proxied at /review/app/
 MANIFEST = HERE / "modules.json"
 CORE_ROLES = {"/review": ("admin",), "/history": ("admin",)}   # built-in defaults; modules.json may only replace
@@ -695,6 +698,10 @@ class Gate:
         self.access_admin = bool(access_admin)
         self.writer = writer                # portal.audit.Writer: the catch-all (None = no audit lines)
         self.review_target = review_target  # the real review package's id, the target of /review/app/ writes
+        # round 17: guests exist only through the Cloudflare door
+        cfg_domains = getattr(getattr(verifier, "cfg", None), "guest_domains", ()) or ()
+        self.guest_domains = tuple(cfg_domains) if mode == "access" else ()
+        self.guest_warned: dict = {}        # email -> last refusal warning (monotonic s), GUEST_WARN_S apart
 
     def route_of(self, scope) -> tuple:
         """-> (route template or None, path params) of this request. The endpoint the router chose when it ran (one
@@ -768,6 +775,22 @@ class Gate:
             log.warning("access refused: the email claim is not a plain ASCII address (cf ip %s)", ip)
             return None, page(403, "Not on the list", ACCESS_SIGN_IN)
         person = self.auth.roster.match_email(email)
+        if person is None and self.guest_domains:      # round 17: an unlisted email at a guest domain (guests.py)
+            from portal import guests as G
+            if G.domain_ok(email, self.guest_domains):
+                known = list(self.auth.roster.people().values())        # cached: no lock for known emails
+                try:
+                    person = await asyncio.to_thread(G.ensure_guest, self.auth.roster.path, email,
+                                                     self.guest_domains, known)
+                except OSError:
+                    log.warning("access refused: guest sign-in, the roster is busy (cf ip %s)", ip)
+                    return None, page(503, "Busy", "The portal is busy. Try again in a moment.")
+                except G.GuestRefused as e:
+                    self.guest_warn(email, f"no new guest ({e})", ip)
+                    return None, page(403, "Not on the list", ACCESS_SIGN_IN)
+                if person is None:
+                    self.guest_warn(email, "guest revoked or blocked", ip)
+                    return None, page(403, "Not on the list", ACCESS_SIGN_IN)
         if person is None:
             log.warning("access refused: %r is not the email of one active person (cf ip %s)", email[:254], ip)
             return None, page(403, "Not on the list", f"You signed in as {email}, but that email is not on the "
@@ -777,6 +800,18 @@ class Gate:
             return None, page(403, "Admin is available on Tailscale only", "Admin is available on Tailscale only. "
                                                                             "Open the portal over Tailscale.")
         return person, None
+
+    def guest_warn(self, email, why, ip) -> None:
+        """A guest refusal's log line, at most once per GUEST_WARN_S per email (a revoked guest's every click would
+        otherwise log one). The memory is bounded: cleared when it holds GUEST_WARN_MAX emails."""
+        now = time.monotonic()
+        last = self.guest_warned.get(email)
+        if last is not None and now - last < GUEST_WARN_S:
+            return
+        if len(self.guest_warned) >= GUEST_WARN_MAX:
+            self.guest_warned.clear()
+        self.guest_warned[email] = now
+        log.warning("access refused: %s: %r (cf ip %s)", why, email[:254], ip)
 
     def bearer_user(self, scope, token) -> tuple:
         """The bearer branch: -> (user, deny, credited). user = the token's person with the role capped
@@ -876,6 +911,11 @@ class Gate:
                 elif state != "ok":
                     deny = page(403, "Not signed in", "This sign-in is unknown, expired or revoked. Open a current "
                                                       "key link.")
+            guest_door = token is None and self.mode == "access"
+            if (deny is None and user is not None and user.get("role") == A.GUEST_ROLE
+                    and not guest_path_ok(path, method, guest_door)):
+                deny = (api_error(403, "Your role can't open this part of the portal.") if token is not None else
+                        page(403, "Not allowed", "Your role can't open this part of the portal."))
             if (deny is None and user is not None and not owner_checked(path)     # pred packages: owner check
                     and not M.allowed(self.rules, path, user.get("role"))):
                 deny = (api_error(403, "Your role can't open this part of the portal.") if token is not None else
@@ -987,6 +1027,26 @@ def script_json(obj) -> str:
 
 def icon(name) -> str:
     return f'<svg viewBox="0 0 24 24" aria-hidden="true">{ICONS.get(name, ICONS["home"])}</svg>'
+
+
+def guest_sets(cfg, user) -> list:
+    """[(pkg id, title)] a guest may open: reviews.served_packages (may_open: open_to "guests" only), sorted."""
+    from portal.modules.reviews import served_packages
+    out = []
+    for d, meta in served_packages(cfg, user, M.Ctx.can_see):
+        t = meta.get("title") if isinstance(meta.get("title"), str) and meta["title"].strip() else d.name
+        out.append((d.name, t.strip()[:120]))
+    return out
+
+
+def render_guest_home(sets) -> str:
+    """A guest's home: links to the open sets, nothing else (no names, owners or emails)."""
+    esc = html.escape
+    if not sets:
+        return ('<div class="cj-about"><h1>Welcome</h1><p class="cj-mut">Nothing is open to guests right now. '
+                'Check back later.</p></div>')
+    items = "".join(f'<li><a href="{REVIEW_BASE}/{esc(pid)}/">{esc(t)}</a></li>' for pid, t in sets)
+    return f'<div class="cj-about"><h1>Welcome</h1><p>Open to guests:</p><ul>{items}</ul></div>'
 
 
 def render_home(request: Request, cfg: Config, user: dict, rules=None) -> str:
@@ -1213,7 +1273,7 @@ async def review_strip(cfg, request: Request, current_id, budget_s: float | None
     without details). Never blocks the event loop. At most 2 build at once (_STRIP_SLOTS, taken without waiting): a
     build that runs past its budget keeps its slot until it ends, so hung lists can't pile up threads."""
     user = request.scope.get("cj_user")
-    if not user:
+    if not user or user.get("role") == A.GUEST_ROLE:   # round 17: a guest gets no switcher (its links are 403s)
         return ""
     if not _STRIP_SLOTS.acquire(blocking=False):    # both slots held (e.g. a hung list): no strip, no waiting
         log.warning("review strip: no free slot, page shown without it")
@@ -1315,6 +1375,55 @@ def pred_package(root: Path | None, pkg_id: str, prefixes=MRS.PREFIX):
     return (pkg, rec) if isinstance(rec, dict) else None
 
 
+GUEST_PATHS = frozenset({"/", "/cj/modules.json", "/cj/me.json"} | {f"/cj/{n}" for n in STATIC})
+# round 17: what a guest may do in the review tool (pred_mount.tool), on tool_api_path; everything else 403
+GUEST_TOOL_READS = frozenset({"", "index.html", "data.js", "api/ping", "api/meta", "api/edits"})
+GUEST_TOOL_DENIED = {"error": "Guests can only answer the questions in this set."}
+
+
+def guest_tool_read_ok(sub: str) -> bool:
+    """A GET / HEAD a guest may make in the tool: GUEST_TOOL_READS or one images/<file>."""
+    if sub in GUEST_TOOL_READS:
+        return True
+    return sub.startswith("images/") and "/" not in sub[7:] and ".." not in sub and len(sub) > 7
+
+
+def guest_edit_body(raw: bytes):
+    """A guest's PUT api/edits body -> the bytes to send upstream, or None (refused). The tool sends its whole
+    record for the image (review_tool/index.html sync), including saved copies of other people's keys, so the body is
+    rebuilt: t + ONLY the attribute decisions (a: / i:a:; review_server re-keys them to the guest and drops echoes).
+    Refused: not a JSON object, no dict dec, any PENDING non-attribute decision (a real write a guest may not make),
+    or a body with no attribute decision at all."""
+    from annotation import review_server as RS
+    try:
+        edit = json.loads(raw, parse_constant=RS._no_constant)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(edit, dict) or not isinstance(edit.get("dec"), dict):
+        return None
+    dec = edit["dec"]
+    if any(not RS.is_attr_key(k) and isinstance(d, dict) and d.get("pending") is True for k, d in dec.items()):
+        return None
+    if any(not RS.is_attr_key(k) and isinstance(d, str) for k, d in dec.items()):    # bare string = a new decision
+        return None
+    attrs = {k: d for k, d in dec.items() if RS.is_attr_key(k)}
+    if not attrs:
+        return None
+    t = edit.get("t", 0)
+    return json.dumps({"t": t, "dec": attrs}).encode("utf-8")
+
+
+def guest_path_ok(path: str, method: str, access_door: bool) -> bool:
+    """Round 17: the ONLY routes a guest reaches (portal/guests.py), through the Cloudflare door only: GUEST_PATHS
+    (GET / HEAD) and /review/<pkg id>/... (owner_checked: pred_mount lets a guest open only open_to "guests"
+    packages). Everything else is the Gate's usual 403."""
+    if not access_door:
+        return False
+    if path in GUEST_PATHS:
+        return method in ("GET", "HEAD")
+    return owner_checked(path)
+
+
 def owner_checked(path: str) -> bool:
     """/review/<pkg id>/... (any segment but app): the Gate's role rule for /review (the real package) doesn't
     apply; pred_mount checks the id and the owner, and anything else under /review/ is the 404 catch-all, so every
@@ -1379,10 +1488,52 @@ def pred_mount(proxy: P.ReviewProxy, root: Path | None, title: str = "Review", r
     def missing():
         return page(404, "Not found", "No such review package, or it isn't yours.")
 
+    join_failed: dict = {}                              # (pkg name, guest id) -> monotonic time of a failed join
+
+    async def guest_join(request: Request, pkg, meta) -> None:
+        """Round 17: a guest who opens the shell page of an open_to "guests" package becomes one of its reviewers
+        (reviews.join_guest, under the meta lock), so the review server takes their object-set answers. Only on the
+        shell GET; a failure is logged and not retried for GUEST_JOIN_RETRY_S (the server then refuses their answers
+        with its own 403)."""
+        user = request.scope.get("cj_user") or {}
+        if user.get("role") != A.GUEST_ROLE:
+            return
+        revs = meta.get("reviewers") if isinstance(meta.get("reviewers"), list) else []
+        if user.get("id") in revs:
+            return
+        k, now = (pkg.name, user.get("id")), time.monotonic()
+        if now - join_failed.get(k, -1e18) < GUEST_JOIN_RETRY_S:
+            return
+        from portal.modules.reviews import ReviewersError, join_guest
+        try:
+            await asyncio.to_thread(join_guest, root, pkg, user["id"])
+        except ReviewersError as e:
+            if len(join_failed) >= GUEST_WARN_MAX:
+                join_failed.clear()
+            join_failed[k] = now
+            log.warning("guest %s not added as a reviewer of %s (%s)", user.get("id"), pkg.name, e)
+
+    async def guest_tool(request: Request):
+        """-> None (go on, body unchanged), bytes (go on with this body) or the 403 JSON answer for a guest."""
+        sub = tool_api_path(request)
+        if request.method in ("GET", "HEAD"):
+            return None if guest_tool_read_ok(sub) else M.no_store(JSONResponse(GUEST_TOOL_DENIED, status_code=403))
+        if request.method == "PUT" and sub == "api/edits":
+            raw = b""
+            async for chunk in request.stream():
+                raw += chunk
+                if len(raw) > proxy.max_body:
+                    break
+            body = guest_edit_body(raw) if len(raw) <= proxy.max_body else None
+            if body is not None:
+                return body
+        return M.no_store(JSONResponse(GUEST_TOOL_DENIED, status_code=403))
+
     async def shell(request: Request):
-        pid, _, _ = lookup(request)
+        pid, pkg, meta = lookup(request)
         if pid is None:
             return missing()
+        await guest_join(request, pkg, meta)
         return shell_response(request, f"{REVIEW_BASE}/{pid}", title,
                               strip=(await strip(request, pid)) if strip else "")
 
@@ -1394,6 +1545,12 @@ def pred_mount(proxy: P.ReviewProxy, root: Path | None, title: str = "Review", r
         pid, pkg, meta = lookup(request)
         if pid is None:
             return missing()
+        body = None
+        if (request.scope.get("cj_user") or {}).get("role") == A.GUEST_ROLE:
+            res = await guest_tool(request)
+            if isinstance(res, Response):
+                return res
+            body = res
         if audit_owner_refused(request) and audit_owner(request.scope.get("cj_user"), meta, pkg):
             return M.no_store(JSONResponse({"error": AUDIT_OWNER_REFUSED}, status_code=403))
         base = f"{REVIEW_BASE}/{pid}"
@@ -1403,7 +1560,7 @@ def pred_mount(proxy: P.ReviewProxy, root: Path | None, title: str = "Review", r
         if not key:                                     # the key went away since lookup
             return missing()
         return await proxy.handle(request, request.scope["cj_user"]["id"], key=key, prefix=base + "/app",
-                                  up_path="/" + pid)
+                                  up_path="/" + pid, body=body)
 
     return [Route(REVIEW_BASE + "/{pkg_id}/", shell, methods=["GET"]),
             Route(REVIEW_BASE + "/{pkg_id}/app", to_app, methods=["GET"]),
@@ -1456,6 +1613,11 @@ def create_app(cfg: Config) -> Gate:
 
     async def home(request: Request):
         brand = read_json(HERE / "static" / "brand.json") or {}
+        if request.scope["cj_user"].get("role") == A.GUEST_ROLE:     # round 17: only the sets open to guests
+            sets = await asyncio.to_thread(guest_sets, cfg, request.scope["cj_user"])
+            if len(sets) == 1:
+                return no_store(RedirectResponse(f"{REVIEW_BASE}/{sets[0][0]}/", status_code=303))
+            return M.Ctx.page(request, str(brand.get("name") or "CryoEV"), render_guest_home(sets), active="home")
         body = render_home(request, cfg, request.scope["cj_user"], rules_box)
         return M.Ctx.page(request, str(brand.get("name") or "CryoEV"), body, active="home")
 
@@ -1709,6 +1871,9 @@ def startup_lines(cfg: Config, host: str, port: int) -> list:
             f"once per {AX.REFETCH_S:g} s); no keys = everyone refused",
             "[cj] who: the JWT email must be the email of exactly one active roster person; admins "
             + ("ALLOWED (CJ_ACCESS_ADMIN=on)" if admin else "refused (CJ_ACCESS_ADMIN off: Admin is Tailscale only)"),
+            ("[cj] guests: ON for %d domain(s) (guest_email_domains; new emails there become role guest, open_to "
+             "\"guests\" review sets only)" % len(getattr(cfg.access, "guest_domains", ()) or ())
+             if getattr(cfg.access, "guest_domains", ()) else "[cj] guests: off (no guest_email_domains)"),
             f"[cj] gate: deny by default; open without sign-in: {', '.join(sorted(OPEN))}; Origin on "
             f"{', '.join(sorted(UNSAFE))} must be {cfg.access.origin}"
             + (f" or {', '.join(cfg.origins)}" if cfg.origins else ""),
