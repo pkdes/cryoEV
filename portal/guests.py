@@ -117,6 +117,36 @@ def _decide(people, gid: str, e: str):
     return True, (p if ok else None)
 
 
+READ_TRIES = 8
+READ_PAUSE_S = 0.02
+
+
+def _read_doc(roster: Path):
+    """The roster document, or None when it is missing or malformed (nobody, guests included). A transient read
+    failure (Windows: PermissionError while another writer os.replace()s the file) is retried briefly, then raised as
+    OSError (the portal answers 503 Busy): a legit new guest is never refused as if blocked."""
+    import time
+    err = None
+    for i in range(READ_TRIES):
+        try:
+            doc = json.loads(Path(roster).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as e:              # mid-replace: retry (a ValueError too: a torn read)
+            err = e
+            time.sleep(READ_PAUSE_S * (i + 1))
+            continue
+        return doc if isinstance(doc, dict) and isinstance(doc.get("people"), list) else None
+    if isinstance(err, ValueError):
+        return None                                     # still not JSON after the retries: malformed
+    raise OSError(f"the roster can't be read right now ({type(err).__name__})")
+
+
+def _read_people(roster: Path):
+    doc = _read_doc(roster)
+    return None if doc is None else doc["people"]
+
+
 def ensure_guest(roster: Path, email: str, domains, people=None, now: datetime | None = None) -> dict | None:
     """The active guest entry for `email` (one per mailbox: +tags dropped), made once when the domain matches; None
     when it may not sign in: wrong domain, an existing entry with this id or mailbox that is revoked or not this guest
@@ -130,22 +160,15 @@ def ensure_guest(roster: Path, email: str, domains, people=None, now: datetime |
         return None
     gid = guest_id(e)
     if people is None:
-        try:
-            doc = json.loads(Path(roster).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None                                 # no or unreadable roster: nobody, guests included
-        people = doc.get("people") if isinstance(doc, dict) and isinstance(doc.get("people"), list) else None
+        people = _read_people(roster)
         if people is None:
             return None
     found, entry = _decide(people, gid, e)
     if found:
         return entry                                    # lock-free: a known guest, or revoked / blocked
     with A.roster_lock(roster):
-        try:
-            doc = json.loads(Path(roster).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        if not isinstance(doc, dict) or not isinstance(doc.get("people"), list):
+        doc = _read_doc(roster)
+        if doc is None:
             return None
         found, entry = _decide(doc["people"], gid, e)
         if found:

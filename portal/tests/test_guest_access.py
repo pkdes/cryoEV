@@ -217,6 +217,28 @@ class RosterEntry(unittest.TestCase):
             with self.assertRaises(AssertionError):                           # a new email does take the lock
                 G.ensure_guest(self.env.roster, "brand-new@example.edu", (DOM,), known)
 
+    def test_transient_read_failure_is_busy_not_blocked(self):
+        real = Path.read_text
+        fails = {"n": 2}
+
+        def flaky(self_, *a, **k):
+            if self_.name == "roster.json" and fails["n"] > 0:
+                fails["n"] -= 1
+                raise PermissionError("being replaced")
+            return real(self_, *a, **k)
+        with mock.patch.object(Path, "read_text", flaky):                     # brief: retried, then made
+            self.assertEqual(G.ensure_guest(self.env.roster, "ann@example.edu", (DOM,))["role"], "guest")
+        fails["n"] = 10 ** 6
+        before = md5(self.env.roster)
+        with mock.patch.object(Path, "read_text", flaky), mock.patch.object(G, "READ_PAUSE_S", 0.001):
+            with self.assertRaises(OSError):                                   # lasting: busy (503), never None
+                G.ensure_guest(self.env.roster, "bob@example.edu", (DOM,))
+        self.assertEqual(md5(self.env.roster), before)
+        bad = self.env.tmp / "bad.json"
+        bad.write_text("{not json", encoding="utf-8")
+        with mock.patch.object(G, "READ_PAUSE_S", 0.001):
+            self.assertIsNone(G.ensure_guest(bad, "ann@example.edu", (DOM,)))   # malformed: nobody
+
     def test_lock_busy_changes_nothing(self):
         before = md5(self.env.roster)
         with mock.patch.object(A, "acquire_lock", return_value=None):
@@ -561,6 +583,24 @@ class GuestTool(unittest.TestCase):
             self.assertNotIn(b"REVIEW_DATA", body, path)
         for m in ("HEAD", "OPTIONS", "PATCH", "TRACE", "DELETE"):
             self.assertIn(self.g("/admin/", e, method=m)[0], (403, 405), m)
+
+    def test_guest_t_and_size(self):
+        e = "tclamp@example.edu"
+        self.join(e)
+        from portal import app as APP
+        out = json.loads(APP.guest_edit_body(json.dumps({"t": 9e15, "dec": {
+            f"a:{self.obj()}:type@x": {"v": "ML", "t": 1, "pending": True}}}).encode()))
+        self.assertEqual(out["t"], 0)
+        big = {"t": 1, "dec": {f"a:{self.obj()}:type@x": {"v": "ML", "t": 1, "pending": True}}, "pad": "x" * (1 << 20)}
+        self.assertEqual(self.put(e, big)[0], 413)
+
+    def test_last_lab_reviewer_kept_while_open(self):
+        pkg = self._copy("pred_obj_lastlab_set_abcd", reviewers=["alice", G.guest_id("g@example.edu")])
+        with self.assertRaises(REV.ReviewersError):
+            REV.write_reviewers(self.review, pkg, remove=["alice"])
+        self.assertEqual(REV.write_reviewers(self.review, pkg, add=["kate"], remove=["alice"]), (["kate"], ["alice"]))
+        G.set_open(pkg, False)                                                 # closed to guests: may empty it
+        self.assertEqual(REV.write_reviewers(self.review, pkg, remove=["kate"]), ([], ["kate"]))
 
     def test_empty_reviewers_never_locked_out(self):
         pkg = self._copy("pred_obj_noreviewers_set_abcd", reviewers=[])

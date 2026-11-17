@@ -539,6 +539,9 @@ def write_reviewers(root, pkg: Path, add=(), remove=(), *, allowed=None, lock_wa
         from portal.guests import GUEST_ID_RE
         lab = [r for r in new if not GUEST_ID_RE.match(r)]
         guests = len(new) - len(lab)
+        if removed and not lab and meta.get("open_to") == "guests":
+            raise ReviewersError("This review is open to guests: keep at least one lab reviewer (an empty list would "
+                                 "let only its guests answer). Close it to guests first.")
         # the caps stop adding only: an over-cap list can still be trimmed
         if any(not GUEST_ID_RE.match(a) for a in added) and len(lab) > cap:
             raise ReviewersError(f"A review can have at most {cap} reviewers.")
