@@ -7,7 +7,7 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
-## 2026-11-17 14:55 · eVHarmony v2: Small & dense, "What is it?", How to judge
+## 2026-11-17 14:55 · eVHarmony v2: Small & dense, What is it, How to judge
 
 - **A fourth answer, "Small & dense"** (swipe down, or the button): small, uniformly dark particles without a clear bilayer, possibly lipoproteins. It is kept as its own answer so it can be studied later.
 - **After a Match, "What is it?"**: one tap for Single, Multilayer, Has vesicles inside or Inside another, then the next card comes. Skip it, or just swipe on, when you can't tell.
