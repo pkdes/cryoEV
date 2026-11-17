@@ -7,13 +7,14 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
-## 2026-11-17 12:00 · Round 17 (draft, time set at release): eVHarmony beta
+## 2026-11-17 14:10 · Round 17: eVHarmony beta, guest sign-in
 
 - **eVHarmony:** a joke dating-app look for one kind of object set: swipe right on a real vesicle, left on anything else, up when it's complicated. Each swipe is an ordinary answer, credited to you; the first cards are the same for everyone.
 - After your 10th answer it tells you what you were doing and asks whether your answers may count (Yes / No). You can keep swiping either way.
 - Low-contrast cards in eVHarmony start with ☼ Auto and Smooth on, until you change them.
 - Every other review set looks and works as before.
-- **Components:** review page 2026-11-17.1 / CLI (`annotation.object_set build --app evharmony --first-items N`, `tools/evh_items.py`, `tools/evh_score.py`).
+- **Guest sign-in (off until configured):** people with an email at a domain the admin allows can sign in as a guest. Guests see only review sets opened to guests, and can only answer that set's questions; they can't change labels, notes or anyone else's answers.
+- **Components:** review page 2026-11-17.1 / portal (guest role, `python -m portal.guests open|close|list`) / CLI (`annotation.object_set build --app evharmony --first-items N`, `tools/evh_items.py`, `tools/evh_score.py`).
 
 ## 2026-11-16 16:40 · Smooth strength slider
 
