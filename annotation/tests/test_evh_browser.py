@@ -28,6 +28,7 @@ from cryoev_testkit import browser  # noqa: E402
 REPO = HERE.parents[1]
 EVH_SCHEMA = json.loads((REPO / "tools" / "evh" / "ls_evh_match_v1.json").read_text(encoding="utf-8"))
 META = {"schema": "review_meta/1", "package": {}, "images": {"imgA.png": {"nm_per_px": 1.5}, "imgB.png": {"nm_per_px": 1.5}}}
+SAMPLE = "Zed Person 2023 sample"
 SPLASH_SEEN = "try { localStorage.setItem('cryoev-review:evh:splash', '1'); } catch (e) {}"
 
 
@@ -44,6 +45,8 @@ def build_evh(folder, *, blind=False, app="evharmony"):
         for o in objs:
             items.append({"id": f"{len(items) + 1:05x}", "image": stem, "obj": o, "crop": [0, 0, 1, 1]})
     data["items"], data["schema"], data["title"] = items, S.to_page(EVH_SCHEMA), "eVHarmony beta"
+    for im in data["images"]:
+        im["split"] = SAMPLE                # a sample label that names a person: never in an eVHarmony bio
     if app:
         data["app"] = app
     (Path(folder) / "data.js").write_text("window.REVIEW_DATA = " + json.dumps(data) + ";\n", encoding="utf-8")
@@ -253,6 +256,30 @@ class EvhTests(unittest.TestCase):
                                     "JSON.stringify({b: 0, c: 10, g: 1, auto: false, smooth: 0})); } catch (e) {}")
         vc = pg2.evaluate("__review.state().vc")
         self.assertEqual((vc["auto"], vc["smooth"], vc["c"]), (False, 0, 10))
+
+    def test_framing_and_bio_without_sample(self):
+        for width, height in ((390, 844), (1280, 800)):
+            data, _, pg = self.open(width=width, height=height)
+            pg.wait_for_function("__review.obj().evh.zoom !== null", timeout=5000)
+            cw = pg.evaluate("document.getElementById('ocv').getBoundingClientRect().width")
+            seen = set()
+            for k in range(len(data["items"])):
+                o = self.obj(pg)
+                z = o["evh"]["zoom"]
+                self.assertLessEqual(z, 1.25 + 1e-9)        # never > 2.5 native px per screen px at DPR 2
+                bio = pg.inner_text("#oBio")
+                self.assertNotIn("Zed", bio)
+                self.assertNotIn("Person", bio)
+                seen.add(bio)
+                if o["item"]["image"] == "imgA" and o["item"]["obj"] == "g1":   # a 220 px circle
+                    d = 220 * z
+                    self.assertLessEqual(d, cw / 3 + 2)          # about 1/3 of the card, or less when capped
+                    self.assertTrue(z == 1.25 or abs(d - cw / 3) < 0.15 * cw, (z, d, cw))
+                if k < len(data["items"]) - 1:
+                    pg.click("#oNext")
+                    pg.wait_for_function(f"__review.obj().pos === {k + 1}", timeout=5000)
+            self.assertGreater(len(seen), 1)
+            self.assertEqual(self.errors, [])
 
     def test_phone_light_and_dark(self):
         for scheme in ("light", "dark"):
