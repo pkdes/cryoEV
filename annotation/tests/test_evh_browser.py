@@ -9,7 +9,11 @@ object set card (annotation/review_tool/index.html, D.app === "evharmony"), on a
   - the splash once per browser (nickname display only); default contrast Auto + Smooth 2 without a saved setting;
   - phone 390 x 844, light and dark, without page errors;
   - r17b: saves the server refuses (403 "not a reviewer"): the #oSaveErr banner with the server's text and the
-    pending count, "Not saved" (never "Saved ✓"); the drafts survive a reload and upload once the server accepts.
+    pending count, "Not saved" (never "Saved ✓"); the drafts survive a reload and upload once the server accepts;
+  - r17c (schema ls_evh_match_v2): the 4th answer (button, swipe down, d / ↓) saves "dense"; after a Match the "What
+    is it?" chips (pick = kind saved + next card; skip = nothing saved + next; a swipe = re-answer + next); the "How to
+    judge" sheet from the splash and the ? button (sections, example crops, the instructions); v1 sets and the flag
+    off unchanged (3 buttons, ↓ / d answer nothing, no sheet, no chips).
 
   python -m unittest discover -s annotation/tests -p test_evh_browser.py -v
 """
@@ -30,14 +34,17 @@ from cryoev_testkit import browser  # noqa: E402
 
 REPO = HERE.parents[1]
 EVH_SCHEMA = json.loads((REPO / "tools" / "evh" / "ls_evh_match_v1.json").read_text(encoding="utf-8"))
+EVH_V2 = json.loads((REPO / "tools" / "evh" / "ls_evh_match_v2.json").read_text(encoding="utf-8"))
+GUIDE_TEXT = "What you're judging: the highlighted outline. Unsure is useful; don't guess."
 META = {"schema": "review_meta/1", "package": {}, "images": {"imgA.png": {"nm_per_px": 1.5}, "imgB.png": {"nm_per_px": 1.5}}}
 SAMPLE = "Zed Person 2023 sample"
 SPLASH_SEEN = "try { localStorage.setItem('cryoev-review:evh:splash', '1'); } catch (e) {}"
 
 
-def build_evh(folder, *, blind=False, app="evharmony"):
+def build_evh(folder, *, blind=False, app="evharmony", schema=None, examples=None, instructions=None):
     """The fixture's two images with every outline as an item (11 items: 10 labels + 1 prediction), the eVHarmony
-    schema, D.app (app=None: the flag off)."""
+    schema (v1 unless given), D.app (app=None: the flag off); r17c: D.examples (copies of imgA.png as
+    images/ex_<id>.jpg) and D.instructions when given."""
     data = F.build(folder, blind=blind)
     sys.path.insert(0, str(REPO))
     from labels import schemas as S
@@ -47,7 +54,15 @@ def build_evh(folder, *, blind=False, app="evharmony"):
         objs = [f"g{g['id']}" for g in im["gt"]] + [f"p{k}" for k in range(len(im["pr"]))]
         for o in objs:
             items.append({"id": f"{len(items) + 1:05x}", "image": stem, "obj": o, "crop": [0, 0, 1, 1]})
-    data["items"], data["schema"], data["title"] = items, S.to_page(EVH_SCHEMA), "eVHarmony beta"
+    data["items"], data["schema"], data["title"] = items, S.to_page(schema or EVH_SCHEMA), "eVHarmony beta"
+    if examples:
+        import shutil
+        for x in examples:
+            if x["src"].startswith("images/"):
+                shutil.copyfile(Path(folder) / "images" / "imgA.png", Path(folder) / x["src"])
+        data["examples"] = examples
+    if instructions:
+        data["instructions"] = instructions
     for im in data["images"]:
         im["split"] = SAMPLE                # a sample label that names a person: never in an eVHarmony bio
     if app:
@@ -74,9 +89,9 @@ class EvhTests(unittest.TestCase):
         cls.pw.stop()
 
     def open(self, *, blind=False, app="evharmony", meta=META, splash_seen=True, width=1280, height=800,
-             scheme="light", init=None):
+             scheme="light", init=None, schema=None, examples=None, instructions=None):
         d = Path(tempfile.mkdtemp(prefix="evh_")) / "pred_obj_evh_ab12"
-        data = build_evh(d, blind=blind, app=app)
+        data = build_evh(d, blind=blind, app=app, schema=schema, examples=examples, instructions=instructions)
         srv = F.FakeServer(d, caps=("i", "t", "m", "a"), meta=meta).start()
         self.addCleanup(srv.close)
         ctx = self.browser.new_context(viewport={"width": width, "height": height}, color_scheme=scheme,
@@ -102,10 +117,168 @@ class EvhTests(unittest.TestCase):
     def next_card(self, pg, pos):
         pg.wait_for_function(f"__review.obj().pos !== {pos} || __review.obj().done === __review.obj().n", timeout=5000)
 
-    def match_of(self, srv, it):
+    def match_of(self, srv, it, attr="match"):
         d = srv.records.get(it["image"] + ".png", {}).get("dec", {})
-        x = d.get(f"a:{it['obj']}:match@rev1")
+        x = d.get(f"a:{it['obj']}:{attr}@rev1")
         return x and x.get("v")
+
+    # ---- r17c: schema v2
+    def open_v2(self, **kw):
+        ex = [{"src": f"images/ex_{i}.jpg", "cat": c, "caption": f"{c} example {i}"}
+              for i, c in (("S1", "single"), ("M1", "ml"), ("N1", "nope"), ("N2", "nope"), ("D1", "dense"),
+                           ("C1", "unsure"), ("Bad", "nonsense"))]
+        ex.append({"src": "https://example.org/x.jpg", "cat": "single", "caption": "outside the package"})
+        return self.open(schema=EVH_V2, examples=kw.pop("examples", ex), instructions=kw.pop("instructions", GUIDE_TEXT),
+                         **kw)
+
+    def test_v2_four_answers_and_swipe_down(self):
+        _, srv, pg = self.open_v2(width=390, height=844)
+        labels = pg.eval_on_selector_all("#oAttrs .evhBtns button", "els => els.map(e => [e.dataset.v, e.textContent])")
+        self.assertEqual([v for v, _ in labels], ["no", "yes", "unsure", "dense"])
+        self.assertIn("Small & dense", dict(labels)["dense"])
+        self.assertTrue(self.obj(pg)["evh"]["dense"])
+        self.assertLessEqual(pg.evaluate("document.documentElement.scrollWidth"), 390)
+        b = pg.locator("#ocv").bounding_box()
+        x, y = b["x"] + b["width"] / 2, b["y"] + b["height"] / 2
+        want = []
+        o = self.obj(pg)
+        touch_swipe(pg, x, y - 60, 10, 170, sel="#ocv")             # swipe down
+        self.next_card(pg, o["pos"])
+        want.append((o["item"], "dense"))
+        for k in ("d", "ArrowDown"):
+            o = self.obj(pg)
+            pg.keyboard.press(k)
+            self.next_card(pg, o["pos"])
+            want.append((o["item"], "dense"))
+        o = self.obj(pg)
+        pg.click("#oAttrs .evhBtns .dense")
+        self.next_card(pg, o["pos"])
+        want.append((o["item"], "dense"))
+        for k, v in (("ArrowLeft", "no"), ("ArrowUp", "unsure")):     # the v1 answers still work
+            o = self.obj(pg)
+            pg.keyboard.press(k)
+            self.next_card(pg, o["pos"])
+            want.append((o["item"], v))
+        self.settle(pg)
+        for it, v in want:
+            self.assertEqual(self.match_of(srv, it), v, it)
+        self.assertEqual(self.obj(pg)["done"], 6)
+        self.assertEqual(self.errors, [])
+
+    def test_v2_kind_chips_after_match(self):
+        _, srv, pg = self.open_v2()
+        o = self.obj(pg)
+        pg.keyboard.press("ArrowRight")                               # Match: the card stays, the chips come
+        pg.wait_for_selector("#oAttrs .evhKind", state="visible", timeout=5000)
+        o1 = self.obj(pg)
+        self.assertEqual((o1["pos"], o1["evh"]["kindFor"]), (o["pos"], o["item"]["id"]))
+        self.assertEqual(pg.locator("#oAttrs .evhBtns").count(), 0)
+        chips = pg.eval_on_selector_all("#oAttrs .evhKind button", "els => els.map(e => e.textContent)")
+        self.assertEqual(chips, ["Single", "Multilayer", "Has vesicles inside", "Inside another", "skip →"])
+        pg.click("#oAttrs .evhKind button[data-v='ml']")              # pick: saved, the next card
+        self.next_card(pg, o["pos"])
+        self.assertIsNone(self.obj(pg)["evh"]["kindFor"])
+        o2 = self.obj(pg)                                             # Match, then skip: no kind saved
+        pg.click("#oAttrs .evhBtns .like")
+        pg.wait_for_selector("#oAttrs .evhKind", state="visible", timeout=5000)
+        pg.click("#oAttrs .evhKind button.skip")
+        self.next_card(pg, o2["pos"])
+        o3 = self.obj(pg)                                             # Match, then the 3 key
+        pg.keyboard.press("y")
+        pg.wait_for_selector("#oAttrs .evhKind", state="visible", timeout=5000)
+        pg.keyboard.press("3")
+        self.next_card(pg, o3["pos"])
+        o4 = self.obj(pg)                                             # Match, then a swipe left: re-answered no
+        pg.keyboard.press("ArrowRight")
+        pg.wait_for_selector("#oAttrs .evhKind", state="visible", timeout=5000)
+        b = pg.locator("#ocv").bounding_box()
+        touch_swipe(pg, b["x"] + b["width"] / 2, b["y"] + b["height"] / 2, -170, 0, sel="#ocv")
+        self.next_card(pg, o4["pos"])
+        o5 = self.obj(pg)                                             # Match, then Match again: = skip
+        pg.keyboard.press("ArrowRight")
+        pg.wait_for_selector("#oAttrs .evhKind", state="visible", timeout=5000)
+        pg.keyboard.press("ArrowRight")
+        self.next_card(pg, o5["pos"])
+        self.settle(pg)
+        got = [(self.match_of(srv, x["item"]), self.match_of(srv, x["item"], "kind")) for x in (o, o2, o3, o4, o5)]
+        self.assertEqual(got, [("yes", "ml"), ("yes", None), ("yes", "mv"), ("no", None), ("yes", None)])
+        self.assertEqual(self.obj(pg)["done"], 5)
+        o6 = self.obj(pg)                                             # Backspace on the chips undoes the Match
+        pg.keyboard.press("ArrowRight")
+        pg.wait_for_selector("#oAttrs .evhKind", state="visible", timeout=5000)
+        pg.keyboard.press("Backspace")
+        pg.wait_for_selector("#oAttrs .evhBtns", state="visible", timeout=5000)
+        self.assertIsNone(self.obj(pg)["mine"]["match"])
+        self.assertEqual(self.obj(pg)["pos"], o6["pos"])
+        self.assertEqual(self.errors, [])
+
+    def test_v2_how_to_judge_sheet(self):
+        _, _, pg = self.open_v2(splash_seen=False, width=390, height=844)
+        self.assertTrue(pg.is_visible("#evhSplash"))
+        self.assertIn("down on small dense particles", pg.inner_text("#evhSplash"))
+        self.assertFalse(pg.is_visible("#oInstr"))                     # the sheet holds the text: no auto-open
+        self.assertFalse(pg.is_visible("#oInfoBtn"))
+        pg.click("#evhHow")
+        self.assertTrue(pg.is_visible("#evhGuide"))
+        self.assertTrue(self.obj(pg)["evh"]["guide"])
+        secs = pg.eval_on_selector_all("#evhGdBody section h3", "els => els.map(e => e.textContent)")
+        self.assertEqual(secs, ["Match →", "Nope ←", "Small & dense ↓", "It's complicated ↑"])
+        figs = pg.eval_on_selector_all("#evhGdBody figure", "els => els.map(e => [e.dataset.cat, "
+                                       "e.querySelector('img').getAttribute('src'), e.textContent])")
+        self.assertEqual([f[0] for f in figs], ["single", "ml", "nope", "nope", "dense", "unsure"])   # bad cat / src dropped
+        self.assertTrue(all(f[1].startswith("images/ex_") for f in figs))
+        self.assertEqual(figs[1][2], "ml example M1")
+        self.assertEqual(self.obj(pg)["evh"]["examples"], 6)
+        pg.wait_for_function("[...document.querySelectorAll('#evhGdBody img')].every(i => i.complete && i.naturalWidth > 0)",
+                             timeout=5000)
+        self.assertIn("Unsure is useful", pg.inner_text("#evhGdBody .guide"))
+        pg.keyboard.press("Escape")                                   # closes the sheet, back on the splash
+        self.assertFalse(pg.is_visible("#evhGuide"))
+        self.assertTrue(pg.is_visible("#evhSplash"))
+        pg.click("#evhGo")
+        pg.click("#evhHelp")                                          # the ? button
+        self.assertTrue(pg.is_visible("#evhGuide"))
+        pg.keyboard.press("y")                                        # keys answer nothing behind the sheet
+        pg.wait_for_timeout(300)
+        self.assertEqual(self.obj(pg)["done"], 0)
+        pg.click("#evhGdX")
+        self.assertFalse(pg.is_visible("#evhGuide"))
+        pg.keyboard.press("?")
+        self.assertTrue(pg.is_visible("#evhGuide"))
+        self.assertEqual(self.errors, [])
+
+    def test_v1_and_flag_off_unchanged_by_v2(self):
+        _, srv, pg = self.open(instructions=GUIDE_TEXT, splash_seen=False)    # a v1 set with instructions
+        self.assertFalse(pg.is_visible("#evhHow"))
+        self.assertTrue(pg.is_visible("#oInstr"))                      # auto-opened once, as before
+        pg.click("#evhGo")
+        pg.keyboard.press("Escape")
+        o = self.obj(pg)
+        self.assertFalse(o["evh"]["dense"])
+        self.assertFalse(o["evh"]["guideOn"])
+        self.assertFalse(pg.is_visible("#evhHelp"))
+        self.assertTrue(pg.is_visible("#oInfoBtn"))
+        self.assertEqual(pg.eval_on_selector_all("#oAttrs .evhBtns button", "els => els.map(e => e.dataset.v)"),
+                         ["no", "unsure", "yes"])
+        for k in ("d", "ArrowDown"):
+            pg.keyboard.press(k)
+        b = pg.locator("#ocv").bounding_box()
+        touch_swipe(pg, b["x"] + b["width"] / 2, b["y"] + b["height"] / 2 - 60, 10, 170, sel="#ocv")
+        pg.wait_for_timeout(500)
+        self.assertEqual((self.obj(pg)["pos"], self.obj(pg)["done"]), (o["pos"], 0))
+        pg.keyboard.press("ArrowRight")                                # v1 Match: no chips, the next card at once
+        self.next_card(pg, o["pos"])
+        self.assertEqual(pg.locator("#oAttrs .evhKind").count(), 0)
+        self.assertEqual(self.errors, [])
+        # flag off with the v2 schema: the plain card, its three questions, no eVHarmony element
+        _, _, pg2 = self.open_v2(app=None)
+        self.assertNotIn("app", self.obj(pg2))
+        heads = pg2.eval_on_selector_all("#oAttrs h3 > span:first-child", "els => els.map(e => e.textContent)")
+        self.assertEqual(heads, ["Match?", "What is it?", "Count my answers"])
+        for sel in ("#oEvh", "#evhGuide", "#evhSplash", "#evhHelp"):
+            self.assertFalse(pg2.is_visible(sel), sel)
+        pg2.keyboard.press("d")                                        # the schema's own key: an ordinary tap
+        pg2.wait_for_function("__review.obj().mine.match === 'dense'", timeout=5000)
 
     def test_flag_off_is_the_plain_card(self):
         _, srv, pg = self.open(app=None)

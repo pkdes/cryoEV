@@ -7,6 +7,15 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-17 14:55 · eVHarmony v2: Small & dense, "What is it?", How to judge
+
+- **A fourth answer, "Small & dense"** (swipe down, or the button): small, uniformly dark particles without a clear bilayer, possibly lipoproteins. It is kept as its own answer so it can be studied later.
+- **After a Match, "What is it?"**: one tap for Single, Multilayer, Has vesicles inside or Inside another, then the next card comes. Skip it, or just swipe on, when you can't tell.
+- **How to judge:** a sheet with example pictures for each answer and the guidelines, from the welcome screen ("How to judge") and the **?** button at the top.
+- These apply to new eVHarmony sets built with the v2 questions (`tools/evh/ls_evh_match_v2.json`). The current eVHarmony set and every other review set work as before.
+- For set makers: some first cards can be known "Nope" cards placed on empty background, so the answers can be checked fairly (`tools/evh_items.py --decoys`, `tools/evh_score.py --decoys --control`); earlier answers move to a rebuilt set with `tools/evh_carry.py`; example pictures go in with `tools/evh_examples.py`.
+- **Components:** review page 2026-11-17.3 / CLI (`tools/evh_items.py --decoys --derive --low --answered`, `tools/evh_carry.py`, `tools/evh_examples.py`, `tools/evh_score.py --decoys --control`).
+
 ## 2026-11-17 14:28 · eVHarmony save status, Smooth on low-res sets
 
 - **Saves that fail now say so.** When the server refuses your answers (for example "not a reviewer") or can't be reached, eVHarmony shows a red banner with the server's reason and how many answers are waiting. Keep the page open: it keeps retrying, and your answers are kept in this browser until they upload.

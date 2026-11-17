@@ -1,0 +1,36 @@
+{
+ "schema": "label_schema/1",
+ "id": "ls_evh_match_v2",
+ "name": "evh_match",
+ "version": 2,
+ "maker": "pujan",
+ "description": "eVHarmony v2 (round 17c): is this candidate a real vesicle? yes (Match) / no (Nope) / dense (Small & dense: small, uniformly dark, no clear bilayer; possibly lipoproteins) / unsure (It's complicated). v1's values keep their names, so v1 answers carry over. Overlapping vesicles count as Match. kind (optional, only meaningful after Match): single / ml (multilayer) / mv (has vesicles inside) / inner (inside another). consent as in v1: answered once per reviewer, on the set's first item only.",
+ "classes": [
+  {"name": "EV", "color": "#4ade80", "key": "1"}
+ ],
+ "object_attrs": [
+  {"id": "match", "label": "Match?", "kind": "choice", "required": true,
+   "help": "Swipe right = Match (a membrane-bound vesicle, overlapping ones too), left = Nope, down = Small and dense, up = It's complicated.",
+   "options": [
+    {"v": "yes", "label": "Match", "key": "y"},
+    {"v": "no", "label": "Nope", "key": "n"},
+    {"v": "dense", "label": "Small and dense", "key": "d"},
+    {"v": "unsure", "label": "It's complicated", "key": "u"}
+   ]},
+  {"id": "kind", "label": "What is it?", "kind": "choice",
+   "help": "Only after a Match, optional: skip when you can't tell.",
+   "options": [
+    {"v": "single", "label": "Single", "key": "s"},
+    {"v": "ml", "label": "Multilayer", "key": "m"},
+    {"v": "mv", "label": "Has vesicles inside", "key": "v"},
+    {"v": "inner", "label": "Inside another", "key": "o"}
+   ]},
+  {"id": "consent", "label": "Count my answers", "kind": "choice",
+   "help": "Asked once, on the set's first item: yes = these answers may be used.",
+   "options": [{"v": "yes", "label": "Yes"}, {"v": "no", "label": "No"}]}
+ ],
+ "image_attrs": [],
+ "tags": [],
+ "supersedes": "ls_evh_match_v1",
+ "class_mapping": {"EV": "EV"}
+}

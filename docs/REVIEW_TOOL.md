@@ -516,6 +516,57 @@ unchanged.
   once a sync pass uploads everything. On every object set the foot line says "Saved ✓" only when nothing is pending
   (any image), "Not saved · N answers waiting" while saves fail; the plain card's sync chip says "not saved" with the
   server's text as its tooltip.
+- **v2 (r17c, schema `tools/evh/ls_evh_match_v2.json`):** `match` = yes (Match →) / no (Nope ←) / dense ("Small &
+  dense" ↓, keys d / ↓; possibly lipoproteins, kept as its own answer) / unsure (It's complicated ↑): v1's value names
+  are kept, so v1 answers carry over. Overlapping vesicles count as Match. Optional `kind` (single / ml / mv / inner),
+  asked only after a Match: the card stays and the "What is it?" chips replace the buttons (keys 1-4; 0 / Enter / Esc
+  = skip); a pick saves `a:<obj>:kind@<rid>` and the next card comes; skip = unanswered; a swipe or answer key while
+  the chips are up re-answers the card (Match again = skip) and moves on; Backspace undoes the Match. The page turns
+  these on from the schema itself (a `dense` option, a `kind` question): a v1 set keeps its three buttons, and ↓ / d do
+  nothing there.
+- **How to judge (r17c):** on a v2 set or a set with examples, a sheet opened from the splash ("How to judge"), the
+  ? button in the header or the ? key (Esc closes): one section per answer with its example crops and captions
+  (Match: Single / Multilayer / Has vesicles inside / Inside another), then the set's instructions as "Guidelines".
+  It replaces the Instructions button and its auto-open there (v1 sets: unchanged). Examples: `data.js`
+  `D.examples = [{src, cat, caption}]` (`src` must be `images/ex_<id>.jpg`: review_server serves only `index.html`,
+  `data.js` and `images/`), written with
+  `python tools/evh_examples.py <pkg> --from <crops dir> --pick S2,M5,... [--cat ID=cat] [--caption ID=text] --do`
+  (also `<pkg>/examples.json` [{file, cat, caption}]; only the `examples` key of data.js changes; `--clear`). The crops
+  dir has `examples.csv` (id, crop file, category, provenance). Use crops that are not items of the set.
+- **Balanced gold (r17c):** an always-yes player scored 89 % on the first set's gold (25 yes / 3 no), so v2 sets add
+  known Nopes:
+  ```bash
+  python tools/evh_items.py --ps <ps> --out evh_items.csv --gold 0 --decoys 20 --derive <new ps folder> \
+      --low 0.10 --answered <old pred_obj_evh_*> --who <owner id>
+  python -m annotation.object_set build --ps <new ps folder> --items evh_items.csv --schema tools/evh/ls_evh_match_v2.json \
+      --line-col line --slug evh --title "eVHarmony beta" --app evharmony --first-items <printed N> \
+      --owner <id> --reviewers a,b --instructions-file guidelines.txt [--review-root <dir>] --do
+  python tools/evh_carry.py --from <old pred_obj_evh_*> --to <new set> --who <owner id> --do
+  python -m annotation.object_set export --pkg <new set> --out evh.csv
+  python tools/evh_score.py --csv evh.csv --gold <owner id> --decoys evh_items_decoys.csv --control
+  ```
+  - **Decoys:** a derived copy of the prediction set (new ps id; images, images.csv byte-copied; every model line
+    byte-identical and in place) with N polygon lines appended: a real candidate's polygon (vertex list, size, pixel
+    staircase), flipped / transposed at random, moved by whole pixels onto a free place of one of the set's images
+    (touching no prediction of any conf and no other decoy, 3 px margin, inside the image), conf and class drawn from
+    the candidates. The list lives only in `<items>_decoys.csv` next to the items CSV (and `evh_derived.json` in the
+    derived folder, which nothing serves): no items CSV column, nothing in data.js, items.json or `/api/meta` says
+    decoy (tested). Leftover tell: object keys g<n> follow line order, so a decoy is the last shown object of its
+    image (the page shows no conf or line).
+  - **--low L:** up to `--n-low` candidates with L <= conf < `--lo` (a set predicted at conf 0.25 has none: reported).
+  - **First block:** the owner's previously answered objects (`--answered --who`) + decoys + low, gold=1, then the
+    rest; build with `--first-items` = the printed count.
+  - **Scoring:** decoys are known "no" without an owner answer (an owner "yes" on one is reported as a conflict);
+    `dense` and `unsure` are excluded from agreement and reported (`n_dense`, `n_unsure`); per reviewer `n_decoys`,
+    `decoy_no` and the `kind_*` counts (on items they called yes). `--control` scores made-up always-yes / always-no /
+    replay reviewers on the same gold: exit 3 unless both lazy ones fail and the replay passes. On the c547fe rebuild
+    (28 owner yes/no + 20 decoys): always-yes 52.1 % fail, always-no 47.9 % fail, replay 100 % pass; without decoys
+    always-yes passed at 89.3 %.
+  - **Carry-over** (`tools/evh_carry.py`, dry run unless --do): the reviewer's `match` (and `consent`) decisions move
+    to the object with the same (image, line) in the new set, every field kept ({v, t, who, server_t}); consent goes to
+    the new set's first item. Only into keys the new set doesn't have; values its schema refuses are skipped. Writes
+    the review_server record format and `_attr_log.jsonl` rows; provenance in `<new>/carried_answers.json` (decisions
+    have no field for it). Run it before the set is served.
 - **View only (r17b):** through the portal, `multi_review_server` adds `answer: true|false` to
   `window.REVIEW_IDENTITY` for a package with a schema (`may_answer`: review_server's PUT rule, reviewers in
   `review_package.json` when non-empty, else the people roster; read per page load). `answer: false` → the

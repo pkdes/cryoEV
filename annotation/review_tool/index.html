@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-17.2";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-17.3";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const h = document.querySelector("header"), inPortal = /^\/review\//.test(location.pathname), v = document.createElement("span");
   v.id = "pageVer"; v.style.cssText = "font-size:11px;color:var(--mute);white-space:nowrap"; v.textContent = "Review page " + PAGE_VERSION;
@@ -335,7 +335,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #oKeys{text-align:center;font-size:11.5px;color:var(--mute);padding:0 12px 8px;background:var(--panel);flex:none}
 @media (hover:none) and (pointer:coarse){#oKeys{display:none!important}}
 /* round 17 eVHarmony (D.app "evharmony", object sets only): the joke skin; every rule is under #obj.evh or an evh id */
-#oEvh[hidden],#oBio[hidden],#oMatch[hidden],#evhSplash[hidden],#evhReveal[hidden],#evhRvAsk[hidden],#evhRvDone[hidden]{display:none}
+#oEvh[hidden],#oBio[hidden],#oMatch[hidden],#evhSplash[hidden],#evhReveal[hidden],#evhRvAsk[hidden],#evhRvDone[hidden],#evhGuide[hidden],#evhHelp[hidden],#evhHow[hidden]{display:none}
 #obj.evh{--hot:#0f766e;--hot2:#b45309}
 #obj.evh #oListBtn,#obj.evh #oItem,#obj.evh #oWho,#obj.evh #oSync,#obj.evh #oTitle{display:none}
 #obj.evh .otbar{justify-content:space-between}
@@ -351,6 +351,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #oStamp{position:absolute;top:18px;right:14px;padding:2px 10px;border:3px solid currentColor;border-radius:8px;font:900 22px/1.2 system-ui,sans-serif;transform:rotate(12deg);opacity:0;pointer-events:none;color:#16a34a}
 #oStamp.no{left:14px;right:auto;transform:rotate(-12deg);color:#dc2626}
 #oStamp.unsure{left:50%;right:auto;transform:translateX(-50%);color:#d97706}
+#oStamp.dense{left:50%;right:auto;top:auto;bottom:70px;transform:translateX(-50%);color:#7c3aed}
 #oMatch{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;z-index:6}
 #oMatch b{font:italic 900 32px/1.1 system-ui,sans-serif;text-align:center;padding:0 20px;background:linear-gradient(90deg,var(--hot),var(--hot2));-webkit-background-clip:text;background-clip:text;color:transparent;filter:drop-shadow(0 2px 6px rgba(0,0,0,.5))}
 #oMatch.pop{animation:pop .9s ease-out forwards}
@@ -359,6 +360,30 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #oAttrs .evhBtns .nope{color:#dc2626;border-color:#dc2626}
 #oAttrs .evhBtns .meh{color:#b45309;border-color:#d97706}
 #oAttrs .evhBtns .like{color:#16a34a;border-color:#16a34a}
+/* r17c (schema v2): four answers in a 2 x 2 grid; the "What is it?" chips after a Match */
+#oAttrs .evhBtns.four{flex-wrap:wrap}
+#oAttrs .evhBtns.four button{flex:1 1 calc(50% - 4px);min-height:46px}
+#oAttrs .evhBtns .dense{color:#7c3aed;border-color:#7c3aed}
+#oAttrs .evhKind h3{margin:0 0 6px;font-size:15px;text-align:center}
+#oAttrs .evhKind .chips{display:flex;flex-wrap:wrap;gap:6px;justify-content:center}
+#oAttrs .evhKind .chips button{min-height:44px;border-radius:22px;padding:2px 14px;font-size:14px;font-weight:700;touch-action:manipulation;color:#16a34a;border-color:#16a34a}
+#oAttrs .evhKind .chips button.skip{color:var(--mute);border-color:var(--line)}
+#oAttrs .evhKind .chips button.on{color:#fff;background:#16a34a}
+#evhHelp{flex:none;min-width:34px;min-height:34px;border-radius:17px;font-weight:800;font-size:16px;padding:0;color:var(--hot);border-color:var(--hot)}
+#evhGuide{position:absolute;inset:0;z-index:45;display:flex;align-items:flex-start;justify-content:center;padding:10px;background:color-mix(in srgb,var(--bg) 70%,transparent);backdrop-filter:blur(3px)}
+#evhGuide .box{width:min(560px,100%);max-height:calc(100% - 4px);display:flex;flex-direction:column;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.35)}
+#evhGuide .gh{display:flex;align-items:center;justify-content:space-between;padding:8px 8px 8px 16px;border-bottom:1px solid var(--line);flex:none}
+#evhGuide h2{margin:0;font-size:18px}
+#evhGuide .gh button{min-width:44px;min-height:44px;border-radius:22px}
+#evhGdBody{overflow:auto;padding:4px 14px 14px;font-size:14px;line-height:1.45}
+#evhGdBody h3{margin:14px 0 2px;font-size:16px}
+#evhGdBody h4{margin:8px 0 4px;font-size:13.5px;color:var(--mute)}
+#evhGdBody p{margin:0 0 6px}
+#evhGdBody .ex{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:8px;margin:4px 0 6px}
+#evhGdBody figure{margin:0}
+#evhGdBody figure img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:8px;background:#000;display:block}
+#evhGdBody figcaption{font-size:12px;line-height:1.3;color:var(--mute);margin-top:3px}
+#evhGdBody .guide{white-space:pre-wrap;border-top:1px solid var(--line);margin-top:12px;padding-top:8px}
 #oAttrs .evhBtns button.on{color:#fff;background:linear-gradient(90deg,var(--hot),var(--hot2));border-color:transparent}
 #oAttrs .evhEmpty{text-align:center;font-weight:700;font-size:16px;margin:0}
 #evhSplash,#evhReveal{position:absolute;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;padding:16px;background:color-mix(in srgb,var(--bg) 70%,transparent);backdrop-filter:blur(3px)}
@@ -371,7 +396,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #evhGo,#evhRvYes,#evhRvKeep{color:#fff;border-color:transparent;background:linear-gradient(90deg,var(--hot),var(--hot2))}
 #evhReveal h2{margin:0 0 8px;font-size:22px}
 #evhReveal p{font-size:15px;line-height:1.45;margin:0}
-#evhReveal .row{display:flex;gap:10px;justify-content:center}
+#evhReveal .row,#evhSplash .row{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
 #evhReveal .row[hidden]{display:none}
 #oList{position:fixed;left:0;top:0;bottom:0;z-index:30;width:min(300px,85vw);display:none;flex-direction:column;background:var(--panel);border-right:1px solid var(--line);box-shadow:0 0 24px rgba(0,0,0,.45)}
 #oList.show{display:flex}
@@ -569,7 +594,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
     <button id="oInfoBtn" class="badge" type="button" title="The set's instructions (?)" aria-controls="oInstr" aria-expanded="false" hidden>ⓘ<span class="oInfoTx"> Instructions</span></button>
     <button id="oWho" class="badge" title="Your reviewer name">👤</button>
   </div>
-  <div id="oEvh" hidden><div class="logo" id="oEvhLogo" title="Tap to switch app"><b id="oEvhName"></b><small id="oEvhTag"></small></div><span id="oEvhNick"></span></div>
+  <div id="oEvh" hidden><div class="logo" id="oEvhLogo" title="Tap to switch app"><b id="oEvhName"></b><small id="oEvhTag"></small></div><span id="oEvhNick"></span><button id="evhHelp" type="button" title="How to judge (?)" aria-controls="evhGuide" hidden>?</button></div>
   <div id="oInstr" role="dialog" aria-labelledby="oInstrH" hidden><div class="oih"><h2 id="oInstrH">Instructions</h2><button id="oInstrX" type="button" title="Close (Esc or ?)">✕</button></div><div id="oInstrTx"></div></div>
   <div id="oBar" role="progressbar" aria-label="items done by you" aria-valuemin="0"><i></i></div>
   <div id="oBlind" role="note" hidden>Blind set · measured sizes and gaps are hidden until it's closed</div>
@@ -584,13 +609,16 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
   <div id="oSaveErr" role="alert" hidden></div>
   <div id="evhSplash" role="dialog" aria-modal="true" aria-labelledby="evhSpH" hidden><div class="box">
     <h1 id="evhSpH">eVHarmony</h1><p class="tag">Find your perfect membrane match</p>
-    <p>Swipe right on real vesicles, left on everything else, up when it's complicated.</p>
+    <p id="evhSpTx">Swipe right on real vesicles, left on everything else, up when it's complicated.</p>
     <label for="evhNick">Your dating name (just for show)</label><input id="evhNick" type="text" maxlength="24" autocomplete="off" placeholder="e.g. BilayerBabe">
-    <button id="evhGo" type="button">Create your profile</button></div></div>
+    <div class="row"><button id="evhHow" type="button" hidden>How to judge</button><button id="evhGo" type="button">Create your profile</button></div></div></div>
   <div id="evhReveal" role="dialog" aria-modal="true" aria-labelledby="evhRvH" hidden><div class="box">
     <h2 id="evhRvH">One more thing… 💘</h2><p id="evhRvTx"></p>
     <div class="row" id="evhRvAsk"><button id="evhRvYes" type="button">Yes</button><button id="evhRvNo" type="button">No</button></div>
     <div class="row" id="evhRvDone" hidden><button id="evhRvKeep" type="button">Keep swiping</button></div></div></div>
+  <div id="evhGuide" role="dialog" aria-modal="true" aria-labelledby="evhGdH" hidden><div class="box">
+    <div class="gh"><h2 id="evhGdH">How to judge</h2><button id="evhGdX" type="button" title="Close (Esc or ?)">✕</button></div>
+    <div id="evhGdBody"></div></div></div>
 </section>
 <div id="imgDlg" role="dialog" aria-modal="true" aria-labelledby="imgDlgTitle" hidden>
   <div class="box">
@@ -3325,7 +3353,15 @@ function makeObjectView() {
     maxZoom: 1.25};  // css px per base-image px: <= 2.5 device px per native px at DPR 2 (1440 px uploads, no 2x / crops)
   const evhMatch = evh ? attrs.find(a => a.id === "match" && a.kind === "choice") || null : null;
   const evhConsent = evh ? attrs.find(a => a.id === "consent" && a.kind === "choice") || null : null;
-  const eh = {meta: null, busy: false, g: null, toastT: null};
+  // r17c (tools/evh/ls_evh_match_v2.json): a 4th answer "dense" (swipe down, d), the optional "kind" chips after a
+  // Match, and the "How to judge" sheet (D.examples + D.instructions). A v1 set (no dense option, no examples) is unchanged.
+  const evhDense = !!(evhMatch && evhMatch.options.some(o => o.v === "dense"));
+  const evhKind = evh ? attrs.find(a => a.id === "kind" && a.kind === "choice") || null : null;
+  const EX_CATS = ["single", "ml", "mv", "inner", "nope", "dense", "unsure"];
+  const evhEx = evh && Array.isArray(D.examples) ? D.examples.filter(x => x && typeof x.src === "string" && /^images\/ex_[A-Za-z0-9_-]{1,40}\.jpg$/.test(x.src)
+    && EX_CATS.includes(x.cat)).slice(0, 60) : [];
+  const evhGuideOn = evh && (evhDense || evhEx.length > 0);
+  const eh = {meta: null, busy: false, g: null, toastT: null, kindFor: null};
   if (st.closed) closedOn = true;  // D.closed (object_set close_set writes it): closed before any answer is tried
   const imOf = it => byStem.get(String(it.image));
   const can = () => capOn("a") && server && !st.closed && !VIEW_ONLY;  // r17b: view only answers nothing
@@ -3712,12 +3748,12 @@ function makeObjectView() {
     }
     if (instr) {  // the set's instructions (D.instructions): the button, and the panel once per browser and text
       $("oInstrTx").textContent = instr;
-      $("oInfoBtn").hidden = false;
+      $("oInfoBtn").hidden = evhGuideOn;  // r17c: eVHarmony v2 shows the text in its "How to judge" sheet instead
       $("oInfoBtn").onclick = () => instrOpen();
       $("oInstrX").onclick = () => instrOpen(false);
       $("oKeys").textContent += " · ? = instructions";
       let seen = null; try { seen = localStorage.getItem(INSTR_KEY); } catch (e) {}
-      if (seen !== instrSig()) { instrOpen(true); try { localStorage.setItem(INSTR_KEY, instrSig()); } catch (e) {} }
+      if (seen !== instrSig() && !evhGuideOn) { instrOpen(true); try { localStorage.setItem(INSTR_KEY, instrSig()); } catch (e) {} }
     }
     if (evh) evhStart();
     render(); connectObjects();
@@ -3774,9 +3810,13 @@ function makeObjectView() {
   }
   function evhRows(it, on, box) {
     if (!evhMatch) { box.append(el("p", null, "This set has no match question.")); return; }
+    if (eh.kindFor && eh.kindFor !== it) eh.kindFor = null;
+    if (eh.kindFor === it && evhKind) return evhKindRow(it, on, box);
     if (nDone() >= items.length) box.append(el("p", "evhEmpty", brand().empty));
-    const row = el("div", "evhBtns"), cur = mineOf(it, evhMatch);
-    for (const [v, cls, lbl] of [["no", "nope", "✕ Nope"], ["unsure", "meh", "🤷 It's complicated"], ["yes", "like", "♥ Match"]]) {
+    const row = el("div", "evhBtns" + (evhDense ? " four" : "")), cur = mineOf(it, evhMatch);
+    const btns = evhDense ? [["no", "nope", "✕ Nope"], ["yes", "like", "♥ Match"], ["unsure", "meh", "🤷 It's complicated"], ["dense", "dense", "● Small & dense"]]
+      : [["no", "nope", "✕ Nope"], ["unsure", "meh", "🤷 It's complicated"], ["yes", "like", "♥ Match"]];
+    for (const [v, cls, lbl] of btns) {
       const o = evhMatch.options.find(x => x.v === v), b = el("button", cls + (cur === v ? " on" : ""), lbl);
       b.type = "button"; b.dataset.v = v; b.disabled = !on || !o; b.title = o ? o.label : "";
       b.setAttribute("aria-pressed", cur === v ? "true" : "false");
@@ -3785,23 +3825,49 @@ function makeObjectView() {
     box.append(row);
     if (evhMatch.help) box.append(el("p", "oHelp", evhMatch.help));
   }
+  function evhKindRow(it, on, box) {  // r17c: "What is it?" after a Match; one tap (or skip) and the next card comes
+    const w = el("div", "evhKind"), chips = el("div", "chips"), cur = mineOf(it, evhKind);
+    w.append(el("h3", null, evhKind.label || "What is it?"));
+    evhKind.options.forEach((o, n) => {
+      const b = el("button", cur === o.v ? "on" : "", o.label); b.type = "button"; b.dataset.v = o.v; b.disabled = !on;
+      b.title = `${o.label} (${n + 1})`; b.onclick = () => evhKindPick(o.v); chips.append(b);
+    });
+    const sk = el("button", "skip", "skip →"); sk.type = "button"; sk.dataset.v = ""; sk.title = "Can't tell: skip (0)";
+    sk.onclick = () => evhKindPick(null); chips.append(sk);
+    w.append(chips); box.append(w);
+  }
+  function evhKindPick(v) {  // v null = skip (unanswered)
+    const it = eh.kindFor; eh.kindFor = null;
+    if (!it || items[st.pos] !== it) return render();
+    if (v != null && evhKind && can() && mineOf(it, evhKind) !== v) {
+      const im = imOf(it), e = ensureEdit(im), k = okey(it.obj, evhKind), prev = e.dec[k] ? clone(e.dec[k]) : null;
+      setDec(e, k, v); st.undo.push({file: im.file, key: k, prev, t: e.dec[k].t, pos: st.pos, node: 0}); touch(im.file);
+    }
+    evhNext(it);
+  }
+  function evhNext(it) {  // after an answer: the next open card (or stay when all are done), then the reveal check
+    if (items[st.pos] !== it) return render();
+    if (items.some(x => !isDone(x))) nextOpen(); else render();
+    evhOffer();
+  }
   function evhToast(v) {
     const m = $("oMatch"), b = brand();
-    m.textContent = ""; m.append(el("b", null, v === "yes" ? b.match : v === "no" ? (b.nope || "Nope") : (b.maybe || "It's complicated")));
+    m.textContent = ""; m.append(el("b", null, v === "yes" ? b.match : v === "no" ? (b.nope || "Nope") : v === "dense" ? (b.dense || "Small & dense 🫐") : (b.maybe || "It's complicated")));
     m.hidden = false; m.classList.remove("pop"); void m.offsetWidth; m.classList.add("pop");
     clearTimeout(eh.toastT); eh.toastT = setTimeout(() => { m.hidden = true; }, 900);
   }
   function evhStamp(v, op) {
     const s = $("oStamp");
-    s.className = v === "yes" ? "" : v; s.textContent = v === "yes" ? "MATCH" : v === "no" ? "NOPE" : "IT'S COMPLICATED";
+    s.className = v === "yes" ? "" : v; s.textContent = v === "yes" ? "MATCH" : v === "no" ? "NOPE" : v === "dense" ? "SMALL & DENSE" : "IT'S COMPLICATED";
     s.style.opacity = op;
   }
   function evhCardReset(animate) { const c = $("oCard"); c.style.transition = animate ? "transform .2s" : ""; c.style.transform = ""; $("oStamp").style.opacity = 0; }
   function evhAnswer(v) {  // one answer = one saved a:<obj>:match@<me>; then the card flies off and the next open one comes
     const it = items[st.pos];
     if (!it || !evhMatch || eh.busy || !evhMatch.options.some(o => o.v === v)) return;
-    if (!can()) { evhCardReset(true); if (VIEW_ONLY && v !== "unsure") return go(st.pos + (v === "yes" ? 1 : -1)); return render(); }  // r17b view only: right / left browse, nothing saved
+    if (!can()) { evhCardReset(true); if (VIEW_ONLY && (v === "yes" || v === "no")) return go(st.pos + (v === "yes" ? 1 : -1)); return render(); }  // r17b view only: right / left browse, nothing saved
     if (!needWho(() => evhAnswer(v))) { evhCardReset(true); return; }
+    const fromKind = eh.kindFor === it; eh.kindFor = null;  // a swipe while the "What is it?" chips are up: skip them
     const im = imOf(it), e = ensureEdit(im), k = okey(it.obj, evhMatch), prev = e.dec[k] ? clone(e.dec[k]) : null;
     if (mineOf(it, evhMatch) !== v) {
       setDec(e, k, v);
@@ -3810,15 +3876,13 @@ function makeObjectView() {
       touch(im.file);
     }
     evhToast(v); evhStamp(v, 1);
-    const c = $("oCard"), w = c.getBoundingClientRect().width, [dx, dy] = v === "yes" ? [w * 1.5, 0] : v === "no" ? [-w * 1.5, 0] : [0, -1200];
+    if (v === "yes" && evhKind && !fromKind) {  // r17c: the card stays, the "What is it?" chips replace the buttons
+      eh.kindFor = it; evhCardReset(true); return render();
+    }
+    const c = $("oCard"), w = c.getBoundingClientRect().width, [dx, dy] = v === "yes" ? [w * 1.5, 0] : v === "no" ? [-w * 1.5, 0] : v === "dense" ? [0, 1200] : [0, -1200];
     eh.busy = true;
     c.style.transition = "transform .24s ease-in"; c.style.transform = `translate(${dx}px, ${dy}px) rotate(${dx / 25}deg)`;
-    setTimeout(() => {
-      evhCardReset(false); eh.busy = false;
-      if (items[st.pos] !== it) return render();
-      if (items.some(x => !isDone(x))) nextOpen(); else render();
-      evhOffer();
-    }, 240);
+    setTimeout(() => { evhCardReset(false); eh.busy = false; evhNext(it); }, 240);
   }
   const evhConsentV = () => evhConsent && items.length && me() ? mineOf(items[0], evhConsent) : null;
   function evhOffer() {  // the reveal: from the 10th answer on, while this reviewer hasn't answered it
@@ -3844,19 +3908,64 @@ function makeObjectView() {
     $("evhSplash").hidden = true; evhBrand(); evhOffer();
   }
   function evhKey(ev) {
+    if (!$("evhGuide").hidden) { if (ev.key === "Escape" || ev.key === "?") { ev.preventDefault(); evhGuide(false); } return; }
     if (!$("evhSplash").hidden) { if (ev.key === "Enter" || ev.key === "Escape") { ev.preventDefault(); evhSplashDone(); } return; }
     if (!$("evhReveal").hidden) { if (ev.key === "Escape") $("evhReveal").hidden = true; return; }  // later: offered again after the next answer
     if (ev.target.tagName === "INPUT" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "SELECT") return;
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
     const k = ev.key;
+    if (eh.kindFor && eh.kindFor === items[st.pos] && evhKind) {  // the "What is it?" chips: 1-4 pick, 0 / Enter / Esc skip
+      const n = "1234".indexOf(k);
+      if (n >= 0 && evhKind.options[n]) { ev.preventDefault(); return evhKindPick(evhKind.options[n].v); }
+      if (k === "0" || k === "Enter" || k === "Escape") { ev.preventDefault(); return evhKindPick(null); }
+      if (k === "Backspace") { ev.preventDefault(); eh.kindFor = null; return undo(); }
+    }
     const v = k === "ArrowRight" || k === "y" || k === "Y" ? "yes" : k === "ArrowLeft" || k === "n" || k === "N" ? "no"
-      : k === "ArrowUp" || k === "u" || k === "U" ? "unsure" : null;
+      : k === "ArrowUp" || k === "u" || k === "U" ? "unsure" : evhDense && (k === "ArrowDown" || k === "d" || k === "D") ? "dense" : null;
     if (v) { ev.preventDefault(); return evhAnswer(v); }
     if (k === "Enter") { ev.preventDefault(); nextOpen(); }
     else if (k === "Backspace") { ev.preventDefault(); undo(); }
     else if (k === "i" || k === "I") { st.outlines = !st.outlines; render(); }
     else if (k === "Escape") { if (instr) instrOpen(false); }
+    else if (k === "?" && evhGuideOn) { ev.preventDefault(); evhGuide(true); }
     else if (k === "?" && instr) { ev.preventDefault(); instrOpen(); }
+  }
+  // r17c: the "How to judge" sheet: one section per answer with the set's example crops (D.examples [{src, cat,
+  // caption}], images/ex_*.jpg, tools/evh_examples.py) and the set's instructions (D.instructions) below. Text only
+  // through textContent; a src must be images/ex_<id>.jpg.
+  const GUIDE = [
+    ["Match →", "A closed, round-ish object bounded by a membrane: a thin dark ring (the bilayer), even if faint or partial. Overlapping vesicles count.",
+      [["single", "Single"], ["ml", "Multilayer"], ["mv", "Has vesicles inside"], ["inner", "Inside another"]]],
+    ["Nope ←", "No membrane edge: ice, carbon or grid edge, grainy noise, aggregates, solid blobs, or an outline on empty background.", [["nope", ""]]],
+    ["Small & dense ↓", "Small, uniformly dark particles without a clear two-line bilayer (possibly lipoproteins).", [["dense", ""]]],
+    ["It's complicated ↑", "Too faint or noisy to tell, or cut off at the edge. Unsure is useful; don't guess.", [["unsure", ""]]]];
+  function evhGuideBuild() {
+    const body = $("evhGdBody"); body.textContent = "";
+    for (const [h, tx, cats] of GUIDE) {
+      if (h.startsWith("Small") && !evhDense) continue;
+      const sec = el("section"); sec.dataset.sec = cats[0][0] === "single" ? "match" : cats[0][0];
+      sec.append(el("h3", null, h), el("p", null, tx));
+      for (const [cat, sub] of cats) {
+        const xs = evhEx.filter(x => x.cat === cat);
+        if (!xs.length) continue;
+        if (sub) sec.append(el("h4", null, sub));
+        const g = el("div", "ex");
+        for (const x of xs) {
+          const f = el("figure"), img = el("img"), cap = typeof x.caption === "string" ? x.caption.slice(0, 160) : "";
+          img.loading = "lazy"; img.alt = cap; img.src = x.src; f.dataset.cat = cat;
+          f.append(img); if (cap) f.append(el("figcaption", null, cap)); g.append(f);
+        }
+        sec.append(g);
+      }
+      body.append(sec);
+    }
+    if (instr) { body.append(el("h3", null, "Guidelines")); body.append(el("p", "guide", instr)); }
+  }
+  function evhGuide(on) {
+    const g = $("evhGuide");
+    if (on && !g.dataset.built) { evhGuideBuild(); g.dataset.built = "1"; }
+    g.hidden = !on; $("evhHelp").setAttribute("aria-expanded", on ? "true" : "false");
+    if (on) $("evhGdX").focus();
   }
   function evhStart() {
     $("obj").classList.add("evh"); $("oEvh").hidden = false;
@@ -3866,6 +3975,14 @@ function makeObjectView() {
     $("evhGo").onclick = evhSplashDone;
     $("evhRvYes").onclick = () => evhConsentSet("yes"); $("evhRvNo").onclick = () => evhConsentSet("no");
     $("evhRvKeep").onclick = () => { $("evhReveal").hidden = true; };
+    if (evhGuideOn) {  // r17c: the "How to judge" sheet from the splash and the ? button
+      $("evhHelp").hidden = false; $("evhHow").hidden = false;
+      $("evhHelp").onclick = () => evhGuide(true); $("evhHow").onclick = () => evhGuide(true); $("evhGdX").onclick = () => evhGuide(false);
+    }
+    if (evhDense) {
+      $("evhSpTx").textContent = "Swipe right on real vesicles, left on everything else, down on small dense particles, up when it's complicated.";
+      $("oKeys").textContent = "→ match · ← nope · ↓ small & dense · ↑ it's complicated · Backspace = undo · i = outline" + (evhGuideOn ? " · ? = how to judge" : "");
+    }
     try { window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", evhBrand); } catch (e) {}
     let seen = null; try { seen = localStorage.getItem(EVH.splash); } catch (e) {}
     if (seen !== "1") { $("evhSplash").hidden = false; $("evhNick").value = evhNick(); }
@@ -3883,12 +4000,13 @@ function makeObjectView() {
       if (!g.drag) return;
       if (g.pan) { st.px = g.px + dx; st.py = g.py + dy; draw(); return; }
       card.style.transition = ""; card.style.transform = `translate(${dx}px, ${dy}px) rotate(${dx / 25}deg)`;
-      evhStamp(dy < -60 && Math.abs(dy) > Math.abs(dx) ? "unsure" : dx > 0 ? "yes" : "no", Math.min(1, Math.max(Math.abs(dx), -dy) / 100));
+      const down = evhDense && dy > 60 && dy > Math.abs(dx);  // r17c: swipe down = Small & dense (v2 only)
+      evhStamp(dy < -60 && Math.abs(dy) > Math.abs(dx) ? "unsure" : down ? "dense" : dx > 0 ? "yes" : "no", Math.min(1, Math.max(Math.abs(dx), evhDense ? Math.abs(dy) : -dy) / 100));
     });
     cv.addEventListener("pointerup", e => {
       const g = eh.g; eh.g = null; if (!g || !g.drag || g.pan) return;
       const dx = e.clientX - g.x, dy = e.clientY - g.y;
-      const v = dy < -90 && Math.abs(dy) > Math.abs(dx) ? "unsure" : dx > 90 ? "yes" : dx < -90 ? "no" : null;
+      const v = dy < -90 && Math.abs(dy) > Math.abs(dx) ? "unsure" : evhDense && dy > 90 && dy > Math.abs(dx) ? "dense" : dx > 90 ? "yes" : dx < -90 ? "no" : null;
       if (v) evhAnswer(v); else evhCardReset(true);
     });
     cv.addEventListener("pointercancel", () => { eh.g = null; evhCardReset(true); });
@@ -3906,7 +4024,8 @@ function makeObjectView() {
     mine: items[st.pos] ? Object.fromEntries(attrs.map(a => [a.id, mineOf(items[st.pos], a)])) : {}, undo: st.undo.length,
     ...(tree ? {mode: "tree", tree: treeState()} : {}),
     ...(evh ? {app: "evharmony", evh: {consent: evhConsentV(), reveal: !$("evhReveal").hidden, splash: !$("evhSplash").hidden,
-      size: items[st.pos] ? evhSize(items[st.pos]) : null, nick: evhNick(), pan: [st.px, st.py], zoom: st.zs || null, bio: $("oBio").textContent}} : {})})};
+      size: items[st.pos] ? evhSize(items[st.pos]) : null, nick: evhNick(), pan: [st.px, st.py], zoom: st.zs || null, bio: $("oBio").textContent,
+      dense: evhDense, kindFor: eh.kindFor ? eh.kindFor.id : null, guide: !$("evhGuide").hidden, guideOn: evhGuideOn, examples: evhEx.length}} : {})})};
 }
 if (D.kind === "objects") OBJ = makeObjectView();
 // ===================================================== end OBJECT SET CARD =====================================================
