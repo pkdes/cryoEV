@@ -230,20 +230,32 @@ def package_key(pkg: Path) -> str:
         return ""
 
 
-def identity_script(who: str) -> bytes:
-    """The inline script that tells the review tool who the (portal) reviewer is; <, > and & escaped for HTML."""
-    js = json.dumps({"who": who, "locked": True}).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+def identity_script(who: str, answer=None) -> bytes:
+    """The inline script that tells the review tool who the (portal) reviewer is; <, > and & escaped for HTML.
+    r17b: answer (True / False, only for an object set: may_answer) is added as "answer"; None leaves it out."""
+    js = json.dumps({"who": who, "locked": True, **({} if answer is None else {"answer": bool(answer)})}).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
     return f"<script>window.REVIEW_IDENTITY = {js};</script>\n".encode()
 
 
-def inject_identity(page: bytes, who: str) -> bytes:
+def may_answer(pkg: Path, who: str, people) -> "bool | None":
+    """r17b: whether `who` may answer this object set's attributes, by review_server's PUT rule (in review_package.json
+    reviewers when that list is non-empty, else on the people roster); None for a package without a schema (no
+    attributes: the page behaves as before). Read per page load, as review_server reads reviewers per request."""
+    if rs.package_schema(pkg) is None:
+        return None
+    revs = rs.package_reviewers(pkg)
+    roster = {p.get("id") for p in people or () if isinstance(p, dict) and isinstance(p.get("id"), str)}
+    return who in revs if revs else who in roster
+
+
+def inject_identity(page: bytes, who: str, answer=None) -> bytes:
     """index.html with identity_script(who) before its first <script> (so before data.js and the tool), else before
     </head>, else at the start."""
     low = page.lower()
     at = low.find(b"<script")
     if at < 0:
         at = max(low.find(b"</head>"), 0)
-    return page[:at] + identity_script(who) + page[at:]
+    return page[:at] + identity_script(who, answer) + page[at:]
 
 
 def stamp_identity(edit, who: str):
@@ -428,7 +440,8 @@ class Dispatch(BaseHTTPRequestHandler):
         if self.reviewer and url.path in ("/", "/index.html"):
             path = TOOL_PAGE if TOOL_PAGE.is_file() else self.pkg_dir / "index.html"  # the current tool (docstring)
             if path.is_file():
-                return self._send(200, inject_identity(path.read_bytes(), self.reviewer), "text/html; charset=utf-8")
+                ans = may_answer(self.pkg_dir, self.reviewer, self.packages.people)  # r17b: view only when False
+                return self._send(200, inject_identity(path.read_bytes(), self.reviewer, ans), "text/html; charset=utf-8")
         return super().do_GET()
 
     def do_HEAD(self):

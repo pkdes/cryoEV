@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-17.1";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-17.2";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const h = document.querySelector("header"), inPortal = /^\/review\//.test(location.pathname), v = document.createElement("span");
   v.id = "pageVer"; v.style.cssText = "font-size:11px;color:var(--mute);white-space:nowrap"; v.textContent = "Review page " + PAGE_VERSION;
@@ -285,7 +285,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #grpErr{color:var(--warn)}
 /* ===== OBJECT SET CARD (round 14, D.kind "objects"): its own view (#obj); no other view uses these rules ===== */
 #obj{position:fixed;inset:0;z-index:15;display:flex;flex-direction:column;background:var(--bg);overflow:hidden;padding:env(safe-area-inset-top,0px) 0 env(safe-area-inset-bottom,0px)}
-#obj[hidden],#oBlind[hidden],#oKeys[hidden],#oOff[hidden]{display:none}
+#obj[hidden],#oBlind[hidden],#oViewOnly[hidden],#oKeys[hidden],#oOff[hidden]{display:none}
 #obj .otbar{display:flex;align-items:center;gap:8px;padding:8px 12px 4px}
 #obj .otbar .round{width:38px;height:38px;font-size:17px;flex:none}
 #oPos{font-weight:700;font-size:15px;font-variant-numeric:tabular-nums;white-space:nowrap}
@@ -305,6 +305,8 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #oBar>i{display:block;height:100%;width:0;background:var(--acc)}
 #oBlind{margin:0 12px 6px;padding:6px 10px;border-radius:8px;background:#fef3c7;color:#78350f;border:1px solid #f59e0b;font-weight:600;font-size:12.5px;flex:none}
 @media (prefers-color-scheme:dark){#oBlind{background:#3b2a06;color:#fcd34d}}
+#oViewOnly{margin:0 12px 6px;padding:8px 12px;border-radius:8px;background:#e0f2fe;color:#0c4a6e;border:1px solid #0284c7;font-weight:700;font-size:13.5px;flex:none;text-align:center}
+@media (prefers-color-scheme:dark){#oViewOnly{background:#082f49;color:#7dd3fc}}
 #oMain{flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;overflow:auto;padding:0 12px 10px}
 #oCard{position:relative;flex:none;height:min(48vh,420px);border-radius:16px;overflow:hidden;background:#000;box-shadow:0 6px 24px rgba(0,0,0,.35)}
 #oCard canvas{display:block;width:100%;height:100%}
@@ -326,6 +328,10 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #oNext.on{background:var(--accOn);border-color:var(--accOnLine);color:#fff}
 #oSaved{flex:1;text-align:center;font-weight:600;color:var(--mute)}
 #oSaved[data-state="saved"]{color:#16a34a}
+#oSaved[data-state="error"]{color:#dc2626}
+/* r17b: the not-saved banner (eVHarmony hides the sync chip): fixed, above the splash / reveal */
+#oSaveErr{position:fixed;left:8px;right:8px;top:8px;z-index:60;margin:0 auto;max-width:560px;padding:10px 14px;border-radius:10px;background:#b91c1c;color:#fff;font-size:14px;line-height:1.4;font-weight:600;box-shadow:0 6px 24px rgba(0,0,0,.35)}
+#oSaveErr[hidden]{display:none}
 #oKeys{text-align:center;font-size:11.5px;color:var(--mute);padding:0 12px 8px;background:var(--panel);flex:none}
 @media (hover:none) and (pointer:coarse){#oKeys{display:none!important}}
 /* round 17 eVHarmony (D.app "evharmony", object sets only): the joke skin; every rule is under #obj.evh or an evh id */
@@ -567,6 +573,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
   <div id="oInstr" role="dialog" aria-labelledby="oInstrH" hidden><div class="oih"><h2 id="oInstrH">Instructions</h2><button id="oInstrX" type="button" title="Close (Esc or ?)">✕</button></div><div id="oInstrTx"></div></div>
   <div id="oBar" role="progressbar" aria-label="items done by you" aria-valuemin="0"><i></i></div>
   <div id="oBlind" role="note" hidden>Blind set · measured sizes and gaps are hidden until it's closed</div>
+  <div id="oViewOnly" role="note" hidden>View only: you're not a reviewer of this set. You can look through the cards, but nothing you pick is saved.</div>
   <div id="oMain">
     <div id="oCard"><canvas id="ocv"></canvas><button id="oOutl" title="Show / hide the outline (i)">Outlines on · i</button><div id="oStamp"></div><div id="oBio" hidden></div></div>
     <div id="oAttrs"></div>
@@ -574,6 +581,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
   <div id="oFoot"><button id="oPrev" title="Previous item (←)">← back</button><span id="oSaved" role="status"></span><button id="oNext" title="Next item (→)">next →</button></div>
   <div id="oKeys">← → move · Enter = next unlabelled · Backspace = undo · i = outline on/off</div>
   <div id="oMatch" hidden></div>
+  <div id="oSaveErr" role="alert" hidden></div>
   <div id="evhSplash" role="dialog" aria-modal="true" aria-labelledby="evhSpH" hidden><div class="box">
     <h1 id="evhSpH">eVHarmony</h1><p class="tag">Find your perfect membrane match</p>
     <p>Swipe right on real vesicles, left on everything else, up when it's complicated.</p>
@@ -619,7 +627,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
   <div class="vcRow"><label for="vcB">Brightness</label><input type="range" id="vcB" min="-100" max="100" step="1" value="0"><output id="vcBo">0</output></div>
   <div class="vcRow"><label for="vcC">Contrast</label><input type="range" id="vcC" min="-100" max="100" step="1" value="0"><output id="vcCo">0</output></div>
   <div class="vcRow" id="vcGRow"><label for="vcG">Gamma</label><input type="range" id="vcG" min="0.3" max="3" step="0.05" value="1"><output id="vcGo">1.00</output></div>
-  <div class="vcRow" id="vcSRow" title="Soften the grain: a Gaussian blur, in full-resolution pixels (0 = off)"><label for="vcS">Smooth</label><input type="range" id="vcS" min="0" max="3" step="0.25" value="0"><output id="vcSo">off</output></div>
+  <div class="vcRow" id="vcSRow" title="Soften the grain: a Gaussian blur, in the image's finest pixels (0 = off)"><label for="vcS">Smooth</label><input type="range" id="vcS" min="0" max="3" step="0.25" value="0"><output id="vcSo">off</output></div>
   <div class="vcBtns"><button id="vcAuto" type="button" aria-pressed="false" title="Stretch the darkest 0.5 % to black and the brightest 0.5 % to white, over what is on screen">Auto</button><button id="vcReset" type="button" title="Back to the image as delivered">Reset</button></div>
   <p id="vcNote">Only how the image looks on this screen: your decisions and outlines are the same either way. Saved in this browser, for you.</p>
   <p id="vcTaint" hidden>This copy of the page can't read the image's pixels (opened from a file), so Auto and gamma are off here.</p>
@@ -730,6 +738,10 @@ const WHO_OK = v => /^[\p{L}\p{N}_ .\-]{1,40}$/u.test(v);
 // in this page. The reviewer is then that signed-in user: never asked, not changeable here, not stored (the server
 // stamps every save with it anyway). Without it (the real review, the sandbox, a file), everything is as before.
 const LOCKED_WHO = (r => r && r.locked === true && typeof r.who === "string" && WHO_OK(r.who) ? r.who : "")(window.REVIEW_IDENTITY);
+// r17b: multi_review_server adds answer: false when that signed-in user may not answer this object set (not one of its
+// reviewers; review_server would refuse every answer with 403): the object card is then view only. No flag (an older
+// server, a file, a package without a schema): as before.
+const VIEW_ONLY = !!LOCKED_WHO && window.REVIEW_IDENTITY.answer === false;
 // R1 Fun mode: per viewer (localStorage, default on, so nothing changes for anyone who never touches it). Off =
 // body.plain: CSS hides every .fun element (the app names, the match pop-up, the bio quips, ♥) and shows its .nofun
 // stand-in. Display only: no decision, key or request depends on it.
@@ -1064,7 +1076,7 @@ function handles(rings) {  // the white vertex handles of the selection; selecte
 }
 // ---------- viewer contrast (r16a P1) and the 2x images (r16a stage 2): display only ----------
 // Brightness / contrast / gamma, Auto (a 0.5-99.5 % stretch over what is on screen: the Editor's view, a card's crop)
-// and Smooth (a Gaussian blur, its strength in full-resolution px: r16c), per reviewer in localStorage. vcDraw is the only way
+// and Smooth (a Gaussian blur, its strength in the image's finest px: r16c / r17b), per reviewer in localStorage. vcDraw is the only way
 // the four image draw sites (Editor, Quick check card, object card, tree card) draw the image. It applies a 256-entry
 // lookup table to a copy of the image (an offscreen canvas at the drawn image's natural size, at most 16 Mpx: the iOS
 // limit), cached per image and redone only when the settings, the image or Auto's levels change (never per frame),
@@ -1076,6 +1088,10 @@ function handles(rings) {  // the white vertex handles of the selection; selecte
 // r16c: Smooth is a strength, sigma in FULL-RESOLUTION pixels (the item crops, chi: 5760 px wide in the ML / MV set),
 // 0 = off. A drawn image with k source px per base (1440) px gets sigma x k / FULL_K source px: the crop sigma, the 2x
 // image sigma / 2, the base image sigma / 4, so the look matches across levels.
+// r17b: that / FULL_K only when the image or item HAS a finer level (data.js im.hi or items[].chi); a set whose base
+// images are the finest there is (e.g. 1440 px uploads) gets sigma = smooth base px (Smooth 2 = sigma 2 px), else
+// max Smooth 3 was 0.75 px there: invisible. vcSigma: the one rule (fine = a finer level exists).
+const vcSigma = (smooth, k, fine) => smooth > 0 ? smooth * (k || 1) / (fine ? FULL_K : 1) : 0;
 const VC_MAX_PX = 16e6, VC0 = {b: 0, c: 0, g: 1, auto: false, smooth: 0}, FULL_K = 4;
 let vc = {...VC0}, vcWho = null, vcTaint = false, vcLast = null;
 const vcCache = new Map();  // image -> {w, h, f, src, lum, cv, cx, out, key, sm, rk, lohi}: the 2 most recently drawn images
@@ -1159,9 +1175,10 @@ function vcStretch(e, r) {  // Auto: the 0.5 / 99.5 % levels of the image inside
   const lo = at(0.005), hi = at(0.995);
   return (e.lohi = hi > lo ? [lo, hi] : [0, 255]);
 }
-function vcDraw(c2, im, dx, dy, dw, dh, vw, vh, k) {  // draw image `im` at (dx, dy, dw, dh) on a view vw x vh (css px), as this viewer set it
-  // k: im's px per base image px (1 base, 2 the 2x image, ~4 a chi crop): Smooth's sigma in im's px is smooth x k / FULL_K
-  const sig = vc.smooth > 0 ? vc.smooth * (k || 1) / FULL_K : 0;
+function vcDraw(c2, im, dx, dy, dw, dh, vw, vh, k, fine) {  // draw image `im` at (dx, dy, dw, dh) on a view vw x vh (css px), as this viewer set it
+  // k: im's px per base image px (1 base, 2 the 2x image, ~4 a chi crop); fine: the image / item has a finer level
+  // (hi / chi). Smooth's sigma in im's px: smooth x k / FULL_K with a finer level, else smooth x k (r17b, vcSigma)
+  const sig = vcSigma(vc.smooth, k, fine);
   if (vcIdentity()) { c2.drawImage(im, dx, dy, dw, dh); return; }
   try {
     if (!vcTaint) {
@@ -1248,7 +1265,7 @@ function draw() {
   // rectangle (W, H and every pixel rule stay the base image's)
   const hi = hiOf(edHi, curImg(), view.s * (window.devicePixelRatio || 1) > 1, img), src = hi || img;
   if (src.naturalWidth !== edLevel) { edLevel = src.naturalWidth; renderInfo(); }  // nm/px follows the level drawn
-  vcDraw(ctx, src, view.ox, view.oy, W * view.s, H * view.s, r.width, r.height, src.naturalWidth / W);
+  vcDraw(ctx, src, view.ox, view.oy, W * view.s, H * view.s, r.width, r.height, src.naturalWidth / W, !!hiSrc(curImg()));
   const im = curImg(), flags = $("showFlags").checked;
   if ($("showPr").checked) {
     im.pr.forEach((p, k) => {  // a flag stays drawn until someone decides on the object
@@ -2662,7 +2679,7 @@ function triDraw() {
   if (tri.wt) { s *= tri.wt.k; ox = ox * tri.wt.k + tri.wt.tx; oy = oy * tri.wt.k + tri.wt.ty; }
   tctx.imageSmoothingEnabled = s < 2;
   const tsrc = hiOf(triHi, im, true, tri.img) || tri.img;
-  vcDraw(tctx, tsrc, ox, oy, Wi * s, Hi * s, box.width, box.height, tsrc.naturalWidth / Wi);  // r16a: the 2x image once loaded
+  vcDraw(tctx, tsrc, ox, oy, Wi * s, Hi * s, box.width, box.height, tsrc.naturalWidth / Wi, !!hiSrc(im));  // r16a: the 2x image once loaded
   const ring = rg => { tctx.beginPath(); for (let k = 0; k < rg.length; k += 2) { const X = rg[k] * Wi * s + ox, Y = rg[k+1] * Hi * s + oy; k ? tctx.lineTo(X, Y) : tctx.moveTo(X, Y); } tctx.closePath(); };
   const col = c.kind === "p" ? "#facc15" : "#e879f9", pad = 12, L = 10;
   const bx0 = x0 * Wi * s + ox - pad, by0 = y0 * Hi * s + oy - pad, bx1 = x1 * Wi * s + ox + pad, by1 = y1 * Hi * s + oy + pad;
@@ -3093,10 +3110,22 @@ function savedState() {  // side panel: "Saved ✓" once the server has this out
   el.textContent = !changed || !server ? "" : dirty.has(im.file) ? "Saving…" : "Saved ✓";
   el.dataset.state = !el.textContent ? "" : dirty.has(im.file) ? "pending" : "saved";
 }
+// r17b: why the last save failed ("" = it didn't): the server's {"error": ...} text (a 403: "not a reviewer"), or
+// "offline". Kept until a sync pass uploads everything, so a retry in flight never reads as saved.
+let syncErr = "";
+const syncFailing = () => !!syncErr && dirty.size > 0;
+function pendingCount() {  // [n, noun]: the answers (attribute decisions) waiting to upload, else the changed images
+  let n = 0; for (const f of dirty) n += pendingAttrs(f).length;
+  return n ? [n, n === 1 ? "answer" : "answers"] : [dirty.size, dirty.size === 1 ? "change" : "changes"];
+}
 function syncBadge(err) {
   const b = $("sync");
   if (!server) { b.textContent = "local only"; b.style.color = ""; $("sync2").textContent = b.textContent; return; }
-  b.textContent = err ? `offline · ${dirty.size} pending` : dirty.size ? `saving ${dirty.size}…` : "saved to lab PC";
+  if (err && !syncErr) syncErr = "offline";
+  if (!dirty.size) syncErr = "";
+  err = err || syncFailing();
+  b.textContent = err ? `${syncErr === "offline" ? "offline" : "not saved"} · ${dirty.size} pending` : dirty.size ? `saving ${dirty.size}…` : "saved to lab PC";
+  b.title = err && syncErr !== "offline" ? "The server said: " + syncErr : "";
   b.style.color = err ? "var(--warn)" : dirty.size ? "" : "#16a34a";
   $("sync2").textContent = b.textContent; $("sync2").style.color = b.style.color;
   savedState();
@@ -3138,7 +3167,7 @@ function chunkOf(rec) {
   out.dec = dec; return out;
 }
 async function sync() {
-  if (!server || syncing || closedOn) return; syncing = true; let err = false;
+  if (!server || syncing || closedOn) return; syncing = true; let err = false, why = "";
   try {
   const blank = new Set([...dirty].filter(f => blankOwn(f).length));
   if (blank.size && !me()) needWho(() => scheduleSync(100));
@@ -3152,10 +3181,12 @@ async function sync() {
       for (let round = 0, left = pendingAttrs(file).length; ; round++) {
       const body = left > ATTR_PUT_MAX ? chunkOf(edits[file]) : edits[file];
       const r = await tfetch("api/edits?f=" + encodeURIComponent(file), {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+      let j = null;
+      if (!r.ok) { try { j = await r.json(); } catch (e) {} }  // r17b: the server's {"error": ...}, shown when saving fails
       if (r.status === 409 && OBJ) {  // r15 (#80g): a closed set refuses answers with {"error": "set closed"}
-        let j = null; try { j = await r.json(); } catch (e) {}
         if (j && j.error === "set closed") { closedOn = true; OBJ.closed(); stop = true; break; }
       }  // any other 409 (e.g. the package open in another review server): the retry path below, as before r15
+      if (!r.ok) why = (j && typeof j.error === "string" && j.error.trim().slice(0, 200)) || (r.status === 403 ? "not a reviewer" : `error ${r.status}`);
       if (r.status === 400) { err = true; banner(`The server rejected the edits for ${file}. Export them and tell the lab.`); break; }
       if (!r.ok) { err = true; stop = true; break; }
       const merged = (await r.json()).edit;  // server merged our record with everyone else's
@@ -3168,9 +3199,10 @@ async function sync() {
       left = now;
       }
       if (stop) break;
-    } catch (e) { err = true; break; }
+    } catch (e) { err = true; why = "offline"; break; }
   }
   } finally { syncing = false; }
+  syncErr = err ? why || "offline" : "";  // a pass that uploaded everything it tried clears the failure
   persist(); syncBadge(err); renderList();
   if (err) scheduleSync(15000);
 }
@@ -3296,7 +3328,7 @@ function makeObjectView() {
   const eh = {meta: null, busy: false, g: null, toastT: null};
   if (st.closed) closedOn = true;  // D.closed (object_set close_set writes it): closed before any answer is tried
   const imOf = it => byStem.get(String(it.image));
-  const can = () => capOn("a") && server && !st.closed;
+  const can = () => capOn("a") && server && !st.closed && !VIEW_ONLY;  // r17b: view only answers nothing
   // A decision is keyed on an object of the item's image: the item's own object, or (tree cards) one node's object.
   const okey = (obj, a) => `a:${obj}:${a.id}@${me()}`;
   const mineAt = (it, obj, a) => { const d = me() ? decOf(imOf(it).file, okey(obj, a)) : null; return d && d.v != null && d.v !== "" ? d.v : null; };
@@ -3354,13 +3386,14 @@ function makeObjectView() {
   // visible part of the crop, Smooth at the crop's own scale). Outlines, W / H and every pixel rule stay on the base image.
   const oChi = {onready: () => draw()};
   const chiBox = it => { const c = it && it.chi_box; return Array.isArray(c) && c.length === 4 && c.every(v => typeof v === "number" && isFinite(v) && v >= 0 && v <= 1) && c[2] > c[0] && c[3] > c[1] ? c : null; };
+  const fineOf = (it, im) => !!(hiSrc(im) || (chiBox(it) && hiSrc({hi: it.chi})));  // r17b: a finer level exists for Smooth (vcSigma)
   function drawChi(it, Wi, Hi, s, ox, oy, b) {
     const box = chiBox(it); hiOf(oChi, {hi: box ? it.chi : null}, true, null);  // a new item (or none): the old crop is dropped
     const h = box && oChi.ready ? oChi.img : null;
     if (!h) return;
     const dw = (box[2] - box[0]) * Wi * s, dh = (box[3] - box[1]) * Hi * s;
     if (!(Math.abs((h.naturalWidth / h.naturalHeight) / (dw / dh) - 1) < 0.02)) return;  // not the box's shape: not drawn
-    vcDraw(cx, h, ox + box[0] * Wi * s, oy + box[1] * Hi * s, dw, dh, b.width, b.height, h.naturalWidth / ((box[2] - box[0]) * Wi));
+    vcDraw(cx, h, ox + box[0] * Wi * s, oy + box[1] * Hi * s, dw, dh, b.width, b.height, h.naturalWidth / ((box[2] - box[0]) * Wi), true);
   }
 
   function draw() {
@@ -3383,7 +3416,7 @@ function makeObjectView() {
     const s = Math.min(b.width / cw, b.height / ch, evh ? EVH.maxZoom : Infinity), ox = (b.width - cw * s) / 2 - x0 * Wi * s + st.px, oy = (b.height - ch * s) / 2 - y0 * Hi * s + st.py;
     if (evh) { st.zs = s; cx.imageSmoothingQuality = "high"; }  // r17: eVHarmony's zoom (css px per base px) and smooth scaling
     cx.imageSmoothingEnabled = true; const osrc = hiOf(oHi, im, true, st.img) || st.img;
-    vcDraw(cx, osrc, ox, oy, Wi * s, Hi * s, b.width, b.height, osrc.naturalWidth / Wi);
+    vcDraw(cx, osrc, ox, oy, Wi * s, Hi * s, b.width, b.height, osrc.naturalWidth / Wi, fineOf(it, im));
     drawChi(it, Wi, Hi, s, ox, oy, b);
     if (!st.outlines || !rings) return;
     const path = rg => { cx.beginPath(); for (let k = 0; k < rg.length; k += 2) { const X = rg[k] * Wi * s + ox, Y = rg[k + 1] * Hi * s + oy; k ? cx.lineTo(X, Y) : cx.moveTo(X, Y); } cx.closePath(); };
@@ -3416,7 +3449,7 @@ function makeObjectView() {
     const [x0, y0, x1, y1] = cropOf(it, im, root && root[0]), cw = (x1 - x0) * Wi, ch = (y1 - y0) * Hi;
     const s = Math.min(b.width / cw, b.height / ch), ox = (b.width - cw * s) / 2 - x0 * Wi * s, oy = (b.height - ch * s) / 2 - y0 * Hi * s;
     cx.imageSmoothingEnabled = true; const osrc = hiOf(oHi, im, true, st.img) || st.img;
-    vcDraw(cx, osrc, ox, oy, Wi * s, Hi * s, b.width, b.height, osrc.naturalWidth / Wi);
+    vcDraw(cx, osrc, ox, oy, Wi * s, Hi * s, b.width, b.height, osrc.naturalWidth / Wi, fineOf(it, im));
     drawChi(it, Wi, Hi, s, ox, oy, b);
     const P = (x, y) => [x * Wi * s + ox, y * Hi * s + oy];
     const path = rg => { cx.beginPath(); for (let k = 0; k < rg.length; k += 2) { const [X, Y] = P(rg[k], rg[k + 1]); k ? cx.lineTo(X, Y) : cx.moveTo(X, Y); } cx.closePath(); };
@@ -3551,10 +3584,15 @@ function makeObjectView() {
 
   function saved() {
     const it = items[st.pos], s = $("oSaved"); if (!s) return;
-    const f = it && imOf(it).file;
-    s.textContent = !server ? "Saved in this browser only" : f && dirty.has(f) ? "Saving…" : "Saved ✓";
-    s.dataset.state = !server ? "local" : f && dirty.has(f) ? "pending" : "saved";
-    $("oSync").textContent = $("sync").textContent; $("oSync").style.color = $("sync").style.color;
+    // r17b: "Saved ✓" only when the server has every answer of this set (nothing dirty), not just this item's image:
+    // a failing save (403, offline) reads "Not saved", and in eVHarmony (no sync chip) the #oSaveErr banner says why
+    const [n, noun] = pendingCount(), bad = server && syncFailing();
+    s.textContent = !server ? "Saved in this browser only" : bad ? `Not saved · ${n} ${noun} waiting` : dirty.size ? "Saving…" : "Saved ✓";
+    s.dataset.state = !server ? "local" : bad ? "error" : dirty.size ? "pending" : "saved";
+    $("oSync").textContent = $("sync").textContent; $("oSync").style.color = $("sync").style.color; $("oSync").title = $("sync").title;
+    const eb = $("oSaveErr");
+    eb.hidden = !(evh && bad);
+    eb.textContent = eb.hidden ? "" : `Your answers aren't being saved (the server said: ${syncErr}). ${n} ${noun} waiting. Keep this page open (it keeps retrying) or tell the person who sent you this link.`;
   }
   function renderList() {
     const box = $("oItems"); box.textContent = "";
@@ -3658,6 +3696,7 @@ function makeObjectView() {
     $("app").style.display = "none"; $("tri").hidden = true; $("obj").hidden = false;
     document.title = PKG_TITLE;
     $("oBlind").hidden = !blind || st.closed;   // a closed set is no longer blind to its maker; the banner would contradict it
+    $("oViewOnly").hidden = !VIEW_ONLY;
     let want = null; try { want = localStorage.getItem(POS_KEY); } catch (e) {}
     const at = want ? items.findIndex(it => it.id === want) : -1;
     st.pos = at >= 0 ? at : Math.max(0, items.findIndex(it => !isDone(it)));
@@ -3761,7 +3800,7 @@ function makeObjectView() {
   function evhAnswer(v) {  // one answer = one saved a:<obj>:match@<me>; then the card flies off and the next open one comes
     const it = items[st.pos];
     if (!it || !evhMatch || eh.busy || !evhMatch.options.some(o => o.v === v)) return;
-    if (!can()) { evhCardReset(true); return render(); }
+    if (!can()) { evhCardReset(true); if (VIEW_ONLY && v !== "unsure") return go(st.pos + (v === "yes" ? 1 : -1)); return render(); }  // r17b view only: right / left browse, nothing saved
     if (!needWho(() => evhAnswer(v))) { evhCardReset(true); return; }
     const im = imOf(it), e = ensureEdit(im), k = okey(it.obj, evhMatch), prev = e.dec[k] ? clone(e.dec[k]) : null;
     if (mineOf(it, evhMatch) !== v) {
@@ -3861,7 +3900,7 @@ function makeObjectView() {
       attrs: attrsFor(nd).map(a => a.id), mine: Object.fromEntries(attrsFor(nd).map(a => [a.id, mineAt(it, nd.obj, a)]))})),
       badges: st.badges.map(b => ({...b}))};
   };
-  return {start, render, key, saved, go, closed, redraw: draw, state: () => ({hi: oHi.ready ? oHi.src : null, chi: oChi.ready && chiBox(items[st.pos]) && oChi.src === items[st.pos].chi ? oChi.src : null, pos: st.pos, n: items.length, done: nDone(), outlines: st.outlines, can: can(),
+  return {start, render, key, saved, go, closed, redraw: draw, state: () => ({hi: oHi.ready ? oHi.src : null, chi: oChi.ready && chiBox(items[st.pos]) && oChi.src === items[st.pos].chi ? oChi.src : null, pos: st.pos, n: items.length, done: nDone(), outlines: st.outlines, can: can(), viewOnly: VIEW_ONLY,
     item: items[st.pos] ? {...items[st.pos]} : null, attrs: attrs.map(a => a.id), keys: Object.keys(keymap), blind, contained,
     drawn: [...st.drawn], instr: {has: !!instr, open: !!instr && !$("oInstr").hidden}, closed: st.closed,
     mine: items[st.pos] ? Object.fromEntries(attrs.map(a => [a.id, mineOf(items[st.pos], a)])) : {}, undo: st.undo.length,
@@ -3885,7 +3924,7 @@ let startMode = null; try { startMode = localStorage.getItem("cryoev-review:mode
   if (m === "classes" || m === "cls" || m === "cards") startMode = "tri"; else if (m === "editor") startMode = "editor"; }
 if (deep) startMode = "editor";  // a deep link always opens the Editor on its object
 if (!OBJ && (startMode === "tri" || (!startMode && window.matchMedia("(max-width: 700px)").matches))) openTri();
-window.__review = {D, CATS, obj: () => OBJ && OBJ.state(), effGt, gtOf, mergeEdit, pull, materialize, edits: () => edits, caps: () => [...caps], openImg, statusOf,
+window.__review = {D, CATS, vcSigma, obj: () => OBJ && OBJ.state(), effGt, gtOf, mergeEdit, pull, materialize, edits: () => edits, caps: () => [...caps], openImg, statusOf,
   meta: () => meta, groups: () => groups, openGroup, stepSample, loadMeta, triGo: n => { tri.pos = n; tri.zoom = 0; tri.picked = null; triRender(); }, render: () => { renderList(); renderSide(); draw(); if (!$("tri").hidden) triRender(); }, state: () => ({mode, sel, curCls, redrawKey, cur, vsel: [...vSel()], order, view: {...view}, W, H, imgReady, server, dirty: dirty.size,
   who: me(), tri: {mode: tri.mode, pos: tri.pos, queue: tri.queue, ready: tri.ready, picked: tri.picked || null, zoom: tri.zoom, wk: tri.wt ? tri.wt.k : 1, xfs: tri.xf ? tri.xf.s : 0, hist: (tri.hist || []).length,
   histIds: (tri.hist || []).slice(), busy: !!tri.busy, xf: tri.xf ? {...tri.xf} : null,

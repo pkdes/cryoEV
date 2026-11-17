@@ -144,6 +144,10 @@ Every view has a **☼** (◐ stays Low conf) button in its top bar (Editor head
   on the cached copy (the canvas `blur()` filter, else a separable kernel of radius ceil(3 sigma)), once per image and
   strength; on a page that can't read pixels, the screen-space canvas filter; hidden where neither works. Saved
   r16a settings with Smooth on read as 1.0.
+  r17b: the / 2 and / 4 apply only when a finer level exists (the image has `hi` or the item `chi`). An image that
+  is the finest there is (e.g. a 1440 px upload) gets sigma = Smooth in its own pixels (Smooth 2 = sigma 2 px), so
+  Smooth is visible there; sets with `hi` / `chi` are unchanged (`vcSigma`; `test_review_r16b_browser.py`
+  `SmoothLevelTests`). The panel tooltip says "in the image's finest pixels".
 - Settings are per reviewer, in this browser (localStorage `cryoev-review:contrast:<who>`). Reset = the image as
   delivered. The button is lit while anything is set.
 - **Display only:** the page draws a lookup-table copy of the image (an offscreen canvas at the image's natural size,
@@ -506,6 +510,17 @@ unchanged.
   answered, unsure (excluded, reported), agreement %, consent, and pass (>= 80 % on >= 20 scored gold). Answers
   without consent = yes are never used.
 - **Not in v1:** a leaderboard (the server returns each reviewer only their own answers).
+- **Save status (r17b):** eVHarmony hides the sync chip, so a failing save (any non-OK PUT, e.g. 403 "you are not a
+  reviewer of this set", or offline) shows a fixed red banner `#oSaveErr`: the server's `{"error"}` text and how many
+  answers wait. Answers stay dirty and in localStorage and retry every 15 s (and on reload / `online`); the banner goes
+  once a sync pass uploads everything. On every object set the foot line says "Saved ✓" only when nothing is pending
+  (any image), "Not saved · N answers waiting" while saves fail; the plain card's sync chip says "not saved" with the
+  server's text as its tooltip.
+- **View only (r17b):** through the portal, `multi_review_server` adds `answer: true|false` to
+  `window.REVIEW_IDENTITY` for a package with a schema (`may_answer`: review_server's PUT rule, reviewers in
+  `review_package.json` when non-empty, else the people roster; read per page load). `answer: false` → the
+  `#oViewOnly` banner, `can()` is false (keys, buttons and swipes save nothing; in eVHarmony right / left still move
+  to the next / previous card). No flag (an older server, a file, no schema) → as before.
 
 ## Tests
 ```bash

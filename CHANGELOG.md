@@ -7,6 +7,14 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-17 14:28 · eVHarmony save status, Smooth on low-res sets
+
+- **Saves that fail now say so.** When the server refuses your answers (for example "not a reviewer") or can't be reached, eVHarmony shows a red banner with the server's reason and how many answers are waiting. Keep the page open: it keeps retrying, and your answers are kept in this browser until they upload.
+- "Saved ✓" at the bottom of every object set now means the server has all your answers, not just the current card's. Until then it says "Saving…" or "Not saved · N answers waiting".
+- **View only:** if you open an object set you're not a reviewer of (for example as an admin through the portal), the cards show "View only: you're not a reviewer of this set" and swipes, keys and buttons don't record answers. You can still look through the cards.
+- **Smooth works on sets without sharper images.** On sets whose images are already the finest available (no 2x image or item crop), Smooth is now measured in those images' pixels, so Smooth 2 visibly softens the grain. Sets with sharper images look the same as before.
+- **Components:** review page 2026-11-17.2 / review server for portal sign-in (`multi_review_server` tells the page whether you may answer).
+
 ## 2026-11-17 14:10 · Round 17: eVHarmony beta, guest sign-in
 
 - **eVHarmony:** a joke dating-app look for one kind of object set: swipe right on a real vesicle, left on anything else, up when it's complicated. Each swipe is an ordinary answer, credited to you; the first cards are the same for everyone.

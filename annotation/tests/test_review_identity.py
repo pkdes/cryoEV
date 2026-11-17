@@ -120,6 +120,28 @@ class MultiIdentity(unittest.TestCase):
         return im["file"], [f"g{g['id']}" for g in im["gt"]]
 
     # ---- the page ----
+    def test_answer_flag_for_object_sets(self):
+        """r17b: an object set's page says whether the signed-in user may answer (review_server's PUT rule: in the
+        reviewers list when it is non-empty, else on the roster); a package without a schema gets no flag."""
+        schema = (REPO / "tools" / "evh" / "ls_evh_match_v1.json").read_text(encoding="utf-8")
+        rec_f, sch_f = self.pkg / rs.RECORD, self.pkg / rs.SCHEMA_FILE
+        rec0 = rec_f.read_bytes()
+        self.assertFalse(sch_f.exists())
+        self.assertIsNone(mrs.may_answer(self.pkg, "u-alice", []))         # control: no schema, no flag
+        try:
+            sch_f.write_text(schema, encoding="utf-8")
+            rec_f.write_text(json.dumps({**json.loads(rec0), "reviewers": ["u-alice"]}), encoding="utf-8")
+            for who, want in (("u-alice", True), ("u-bob", False)):
+                st, body = request(self.port, "GET", f"/{PKG}/", headers=self.portal(who))
+                self.assertEqual(st, 200)
+                self.assertIn(f'{{"who": "{who}", "locked": true, "answer": {str(want).lower()}}}'.encode(), body)
+            rec_f.write_text(json.dumps({**json.loads(rec0), "reviewers": []}), encoding="utf-8")  # no list: the roster
+            self.assertTrue(mrs.may_answer(self.pkg, "u-bob", [{"id": "u-bob"}]))
+            self.assertFalse(mrs.may_answer(self.pkg, "u-bob", [{"id": "u-alice"}]))
+        finally:
+            rec_f.write_bytes(rec0)
+            sch_f.unlink(missing_ok=True)
+
     def test_page_carries_the_identity(self):
         st, body = request(self.port, "GET", f"/{PKG}/", headers=self.portal("u-alice"))
         self.assertEqual(st, 200)

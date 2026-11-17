@@ -7,11 +7,14 @@ object set card (annotation/review_tool/index.html, D.app === "evharmony"), on a
   - the reveal after the 10th answer, consent saved as a:<items[0].obj>:consent@<rid>, not offered again;
   - the size line: shown with nm/px and no blind columns; none when blind or nm/px is missing;
   - the splash once per browser (nickname display only); default contrast Auto + Smooth 2 without a saved setting;
-  - phone 390 x 844, light and dark, without page errors.
+  - phone 390 x 844, light and dark, without page errors;
+  - r17b: saves the server refuses (403 "not a reviewer"): the #oSaveErr banner with the server's text and the
+    pending count, "Not saved" (never "Saved ✓"); the drafts survive a reload and upload once the server accepts.
 
   python -m unittest discover -s annotation/tests -p test_evh_browser.py -v
 """
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -290,6 +293,94 @@ class EvhTests(unittest.TestCase):
             hot = pg.evaluate("getComputedStyle(document.getElementById('obj')).getPropertyValue('--hot').trim()")
             self.assertEqual(hot, "#2dd4bf" if scheme == "dark" else "#0f766e")
             self.assertEqual(self.errors, [], scheme)
+
+    def test_refused_saves_show_banner_then_upload(self):
+        shots = os.environ.get("R17B_SHOTS")
+        _, srv, pg = self.open()
+        srv.refuse = "not a reviewer"
+        self.assertFalse(pg.is_visible("#oSaveErr"))
+        want = []
+        for _ in range(3):
+            o = self.obj(pg)
+            pg.keyboard.press("ArrowRight")
+            self.next_card(pg, o["pos"])
+            want.append(o["item"])
+        pg.wait_for_selector("#oSaveErr", state="visible", timeout=8000)
+        txt = pg.inner_text("#oSaveErr")
+        self.assertIn("aren't being saved", txt)
+        self.assertIn("the server said: not a reviewer", txt)
+        self.assertIn("3 answers waiting", txt)
+        self.assertEqual(pg.get_attribute("#oSaved", "data-state"), "error")
+        self.assertNotIn("Saved ✓", pg.inner_text("#oSaved"))
+        self.assertIn("3 answers waiting", pg.inner_text("#oSaved"))
+        self.assertGreater(srv.refused, 0)
+        self.assertEqual(srv.records, {})
+        if shots:
+            pg.screenshot(path=str(Path(shots) / "r17b_evh_not_saved.png"))
+        # a reload keeps the drafts (localStorage) and still says so
+        pg.reload()
+        pg.wait_for_function("window.__review && __review.obj() && __review.state().server", timeout=15000)
+        pg.wait_for_selector("#oSaveErr", state="visible", timeout=8000)
+        self.assertIn("3 answers waiting", pg.inner_text("#oSaveErr"))
+        # the server accepts: the drafts upload, the banner goes, "Saved ✓"
+        srv.refuse = None
+        pg.evaluate("dispatchEvent(new Event('online'))")
+        self.settle(pg)
+        pg.wait_for_selector("#oSaveErr", state="hidden", timeout=5000)
+        self.assertEqual(pg.inner_text("#oSaved"), "Saved ✓")
+        for it in want:
+            self.assertEqual(self.match_of(srv, it), "yes", it)
+        if shots:
+            pg.screenshot(path=str(Path(shots) / "r17b_evh_saved.png"))
+        self.assertEqual(self.errors, [])
+
+    def test_view_only_when_not_a_reviewer(self):
+        """r17b: REVIEW_IDENTITY.answer === false (multi_review_server: not a reviewer): a View only banner; swipes,
+        keys and buttons save nothing, right / left still browse. Control: the same identity without the flag answers."""
+        ident = "window.REVIEW_IDENTITY = {who: 'rev1', locked: true%s};"
+        for app in ("evharmony", None):
+            _, srv, pg = self.open(app=app, init=ident % ", answer: false")
+            self.assertTrue(pg.is_visible("#oViewOnly"), app)
+            self.assertIn("not a reviewer", pg.inner_text("#oViewOnly"))
+            o = self.obj(pg)
+            self.assertTrue(o["viewOnly"])
+            self.assertFalse(o["can"])
+            pg.keyboard.press("y")
+            if app:
+                pg.keyboard.press("ArrowRight")
+                pg.wait_for_function(f"__review.obj().pos !== {o['pos']}", timeout=5000)
+                b = pg.locator("#ocv").bounding_box()
+                touch_swipe(pg, b["x"] + b["width"] / 2, b["y"] + b["height"] / 2, 160, 0, sel="#ocv")
+                pg.wait_for_timeout(400)
+            else:
+                pg.locator("#oAttrs button").first.dispatch_event("click")
+                pg.click("#oNext")
+                pg.wait_for_function(f"__review.obj().pos !== {o['pos']}", timeout=5000)
+            pg.wait_for_timeout(1200)                     # a save would have gone by now (800 ms)
+            self.assertEqual(srv.puts, [], app)
+            self.assertEqual(self.obj(pg)["done"], 0)
+            self.assertEqual(self.errors, [])
+        _, srv, pg = self.open(init=ident % "")               # control: no flag (an older server): answers as before
+        self.assertFalse(pg.is_visible("#oViewOnly"))
+        self.assertFalse(self.obj(pg)["viewOnly"])
+        pg.keyboard.press("ArrowRight")
+        self.settle(pg)
+        self.assertEqual(len([k for f in srv.records.values() for k in f["dec"]]), 1)
+
+    def test_refused_saves_plain_card_not_saved(self):
+        _, srv, pg = self.open(app=None)
+        srv.refuse = "not a reviewer"
+        pg.keyboard.press("y")
+        pg.wait_for_function("document.getElementById('oSaved').dataset.state === 'error'", timeout=8000)
+        self.assertNotIn("Saved ✓", pg.inner_text("#oSaved"))
+        self.assertFalse(pg.is_visible("#oSaveErr"))              # the plain card has its sync chip instead
+        self.assertIn("not saved", pg.inner_text("#oSync"))
+        self.assertEqual(pg.get_attribute("#oSync", "title"), "The server said: not a reviewer")
+        srv.refuse = None
+        pg.evaluate("dispatchEvent(new Event('online'))")
+        self.settle(pg)
+        pg.wait_for_function("document.getElementById('oSaved').dataset.state === 'saved'", timeout=5000)
+        self.assertEqual(self.errors, [])
 
 
 if __name__ == "__main__":

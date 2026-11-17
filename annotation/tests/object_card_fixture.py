@@ -235,8 +235,10 @@ class FakeServer:
     """The review server's API, just enough for the object card (see the module docstring)."""
 
     def __init__(self, folder, caps=("i", "t", "a"), who=None, attr_cap=64, closed=False, fail=False, lock409=0,
-                 meta=None):
+                 meta=None, refuse=None):
         self.folder, self.caps, self.who = Path(folder), list(caps), who
+        self.refuse = refuse                      # r17b: a str: every PUT gets 403 {"error": refuse} (None: accepted)
+        self.refused = 0
         self.attr_cap, self.closed, self.fail = attr_cap, closed, fail
         self.meta = meta                          # r17: a dict served as GET /api/meta (None: 404, as before)
         self.lock409 = lock409                    # the next N PUTs: multi_review_server's "open in another server" 409
@@ -282,6 +284,9 @@ class FakeServer:
                 rec = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
                 if outer.fail:
                     return self._json({"error": "down"}, 503)
+                if outer.refuse is not None:
+                    outer.refused += 1
+                    return self._json({"error": outer.refuse}, 403)
                 if outer.lock409 > 0:
                     outer.lock409 -= 1
                     return self._json({"error": "This package is open in another review server: only one may save "
