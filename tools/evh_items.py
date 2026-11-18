@@ -39,6 +39,8 @@ r17f (optional; without them the output is unchanged):
   --images-of PKG      only images that hold an item of the object set PKG (e.g. the 49 images of an ML/MV set
                        whose prediction set has more); decoys go on those images too
   --exclude IMG:LINE,...  objects left out (practice cards, How to judge examples shown elsewhere)
+  --head N             only N cards first: N/2 answered + N/2 decoys (seeded picks, interleaved); every other
+                       answered object and decoy goes in the shuffled queue (still known answers, still scored)
   With any of these, the first block (gold=1) = answered + decoys + low (+ the --gold stratified pick from the rest),
   then the rest (gold=0). Build with --first-items <the printed count>.
 """
@@ -290,6 +292,7 @@ def main(argv=None):
     ap.add_argument("--answered-attr", default="match", help="r17f: the attribute that counts as answered")
     ap.add_argument("--images-of", type=Path, help="r17f: only the images of this object set's items")
     ap.add_argument("--exclude", default="", help="r17f: IMG:LINE,... objects left out")
+    ap.add_argument("--head", type=int, default=0, help="r17f: N first cards: N/2 answered + N/2 decoys, interleaved")
     a = ap.parse_args(argv)
     if a.decoys and not a.derive:
         ap.error("--decoys needs --derive <new folder>")
@@ -347,6 +350,19 @@ def main(argv=None):
               f"{new_id} at {a.derive}; list (off-package) {dfile}")
     dec = [(d["image"], d["line"], round(d["conf"], 4)) for d in drows]
     allc = sorted(cands + low + dec, key=lambda c: (c[0], c[1]))
+    if a.head:
+        hr = random.Random(f"head:{a.seed}")
+        ha = hr.sample(first, min(a.head // 2, len(first)))
+        hd = hr.sample(dec, min(a.head - len(ha), len(dec)))
+        first = [x for pair in zip(ha, hd) for x in pair] + ha[len(hd):] + hd[len(ha):]
+        print(f"[head] first {len(first)} cards: {len(ha)} answered + {len(hd)} decoys (interleaved); the other "
+              f"{len(dec) - len(hd)} decoys and answered objects are in the shuffled queue")
+        text = items_csv(allc, 0, a.seed, first)
+        a.out.write_text(text, encoding="utf-8", newline="")
+        print(f"[OK] {a.out}: {len(allc)} rows ({len(cands)} candidates {a.lo} <= conf < {a.hi}, {len(low)} low, "
+              f"{len(dec)} decoys) on {len({c[0] for c in allc})} images; first {len(first)} rows = gold. Build with "
+              f"--ps {ps_used} --first-items {len(first)} --app evharmony")
+        return 0
     first = first + dec + low
     text = items_csv(allc, a.gold, a.seed, first)
     a.out.write_text(text, encoding="utf-8", newline="")

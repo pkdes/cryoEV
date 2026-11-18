@@ -1148,7 +1148,7 @@ const vcSigma = (smooth, k, fine) => smooth > 0 ? smooth * (k || 1) / (fine ? FU
 const VC_MAX_PX = 16e6, VC0 = {b: 0, c: 0, g: 1, auto: false, smooth: 0}, FULL_K = 4;
 let vc = {...VC0}, vcWho = null, vcTaint = false, vcLast = null;
 // r17f: true while eVHarmony's default (Auto + Smooth 2, nothing saved) is in use: then a card without a finer level
-// (no 2x / native crop) draws with Smooth 0 (a 1440 px image blurred by 2 px reads as soft); cleared by any change
+// (no 2x / native crop) draws with Smooth 1 (2 blurs a 1440 px image, 0 shows its grain); cleared by any change
 let vcEvhDef = false;
 const vcCache = new Map();  // image -> {w, h, f, src, lum, cv, cx, out, key, sm, rk, lohi}: the 2 most recently drawn images
 const vcFilterOk = (() => { try { return typeof document.createElement("canvas").getContext("2d").filter === "string"; } catch (e) { return false; } })();
@@ -1231,17 +1231,19 @@ function vcStretch(e, r) {  // Auto: the 0.5 / 99.5 % levels of the image inside
   const lo = at(0.005), hi = at(0.995);
   return (e.lohi = hi > lo ? [lo, hi] : [0, 255]);
 }
-function vcDraw(c2, im, dx, dy, dw, dh, vw, vh, k, fine) {  // draw image `im` at (dx, dy, dw, dh) on a view vw x vh (css px), as this viewer set it
+function vcDraw(c2, im, dx, dy, dw, dh, vw, vh, k, fine, rng) {  // draw image `im` at (dx, dy, dw, dh) on a view vw x vh (css px), as this viewer set it
+  // r17f: rng = an Auto range [lo, hi] to use instead of this image's own (an item crop drawn over its base image takes
+  // the base view's range, so the crop and the base around it map the same grey levels: no visible box)
   // k: im's px per base image px (1 base, 2 the 2x image, ~4 a chi crop); fine: the image / item has a finer level
   // (hi / chi). Smooth's sigma in im's px: smooth x k / FULL_K with a finer level, else smooth x k (r17b, vcSigma)
-  const sm = vcEvhDef && !fine ? 0 : vc.smooth, sig = vcSigma(sm, k, fine);  // r17f: vcEvhDef above
+  const sm = vcEvhDef && !fine ? 1 : vc.smooth, sig = vcSigma(sm, k, fine);  // r17f: vcEvhDef above
   if (vcIdentity()) { c2.drawImage(im, dx, dy, dw, dh); return; }
   try {
     if (!vcTaint) {
       let e = null;
       try { e = vcEntry(im); } catch (err) { vcTaint = true; vcSync(); }  // a tainted canvas (SecurityError): the filter fallback
       if (e) {
-        const [lo, hi] = vc.auto ? vcStretch(e, [-dx / dw, -dy / dh, (vw - dx) / dw, (vh - dy) / dh]) : [0, 255];
+        const [lo, hi] = vc.auto ? (rng || vcStretch(e, [-dx / dw, -dy / dh, (vw - dx) / dw, (vh - dy) / dh])) : [0, 255];
         const key = [lo, hi, vc.b, vc.c, vc.g, sig].join();
         if (e.key !== key) {
           const L = vcLut(lo, hi), s = sig ? vcBlur(e, im, sig) : e.src, a = e.src, o = e.out.data;
@@ -3478,13 +3480,14 @@ function makeObjectView() {
   const oChi = {onready: () => draw()};
   const chiBox = it => { const c = it && it.chi_box; return Array.isArray(c) && c.length === 4 && c.every(v => typeof v === "number" && isFinite(v) && v >= 0 && v <= 1) && c[2] > c[0] && c[3] > c[1] ? c : null; };
   const fineOf = (it, im) => !!(hiSrc(im) || (chiBox(it) && hiSrc({hi: it.chi})));  // r17b: a finer level exists for Smooth (vcSigma)
-  function drawChi(it, Wi, Hi, s, ox, oy, b) {
+  function drawChi(it, Wi, Hi, s, ox, oy, b, rng) {  // rng (r17f): the base view's Auto range, shared
     const box = chiBox(it); hiOf(oChi, {hi: box ? it.chi : null}, true, null);  // a new item (or none): the old crop is dropped
     const h = box && oChi.ready ? oChi.img : null;
     if (!h) return;
     const dw = (box[2] - box[0]) * Wi * s, dh = (box[3] - box[1]) * Hi * s;
     if (!(Math.abs((h.naturalWidth / h.naturalHeight) / (dw / dh) - 1) < 0.02)) return;  // not the box's shape: not drawn
-    vcDraw(cx, h, ox + box[0] * Wi * s, oy + box[1] * Hi * s, dw, dh, b.width, b.height, h.naturalWidth / ((box[2] - box[0]) * Wi), true);
+    st.chiRect = [ox + box[0] * Wi * s, oy + box[1] * Hi * s, dw, dh];  // css px on the canvas (tests measure its edge)
+    vcDraw(cx, h, st.chiRect[0], st.chiRect[1], dw, dh, b.width, b.height, h.naturalWidth / ((box[2] - box[0]) * Wi), true, rng);
   }
 
   function draw() {
@@ -3509,7 +3512,7 @@ function makeObjectView() {
     if (evh) { const rb = Array.isArray(ring) && ring.length >= 6 ? ringBox(ring) : null; st.of = rb ? Math.max((rb[2] - rb[0]) * Wi, (rb[3] - rb[1]) * Hi) * s / Math.max(1, b.width) : null; }  // r17d: the object's share of the card width
     cx.imageSmoothingEnabled = true; cx.imageSmoothingQuality = "high"; const osrc = hiOf(oHi, im, true, st.img) || st.img;  // r17f: high on every object card
     vcDraw(cx, osrc, ox, oy, Wi * s, Hi * s, b.width, b.height, osrc.naturalWidth / Wi, fineOf(it, im));
-    drawChi(it, Wi, Hi, s, ox, oy, b);
+    drawChi(it, Wi, Hi, s, ox, oy, b, vcLast && vcLast.lo != null ? [vcLast.lo, vcLast.hi] : null);
     if (!st.outlines || !rings) return;
     const path = rg => { cx.beginPath(); for (let k = 0; k < rg.length; k += 2) { const X = rg[k] * Wi * s + ox, Y = rg[k + 1] * Hi * s + oy; k ? cx.lineTo(X, Y) : cx.moveTo(X, Y); } cx.closePath(); };
     if (contained && Array.isArray(it.also)) {  // the objects the builder found inside the target (it.also): thinner, green
@@ -3542,7 +3545,7 @@ function makeObjectView() {
     const s = Math.min(b.width / cw, b.height / ch), ox = (b.width - cw * s) / 2 - x0 * Wi * s, oy = (b.height - ch * s) / 2 - y0 * Hi * s;
     cx.imageSmoothingEnabled = true; cx.imageSmoothingQuality = "high"; const osrc = hiOf(oHi, im, true, st.img) || st.img;  // r17f: high on every object card
     vcDraw(cx, osrc, ox, oy, Wi * s, Hi * s, b.width, b.height, osrc.naturalWidth / Wi, fineOf(it, im));
-    drawChi(it, Wi, Hi, s, ox, oy, b);
+    drawChi(it, Wi, Hi, s, ox, oy, b, vcLast && vcLast.lo != null ? [vcLast.lo, vcLast.hi] : null);
     const P = (x, y) => [x * Wi * s + ox, y * Hi * s + oy];
     const path = rg => { cx.beginPath(); for (let k = 0; k < rg.length; k += 2) { const [X, Y] = P(rg[k], rg[k + 1]); k ? cx.lineTo(X, Y) : cx.moveTo(X, Y); } cx.closePath(); };
     const shown = ns.map(nd => ({nd, rings: ringsOf(im, nd.obj)})).filter(x => Array.isArray(x.rings) && x.rings.length);
@@ -4180,7 +4183,7 @@ function makeObjectView() {
       attrs: attrsFor(nd).map(a => a.id), mine: Object.fromEntries(attrsFor(nd).map(a => [a.id, mineAt(it, nd.obj, a)]))})),
       badges: st.badges.map(b => ({...b}))};
   };
-  return {start, render, key, saved, go, closed, redraw: draw, state: () => ({hi: oHi.ready ? oHi.src : null, chi: oChi.ready && chiBox(items[st.pos]) && oChi.src === items[st.pos].chi ? oChi.src : null, pos: st.pos, n: items.length, done: nDone(), outlines: st.outlines, can: can(), viewOnly: VIEW_ONLY,
+  return {start, render, key, saved, go, closed, redraw: draw, state: () => ({chiRect: st.chiRect && oChi.ready ? [...st.chiRect] : null, hi: oHi.ready ? oHi.src : null, chi: oChi.ready && chiBox(items[st.pos]) && oChi.src === items[st.pos].chi ? oChi.src : null, pos: st.pos, n: items.length, done: nDone(), outlines: st.outlines, can: can(), viewOnly: VIEW_ONLY,
     item: items[st.pos] ? {...items[st.pos]} : null, attrs: attrs.map(a => a.id), keys: Object.keys(keymap), blind, contained,
     drawn: [...st.drawn], instr: {has: !!instr, open: !!instr && !$("oInstr").hidden}, closed: st.closed,
     mine: items[st.pos] ? Object.fromEntries(attrs.map(a => [a.id, mineOf(items[st.pos], a)])) : {}, undo: st.undo.length,

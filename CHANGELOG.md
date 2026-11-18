@@ -9,7 +9,8 @@ near the top of annotation/review_tool/index.html.
 
 ## 2026-11-18 21:00 · eVHarmony sharper cards
 
-- **Crisper pictures:** cards that have no finer picture behind them are no longer softened by default (Smooth starts at off there; cards with a finer picture keep Smooth 2). Your own Smooth setting still wins once you change it.
+- **Crisper pictures:** cards that have no finer picture behind them are softened less by default (Smooth 1 there instead of 2; cards with a finer picture keep Smooth 2). Your own Smooth setting still wins once you change it.
+- **No more box around the sharp crop:** on desktop, the sharper close-up of the vesicle is now shaded exactly like the picture around it, so no lighter square shows.
 - Pictures on object cards are always scaled with the browser's best quality.
 - Images from the multi-set review server are marked so that proxies and data savers leave them uncompressed.
 - For set makers: `object_set build --quality` (default 72 as before), `tools/add_hires.py` item crops up to 2560 px and no crop coarser than the 2x picture; `tools/evh_items.py --images-of --exclude --answered-attr` and `tools/evh_carry.py --map` build an eVHarmony set from another object set's answers.

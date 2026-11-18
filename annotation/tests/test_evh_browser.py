@@ -761,17 +761,81 @@ class EvhTests(unittest.TestCase):
         self.assertEqual(self.errors, [])
 
     def test_r17f_smooth_default_off_without_finer_level(self):
-        """r17f: the eVHarmony default (nothing saved) draws a card without a 2x / native crop at Smooth 0; a saved
+        """r17f: the eVHarmony default (nothing saved) draws a card without a 2x / native crop at Smooth 1; a saved
         Smooth still applies; object cards draw with imageSmoothingQuality high."""
         _, _, pg = self.open()
         pg.wait_for_function("__review.state().vc.last && __review.state().vc.last.lo != null", timeout=10000)
         st = pg.evaluate("__review.state().vc")
-        self.assertEqual((st["auto"], st["smooth"], st["last"]["smooth"], st["last"]["sigma"]), (True, 2, 0, 0))
+        self.assertEqual((st["auto"], st["smooth"], st["last"]["smooth"], st["last"]["sigma"]), (True, 2, 1, 1))
         self.assertEqual(pg.evaluate("document.getElementById('ocv').getContext('2d').imageSmoothingQuality"), "high")
         _, _, pg2 = self.open(init="try { localStorage.setItem('cryoev-review:contrast:rev1', "
                                    "JSON.stringify({b: 0, c: 0, g: 1, auto: true, smooth: 2})); } catch (e) {}")
         pg2.wait_for_function("__review.state().vc.last && __review.state().vc.last.lo != null", timeout=10000)
         self.assertEqual(pg2.evaluate("__review.state().vc.last.smooth"), 2)   # chosen by the viewer: kept
+        self.assertEqual(self.errors, [])
+
+    REGION_JS = """r => { const cv = document.getElementById('ocv'), k = cv.width / cv.getBoundingClientRect().width;
+        const g = cv.getContext('2d'), [x, y, w, h] = r.map(v => Math.round(v * k));
+        const d = g.getImageData(x, y, w, h).data; let n = 0, s = 0, q = 0;
+        for (let i = 0; i < d.length; i += 4) { n++; s += d[i]; q += d[i] * d[i]; } const m = s / n; return [m, Math.sqrt(q / n - m * m)]; }"""
+
+    def seam_page(self, folder, want_chi):
+        srv = F.FakeServer(folder, caps=("i", "t", "m", "a"), meta=META).start()
+        self.addCleanup(srv.close)
+        ctx = self.browser.new_context(viewport={"width": 1280, "height": 800})
+        self.addCleanup(ctx.close)
+        ctx.add_init_script(SPLASH_SEEN + "try { localStorage.setItem('cryoev-review:contrast:rev1', "
+                            "JSON.stringify({b: 0, c: 0, g: 1, auto: true, smooth: 0})); } catch (e) {}")
+        pg = ctx.new_page()
+        pg.on("pageerror", lambda e: self.errors.append(str(e)))
+        pg.goto(srv.url + "?who=rev1")
+        pg.wait_for_function("window.__review && __review.obj() && __review.state().server", timeout=15000)
+        pg.keyboard.press("i")                                                        # outlines off
+        pg.wait_for_function("!__review.obj().outlines && __review.state().vc.last && __review.state().vc.last.lo != null")
+        if want_chi:
+            pg.wait_for_function(f"__review.obj().chi === {json.dumps(want_chi)} && !!__review.obj().chiRect", timeout=10000)
+        pg.wait_for_timeout(300)
+        return pg
+
+    def test_r17f_native_crop_has_no_seam(self):
+        """r17f: an item crop drawn over its base image takes the base view's Auto range, so the crop's area looks
+        like the base image there: the same region of the card, drawn with the crop vs without it (the same set minus
+        the chi keys), has the same mean (within 5 %) and std dev (within 20 %). The fixture gives the view a dark and a
+        bright disk outside the crop, so a crop stretched on its own range (the r16b code) is ~40 % brighter there
+        (measured; on a real ML/MV card its edge was ~50 % off in std dev)."""
+        import shutil
+        import numpy as np
+        from PIL import Image
+        self.errors = []
+        d = Path(tempfile.mkdtemp(prefix="evh_")) / "pred_obj_evh_ab12"
+        data = build_evh(d, schema=EVH_V3)
+        K = 4
+        rng = np.random.default_rng(7)
+        orig = np.asarray(Image.fromarray(np.clip(rng.normal(120, 30, (120, 160)), 0, 255).astype("uint8"), "L")
+                          .resize((640 * K, 480 * K), Image.BICUBIC), dtype=float)   # grain coarser than base px
+        yy, xx = np.mgrid[0:480 * K, 0:640 * K]
+        orig[(xx - 520 * K) ** 2 + (yy - 120 * K) ** 2 < (30 * K) ** 2] = 0         # a dark disk and a bright one, in
+        orig[(xx - 370 * K) ** 2 + (yy - 250 * K) ** 2 < (20 * K) ** 2] = 255       # view only (outside the crop)
+        oim = Image.fromarray(orig.astype("uint8"), "L")
+        oim.resize((640, 480), Image.LANCZOS).convert("RGB").save(d / "images" / "imgA.png")
+        it = next(i for i in data["items"] if i["image"] == "imgA" and i["obj"] == "g5")   # (440, 180) r 28
+        it["crop"] = [round((440 - 38) / 640, 5), round((180 - 38) / 480, 5), round((440 + 38) / 640, 5), round((180 + 38) / 480, 5)]
+        data["items"] = [it] + [i for i in data["items"] if i is not it]
+        d0 = d.parent / "nochi" / d.name
+        shutil.copytree(d, d0)
+        (d0 / "data.js").write_text("window.REVIEW_DATA = " + json.dumps(data) + ";\n", encoding="utf-8")   # no chi
+        import test_review_r16b_browser as R16B
+        R16B.add_chi(d, data, {"imgA": oim}, only={it["id"]})
+        pg = self.seam_page(d, it["chi"])
+        r = pg.evaluate("__review.obj().chiRect")
+        inner = [r[0] + 8, r[1] + 8, r[2] - 16, r[3] - 16]
+        mc, sc = pg.evaluate(self.REGION_JS, inner)
+        pg0 = self.seam_page(d0, None)
+        self.assertIsNone(pg0.evaluate("__review.obj().chiRect"))                     # control: no crop drawn there
+        mb, sb = pg0.evaluate(self.REGION_JS, inner)
+        self.assertGreater(sb, 5)                                                      # a textured region
+        self.assertLess(abs(mc - mb) / mb, 0.05, (mc, mb))
+        self.assertLess(abs(sc - sb) / sb, 0.20, (sc, sb))
         self.assertEqual(self.errors, [])
 
     def test_practice_start_for_real(self):

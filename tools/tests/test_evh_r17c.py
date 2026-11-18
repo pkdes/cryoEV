@@ -401,6 +401,19 @@ class R17c(unittest.TestCase):
                                          "--map", m, "--do"]), 0)
         by = {(r["image"], int(r["line"])): r["match@admin1"] for r in O.table(new)["rows"]}
         self.assertEqual([by[(i["image"], int(i["line"]))] for i in (a, b, c)], ["yes", "unsure", "yes"])
+        # --head 4: 2 answered + 2 decoys first; the 3rd answered object and the other decoys later in the queue
+        rc = evh_items.main(["--ps", str(self.ps), "--out", str(self.t / "h.csv"), "--gold", "0", "--hi", "1.01",
+                             "--images-of", str(src), "--answered", str(src), "--who", "admin1", "--answered-attr", "kind",
+                             "--decoys", "4", "--derive", str(self.t / "hder"), "--head", "4"])
+        self.assertEqual(rc, 0)
+        hrows = list(csv.DictReader(io.StringIO((self.t / "h.csv").read_text(encoding="utf-8"))))
+        hdec = {(r["image"], r["line"]) for r in csv.DictReader(io.StringIO((self.t / "h_decoys.csv").read_text(encoding="utf-8")))}
+        ans = {(i["image"], str(i["line"])) for i in (a, b, c)}
+        head = [(r["image"], r["line"]) for r in hrows[:4]]
+        self.assertEqual(([k in ans for k in head], [k in hdec for k in head]), ([True, False] * 2, [False, True] * 2))
+        self.assertEqual([r["gold"] for r in hrows[:5]], ["1", "1", "1", "1", "0"])
+        keys = {(r["image"], r["line"]) for r in hrows}
+        self.assertTrue(ans <= keys and hdec <= keys)                           # all still in the set
         P = evh_carry.plan(src, new, "admin1", ("match",), evh_carry.parse_map("kind->match:single=yes"))
         self.assertEqual((len(P["unmapped"]), len(P["exists"])), (2, 1))
         with self.assertRaises(ValueError):
