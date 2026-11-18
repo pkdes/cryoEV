@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-18.1";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-18.2";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const h = document.querySelector("header"), inPortal = /^\/review\//.test(location.pathname), v = document.createElement("span");
   v.id = "pageVer"; v.style.cssText = "font-size:11px;color:var(--mute);white-space:nowrap"; v.textContent = "Review page " + PAGE_VERSION;
@@ -381,14 +381,14 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #evhGuide h2{margin:0;font-size:18px}
 #evhGuide .gh button{min-width:44px;min-height:44px;border-radius:22px}
 #evhGdBody{overflow:auto;padding:4px 14px 14px;font-size:14px;line-height:1.45}
-#evhGdBody h3{margin:14px 0 2px;font-size:16px}
-#evhGdBody h4{margin:8px 0 4px;font-size:13.5px;color:var(--mute)}
-#evhGdBody p{margin:0 0 6px}
-#evhGdBody .ex{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:8px;margin:4px 0 6px}
-#evhGdBody figure{margin:0}
-#evhGdBody figure img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:8px;background:#000;display:block}
-#evhGdBody figcaption{font-size:12px;line-height:1.3;color:var(--mute);margin-top:3px}
-#evhGdBody .guide{white-space:pre-wrap;border-top:1px solid var(--line);margin-top:12px;padding-top:8px}
+#evhGdBody h3,#evhRvGuide h3{margin:14px 0 2px;font-size:16px}
+#evhGdBody h4,#evhRvGuide h4{margin:8px 0 4px;font-size:13.5px;color:var(--mute)}
+#evhGdBody p,#evhRvGuide p{margin:0 0 6px}
+#evhGdBody .ex,#evhRvGuide .ex{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:8px;margin:4px 0 6px}
+#evhGdBody figure,#evhRvGuide figure{margin:0}
+#evhGdBody figure img,#evhRvGuide figure img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:8px;background:#000;display:block}
+#evhGdBody figcaption,#evhRvGuide figcaption{font-size:12px;line-height:1.3;color:var(--mute);margin-top:3px}
+#evhGdBody .guide,#evhRvGuide .guide{white-space:pre-wrap;border-top:1px solid var(--line);margin-top:12px;padding-top:8px}
 #oAttrs .evhBtns button.on{color:#fff;background:linear-gradient(90deg,var(--hot),var(--hot2));border-color:transparent}
 #oAttrs .evhEmpty{text-align:center;font-weight:700;font-size:16px;margin:0}
 #evhSplash,#evhReveal{position:absolute;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;padding:16px;background:color-mix(in srgb,var(--bg) 70%,transparent);backdrop-filter:blur(3px)}
@@ -403,6 +403,22 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #evhReveal p{font-size:15px;line-height:1.45;margin:0}
 #evhReveal .row,#evhSplash .row{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
 #evhReveal .row[hidden]{display:none}
+/* r17d: practice cards (D.practice): the long reveal (message, How to judge, consent, Redo / Start) and the redo feedback */
+#evhRvGuide[hidden],#evhRvPr[hidden],#evhRvQ[hidden]{display:none}
+#evhReveal.long{align-items:flex-start;overflow:auto}
+#evhReveal.long .box{width:min(560px,100%)}
+#evhRvGuide{text-align:left;font-size:14px;line-height:1.45;margin:10px 0 4px;border-top:1px solid var(--line)}
+#evhRvGuide p{font-size:14px;margin:0 0 6px}
+#evhReveal #evhRvQ{margin-top:12px;font-weight:700}
+#evhRvPr{margin-top:6px}
+#evhRvRedo{color:var(--hot);border-color:var(--hot)}
+#evhRvReal{color:#fff;border-color:transparent;background:linear-gradient(90deg,var(--hot),var(--hot2))}
+#oAttrs .evhFb{text-align:center}
+#oAttrs .evhFb p{margin:0 0 6px;font-size:15px;line-height:1.4}
+#oAttrs .evhFb .you{font-weight:700}
+#oAttrs .evhFb .you.ok{color:#16a34a}
+#oAttrs .evhFb .you.off{color:#b45309}
+#oAttrs .evhFb button{min-height:48px;border-radius:24px;padding:0 26px;font-size:16px;font-weight:700;color:#fff;border-color:transparent;background:linear-gradient(90deg,var(--hot),var(--hot2))}
 #oList{position:fixed;left:0;top:0;bottom:0;z-index:30;width:min(300px,85vw);display:none;flex-direction:column;background:var(--panel);border-right:1px solid var(--line);box-shadow:0 0 24px rgba(0,0,0,.45)}
 #oList.show{display:flex}
 #oList .tlh{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--mute);border-bottom:1px solid var(--line)}
@@ -619,8 +635,10 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
     <div class="row"><button id="evhHow" type="button" hidden>How to judge</button><button id="evhGo" type="button">Create your profile</button></div></div></div>
   <div id="evhReveal" role="dialog" aria-modal="true" aria-labelledby="evhRvH" hidden><div class="box">
     <h2 id="evhRvH">One more thing… 💘</h2><p id="evhRvTx"></p>
+    <div id="evhRvGuide" hidden></div><p id="evhRvQ" hidden></p>
     <div class="row" id="evhRvAsk"><button id="evhRvYes" type="button">Yes</button><button id="evhRvNo" type="button">No</button></div>
-    <div class="row" id="evhRvDone" hidden><button id="evhRvKeep" type="button">Keep swiping</button></div></div></div>
+    <div class="row" id="evhRvDone" hidden><button id="evhRvKeep" type="button">Keep swiping</button></div>
+    <div id="evhRvPr" hidden><p>The practice cards don't count.</p><div class="row"><button id="evhRvRedo" type="button">Redo the 3 practice cards</button><button id="evhRvReal" type="button">Start for real</button></div></div></div></div>
   <div id="evhGuide" role="dialog" aria-modal="true" aria-labelledby="evhGdH" hidden><div class="box">
     <div class="gh"><h2 id="evhGdH">How to judge</h2><button id="evhGdX" type="button" title="Close (Esc or ?)">✕</button></div>
     <div id="evhGdBody"></div></div></div>
@@ -3302,6 +3320,11 @@ window.addEventListener("online", () => scheduleSync(100));
 //   D.instructions         (r15 hotfix, optional) the maker's plain-text set instructions (object_set.py instructions):
 //                          an "ⓘ Instructions" button in the top bar opens a panel (textContent, pre-wrap); "?" toggles,
 //                          Esc closes; opened by itself once per browser and text (localStorage). Absent: no change.
+//   D.practice             (r17d, eVHarmony only, optional) [{id, image, obj, crop, answer yes|no|unsure, kind?, note?}]
+//                          (tools/evh_practice.py): cards shown first to a reviewer without a consent answer; their
+//                          answers stay in page memory (never saved; the objects are not D.items, so the server
+//                          refuses them too). After the last one the reveal (message, How to judge, consent, then
+//                          Redo / Start for real) replaces the 10-answer reveal. Absent: as before.
 // Every tap saves at once: a decision a:<obj>:<attr>@<me> on the item's image record (the server overwrites @<rid>
 // from the signed-in identity). Attribute keys never count as object edits (statusOf, restoreSnap). Only this
 // reviewer's own answers are read back; others' are never shown. Saving needs the server's "a" cap (/api/ping).
@@ -3372,6 +3395,13 @@ function makeObjectView() {
     && EX_CATS.includes(x.cat)).slice(0, 60) : [];
   const evhGuideOn = evh && (evhDense || evhEx.length > 0 || EVH_FU.yes.length > 0 || EVH_FU.unsure.length > 0);
   const eh = {meta: null, busy: false, g: null, toastT: null, fu: null, fuV: null};  // fu: the item whose follow-ups are up
+  // r17d: the practice cards (D.practice); pr.on while they are up (until "Start for real", or a consent answer from the
+  // server). pr.ans: this pass's answers (page memory only); pr.fb: the answer whose feedback is shown (the redo pass)
+  const PR_ANS = ["yes", "no", "unsure"];
+  const evhPr = evh && Array.isArray(D.practice) ? D.practice.filter(p => p && typeof p.id === "string" && typeof p.obj === "string"
+    && byStem.has(String(p.image)) && PR_ANS.includes(p.answer) && !items.some(it => it.image === p.image && it.obj === p.obj)).slice(0, 10) : [];
+  const pr = {on: evhPr.length > 0 && !VIEW_ONLY && !st.closed, k: 0, redo: false, ans: [], fb: null, done: false};
+  const onCard = () => pr.on ? evhPr[pr.k] || null : items[st.pos];  // the card on screen
   if (st.closed) closedOn = true;  // D.closed (object_set close_set writes it): closed before any answer is tried
   const imOf = it => byStem.get(String(it.image));
   const can = () => capOn("a") && server && !st.closed && !VIEW_ONLY;  // r17b: view only answers nothing
@@ -3443,7 +3473,7 @@ function makeObjectView() {
   }
 
   function draw() {
-    const it = items[st.pos], b = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    const it = onCard(), b = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
     cv.width = Math.max(1, Math.round(b.width * dpr)); cv.height = Math.max(1, Math.round(b.height * dpr));
     cx.setTransform(dpr, 0, 0, dpr, 0, 0); cx.fillStyle = "#000"; cx.fillRect(0, 0, b.width, b.height);
     if (!it) return;
@@ -3652,7 +3682,7 @@ function makeObjectView() {
     });
   }
   function render() {
-    const it = items[st.pos], on = can(), f = document.activeElement;
+    const it = onCard(), on = can(), f = document.activeElement;
     const typing = !!(f && f.tagName === "INPUT" && f.closest && f.closest("#oAttrs"));
     const n = items.length, done = nDone();
     $("oPos").textContent = n ? `${st.pos + 1} / ${n}` : "0 / 0";
@@ -3664,7 +3694,8 @@ function makeObjectView() {
     $("oBar").title = `${done} of ${n} done by you`;
     $("oWho").textContent = "👤 " + (me() ? dispName(me()) : "set name");
     $("oOutl").textContent = st.outlines ? "Outlines on · i" : "Outlines off · i"; $("oOutl").classList.toggle("off", !st.outlines);
-    $("oPrev").disabled = st.pos <= 0; $("oNext").disabled = st.pos >= n - 1;
+    $("oPrev").disabled = st.pos <= 0 || pr.on; $("oNext").disabled = st.pos >= n - 1 || pr.on;
+    if (pr.on) $("oPos").textContent = `Practice ${pr.k + 1} / ${evhPr.length}`;
     $("oNext").classList.toggle("on", !!it && isDone(it));
     const box = $("oAttrs");
     if (typing && it) {  // typing a note: leave the rows alone (a pull mid-typing must not wipe it); only the marks
@@ -3691,8 +3722,8 @@ function makeObjectView() {
       else {
         if (!on) { const p = el("p", null, st.closed ? "This set is closed: no more answers are saved."
           : server ? "This review server can't save attributes yet (no “a” in its /api/ping caps). Nothing is saved."
-          : "Open this set from the review server to answer: attributes save only there."); p.id = "oOff"; box.append(p); }
-        if (evh) evhRows(it, on, box);
+          : "Open this set from the review server to answer: attributes save only there."); p.id = "oOff"; if (!pr.on) box.append(p); }
+        if (evh) evhRows(it, on || pr.on, box);
         else for (const a of attrs) box.append(rowFor(it, a, on));
         if (!attrs.length) box.append(el("p", null, "This set's label schema has no object attributes."));
       }
@@ -3735,6 +3766,7 @@ function makeObjectView() {
   async function connectObjects() {
     if (!location.protocol.startsWith("http")) return render();
     try { await pull(); await loadCaps(); server = true; syncBadge(); sync(); } catch (e) { syncBadge(); }
+    if (pr.on && evhConsentV() != null) evhPrEnd(true);  // r17d: consent answered before (the owner too): no practice
     render();
     if (evh && server) { if (items[st.pos] && isDone(items[st.pos])) nextOpen(); evhMeta(); evhOffer(); }  // a swipe app opens on an open card
   }
@@ -3822,8 +3854,9 @@ function makeObjectView() {
     if (!evhMatch) { box.append(el("p", null, "This set has no match question.")); return; }
     if (eh.fu && eh.fu !== it) eh.fu = null;
     if (eh.fu === it) return evhFuRow(it, on, box);
-    if (nDone() >= items.length) box.append(el("p", "evhEmpty", brand().empty));
-    const row = el("div", "evhBtns" + (evhDense ? " four" : "")), cur = mineOf(it, evhMatch);
+    if (pr.on && pr.fb) return evhPrFeedback(box);
+    if (!pr.on && nDone() >= items.length) box.append(el("p", "evhEmpty", brand().empty));
+    const row = el("div", "evhBtns" + (evhDense ? " four" : "")), cur = pr.on ? pr.ans[pr.k] || null : mineOf(it, evhMatch);
     const btns = evhDense ? [["no", "nope", "✕ Nope"], ["yes", "like", "♥ Match"], ["unsure", "meh", "🤷 It's complicated"], ["dense", "dense", "● Small & dense"]]
       : [["no", "nope", "✕ Nope"], ["unsure", "meh", "🤷 It's complicated"], ["yes", "like", "♥ Match"]];
     for (const [v, cls, lbl] of btns) {
@@ -3892,8 +3925,9 @@ function makeObjectView() {
   }
   function evhCardReset(animate) { const c = $("oCard"); c.style.transition = animate ? "transform .2s" : ""; c.style.transform = ""; $("oStamp").style.opacity = 0; }
   function evhAnswer(v) {  // one answer = one saved a:<obj>:match@<me>; then the card flies off and the next open one comes
-    const it = items[st.pos];
+    const it = onCard();
     if (!it || !evhMatch || eh.busy || !evhMatch.options.some(o => o.v === v)) return;
+    if (pr.on) return evhPrAnswer(v);
     if (!can()) { evhCardReset(true); if (VIEW_ONLY && (v === "yes" || v === "no")) return go(st.pos + (v === "yes" ? 1 : -1)); return render(); }  // r17b view only: right / left browse, nothing saved
     if (!needWho(() => evhAnswer(v))) { evhCardReset(true); return; }
     const fromFu = eh.fu === it; eh.fu = null;  // a swipe while the follow-ups are up: they are skipped
@@ -3908,13 +3942,72 @@ function makeObjectView() {
     if ((EVH_FU[v] || []).length && !fromFu) {  // r17c: the card stays, its follow-ups replace the buttons
       eh.fu = it; eh.fuV = v; evhCardReset(true); return render();
     }
+    evhFly(v, () => evhNext(it));
+  }
+  function evhFly(v, then) {  // the card flies off in the answer's direction, then `then`
     const c = $("oCard"), w = c.getBoundingClientRect().width, [dx, dy] = v === "yes" ? [w * 1.5, 0] : v === "no" ? [-w * 1.5, 0] : v === "dense" ? [0, 1200] : [0, -1200];
     eh.busy = true;
     c.style.transition = "transform .24s ease-in"; c.style.transform = `translate(${dx}px, ${dy}px) rotate(${dx / 25}deg)`;
-    setTimeout(() => { evhCardReset(false); eh.busy = false; evhNext(it); }, 240);
+    setTimeout(() => { evhCardReset(false); eh.busy = false; then(); }, 240);
+  }
+  // ---- r17d: practice cards (D.practice). Nothing here saves: an answer is pr.ans (page memory); a reload starts the
+  // practice again. The persisted "practice done" is the consent answer (asked in the reveal after the last card).
+  // No follow-up chips on practice cards.
+  const evhLbl = v => v === "yes" ? "Match" : v === "no" ? "Nope" : v === "dense" ? "Small & dense" : "It's complicated";
+  function evhPrAnswer(v) {
+    if (pr.fb) { evhCardReset(true); return evhPrNext(); }       // a swipe while the feedback is up: the next card
+    pr.ans[pr.k] = v; evhToast(v); evhStamp(v, 1);
+    if (pr.redo) { pr.fb = v; evhCardReset(true); return render(); }  // the redo pass: the card stays, our answer shows
+    evhFly(v, evhPrNext);
+  }
+  function evhPrNext() {
+    pr.fb = null; st.px = st.py = 0;
+    if (pr.k + 1 < evhPr.length) { pr.k++; return render(); }
+    if (pr.redo) return evhPrEnd();
+    pr.done = true; render(); evhPrReveal();
+  }
+  function evhPrFeedback(box) {  // "You: Nope" / "Our answer: Match · Single — <note>" and Next
+    const p = evhPr[pr.k], ok = pr.fb === p.answer, w = el("div", "evhFb");
+    const ko = p.answer === "yes" && typeof p.kind === "string" && p.kind ? (evhKind && evhKind.options.find(o => o.v === p.kind) || {label: p.kind}).label : "";
+    w.append(el("p", "you " + (ok ? "ok" : "off"), (ok ? "✓ " : "") + "You: " + evhLbl(pr.fb)));
+    w.append(el("p", "ours", "Our answer: " + evhLbl(p.answer) + (ko ? " · " + txt(ko, 30) : "")
+      + (typeof p.note === "string" && p.note ? " — " + p.note.slice(0, 200) : "")));
+    const b = el("button", "next", pr.k + 1 < evhPr.length ? "Next →" : "Start for real →"); b.type = "button"; b.title = "Next (Enter)";
+    b.onclick = evhPrNext; w.append(b); box.append(w);
+  }
+  function evhPrReveal() {  // after the last practice card: what this is, How to judge, consent, then Redo / Start
+    const r = $("evhReveal"), g = $("evhRvGuide");
+    r.classList.add("long");
+    $("evhRvH").textContent = "Plot twist 💘";
+    $("evhRvTx").textContent = "Those were practice cards. From here on, every card is a real vesicle candidate from a cryo-EM image: "
+      + "your swipes help annotate them for CryoEV.";
+    if (!g.dataset.built) { g.append(el("h3", null, "How to judge")); evhGuideBuild(g); g.dataset.built = "1"; }
+    g.hidden = false;
+    const c = evhConsentV();
+    if (c == null && can()) {
+      $("evhRvQ").textContent = "A few cards have known answers, to check the rest. Count my answers?"; $("evhRvQ").hidden = false;
+      $("evhRvAsk").hidden = false; $("evhRvPr").hidden = true;
+    } else evhPrChoice(c);
+    $("evhRvDone").hidden = true; r.hidden = false; r.scrollTop = 0;
+  }
+  function evhPrChoice(v) {  // consent answered (or nothing to ask): Redo the practice cards, or Start for real
+    $("evhRvQ").textContent = v === "yes" ? "Thank you! Your answers will count." : v === "no" ? "No problem: your answers won't be counted." : "";
+    $("evhRvQ").hidden = v == null; $("evhRvAsk").hidden = true; $("evhRvDone").hidden = true; $("evhRvPr").hidden = false;
+    try { $("evhRvPr").scrollIntoView({block: "nearest"}); } catch (e) {}
+  }
+  function evhPrRedo() {
+    pr.redo = true; pr.k = 0; pr.ans = []; pr.fb = null; st.px = st.py = 0;
+    $("evhReveal").hidden = true; render();
+  }
+  function evhPrEnd(quiet) {  // the real queue, from its first open card (the gold first, as before)
+    pr.on = false; pr.fb = null; st.px = st.py = 0; eh.fu = null;
+    if (quiet) return;
+    $("evhReveal").hidden = true;
+    const n = items.findIndex(x => !isDone(x)); go(n >= 0 ? n : 0);
   }
   const evhConsentV = () => evhConsent && items.length && me() ? mineOf(items[0], evhConsent) : null;
   function evhOffer() {  // the reveal: from the 10th answer on, while this reviewer hasn't answered it
+    if (evhPr.length) return;  // r17d: a set with practice cards asks in the reveal after them instead
     if (!evhConsent || !can() || !me() || !$("evhSplash").hidden || evhConsentV() != null) return;
     const n = nDone();
     if (n < EVH.at) return;
@@ -3927,6 +4020,7 @@ function makeObjectView() {
     if (!needWho(() => evhConsentSet(v))) return;
     const im = imOf(it), e = ensureEdit(im);
     setDec(e, okey(it.obj, evhConsent), v); touch(im.file);
+    if (evhPr.length) return evhPrChoice(v);
     $("evhRvTx").textContent = v === "yes" ? "Thank you! Your answers will count. Keep swiping as long as you like."
       : "No problem: your answers won't be counted. Keep swiping just for fun.";
     $("evhRvAsk").hidden = true; $("evhRvDone").hidden = false; $("evhRvKeep").focus();
@@ -3939,10 +4033,12 @@ function makeObjectView() {
   function evhKey(ev) {
     if (!$("evhGuide").hidden) { if (ev.key === "Escape" || ev.key === "?") { ev.preventDefault(); evhGuide(false); } return; }
     if (!$("evhSplash").hidden) { if (ev.key === "Enter" || ev.key === "Escape") { ev.preventDefault(); evhSplashDone(); } return; }
-    if (!$("evhReveal").hidden) { if (ev.key === "Escape") $("evhReveal").hidden = true; return; }  // later: offered again after the next answer
+    if (!$("evhReveal").hidden) { if (ev.key === "Escape" && !evhPr.length) $("evhReveal").hidden = true; return; }  // later: offered again after the next answer (r17d: a practice set's reveal stays)
     if (ev.target.tagName === "INPUT" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "SELECT") return;
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
     const k = ev.key;
+    if (pr.on && pr.fb) { if (k === "Enter" || k === " " || k === "ArrowRight") { ev.preventDefault(); evhPrNext(); } return; }  // r17d feedback
+    if (pr.on && (k === "Enter" || k === "Backspace")) { ev.preventDefault(); return; }  // practice: no undo / skip
     if (eh.fu && eh.fu === items[st.pos]) {  // follow-ups: 1-9 the first chip question, o the outline toggle, 0 / Enter / Esc skip
       const fus = EVH_FU[eh.fuV] || [], chip = fus.find(a => !isTog(a)), tog = fus.find(isTog), n = "123456789".indexOf(k);
       if (chip && n >= 0 && chip.options[n]) { ev.preventDefault(); return evhFuPick(chip, chip.options[n].v); }
@@ -3978,8 +4074,8 @@ function makeObjectView() {
       ...(evhDense ? [["Small & dense ↓", "Small, uniformly dark particles without a clear two-line bilayer (possibly lipoproteins).", [["dense", ""]]]] : []),
       ["It's complicated ↑", comp, [["unsure", ""], ["dense", ""]]]];
   }
-  function evhGuideBuild() {
-    const body = $("evhGdBody"); body.textContent = "";
+  function evhGuideBuild(into) {  // r17d: into = the reveal's copy (#evhRvGuide); default the sheet
+    const body = into || $("evhGdBody"); if (!into) body.textContent = "";
     const secs = evhGuideSecs();
     for (const [h, tx, cats] of secs) {
       const sec = el("section"); sec.dataset.sec = cats[0][0] === "single" ? "match" : cats[0][0];
@@ -4015,6 +4111,7 @@ function makeObjectView() {
     $("evhGo").onclick = evhSplashDone;
     $("evhRvYes").onclick = () => evhConsentSet("yes"); $("evhRvNo").onclick = () => evhConsentSet("no");
     $("evhRvKeep").onclick = () => { $("evhReveal").hidden = true; };
+    $("evhRvRedo").onclick = evhPrRedo; $("evhRvReal").onclick = () => evhPrEnd();
     if (evhGuideOn) {  // r17c: the "How to judge" sheet from the splash and the ? button
       $("evhHelp").hidden = false; $("evhHow").hidden = false;
       $("evhHelp").onclick = () => evhGuide(true); $("evhHow").onclick = () => evhGuide(true); $("evhGdX").onclick = () => evhGuide(false);
@@ -4066,7 +4163,9 @@ function makeObjectView() {
     ...(tree ? {mode: "tree", tree: treeState()} : {}),
     ...(evh ? {app: "evharmony", evh: {consent: evhConsentV(), reveal: !$("evhReveal").hidden, splash: !$("evhSplash").hidden,
       size: items[st.pos] ? evhSize(items[st.pos]) : null, nick: evhNick(), pan: [st.px, st.py], zoom: st.zs || null, bio: $("oBio").textContent,
-      dense: evhDense, kindFor: eh.fu ? eh.fu.id : null, fuV: eh.fu ? eh.fuV : null, guide: !$("evhGuide").hidden, guideOn: evhGuideOn, examples: evhEx.length}} : {})})};
+      dense: evhDense, kindFor: eh.fu ? eh.fu.id : null, fuV: eh.fu ? eh.fuV : null, guide: !$("evhGuide").hidden, guideOn: evhGuideOn, examples: evhEx.length,
+      practice: evhPr.length ? {on: pr.on, k: pr.k, n: evhPr.length, redo: pr.redo, fb: pr.fb, done: pr.done, answers: [...pr.ans],
+        card: pr.on && evhPr[pr.k] ? evhPr[pr.k].id : null} : null}} : {})})};
 }
 if (D.kind === "objects") OBJ = makeObjectView();
 // ===================================================== end OBJECT SET CARD =====================================================

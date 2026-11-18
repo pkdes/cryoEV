@@ -16,6 +16,10 @@ object set card (annotation/review_tool/index.html, D.app === "evharmony"), on a
     off unchanged (3 buttons, ↓ / d answer nothing, no sheet, no chips);
   - r17c v3 (ls_evh_match_v3): 3 answers (↓ / d nothing); after a Match the kind chips (Single / Multilayer) and the
     "Outline off" toggle; after It's complicated the "why" chips; the sheet without a Small & dense section.
+  - r17d (D.practice): the practice cards first (no attribute PUT for them), the reveal after the 3rd (message, How
+    to judge, consent saved; Esc doesn't close it), Redo (feedback "Our answer: Match · Single — note", then the
+    real queue) or Start for real (the real queue at once); a reviewer with consent already skips the practice; a
+    set without D.practice keeps the reveal at 10.
 
   python -m unittest discover -s annotation/tests -p test_evh_browser.py -v
 """
@@ -44,7 +48,11 @@ SAMPLE = "Zed Person 2023 sample"
 SPLASH_SEEN = "try { localStorage.setItem('cryoev-review:evh:splash', '1'); } catch (e) {}"
 
 
-def build_evh(folder, *, blind=False, app="evharmony", schema=None, examples=None, instructions=None):
+PRACTICE = ((3, "yes", "single", "A round ring: one vesicle."), (5, "no", "", "No membrane ring."),
+            (7, "yes", "", "Another clear ring."))
+
+
+def build_evh(folder, *, blind=False, app="evharmony", schema=None, examples=None, instructions=None, practice=False):
     """The fixture's two images with every outline as an item (11 items: 10 labels + 1 prediction), the eVHarmony
     schema (v1 unless given), D.app (app=None: the flag off); r17c: D.examples (copies of imgA.png as
     images/ex_<id>.jpg) and D.instructions when given."""
@@ -66,6 +74,9 @@ def build_evh(folder, *, blind=False, app="evharmony", schema=None, examples=Non
         data["examples"] = examples
     if instructions:
         data["instructions"] = instructions
+    if practice:                            # r17d: items 3, 5, 7 leave the queue as practice cards (tools/evh_practice.py)
+        data["practice"] = [{**items[n], "answer": a, **({"kind": k} if k else {}), "note": t} for n, a, k, t in PRACTICE]
+        data["items"] = [it for n, it in enumerate(items) if n not in {x[0] for x in PRACTICE}]
     for im in data["images"]:
         im["split"] = SAMPLE                # a sample label that names a person: never in an eVHarmony bio
     if app:
@@ -92,10 +103,15 @@ class EvhTests(unittest.TestCase):
         cls.pw.stop()
 
     def open(self, *, blind=False, app="evharmony", meta=META, splash_seen=True, width=1280, height=800,
-             scheme="light", init=None, schema=None, examples=None, instructions=None):
+             scheme="light", init=None, schema=None, examples=None, instructions=None, practice=False, consent=None):
         d = Path(tempfile.mkdtemp(prefix="evh_")) / "pred_obj_evh_ab12"
-        data = build_evh(d, blind=blind, app=app, schema=schema, examples=examples, instructions=instructions)
+        data = build_evh(d, blind=blind, app=app, schema=schema, examples=examples, instructions=instructions,
+                         practice=practice)
         srv = F.FakeServer(d, caps=("i", "t", "m", "a"), meta=meta).start()
+        if consent:                         # r17d: this reviewer answered consent before (on the first item)
+            it0 = data["items"][0]
+            srv.records[it0["image"] + ".png"] = {"dec": {f"a:{it0['obj']}:consent@rev1": {
+                "v": consent, "t": 1, "who": "rev1", "server_t": 1}}}
         self.addCleanup(srv.close)
         ctx = self.browser.new_context(viewport={"width": width, "height": height}, color_scheme=scheme,
                                        has_touch=width < 600)
@@ -359,6 +375,7 @@ class EvhTests(unittest.TestCase):
         pg.keyboard.press("y")
         pg.wait_for_selector("#evhReveal", state="visible", timeout=5000)
         self.assertEqual(self.obj(pg)["done"], 10)
+        self.assertIsNone(self.obj(pg)["evh"]["practice"])          # r17d: no D.practice = the reveal at 10, as before
         self.assertIn("Plot twist: you just reviewed 10 vesicle candidates for the CryoEV model. A few cards had "
                       "known answers. Count my answers?", pg.inner_text("#evhRvTx"))
         self.assertTrue(pg.is_visible("#evhRvYes") and pg.is_visible("#evhRvNo"))
@@ -642,6 +659,122 @@ class EvhTests(unittest.TestCase):
             self.assertIn(t, txt)
         self.assertEqual(pg.eval_on_selector_all("#evhGdBody h4", "els => els.map(e => e.textContent)"),
                          ["Single", "Multilayer"])
+        self.assertEqual(self.errors, [])
+
+
+    # ---- r17d: practice cards
+    def attr_puts(self, srv):
+        return [k for _f, rec in srv.puts for k in (rec.get("dec") or {}) if k.startswith("a:")]
+
+    def practice_answer(self, pg, key):
+        k = self.obj(pg)["evh"]["practice"]["k"]
+        pg.keyboard.press(key)
+        pg.wait_for_function(f"(p => p.k !== {k} || p.done || p.fb)(__review.obj().evh.practice)", timeout=5000)
+
+    def to_reveal(self, pg, keys=("y", "n", "y")):
+        for key in keys:
+            self.practice_answer(pg, key)
+        pg.wait_for_selector("#evhReveal", state="visible", timeout=5000)
+
+    def test_practice_then_reveal_then_redo(self):
+        data, srv, pg = self.open_v3(practice=True, width=390, height=844)
+        p = self.obj(pg)["evh"]["practice"]
+        self.assertEqual((p["on"], p["k"], p["n"], p["card"]), (True, 0, 3, data["practice"][0]["id"]))
+        self.assertEqual(pg.inner_text("#oPos"), "Practice 1 / 3")
+        self.assertFalse(pg.is_visible("#evhReveal"))
+        self.practice_answer(pg, "ArrowRight")                     # no follow-up chips on a practice card
+        self.assertEqual(self.obj(pg)["evh"]["practice"]["card"], data["practice"][1]["id"])
+        self.assertFalse(pg.is_visible("#oAttrs .evhKind"))
+        b = pg.locator("#ocv").bounding_box()
+        touch_swipe(pg, b["x"] + b["width"] / 2, b["y"] + b["height"] / 2, -170, 0, sel="#ocv")   # a swipe left = Nope
+        pg.wait_for_function("__review.obj().evh.practice.k === 2", timeout=5000)
+        pg.keyboard.press("Backspace")                             # no undo in practice
+        self.assertEqual(self.obj(pg)["evh"]["practice"]["k"], 2)
+        self.practice_answer(pg, "u")
+        pg.wait_for_selector("#evhReveal", state="visible", timeout=5000)
+        p = self.obj(pg)["evh"]["practice"]
+        self.assertEqual((p["done"], p["answers"]), (True, ["yes", "no", "unsure"]))
+        self.assertEqual(self.attr_puts(srv), [])                  # nothing of the practice was sent
+        self.assertIn("practice cards", pg.inner_text("#evhRvTx"))
+        self.assertIn("real vesicle candidate", pg.inner_text("#evhRvTx"))
+        self.assertTrue(pg.is_visible("#evhRvGuide"))
+        self.assertEqual(pg.eval_on_selector_all("#evhRvGuide section h3", "els => els.map(e => e.textContent)"),
+                         ["Match →", "Nope ←", "It's complicated ↑"])
+        self.assertIn(GUIDE_TEXT, pg.inner_text("#evhRvGuide"))
+        self.assertIn("Count my answers?", pg.inner_text("#evhRvQ"))
+        self.assertFalse(pg.is_visible("#evhRvPr"))                # Redo / Start only after the consent answer
+        pg.keyboard.press("Escape")                                # the practice reveal stays
+        pg.keyboard.press("y")
+        self.assertTrue(pg.is_visible("#evhReveal"))
+        self.assertLessEqual(pg.evaluate("document.documentElement.scrollWidth"), 390)
+        pg.click("#evhRvYes")
+        self.settle(pg)
+        first = data["items"][0]
+        self.assertEqual(self.match_of(srv, first, "consent"), "yes")
+        self.assertEqual(self.obj(pg)["evh"]["consent"], "yes")
+        self.assertTrue(pg.is_visible("#evhRvPr"))
+        self.assertIn("The practice cards don't count.", pg.inner_text("#evhRvPr"))
+        self.assertEqual(pg.inner_text("#evhRvRedo"), "Redo the 3 practice cards")
+        pg.click("#evhRvRedo")
+        self.assertFalse(pg.is_visible("#evhReveal"))
+        p = self.obj(pg)["evh"]["practice"]
+        self.assertEqual((p["on"], p["redo"], p["k"], p["card"]), (True, True, 0, data["practice"][0]["id"]))
+        self.practice_answer(pg, "n")                              # wrong: the card stays, our answer shows
+        pg.wait_for_selector("#oAttrs .evhFb", state="visible", timeout=5000)
+        self.assertEqual(self.obj(pg)["evh"]["practice"]["k"], 0)
+        fb = pg.inner_text("#oAttrs .evhFb")
+        self.assertIn("You: Nope", fb)
+        self.assertIn("Our answer: Match · Single — A round ring: one vesicle.", fb)
+        pg.click("#oAttrs .evhFb button")
+        pg.wait_for_function("__review.obj().evh.practice.k === 1 && !__review.obj().evh.practice.fb", timeout=5000)
+        self.practice_answer(pg, "n")                              # right
+        self.assertIn("✓ You: Nope", pg.inner_text("#oAttrs .evhFb"))
+        self.assertIn("Our answer: Nope — No membrane ring.", pg.inner_text("#oAttrs .evhFb"))
+        pg.keyboard.press("Enter")
+        pg.wait_for_function("__review.obj().evh.practice.k === 2 && !__review.obj().evh.practice.fb", timeout=5000)
+        self.practice_answer(pg, "y")
+        self.assertIn("Our answer: Match — Another clear ring.", pg.inner_text("#oAttrs .evhFb"))  # no kind given
+        self.assertEqual(pg.inner_text("#oAttrs .evhFb button"), "Start for real →")
+        pg.click("#oAttrs .evhFb button")
+        pg.wait_for_function("!__review.obj().evh.practice.on", timeout=5000)
+        o = self.obj(pg)
+        self.assertEqual((o["pos"], o["item"]["id"]), (0, first["id"]))   # the real queue from its first card
+        self.assertFalse(pg.is_visible("#evhReveal"))
+        self.assertEqual([k for k in self.attr_puts(srv) if ":match@" in k], [])
+        pg.keyboard.press("n")                                     # now an answer saves
+        self.next_card(pg, 0)
+        self.settle(pg)
+        self.assertEqual(self.match_of(srv, first), "no")
+        self.assertFalse(pg.is_visible("#evhReveal"))
+        self.assertEqual(self.errors, [])
+
+    def test_practice_start_for_real(self):
+        data, srv, pg = self.open_v3(practice=True)
+        self.to_reveal(pg)
+        pg.click("#evhRvNo")
+        self.settle(pg)
+        self.assertEqual(self.match_of(srv, data["items"][0], "consent"), "no")
+        self.assertIn("won't be counted", pg.inner_text("#evhRvQ"))
+        pg.click("#evhRvReal")
+        pg.wait_for_function("!__review.obj().evh.practice.on", timeout=5000)
+        o = self.obj(pg)
+        self.assertEqual((o["pos"], o["item"]["id"], o["n"]), (0, data["items"][0]["id"], len(data["items"])))
+        self.assertFalse(pg.is_visible("#evhReveal"))
+        self.assertNotIn("Practice", pg.inner_text("#oPos"))
+        self.assertEqual([k for k in self.attr_puts(srv) if ":consent@" not in k], [])
+        self.assertEqual(self.errors, [])
+
+    def test_practice_skipped_with_consent(self):
+        data, srv, pg = self.open_v3(practice=True, consent="yes")
+        pg.wait_for_function("!__review.obj().evh.practice.on", timeout=5000)
+        o = self.obj(pg)
+        self.assertEqual((o["item"]["id"], o["evh"]["consent"]), (data["items"][0]["id"], "yes"))
+        self.assertNotIn("Practice", pg.inner_text("#oPos"))
+        pg.keyboard.press("n")
+        self.next_card(pg, o["pos"])
+        self.settle(pg)
+        self.assertEqual(self.match_of(srv, data["items"][0]), "no")
+        self.assertFalse(pg.is_visible("#evhReveal"))
         self.assertEqual(self.errors, [])
 
 

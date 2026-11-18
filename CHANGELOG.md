@@ -7,6 +7,15 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-18 12:00 · eVHarmony practice cards before the reveal
+
+- **Three practice cards first:** a new player gets a sense of the swiping on three cards with known answers. Practice answers are never saved.
+- **Then the reveal:** a short note that these are real vesicle candidates and their swipes help annotate them for CryoEV, the How to judge guide, and the usual Count my answers question.
+- **Redo or start:** after that, Redo the 3 practice cards (each shows our answer and why) or Start for real. The practice cards don't count.
+- Players who already answered Count my answers skip the practice. Sets without practice cards, and every other review set, work as before.
+- For set makers: `tools/evh_practice.py` moves the chosen cards out of the queue and out of the scored export.
+- **Components:** review page 2026-11-18.2 / CLI (`tools/evh_practice.py`).
+
 ## 2026-11-18 08:50 · eVHarmony v3: three answers and optional follow-ups
 
 - **Back to three answers:** Match, Nope, It's complicated. Small and dense is no longer its own answer (no swipe down); it is now one of the reasons under It's complicated, which covers anything not clearly yes or no.
