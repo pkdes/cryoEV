@@ -24,6 +24,8 @@ owner answer needed (a decoy the owner answered "yes" stays "no" and is counted 
   why_<v>    their "why" answers on items they called unsure (v3: faint / dense / edge / other)
 Agreement is on yes / no only: every other answer (unsure; v2's dense) is excluded and reported.
 Prints a table; --out writes it as CSV. Read-only.
+--src SRC[,SRC] (r17f): only export rows whose `src` column (object_set build --export-cols) is one of these, e.g.
+ml_mv,decoy for scoring (a test39 set's answers are evaluation-only).
 
 --control (r17c, before a go-live): scores three made-up reviewers on the same gold (nothing is written):
 ctl_always_yes and ctl_always_no must FAIL and ctl_replay (the gold answers, decoys as no) must PASS; exit 3 if
@@ -57,6 +59,14 @@ def read_export(text: str) -> tuple:
     if not revs:
         raise ValueError(f"no {ATTR}@<reviewer> columns: is this an eVHarmony set's export?")
     return list(rd), revs
+
+
+def filter_src(rows, srcs) -> list:
+    """r17f: the rows whose src column is one of srcs (a ValueError when the export has no src column)."""
+    if rows and "src" not in rows[0]:
+        raise ValueError("--src: the export has no src column (object_set build --export-cols src)")
+    want = {s.strip() for s in srcs if s.strip()}
+    return [r for r in rows if _v(r.get("src")) in want]
 
 
 def read_decoys(text: str) -> set:
@@ -173,11 +183,14 @@ def main(argv=None):
     ap.add_argument("--out", type=Path)
     ap.add_argument("--decoys", type=Path, help="r17c: tools/evh_items.py's <items>_decoys.csv (known Nopes)")
     ap.add_argument("--control", action="store_true", help="r17c: always-yes / always-no must fail, a replay pass")
+    ap.add_argument("--src", help="r17f: only rows with these src values (comma-separated)")
     ap.add_argument("--min-gold", type=int, default=20)
     ap.add_argument("--min-agree", type=float, default=0.8)
     a = ap.parse_args(argv)
     try:
         rows, revs = read_export(a.csv.read_text(encoding="utf-8-sig"))
+        if a.src:
+            rows = filter_src(rows, a.src.split(","))
         dec = read_decoys(a.decoys.read_text(encoding="utf-8-sig")) if a.decoys else frozenset()
         res = score(rows, revs, a.gold, a.min_gold, a.min_agree, dec)
     except (ValueError, OSError, KeyError) as e:

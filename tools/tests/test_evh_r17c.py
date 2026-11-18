@@ -436,6 +436,47 @@ class R17c(unittest.TestCase):
             O.build(self.ps, self.t / "q.csv", str(V3), self.t / "r4", line_col="line", slug="evh", owner="admin1",
                     quality=0)
 
+    def test_r17f_source_tags_export_and_score_filter(self):
+        """r17f: build --export-cols copies items CSV tag columns into items.json rows and the export (never data.js);
+        --src-use goes to items.json; --max-items lifts the cap for one build; evh_score --src keeps only those rows."""
+        rows = self.items(out="t.csv")
+        tags = ["ml_mv", "decoy", "test39"]
+        buf = io.StringIO()
+        w = csv.writer(buf, lineterminator="\n")
+        w.writerow(list(rows[0]) + ["src", "gt", "m1"])
+        for k, r in enumerate(rows):
+            w.writerow(list(r.values()) + [tags[k % 3], "EV" if k % 3 == 2 else "", "non-EV" if k == 2 else ""])
+        (self.t / "tags.csv").write_text(buf.getvalue(), encoding="utf-8")
+        with self.assertRaises(O.ObjectSetError):                                # the cap, and a bad column
+            O.build(self.ps, self.t / "tags.csv", str(V3), self.t / "rx", line_col="line", slug="evh", owner="admin1",
+                    max_items=3)
+        with self.assertRaises(O.ObjectSetError):
+            O.build(self.ps, self.t / "tags.csv", str(V3), self.t / "ry", line_col="line", slug="evh", owner="admin1",
+                    export_cols=["nope"])
+        pkg = O.build(self.ps, self.t / "tags.csv", str(V3), self.t / "review", line_col="line", slug="evh",
+                      owner="admin1", reviewers=["admin1"], app="evharmony", export_cols=["src", "gt", "m1"],
+                      src_use={"test39": "eval_only"},
+                      max_items=len(rows))
+        ij = O.read_items(pkg)
+        self.assertEqual((ij["export_cols"], ij["src_use"]), (["src", "gt", "m1"], {"test39": "eval_only"}))
+        self.assertNotIn("test39", (pkg / "data.js").read_text(encoding="utf-8"))   # tags stay server-side
+        tab = O.table(pkg)
+        self.assertEqual(tab["columns"][-3:], ["src", "gt", "m1"])
+        by = {(r["image"], int(r["line"])): r for r in tab["rows"]}
+        for k, r in enumerate(rows):
+            x = by[(r["image"], int(r["line"]))]
+            self.assertEqual((x["src"], x["gt"]), (tags[k % 3], "EV" if k % 3 == 2 else ""))
+        text = O.to_csv(tab)
+        out, _revs = evh_score.read_export(text)
+        sub = evh_score.filter_src(out, ["ml_mv", "decoy"])
+        self.assertEqual(len(sub), sum(1 for k in range(len(rows)) if k % 3 != 2))
+        self.assertEqual({r["src"] for r in sub}, {"ml_mv", "decoy"})
+        plain = O.build(self.ps, self.t / "t.csv", str(V3), self.t / "plain", line_col="line", slug="evh", owner="admin1",
+                        reviewers=["admin1"])
+        self.assertNotIn("export_cols", O.read_items(plain))                     # without the options: as before
+        with self.assertRaises(ValueError):
+            evh_score.filter_src(evh_score.read_export(O.to_csv(O.table(plain)))[0], ["ml_mv"])
+
 
 class FollowUps(unittest.TestCase):
     def test_v3_follow_up_counts(self):

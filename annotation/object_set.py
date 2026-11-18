@@ -11,6 +11,7 @@ attributes (labels/schemas.py) instead of whole images.
         [--image-col image] (--line-col line | --particle-col particle_id) [--blind-cols c1,c2]
         [--outline-mode target|target+contained] [--slug <name>] [--seed N] [--owner <id>] [--reviewers a,b]
         [--review-root <dir>] [--do [--register --registry <dir>]] [--app evharmony] [--first-items N] [--quality Q]
+        [--export-cols a,b] [--src-use SRC=USE,...] [--max-items N]
     python -m annotation.object_set export --pkg <pkg> --out <file.csv> [--coco <file.json>]
     python -m annotation.object_set import --pkg <pkg> --csv <file.csv>
     python -m annotation.object_set instructions <pkg> (--text TEXT | --file PATH | --clear) [--do]
@@ -248,7 +249,7 @@ def resolve(ps_dir, rows, cols, image_col, line_col=None, particle_col=None, ps_
 
 # ---------------------------------------------------------------- build
 def plan(ps_dir, items_csv, schema, image_col="image", line_col=None, particle_col=None, blind_cols=(),
-         outline_mode="target", registry_root=None) -> dict:
+         outline_mode="target", registry_root=None, max_items=None, export_cols=()) -> dict:
     """Every check build makes, nothing written. -> the plan (raises ObjectSetError with every problem)."""
     ps_dir = Path(ps_dir)
     req, ps_id, model, ps_rows, pred_dir = pp._ps_inputs(ps_dir)
@@ -264,8 +265,12 @@ def plan(ps_dir, items_csv, schema, image_col="image", line_col=None, particle_c
     problems = []
     if not rows:
         problems.append("the items CSV has no rows")
-    if len(rows) > MAX_ITEMS:
-        problems.append(f"{len(rows)} items: at most {MAX_ITEMS}")
+    cap = MAX_ITEMS if max_items is None else int(max_items)   # r17f: --max-items (CLI) for a larger eVHarmony set
+    if len(rows) > cap:
+        problems.append(f"{len(rows)} items: at most {cap}")
+    for c in export_cols or ():
+        if c not in cols:
+            problems.append(f"export column {c!r} is not in the items CSV")
     if len(set(cols)) != len(cols) or any(not c or len(c) > COL_MAX for c in cols):
         problems.append(f"items CSV columns must be unique names of 1-{COL_MAX} characters")
     blind = list(dict.fromkeys(blind_cols or ()))
@@ -312,12 +317,17 @@ def plan(ps_dir, items_csv, schema, image_col="image", line_col=None, particle_c
 def build(ps_dir, items_csv, schema, review_root, image_col="image", line_col=None, particle_col=None,
           blind_cols=(), outline_mode="target", slug=None, seed=None, owner=None, reviewers=(),
           registry_root=None, width=1440, quality=72, built_by="cli", title=None, instructions=None, app=None,
-          first_items=0) -> Path:
+          first_items=0, export_cols=(), src_use=None, max_items=None) -> Path:
     """Build the object set (module doc) under review_root. -> its folder. Registering is separate (register()).
     title: the set's name as its maker typed it (data.js D.title and the record's title; default the slug).
     instructions: the set instructions (clean_instructions; None or empty = none, the data.js of before)."""
     instructions = clean_instructions(instructions) if instructions is not None else ""
-    P = plan(ps_dir, items_csv, schema, image_col, line_col, particle_col, blind_cols, outline_mode, registry_root)
+    P = plan(ps_dir, items_csv, schema, image_col, line_col, particle_col, blind_cols, outline_mode, registry_root,
+             max_items, export_cols)
+    # r17f: items CSV columns copied into the export (e.g. src / gt / m1..m3 tags: never in data.js), and what each
+    # source's answers may be used for (items.json src_use, e.g. {"test39": "eval_only"})
+    P["export_cols"] = [c for c in dict.fromkeys(export_cols or ()) if c not in P["blind"]]
+    P["src_use"] = dict(src_use or {})
     P["instructions"] = instructions
     if app is not None and app not in APPS:
         raise ObjectSetError(f"app must be one of {APPS}")
@@ -535,7 +545,8 @@ def _build_into(out, final, P, owner, reviewers, seed, width, quality, built_by,
             "file": P["items_name"], "sha256": P["sha256"]},
         "columns": P["cols"], "image_col": P["image_col"], "key_col": P["key_col"], "key_kind": P["key_kind"],
         "blind_cols": P["blind"], "outline_mode": mode, "label_schema": doc["id"],
-        **({"first_items": nf} if nf else {}), "items": items})
+        **({"first_items": nf} if nf else {}), **({"export_cols": P["export_cols"]} if P.get("export_cols") else {}),
+        **({"src_use": P["src_use"]} if P.get("src_use") else {}), "items": items})
     pp._write_json(out / "labels.coco.json", coco, indent=None)
     pp._write_json(out / pp.META, {"schema": "prediction_package/1", "kind": "objects", "package": pid,
                                    "prediction_set": P["ps_id"], "model": P["model"], "owner": owner,
@@ -616,9 +627,10 @@ def table(pkg) -> dict:
     attrs = [a["id"] for a in doc.get("object_attrs") or []]
     rids = sorted({k.split("@", 1)[1] for d in dec.values() for k in d} | set(om.package_reviewers(pkg)))
     blind = list(items.get("blind_cols") or [])
+    tags = [c for c in items.get("export_cols") or [] if c not in blind]   # r17f: build --export-cols
     cols = (["item", "image", "obj", "line"] + [f"{a}@{r}" for a in attrs for r in rids]
             + [f"agree_{a}" for a in attrs] + ["reviewers", "last_t", "history_n", "schema_id", "schema_version"]
-            + blind)
+            + blind + tags)
     n_hist = {}
     file_of = {Path(i["file"]).stem: i["file"] for i in data["images"]}
     for h in hist:
@@ -648,7 +660,7 @@ def table(pkg) -> dict:
         row["last_t"] = int(last) if rs._num(last) else None
         row["history_n"] = n_hist.get((it["image"], it["obj"]), 0) if it["image"] in file_of else 0
         row["schema_id"], row["schema_version"] = doc["id"], doc["version"]
-        for c in blind:
+        for c in blind + tags:
             row[c] = it["row"].get(c, "")
         rows.append(row)
     return {"columns": cols, "rows": rows, "schema": doc}
@@ -1568,6 +1580,9 @@ def main(argv=None):
     b.add_argument("--register", action="store_true", help="with --do: append the review_package line to --registry")
     b.add_argument("--app", choices=APPS, help="round 17: a page skin (data.js D.app); default none")
     b.add_argument("--quality", type=int, default=72, help="r17f: the base JPEGs' quality (1-95; default 72)")
+    b.add_argument("--export-cols", default="", help="r17f: items CSV columns copied into the export (never data.js)")
+    b.add_argument("--src-use", default="", help="r17f: SRC=USE,... what each source's answers are for (items.json)")
+    b.add_argument("--max-items", type=int, help=f"r17f: a larger cap than {MAX_ITEMS} for this build (CLI only)")
     b.add_argument("--first-items", type=int, default=0, metavar="N",
                    help="round 17: the first N items CSV rows come first in every reviewer's order (shuffled among "
                         "themselves), then the rest")
@@ -1623,7 +1638,9 @@ def main(argv=None):
                 a.review_root = config.laptop_root() / "review"
             pkg = build(a.ps, a.items, a.schema, a.review_root, a.image_col, a.line_col, a.particle_col, blind,
                         a.outline_mode, a.slug, a.seed, a.owner, revs, a.registry, title=a.title,
-                        instructions=instr, app=a.app, first_items=a.first_items, quality=a.quality)
+                        instructions=instr, app=a.app, first_items=a.first_items, quality=a.quality,
+                        export_cols=[c for c in a.export_cols.split(",") if c],
+                        src_use=dict(x.split("=", 1) for x in a.src_use.split(",") if "=" in x), max_items=a.max_items)
             if a.register:
                 register(pkg, a.registry)
                 print(f"[OK] registered {pkg.name} in {a.registry}")
