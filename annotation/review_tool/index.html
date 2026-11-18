@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-18.2";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-18.3";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const h = document.querySelector("header"), inPortal = /^\/review\//.test(location.pathname), v = document.createElement("span");
   v.id = "pageVer"; v.style.cssText = "font-size:11px;color:var(--mute);white-space:nowrap"; v.textContent = "Review page " + PAGE_VERSION;
@@ -384,6 +384,8 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #evhGdBody h3,#evhRvGuide h3{margin:14px 0 2px;font-size:16px}
 #evhGdBody h4,#evhRvGuide h4{margin:8px 0 4px;font-size:13.5px;color:var(--mute)}
 #evhGdBody p,#evhRvGuide p{margin:0 0 6px}
+#evhGdBody ul.bul,#evhRvGuide ul.bul{margin:2px 0 6px;padding-left:20px}#evhGdBody ul.bul li,#evhRvGuide ul.bul li{margin:2px 0}
+#evhGdBody details.guideFull{margin-top:12px;border-top:1px solid var(--line);padding-top:8px}#evhGdBody details.guideFull summary{cursor:pointer;color:var(--mute);font-size:13px}
 #evhGdBody .ex,#evhRvGuide .ex{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:8px;margin:4px 0 6px}
 #evhGdBody figure,#evhRvGuide figure{margin:0}
 #evhGdBody figure img,#evhRvGuide figure img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:8px;background:#000;display:block}
@@ -3410,7 +3412,8 @@ function makeObjectView() {
   const onCard = () => pr.on ? evhPr[pr.k] || null : items[st.pos];  // the card on screen
   // the practice zoom (object ~1/2 of the card, up to EVH.prZoom): a practice card with a finer image level that isn't
   // a Nope (decoys keep the usual framing, as picked)
-  const prBig = (it, im) => pr.on && it && it.answer !== "no" && fineOf(it, im);
+  // r17e: phone-width only (a wide card at zoom 4 blew the object up past its ring: PKD's desktop shot 11-18)
+  const prBig = (it, im) => pr.on && it && it.answer !== "no" && fineOf(it, im) && window.innerWidth <= 700;
   if (st.closed) closedOn = true;  // D.closed (object_set close_set writes it): closed before any answer is tried
   const imOf = it => it._pim || byStem.get(String(it.image));  // r17d: a practice card's own image record first
   const can = () => capOn("a") && server && !st.closed && !VIEW_ONLY;  // r17b: view only answers nothing
@@ -4069,28 +4072,33 @@ function makeObjectView() {
   // r17c: the "How to judge" sheet: one section per answer with the set's example crops (D.examples [{src, cat,
   // caption}], images/ex_*.jpg, tools/evh_examples.py) and the set's instructions (D.instructions) below. Text only
   // through textContent; a src must be images/ex_<id>.jpg.
-  function evhGuideSecs() {  // [heading, text, [[example cat, sub-heading]]]; v1 / v2 / v3 from the schema in use
+  function evhGuideSecs() {  // [heading, [bullets], [[example cat, sub-heading]]]; v1 / v2 / v3 from the schema in use (r17e: bullets)
     const lbl = a => a ? a.options.map(o => o.label).join(" / ") : "";
     const tog = EVH_FU.yes.find(isTog), why = EVH_FU.unsure[0];
-    const match = "A closed, round-ish object bounded by a membrane: a thin dark ring (the bilayer), even if faint or partial. Overlapping vesicles and slightly-off outlines count."
-      + (evhKind ? ` Then, if you can tell: ${lbl(evhKind)}` + (evhKind.options.some(o => o.v === "multilayer") ? " (any part of a multilayer counts: outer ring or inner layer)." : ".") : "")
-      + (tog ? " Tap Outline off when it's the right object but the outline needs correcting." : "");
-    const comp = evhDense ? "Too faint or noisy to tell, or cut off at the edge. Unsure is useful; don't guess."
-      : "Anything not clearly yes or no: a faint bilayer, a small dense particle (possibly a lipoprotein), or cut off at the edge."
-        + (why ? ` Then tap why if you like (${lbl(why)}).` : "") + " Unsure is useful; don't guess.";
+    const match = ["A closed ring: a thin dark line (the membrane) all the way round",
+      "Faint or partly hidden still counts",
+      "Overlapping vesicles count, and so does a slightly-off outline"];
+    if (evhKind) match.push(`If you can tell, tap ${lbl(evhKind)}` + (evhKind.options.some(o => o.v === "multilayer") ? " (any part of a multilayer counts)" : ""));
+    if (tog) match.push("Outline off = right object, the outline needs correcting");
+    const comp = evhDense ? ["Too faint or noisy to tell, or cut off at the edge", "Unsure is useful: don't guess"]
+      : ["Anything not clearly yes or no", "e.g. a faint bilayer, small & dense (maybe a lipoprotein), cut off at the edge"]
+        .concat(why ? [`If you like, tap why: ${lbl(why)}`] : [], ["Unsure is useful: don't guess"]);
     return [
       ["Match →", match, [["single", "Single"], ["ml", "Multilayer"], ["mv", "Has vesicles inside"], ["inner", "Inside another"]]],
-      ["Nope ←", "No membrane edge. Ice contamination (dark, sharp blobs or crystals) is the obvious one; also carbon or grid edge, grainy noise, aggregates, solid blobs, or an outline on empty background.", [["nope", ""]]],
-      ...(evhDense ? [["Small & dense ↓", "Small, uniformly dark particles without a clear two-line bilayer (possibly lipoproteins).", [["dense", ""]]]] : []),
+      ["Nope ←", ["No membrane ring", "Ice contamination: dark, sharp blobs or crystals (the obvious one)",
+                  "Also: carbon or grid edge, grainy noise, aggregates, solid blobs, empty background"], [["nope", ""]]],
+      ...(evhDense ? [["Small & dense ↓", ["Small, uniformly dark particle", "No clear two-line bilayer (maybe a lipoprotein)"], [["dense", ""]]]] : []),
       ["It's complicated ↑", comp, [["unsure", ""], ["dense", ""]]]];
   }
+  const EVH_TIPS = ["☼ = contrast (Auto + Smooth help)", "Tap the image to zoom", "i = outline on / off"];
+  function evhBullets(xs) { const ul = el("ul", "bul"); for (const x of xs) ul.append(el("li", null, x)); return ul; }
   function evhGuideBuild(into) {  // r17d: into = the reveal's copy (#evhRvGuide); default the sheet
     const body = into || $("evhGdBody"); if (!into) body.textContent = "";
     const secs = evhGuideSecs();
     for (const [h, tx, cats] of secs) {
       const sec = el("section"); sec.dataset.sec = cats[0][0] === "single" ? "match" : cats[0][0];
       if (evhDense && cats[0][0] === "unsure") cats.length = 1;  // v2: dense examples have their own section
-      sec.append(el("h3", null, h), el("p", null, tx));
+      sec.append(el("h3", null, h), evhBullets(tx));
       for (const [cat, sub] of cats) {
         const xs = evhEx.filter(x => x.cat === cat);
         if (!xs.length) continue;
@@ -4105,7 +4113,10 @@ function makeObjectView() {
       }
       body.append(sec);
     }
-    if (instr && !into) { body.append(el("h3", null, "Guidelines")); body.append(el("p", "guide", instr)); }  // r17d: not repeated on the reveal
+    if (!into) { body.append(el("h3", null, "Tips")); body.append(evhBullets(EVH_TIPS)); }
+    if (instr && !into) {  // r17d: not repeated on the reveal; r17e: the set's full text folded away under the bullets
+      const d = el("details", "guideFull"); d.append(el("summary", null, "Full guidelines"), el("p", "guide", instr)); body.append(d);
+    }
   }
   function evhGuide(on) {
     const g = $("evhGuide");

@@ -7,6 +7,14 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-18 18:30 · eVHarmony guide in short bullets
+
+- **How to judge is quicker to read:** each answer is a few short bullets instead of a paragraph, with the example images as before.
+- **Tips** (contrast, zoom, outline on or off) as bullets at the end of the guide.
+- The set's full guidelines text is folded under Full guidelines in the guide.
+- Practice cards zoom in further on phones only; on a wide screen they keep the usual framing.
+- **Components:** review page 2026-11-18.3.
+
 ## 2026-11-18 12:00 · eVHarmony practice cards before the reveal
 
 - **Three practice cards first:** a new player gets a sense of the swiping on three cards with known answers. Practice answers are never saved.

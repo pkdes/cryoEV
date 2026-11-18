@@ -260,7 +260,9 @@ class EvhTests(unittest.TestCase):
         self.assertEqual(self.obj(pg)["evh"]["examples"], 6)
         pg.wait_for_function("[...document.querySelectorAll('#evhGdBody img')].every(i => i.complete && i.naturalWidth > 0)",
                              timeout=5000)
-        self.assertIn("Unsure is useful", pg.inner_text("#evhGdBody .guide"))
+        self.assertIn("Unsure is useful", pg.inner_text("#evhGdBody section:last-of-type"))
+        self.assertIn("Unsure is useful", pg.text_content("#evhGdBody details.guideFull .guide"))  # r17e: full text folded
+        self.assertEqual(pg.eval_on_selector_all("#evhGdBody section h3", "els => els.length"), 4)
         pg.keyboard.press("Escape")                                   # closes the sheet, back on the splash
         self.assertFalse(pg.is_visible("#evhGuide"))
         self.assertTrue(pg.is_visible("#evhSplash"))
@@ -665,7 +667,7 @@ class EvhTests(unittest.TestCase):
         self.assertEqual(secs, ["Match →", "Nope ←", "It's complicated ↑"])
         txt = pg.inner_text("#evhGdBody")
         for t in ("any part of a multilayer counts", "Outline off", "Ice contamination", "Small and dense",
-                  "Anything not clearly yes or no", "Maybe a bilayer, hard to tell"):
+                  "Anything not clearly yes or no", "Maybe a bilayer, hard to tell", "Tips"):
             self.assertIn(t, txt)
         self.assertEqual(pg.eval_on_selector_all("#evhGdBody h4", "els => els.map(e => e.textContent)"),
                          ["Single", "Multilayer"])
@@ -790,8 +792,16 @@ class EvhTests(unittest.TestCase):
         self.assertEqual(self.errors, [])
 
 
+    def test_practice_zoom_phone_only(self):  # r17e: a wide screen keeps the usual framing on practice cards
+        data, srv, pg = self.open_v3(practice="ext", width=1400, height=900)
+        pg.wait_for_function("__review.obj().evh.objFrac !== null", timeout=10000)
+        pg.wait_for_timeout(300)
+        self.assertLessEqual(self.obj(pg)["evh"]["zoom"], 1.25)
+        self.assertLess(self.obj(pg)["evh"]["objFrac"], 0.45)
+        self.assertEqual(self.errors, [])
+
     def test_practice_card_from_other_package(self):
-        data, srv, pg = self.open_v3(practice="ext")
+        data, srv, pg = self.open_v3(practice="ext", width=390, height=844)
         p = self.obj(pg)["evh"]["practice"]
         self.assertEqual((p["on"], p["n"], p["card"]), (True, 3, "0a1b2"))
         pg.wait_for_function("__review.obj().drawn.length > 0", timeout=10000)   # its own image and outline are drawn
