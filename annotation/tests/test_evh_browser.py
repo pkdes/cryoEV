@@ -80,10 +80,12 @@ def build_evh(folder, *, blind=False, app="evharmony", schema=None, examples=Non
         if practice == "ext":               # r17d v2: the first card from another package (its own image record)
             import shutil
             shutil.copyfile(Path(folder) / "images" / "imgB.png", Path(folder) / "images" / "px_0a1b2c3d.jpg")
+            shutil.copyfile(Path(folder) / "images" / "imgB.png", Path(folder) / "images" / "px_0a1b2c3d.hi.jpg")
             imb = next(im for im in data["images"] if im["file"] == "imgB.png")
             data["practice"][0] = {"id": "0a1b2", "image": "px_0a1b2c3d", "obj": "g1", "crop": [0, 0, 1, 1], "answer": "yes",
                                    "note": "From elsewhere.", "im": {"file": "px_0a1b2c3d.jpg", "split": "", "w": imb["w"],
-                                   "h": imb["h"], "src": "images/px_0a1b2c3d.jpg", "gt": [{**imb["gt"][1], "id": 1}], "pr": []}}
+                                   "h": imb["h"], "src": "images/px_0a1b2c3d.jpg", "gt": [{**imb["gt"][1], "id": 1}], "pr": [],
+                                   "hi": "images/px_0a1b2c3d.hi.jpg", "hi_w": imb["w"], "hi_h": imb["h"]}}
     for im in data["images"]:
         im["split"] = SAMPLE                # a sample label that names a person: never in an eVHarmony bio
     if app:
@@ -794,8 +796,11 @@ class EvhTests(unittest.TestCase):
         pg.wait_for_function("__review.obj().drawn.length > 0", timeout=10000)   # its own image and outline are drawn
         pg.wait_for_function("__review.obj().evh.objFrac !== null", timeout=10000)
         self.assertAlmostEqual(self.obj(pg)["evh"]["objFrac"], 0.5, delta=0.06)  # a practice card: the object ~1/2 wide
+        self.practice_answer(pg, "y")                                # card 2: no finer image -> the usual zoom cap
+        pg.wait_for_timeout(400)
+        self.assertLessEqual(self.obj(pg)["evh"]["zoom"], 1.25)
         self.assertNotIn("0a1b2", [it["id"] for it in data["items"]])
-        self.to_reveal(pg)
+        self.to_reveal(pg, keys=("n", "y"))
         self.assertEqual(self.attr_puts(srv), [])
         self.assertEqual(self.errors, [])
 
