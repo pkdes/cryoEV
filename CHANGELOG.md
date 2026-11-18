@@ -7,6 +7,15 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-18 08:50 · eVHarmony v3: three answers, follow-ups after Match and It's complicated
+
+- **Back to three answers:** Match, Nope, It's complicated. Small and dense is no longer its own answer (no swipe down); it is now one of the reasons under It's complicated, which covers anything not clearly yes or no.
+- **After a Match** (optional, one tap): Single or Multilayer (any part of a multilayer counts, its outer ring or an inner layer), and an Outline off toggle for the right object with an outline that needs correcting.
+- **After It's complicated** (optional, one tap): why: Faint bilayer, Small and dense, Cut off at edge, or Other. Skip, or just swipe on, when you like.
+- **How to judge** now shows examples for Match (Single, Multilayer), Nope and It's complicated, without the label numbers on the pictures, and the guidelines are updated to match.
+- Sets built with the v3 questions (`tools/evh/ls_evh_match_v3.json`) work this way; v1 and v2 sets and every other review set look and work as before. Your earlier answers carry over to a rebuilt set.
+- **Components:** review page 2026-11-18.1 / CLI (`tools/evh_score.py` reports kind, outline_off and why per person; `tools/evh_examples.py --caption` repeatable).
+
 ## 2026-11-17 14:55 · eVHarmony v2: Small and dense, What is it, How to judge
 
 - **A fourth answer, "Small & dense"** (swipe down, or the button): small, uniformly dark particles without a clear bilayer, possibly lipoproteins. It is kept as its own answer so it can be studied later.

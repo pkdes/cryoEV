@@ -18,8 +18,11 @@ owner answer needed (a decoy the owner answered "yes" stays "no" and is counted 
   consent    "yes" only when their consent cells say yes and none says no; absent or no = "no"
   pass       agree_pct >= --min-agree x 100 AND n_scored >= --min-gold (the owner's OK still decides what counts;
              a reviewer without consent = "yes" is never used, pass or not)
-  kind_*     (v2) their "kind" answers on items they called yes: single / ml / mv / inner (every reviewer, the gold
-             one too, in the printed kind table)
+  follow-ups (v2 / v3) per reviewer, every reviewer (the gold one too) in the printed table:
+  kind_<v>   their "kind" answers on items they called yes (v2: single / ml / mv / inner; v3: single / multilayer)
+  outline_off  items they called yes and marked "Outline off" (v3)
+  why_<v>    their "why" answers on items they called unsure (v3: faint / dense / edge / other)
+Agreement is on yes / no only: every other answer (unsure; v2's dense) is excluded and reported.
 Prints a table; --out writes it as CSV. Read-only.
 
 --control (r17c, before a go-live): scores three made-up reviewers on the same gold (nothing is written):
@@ -34,11 +37,11 @@ import io
 import sys
 from pathlib import Path
 
-ATTR, CONSENT, KIND = "match", "consent", "kind"
+ATTR, CONSENT = "match", "consent"
 SCORED = ("yes", "no")
-KINDS = ("single", "ml", "mv", "inner")
+FOLLOW = (("kind", "yes"), ("outline_off", "yes"), ("why", "unsure"))   # (attribute, the match answer it follows)
 COLUMNS = ["reviewer", "n_gold", "n_unsure", "n_scored", "n_agree", "agree_pct", "consent", "pass", "n_dense",
-           "n_decoys", "decoy_no"] + [f"kind_{k}" for k in KINDS]
+           "n_decoys", "decoy_no"]
 
 
 def _v(t) -> str:
@@ -82,12 +85,23 @@ def gold_rows(rows, gold: str, decoys=frozenset()) -> tuple:
     return out, nd, nc
 
 
-def kinds(rows, rid: str) -> dict:
-    out = {k: 0 for k in KINDS}
-    for r in rows:
-        k = _v(r.get(f"{KIND}@{rid}"))
-        if k in out and _v(r.get(f"{ATTR}@{rid}")) == "yes":
-            out[k] += 1
+def follow_values(rows) -> dict:
+    """{attr: [values seen]} of the follow-up columns in the export (sorted; outline_off counts only "yes")."""
+    out = {}
+    for at, _m in FOLLOW:
+        vals = {_v(r.get(c)) for r in rows for c in r if c.startswith(at + "@")} - {""}
+        if vals:
+            out[at] = ["yes"] if at == "outline_off" else sorted(vals)
+    return out
+
+
+def follow_ups(rows, rid: str, seen: dict) -> dict:
+    """{kind_<v> | outline_off | why_<v>: count} for one reviewer: only on items they answered the leading match."""
+    out = {}
+    for at, m in FOLLOW:
+        for v in seen.get(at, []):
+            col = at if at == "outline_off" else f"{at}_{v}"
+            out[col] = sum(1 for r in rows if _v(r.get(f"{at}@{rid}")) == v and _v(r.get(f"{ATTR}@{rid}")) == m)
     return out
 
 
@@ -95,6 +109,7 @@ def score(rows, reviewers, gold: str, min_gold: int = 20, min_agree: float = 0.8
     if gold not in reviewers:
         raise ValueError(f"gold reviewer {gold!r} has no {ATTR}@{gold} column (reviewers: {', '.join(reviewers)})")
     golds, _nd, _nc = gold_rows(rows, gold, decoys)
+    seen = follow_values(rows)
     out = []
     for rid in sorted(x for x in reviewers if x != gold):
         n_gold = n_unsure = n_dense = n_agree = n_dec = dec_no = 0
@@ -108,7 +123,7 @@ def score(rows, reviewers, gold: str, min_gold: int = 20, min_agree: float = 0.8
                 dec_no += a == "no"
             if a == "unsure":
                 n_unsure += 1
-            elif a == "dense":
+            elif a not in SCORED:                       # v2's dense (and any other non yes / no)
                 n_dense += 1
             elif a == g:
                 n_agree += 1
@@ -119,7 +134,7 @@ def score(rows, reviewers, gold: str, min_gold: int = 20, min_agree: float = 0.8
         ok = pct is not None and pct >= 100.0 * min_agree and n_scored >= min_gold
         out.append({"reviewer": rid, "n_gold": n_gold, "n_unsure": n_unsure, "n_scored": n_scored, "n_agree": n_agree,
                     "agree_pct": pct, "consent": consent, "pass": ok, "n_dense": n_dense, "n_decoys": n_dec,
-                    "decoy_no": dec_no, **{f"kind_{k}": v for k, v in kinds(rows, rid).items()}})
+                    "decoy_no": dec_no, **follow_ups(rows, rid, seen)})
     return out
 
 
@@ -144,9 +159,10 @@ def control(rows, gold: str, min_gold: int = 20, min_agree: float = 0.8, decoys=
 def to_csv(res: list) -> str:
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
-    w.writerow(COLUMNS)
+    cols = COLUMNS + [c for c in (res[0] if res else {}) if c not in COLUMNS]
+    w.writerow(cols)
     for r in res:
-        w.writerow(["" if r[c] is None else ("1" if r[c] is True else "0" if r[c] is False else r[c]) for c in COLUMNS])
+        w.writerow(["" if r[c] is None else ("1" if r[c] is True else "0" if r[c] is False else r[c]) for c in cols])
     return buf.getvalue()
 
 
@@ -177,11 +193,13 @@ def main(argv=None):
         print(f"  {r['reviewer']:<20} gold {r['n_gold']:>3}  unsure {r['n_unsure']:>3}  dense {r['n_dense']:>3}  agree "
               f"{'-' if r['agree_pct'] is None else str(r['agree_pct']) + ' %':>8}  decoys {r['decoy_no']}/{r['n_decoys']} no  "
               f"consent {r['consent']:<3}  {'PASS' if r['pass'] else 'fail'}")
-    if rows and any(f"{KIND}@{x}" in rows[0] for x in revs):
-        print("kind answers (on items each called yes): " + ", ".join(KINDS))
+    seen = follow_values(rows)
+    if seen:
+        print("follow-ups (kind / outline_off after yes, why after unsure): " + ", ".join(
+            f"{a}: {'/'.join(v)}" for a, v in seen.items()))
         for rid in revs:
-            k = kinds(rows, rid)
-            print(f"  {rid:<20} " + "  ".join(f"{n} {k[n]}" for n in KINDS))
+            f = follow_ups(rows, rid, seen)
+            print(f"  {rid:<20} " + "  ".join(f"{k} {n}" for k, n in f.items()))
     if a.out:
         a.out.write_text(to_csv(res), encoding="utf-8", newline="")
         print(f"[OK] {a.out}")

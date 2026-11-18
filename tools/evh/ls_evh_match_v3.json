@@ -1,0 +1,44 @@
+{
+ "schema": "label_schema/1",
+ "id": "ls_evh_match_v3",
+ "name": "evh_match",
+ "version": 3,
+ "maker": "pujan",
+ "description": "eVHarmony v3 (round 17c, owner feedback): is this candidate a real vesicle? yes (Match) / no (Nope) / unsure (It's complicated: anything not clearly yes or no). v1's value names, so v1 answers carry over. After a Match, optional: kind single / multilayer (any part of one: outer ring or inner layer) and outline_off = yes (the right object, but its outline needs correcting). After It's complicated, optional: why faint / dense (small and dense) / edge (cut off at the edge) / other. consent as in v1: answered once per reviewer, on the set's first item only.",
+ "classes": [
+  {"name": "EV", "color": "#4ade80", "key": "1"}
+ ],
+ "object_attrs": [
+  {"id": "match", "label": "Match?", "kind": "choice", "required": true,
+   "help": "Swipe right = Match (a membrane-bound vesicle, overlapping ones too), left = Nope, up = It's complicated (anything not clearly yes or no).",
+   "options": [
+    {"v": "yes", "label": "Match", "key": "y"},
+    {"v": "no", "label": "Nope", "key": "n"},
+    {"v": "unsure", "label": "It's complicated", "key": "u"}
+   ]},
+  {"id": "kind", "label": "What is it?", "kind": "choice",
+   "help": "Only after a Match, optional. Multilayer: any part of one (outer ring, inner layer).",
+   "options": [
+    {"v": "single", "label": "Single", "key": "s"},
+    {"v": "multilayer", "label": "Multilayer", "key": "m"}
+   ]},
+  {"id": "outline_off", "label": "Outline off", "kind": "choice",
+   "help": "Only after a Match, optional: the right object, but its outline needs correcting.",
+   "options": [{"v": "yes", "label": "Outline off", "key": "o"}, {"v": "no", "label": "Outline fine"}]},
+  {"id": "why", "label": "Why complicated?", "kind": "choice",
+   "help": "Only after It's complicated, optional.",
+   "options": [
+    {"v": "faint", "label": "Faint bilayer", "key": "f"},
+    {"v": "dense", "label": "Small and dense", "key": "d"},
+    {"v": "edge", "label": "Cut off at edge", "key": "e"},
+    {"v": "other", "label": "Other", "key": "x"}
+   ]},
+  {"id": "consent", "label": "Count my answers", "kind": "choice",
+   "help": "Asked once, on the set's first item: yes = these answers may be used.",
+   "options": [{"v": "yes", "label": "Yes"}, {"v": "no", "label": "No"}]}
+ ],
+ "image_attrs": [],
+ "tags": [],
+ "supersedes": "ls_evh_match_v2",
+ "class_mapping": {"EV": "EV"}
+}

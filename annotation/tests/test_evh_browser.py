@@ -13,7 +13,9 @@ object set card (annotation/review_tool/index.html, D.app === "evharmony"), on a
   - r17c (schema ls_evh_match_v2): the 4th answer (button, swipe down, d / ↓) saves "dense"; after a Match the "What
     is it?" chips (pick = kind saved + next card; skip = nothing saved + next; a swipe = re-answer + next); the "How to
     judge" sheet from the splash and the ? button (sections, example crops, the instructions); v1 sets and the flag
-    off unchanged (3 buttons, ↓ / d answer nothing, no sheet, no chips).
+    off unchanged (3 buttons, ↓ / d answer nothing, no sheet, no chips);
+  - r17c v3 (ls_evh_match_v3): 3 answers (↓ / d nothing); after a Match the kind chips (Single / Multilayer) and the
+    "Outline off" toggle; after It's complicated the "why" chips; the sheet without a Small & dense section.
 
   python -m unittest discover -s annotation/tests -p test_evh_browser.py -v
 """
@@ -35,6 +37,7 @@ from cryoev_testkit import browser  # noqa: E402
 REPO = HERE.parents[1]
 EVH_SCHEMA = json.loads((REPO / "tools" / "evh" / "ls_evh_match_v1.json").read_text(encoding="utf-8"))
 EVH_V2 = json.loads((REPO / "tools" / "evh" / "ls_evh_match_v2.json").read_text(encoding="utf-8"))
+EVH_V3 = json.loads((REPO / "tools" / "evh" / "ls_evh_match_v3.json").read_text(encoding="utf-8"))
 GUIDE_TEXT = "What you're judging: the highlighted outline. Unsure is useful; don't guess."
 META = {"schema": "review_meta/1", "package": {}, "images": {"imgA.png": {"nm_per_px": 1.5}, "imgB.png": {"nm_per_px": 1.5}}}
 SAMPLE = "Zed Person 2023 sample"
@@ -553,6 +556,92 @@ class EvhTests(unittest.TestCase):
         pg.evaluate("dispatchEvent(new Event('online'))")
         self.settle(pg)
         pg.wait_for_function("document.getElementById('oSaved').dataset.state === 'saved'", timeout=5000)
+        self.assertEqual(self.errors, [])
+
+    # ---- r17c v3
+    def open_v3(self, **kw):
+        ex = [{"src": f"images/ex_{i}.jpg", "cat": c, "caption": cap} for i, c, cap in (
+            ("S3", "single", "Single vesicle"), ("M4", "ml", "Any part of a multilayer counts"),
+            ("N5", "nope", "Ice"), ("C5", "unsure", "Maybe a bilayer, hard to tell"))]
+        return self.open(schema=EVH_V3, examples=ex, instructions=GUIDE_TEXT, **kw)
+
+    def test_v3_three_answers_and_follow_ups(self):
+        _, srv, pg = self.open_v3(width=390, height=844)
+        self.assertEqual(pg.eval_on_selector_all("#oAttrs .evhBtns button", "els => els.map(e => e.dataset.v)"),
+                         ["no", "unsure", "yes"])
+        self.assertFalse(self.obj(pg)["evh"]["dense"])
+        o0 = self.obj(pg)
+        pg.keyboard.press("d")                                        # no 4th answer: d / ↓ / swipe down do nothing
+        pg.keyboard.press("ArrowDown")
+        b = pg.locator("#ocv").bounding_box()
+        touch_swipe(pg, b["x"] + b["width"] / 2, b["y"] + b["height"] / 2 - 60, 10, 170, sel="#ocv")
+        pg.wait_for_timeout(400)
+        self.assertEqual((self.obj(pg)["pos"], self.obj(pg)["done"]), (o0["pos"], 0))
+        # Match: kind chips + the Outline off toggle; toggle, then Multilayer -> both saved, the next card
+        o = self.obj(pg)
+        pg.keyboard.press("ArrowRight")
+        pg.wait_for_selector("#oAttrs .evhKind", state="visible", timeout=5000)
+        self.assertEqual(self.obj(pg)["evh"]["fuV"], "yes")
+        self.assertEqual(pg.eval_on_selector_all("#oAttrs .evhKind button", "els => els.map(e => e.textContent)"),
+                         ["Single", "Multilayer", "✎ Outline off", "skip →"])
+        pg.click("#oAttrs .evhKind button[data-attr='outline_off']")
+        self.assertEqual(pg.get_attribute("#oAttrs .evhKind button[data-attr='outline_off']", "aria-pressed"), "true")
+        self.assertEqual(pg.inner_text("#oAttrs .evhKind button.skip"), "next →")
+        self.assertEqual(self.obj(pg)["pos"], o["pos"])               # a toggle doesn't move on
+        pg.click("#oAttrs .evhKind button[data-v='multilayer']")
+        self.next_card(pg, o["pos"])
+        # Match, o (toggle), Enter: outline_off only
+        o2 = self.obj(pg)
+        pg.keyboard.press("y")
+        pg.wait_for_selector("#oAttrs .evhKind", state="visible", timeout=5000)
+        pg.keyboard.press("o")
+        pg.keyboard.press("Enter")
+        self.next_card(pg, o2["pos"])
+        # Match, 1 = Single
+        o3 = self.obj(pg)
+        pg.keyboard.press("y")
+        pg.wait_for_selector("#oAttrs .evhKind", state="visible", timeout=5000)
+        pg.keyboard.press("1")
+        self.next_card(pg, o3["pos"])
+        # It's complicated: the why chips; pick Small and dense
+        o4 = self.obj(pg)
+        pg.keyboard.press("ArrowUp")
+        pg.wait_for_selector("#oAttrs .evhKind.why", state="visible", timeout=5000)
+        self.assertEqual(pg.eval_on_selector_all("#oAttrs .evhKind button", "els => els.map(e => e.textContent)"),
+                         ["Faint bilayer", "Small and dense", "Cut off at edge", "Other", "skip →"])
+        pg.click("#oAttrs .evhKind button[data-v='dense']")
+        self.next_card(pg, o4["pos"])
+        # It's complicated, then a swipe left: re-answered no, no why
+        o5 = self.obj(pg)
+        pg.keyboard.press("u")
+        pg.wait_for_selector("#oAttrs .evhKind.why", state="visible", timeout=5000)
+        touch_swipe(pg, b["x"] + b["width"] / 2, b["y"] + b["height"] / 2, -170, 0, sel="#ocv")
+        self.next_card(pg, o5["pos"])
+        # Nope: no follow-ups, the next card at once
+        o6 = self.obj(pg)
+        pg.keyboard.press("n")
+        self.next_card(pg, o6["pos"])
+        self.settle(pg)
+        got = [tuple(self.match_of(srv, x["item"], a) for a in ("match", "kind", "outline_off", "why"))
+               for x in (o, o2, o3, o4, o5, o6)]
+        self.assertEqual(got, [("yes", "multilayer", "yes", None), ("yes", None, "yes", None), ("yes", "single", None, None),
+                               ("unsure", None, None, "dense"), ("no", None, None, None), ("no", None, None, None)])
+        self.assertLessEqual(pg.evaluate("document.documentElement.scrollWidth"), 390)
+        self.assertEqual(self.errors, [])
+
+    def test_v3_how_to_judge(self):
+        _, _, pg = self.open_v3(splash_seen=False)
+        self.assertIn("up when it's complicated", pg.inner_text("#evhSplash"))
+        self.assertNotIn("down", pg.inner_text("#evhSplash"))
+        pg.click("#evhHow")
+        secs = pg.eval_on_selector_all("#evhGdBody section h3", "els => els.map(e => e.textContent)")
+        self.assertEqual(secs, ["Match →", "Nope ←", "It's complicated ↑"])
+        txt = pg.inner_text("#evhGdBody")
+        for t in ("any part of a multilayer counts", "Outline off", "Ice contamination", "Small and dense",
+                  "Anything not clearly yes or no", "Maybe a bilayer, hard to tell"):
+            self.assertIn(t, txt)
+        self.assertEqual(pg.eval_on_selector_all("#evhGdBody h4", "els => els.map(e => e.textContent)"),
+                         ["Single", "Multilayer"])
         self.assertEqual(self.errors, [])
 
 

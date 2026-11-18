@@ -2,7 +2,7 @@
 eVHarmony "How to judge" examples (round 17c): chosen example crops -> an eVHarmony object set.
 
     python tools/evh_examples.py <pred_obj_*> --from <crops dir> --pick S2,M5,N1,... [--cat S2=single,...]
-        [--caption S2="text",...] [--do]
+        [--caption "S2,S3=text, commas allowed" ...] [--do]
     python tools/evh_examples.py <pred_obj_*> --clear [--do]
 
 <crops dir>/examples.csv lists the candidate crops, one row each: `id` (e.g. S2), the crop's file (`file`, `crop`,
@@ -78,11 +78,20 @@ def _caption(t) -> str:
     return t
 
 
-def _pairs(arg) -> dict:
+def _pairs(args) -> dict:
+    """--cat / --caption values (repeatable): "ID=value,ID=value" for categories; "ID[,ID...]=text" for one caption
+    (the text may hold commas)."""
     out = {}
-    for x in [y for y in (arg or "").split(",") if y.strip()]:
-        k, _, v = x.partition("=")
-        out[k.strip()] = v.strip().strip('"')
+    for arg in args or []:
+        if "=" in arg and "," in arg.split("=", 1)[1] and all("=" in y for y in arg.split(",")):
+            parts = arg.split(",")                       # ID=value,ID=value (no comma inside a value)
+        else:
+            parts = [arg]
+        for x in parts:
+            k, _, v = x.partition("=")
+            for i in k.split(","):
+                if i.strip():
+                    out[i.strip()] = v.strip().strip('"')
     return out
 
 
@@ -161,8 +170,8 @@ def main(argv=None):
     ap.add_argument("pkg", type=Path)
     ap.add_argument("--from", dest="src", type=Path)
     ap.add_argument("--pick", default="")
-    ap.add_argument("--cat", default="", help="id=category,... overrides")
-    ap.add_argument("--caption", default="", help='id="caption",... overrides')
+    ap.add_argument("--cat", action="append", help="id=category,... overrides (repeatable)")
+    ap.add_argument("--caption", action="append", help='"ID[,ID...]=caption" (repeatable; the caption may hold commas)')
     ap.add_argument("--clear", action="store_true")
     ap.add_argument("--do", action="store_true")
     a = ap.parse_args(argv)

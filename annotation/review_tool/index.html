@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-17.3";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-18.1";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const h = document.querySelector("header"), inPortal = /^\/review\//.test(location.pathname), v = document.createElement("span");
   v.id = "pageVer"; v.style.cssText = "font-size:11px;color:var(--mute);white-space:nowrap"; v.textContent = "Review page " + PAGE_VERSION;
@@ -369,6 +369,11 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #oAttrs .evhKind .chips button{min-height:44px;border-radius:22px;padding:2px 14px;font-size:14px;font-weight:700;touch-action:manipulation;color:#16a34a;border-color:#16a34a}
 #oAttrs .evhKind .chips button.skip{color:var(--mute);border-color:var(--line)}
 #oAttrs .evhKind .chips button.on{color:#fff;background:#16a34a}
+#oAttrs .evhKind .chips + h3{margin-top:10px}
+#oAttrs .evhKind.why .chips button{color:#b45309;border-color:#d97706}
+#oAttrs .evhKind.why .chips button.on{color:#fff;background:#d97706}
+#oAttrs .evhKind .chips button.tog{color:#2563eb;border-color:#2563eb}
+#oAttrs .evhKind .chips button.tog.on{color:#fff;background:#2563eb}
 #evhHelp{flex:none;min-width:34px;min-height:34px;border-radius:17px;font-weight:800;font-size:16px;padding:0;color:var(--hot);border-color:var(--hot)}
 #evhGuide{position:absolute;inset:0;z-index:45;display:flex;align-items:flex-start;justify-content:center;padding:10px;background:color-mix(in srgb,var(--bg) 70%,transparent);backdrop-filter:blur(3px)}
 #evhGuide .box{width:min(560px,100%);max-height:calc(100% - 4px);display:flex;flex-direction:column;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.35)}
@@ -3357,11 +3362,16 @@ function makeObjectView() {
   // Match, and the "How to judge" sheet (D.examples + D.instructions). A v1 set (no dense option, no examples) is unchanged.
   const evhDense = !!(evhMatch && evhMatch.options.some(o => o.v === "dense"));
   const evhKind = evh ? attrs.find(a => a.id === "kind" && a.kind === "choice") || null : null;
+  // r17c v3 (ls_evh_match_v3): optional follow-ups after an answer, from the schema: after a Match "kind" (chips) and
+  // "outline_off" (a toggle: yes / cleared); after It's complicated "why" (chips). A chip pick saves and moves on.
+  const fuOf = id => evh ? attrs.find(a => a.id === id && a.kind === "choice") || null : null;
+  const EVH_FU = {yes: [evhKind, fuOf("outline_off")].filter(Boolean), unsure: [fuOf("why")].filter(Boolean)};
+  const isTog = a => a.id === "outline_off" && a.options.some(o => o.v === "yes");
   const EX_CATS = ["single", "ml", "mv", "inner", "nope", "dense", "unsure"];
   const evhEx = evh && Array.isArray(D.examples) ? D.examples.filter(x => x && typeof x.src === "string" && /^images\/ex_[A-Za-z0-9_-]{1,40}\.jpg$/.test(x.src)
     && EX_CATS.includes(x.cat)).slice(0, 60) : [];
-  const evhGuideOn = evh && (evhDense || evhEx.length > 0);
-  const eh = {meta: null, busy: false, g: null, toastT: null, kindFor: null};
+  const evhGuideOn = evh && (evhDense || evhEx.length > 0 || EVH_FU.yes.length > 0 || EVH_FU.unsure.length > 0);
+  const eh = {meta: null, busy: false, g: null, toastT: null, fu: null, fuV: null};  // fu: the item whose follow-ups are up
   if (st.closed) closedOn = true;  // D.closed (object_set close_set writes it): closed before any answer is tried
   const imOf = it => byStem.get(String(it.image));
   const can = () => capOn("a") && server && !st.closed && !VIEW_ONLY;  // r17b: view only answers nothing
@@ -3810,8 +3820,8 @@ function makeObjectView() {
   }
   function evhRows(it, on, box) {
     if (!evhMatch) { box.append(el("p", null, "This set has no match question.")); return; }
-    if (eh.kindFor && eh.kindFor !== it) eh.kindFor = null;
-    if (eh.kindFor === it && evhKind) return evhKindRow(it, on, box);
+    if (eh.fu && eh.fu !== it) eh.fu = null;
+    if (eh.fu === it) return evhFuRow(it, on, box);
     if (nDone() >= items.length) box.append(el("p", "evhEmpty", brand().empty));
     const row = el("div", "evhBtns" + (evhDense ? " four" : "")), cur = mineOf(it, evhMatch);
     const btns = evhDense ? [["no", "nope", "✕ Nope"], ["yes", "like", "♥ Match"], ["unsure", "meh", "🤷 It's complicated"], ["dense", "dense", "● Small & dense"]]
@@ -3825,24 +3835,43 @@ function makeObjectView() {
     box.append(row);
     if (evhMatch.help) box.append(el("p", "oHelp", evhMatch.help));
   }
-  function evhKindRow(it, on, box) {  // r17c: "What is it?" after a Match; one tap (or skip) and the next card comes
-    const w = el("div", "evhKind"), chips = el("div", "chips"), cur = mineOf(it, evhKind);
-    w.append(el("h3", null, evhKind.label || "What is it?"));
-    evhKind.options.forEach((o, n) => {
-      const b = el("button", cur === o.v ? "on" : "", o.label); b.type = "button"; b.dataset.v = o.v; b.disabled = !on;
-      b.title = `${o.label} (${n + 1})`; b.onclick = () => evhKindPick(o.v); chips.append(b);
-    });
-    const sk = el("button", "skip", "skip →"); sk.type = "button"; sk.dataset.v = ""; sk.title = "Can't tell: skip (0)";
-    sk.onclick = () => evhKindPick(null); chips.append(sk);
-    w.append(chips); box.append(w);
-  }
-  function evhKindPick(v) {  // v null = skip (unanswered)
-    const it = eh.kindFor; eh.kindFor = null;
-    if (!it || items[st.pos] !== it) return render();
-    if (v != null && evhKind && can() && mineOf(it, evhKind) !== v) {
-      const im = imOf(it), e = ensureEdit(im), k = okey(it.obj, evhKind), prev = e.dec[k] ? clone(e.dec[k]) : null;
-      setDec(e, k, v); st.undo.push({file: im.file, key: k, prev, t: e.dec[k].t, pos: st.pos, node: 0}); touch(im.file);
+  function evhFuRow(it, on, box) {  // r17c: the follow-ups of the answer just given; one chip tap (or skip) and the next card
+    const fus = EVH_FU[eh.fuV] || [], w = el("div", "evhKind" + (eh.fuV === "unsure" ? " why" : ""));
+    let any = false, first = true;
+    for (const a of fus) {
+      const chips = el("div", "chips"), cur = mineOf(it, a);
+      if (isTog(a)) {
+        const on1 = cur === "yes"; any = any || on1;
+        const b = el("button", "tog" + (on1 ? " on" : ""), "✎ " + (a.options.find(o => o.v === "yes").label || a.label));
+        b.type = "button"; b.dataset.attr = a.id; b.disabled = !on; b.title = (a.help || a.label) + " (o)";
+        b.setAttribute("aria-pressed", on1 ? "true" : "false"); b.onclick = () => evhFuToggle(a); chips.append(b);
+        w.append(chips); continue;
+      }
+      w.append(el("h3", null, a.label));
+      a.options.forEach((o, n) => {
+        const b = el("button", cur === o.v ? "on" : "", o.label); b.type = "button"; b.dataset.v = o.v; b.dataset.attr = a.id;
+        b.disabled = !on; b.title = first ? `${o.label} (${n + 1})` : o.label; b.onclick = () => evhFuPick(a, o.v); chips.append(b);
+      });
+      first = false;
+      w.append(chips);
     }
+    const sk = el("button", "skip", any ? "next →" : "skip →"); sk.type = "button"; sk.dataset.v = ""; sk.title = "Can't tell: skip (0)";
+    sk.onclick = () => evhFuPick(null, null);
+    const last = el("div", "chips"); last.append(sk); w.append(last);
+    box.append(w);
+  }
+  function evhFuSet(it, a, v) {
+    const im = imOf(it), e = ensureEdit(im), k = okey(it.obj, a), prev = e.dec[k] ? clone(e.dec[k]) : null;
+    setDec(e, k, v); st.undo.push({file: im.file, key: k, prev, t: e.dec[k].t, pos: st.pos, node: 0}); touch(im.file);
+  }
+  function evhFuToggle(a) {  // outline_off: yes <-> cleared; the card stays
+    const it = eh.fu; if (!it || items[st.pos] !== it || !can()) return;
+    evhFuSet(it, a, mineOf(it, a) === "yes" ? null : "yes"); render();
+  }
+  function evhFuPick(a, v) {  // a null = skip / next (nothing more saved)
+    const it = eh.fu; eh.fu = null;
+    if (!it || items[st.pos] !== it) return render();
+    if (a && v != null && can() && mineOf(it, a) !== v) evhFuSet(it, a, v);
     evhNext(it);
   }
   function evhNext(it) {  // after an answer: the next open card (or stay when all are done), then the reveal check
@@ -3867,7 +3896,7 @@ function makeObjectView() {
     if (!it || !evhMatch || eh.busy || !evhMatch.options.some(o => o.v === v)) return;
     if (!can()) { evhCardReset(true); if (VIEW_ONLY && (v === "yes" || v === "no")) return go(st.pos + (v === "yes" ? 1 : -1)); return render(); }  // r17b view only: right / left browse, nothing saved
     if (!needWho(() => evhAnswer(v))) { evhCardReset(true); return; }
-    const fromKind = eh.kindFor === it; eh.kindFor = null;  // a swipe while the "What is it?" chips are up: skip them
+    const fromFu = eh.fu === it; eh.fu = null;  // a swipe while the follow-ups are up: they are skipped
     const im = imOf(it), e = ensureEdit(im), k = okey(it.obj, evhMatch), prev = e.dec[k] ? clone(e.dec[k]) : null;
     if (mineOf(it, evhMatch) !== v) {
       setDec(e, k, v);
@@ -3876,8 +3905,8 @@ function makeObjectView() {
       touch(im.file);
     }
     evhToast(v); evhStamp(v, 1);
-    if (v === "yes" && evhKind && !fromKind) {  // r17c: the card stays, the "What is it?" chips replace the buttons
-      eh.kindFor = it; evhCardReset(true); return render();
+    if ((EVH_FU[v] || []).length && !fromFu) {  // r17c: the card stays, its follow-ups replace the buttons
+      eh.fu = it; eh.fuV = v; evhCardReset(true); return render();
     }
     const c = $("oCard"), w = c.getBoundingClientRect().width, [dx, dy] = v === "yes" ? [w * 1.5, 0] : v === "no" ? [-w * 1.5, 0] : v === "dense" ? [0, 1200] : [0, -1200];
     eh.busy = true;
@@ -3914,11 +3943,12 @@ function makeObjectView() {
     if (ev.target.tagName === "INPUT" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "SELECT") return;
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
     const k = ev.key;
-    if (eh.kindFor && eh.kindFor === items[st.pos] && evhKind) {  // the "What is it?" chips: 1-4 pick, 0 / Enter / Esc skip
-      const n = "1234".indexOf(k);
-      if (n >= 0 && evhKind.options[n]) { ev.preventDefault(); return evhKindPick(evhKind.options[n].v); }
-      if (k === "0" || k === "Enter" || k === "Escape") { ev.preventDefault(); return evhKindPick(null); }
-      if (k === "Backspace") { ev.preventDefault(); eh.kindFor = null; return undo(); }
+    if (eh.fu && eh.fu === items[st.pos]) {  // follow-ups: 1-9 the first chip question, o the outline toggle, 0 / Enter / Esc skip
+      const fus = EVH_FU[eh.fuV] || [], chip = fus.find(a => !isTog(a)), tog = fus.find(isTog), n = "123456789".indexOf(k);
+      if (chip && n >= 0 && chip.options[n]) { ev.preventDefault(); return evhFuPick(chip, chip.options[n].v); }
+      if (tog && (k === "o" || k === "O")) { ev.preventDefault(); return evhFuToggle(tog); }
+      if (k === "0" || k === "Enter" || k === "Escape") { ev.preventDefault(); return evhFuPick(null, null); }
+      if (k === "Backspace") { ev.preventDefault(); eh.fu = null; return undo(); }
     }
     const v = k === "ArrowRight" || k === "y" || k === "Y" ? "yes" : k === "ArrowLeft" || k === "n" || k === "N" ? "no"
       : k === "ArrowUp" || k === "u" || k === "U" ? "unsure" : evhDense && (k === "ArrowDown" || k === "d" || k === "D") ? "dense" : null;
@@ -3933,17 +3963,27 @@ function makeObjectView() {
   // r17c: the "How to judge" sheet: one section per answer with the set's example crops (D.examples [{src, cat,
   // caption}], images/ex_*.jpg, tools/evh_examples.py) and the set's instructions (D.instructions) below. Text only
   // through textContent; a src must be images/ex_<id>.jpg.
-  const GUIDE = [
-    ["Match →", "A closed, round-ish object bounded by a membrane: a thin dark ring (the bilayer), even if faint or partial. Overlapping vesicles count.",
-      [["single", "Single"], ["ml", "Multilayer"], ["mv", "Has vesicles inside"], ["inner", "Inside another"]]],
-    ["Nope ←", "No membrane edge: ice, carbon or grid edge, grainy noise, aggregates, solid blobs, or an outline on empty background.", [["nope", ""]]],
-    ["Small & dense ↓", "Small, uniformly dark particles without a clear two-line bilayer (possibly lipoproteins).", [["dense", ""]]],
-    ["It's complicated ↑", "Too faint or noisy to tell, or cut off at the edge. Unsure is useful; don't guess.", [["unsure", ""]]]];
+  function evhGuideSecs() {  // [heading, text, [[example cat, sub-heading]]]; v1 / v2 / v3 from the schema in use
+    const lbl = a => a ? a.options.map(o => o.label).join(" / ") : "";
+    const tog = EVH_FU.yes.find(isTog), why = EVH_FU.unsure[0];
+    const match = "A closed, round-ish object bounded by a membrane: a thin dark ring (the bilayer), even if faint or partial. Overlapping vesicles and slightly-off outlines count."
+      + (evhKind ? ` Then, if you can tell: ${lbl(evhKind)}` + (evhKind.options.some(o => o.v === "multilayer") ? " (any part of a multilayer counts: outer ring or inner layer)." : ".") : "")
+      + (tog ? " Tap Outline off when it's the right object but the outline needs correcting." : "");
+    const comp = evhDense ? "Too faint or noisy to tell, or cut off at the edge. Unsure is useful; don't guess."
+      : "Anything not clearly yes or no: a faint bilayer, a small dense particle (possibly a lipoprotein), or cut off at the edge."
+        + (why ? ` Then tap why if you like (${lbl(why)}).` : "") + " Unsure is useful; don't guess.";
+    return [
+      ["Match →", match, [["single", "Single"], ["ml", "Multilayer"], ["mv", "Has vesicles inside"], ["inner", "Inside another"]]],
+      ["Nope ←", "No membrane edge. Ice contamination (dark, sharp blobs or crystals) is the obvious one; also carbon or grid edge, grainy noise, aggregates, solid blobs, or an outline on empty background.", [["nope", ""]]],
+      ...(evhDense ? [["Small & dense ↓", "Small, uniformly dark particles without a clear two-line bilayer (possibly lipoproteins).", [["dense", ""]]]] : []),
+      ["It's complicated ↑", comp, [["unsure", ""], ["dense", ""]]]];
+  }
   function evhGuideBuild() {
     const body = $("evhGdBody"); body.textContent = "";
-    for (const [h, tx, cats] of GUIDE) {
-      if (h.startsWith("Small") && !evhDense) continue;
+    const secs = evhGuideSecs();
+    for (const [h, tx, cats] of secs) {
       const sec = el("section"); sec.dataset.sec = cats[0][0] === "single" ? "match" : cats[0][0];
+      if (evhDense && cats[0][0] === "unsure") cats.length = 1;  // v2: dense examples have their own section
       sec.append(el("h3", null, h), el("p", null, tx));
       for (const [cat, sub] of cats) {
         const xs = evhEx.filter(x => x.cat === cat);
@@ -3979,6 +4019,7 @@ function makeObjectView() {
       $("evhHelp").hidden = false; $("evhHow").hidden = false;
       $("evhHelp").onclick = () => evhGuide(true); $("evhHow").onclick = () => evhGuide(true); $("evhGdX").onclick = () => evhGuide(false);
     }
+    if (evhGuideOn && !evhDense) $("oKeys").textContent = "→ match · ← nope · ↑ it's complicated · Backspace = undo · i = outline · ? = how to judge";
     if (evhDense) {
       $("evhSpTx").textContent = "Swipe right on real vesicles, left on everything else, down on small dense particles, up when it's complicated.";
       $("oKeys").textContent = "→ match · ← nope · ↓ small & dense · ↑ it's complicated · Backspace = undo · i = outline" + (evhGuideOn ? " · ? = how to judge" : "");
@@ -4025,7 +4066,7 @@ function makeObjectView() {
     ...(tree ? {mode: "tree", tree: treeState()} : {}),
     ...(evh ? {app: "evharmony", evh: {consent: evhConsentV(), reveal: !$("evhReveal").hidden, splash: !$("evhSplash").hidden,
       size: items[st.pos] ? evhSize(items[st.pos]) : null, nick: evhNick(), pan: [st.px, st.py], zoom: st.zs || null, bio: $("oBio").textContent,
-      dense: evhDense, kindFor: eh.kindFor ? eh.kindFor.id : null, guide: !$("evhGuide").hidden, guideOn: evhGuideOn, examples: evhEx.length}} : {})})};
+      dense: evhDense, kindFor: eh.fu ? eh.fu.id : null, fuV: eh.fu ? eh.fuV : null, guide: !$("evhGuide").hidden, guideOn: evhGuideOn, examples: evhEx.length}} : {})})};
 }
 if (D.kind === "objects") OBJ = makeObjectView();
 // ===================================================== end OBJECT SET CARD =====================================================

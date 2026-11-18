@@ -567,6 +567,18 @@ unchanged.
     the new set's first item. Only into keys the new set doesn't have; values its schema refuses are skipped. Writes
     the review_server record format and `_attr_log.jsonl` rows; provenance in `<new>/carried_answers.json` (decisions
     have no field for it). Run it before the set is served.
+- **v3 (r17c, owner feedback; schema `tools/evh/ls_evh_match_v3.json`, the current one):** `match` = yes / no /
+  unsure only (no dense answer, no swipe down; v1 value names, so answers carry over). It's complicated = anything not
+  clearly yes or no. Optional follow-ups, all from the schema (the page shows what the schema has):
+  after a Match `kind` = single / multilayer (any part of one: outer ring or inner layer; MV / inner are left to a
+  secondary analysis) as chips (keys 1-2) and `outline_off` = yes as a toggle (key o; tap again = cleared): the right
+  object, its outline needs correcting; after It's complicated `why` = faint / dense (Small and dense) / edge / other
+  (keys 1-4). A chip pick saves and moves on; the toggle doesn't move; skip / next (0, Enter, Esc) moves on; a swipe or
+  answer key re-answers the card and moves on; Backspace undoes the last answer. v2 sets keep their 4th answer and
+  4 kind chips. The How to judge sheet has Match (Single / Multilayer), Nope, It's complicated (+ Small & dense only on
+  a v2 set); its texts follow the schema. Scoring: agreement on yes / no only (unsure, and v2's dense, excluded and
+  reported); per reviewer `kind_<v>`, `outline_off` and `why_<v>` counts (the CSV adds the columns found).
+  `tools/evh_examples.py --caption "ID[,ID...]=text"` is repeatable and the text may hold commas.
 - **View only (r17b):** through the portal, `multi_review_server` adds `answer: true|false` to
   `window.REVIEW_IDENTITY` for a package with a schema (`may_answer`: review_server's PUT rule, reviewers in
   `review_package.json` when non-empty, else the people roster; read per page load). `answer: false` → the

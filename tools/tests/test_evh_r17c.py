@@ -36,6 +36,7 @@ from annotation import review_server as rs  # noqa: E402
 
 V1 = REPO / "tools" / "evh" / "ls_evh_match_v1.json"
 V2 = REPO / "tools" / "evh" / "ls_evh_match_v2.json"
+V3 = REPO / "tools" / "evh" / "ls_evh_match_v3.json"
 W, H = 300, 220
 
 
@@ -182,7 +183,7 @@ class R17c(unittest.TestCase):
         snap = {f.name: f.read_bytes() for f in (old / "edits").iterdir()}
         rows = self.items("--decoys", "3", "--derive", str(self.t / "derived"), "--answered", str(old), "--who", "admin1")
         self.assertEqual({(r["image"], int(r["line"])) for r in rows[:3]}, set(picks))
-        new = O.build(self.t / "derived", self.t / "items.csv", str(V2), self.t / "review", line_col="line",
+        new = O.build(self.t / "derived", self.t / "items.csv", str(V3), self.t / "review", line_col="line",
                       slug="evh", seed=2, owner="admin1", reviewers=["admin1"], app="evharmony", first_items=6)
         P = evh_carry.plan(old, new, "admin1")
         self.assertEqual(sum(len(v) for v in P["put"].values()), 4)
@@ -285,6 +286,25 @@ class R17c(unittest.TestCase):
         self.assertEqual(evh_examples.main([str(pkg), "--from", str(src), "--pick", "Z9", "--do"]), 2)
 
 
+class FollowUps(unittest.TestCase):
+    def test_v3_follow_up_counts(self):
+        cols = ["item", "image", "obj", "line", "match@own", "match@r1", "kind@r1", "outline_off@r1", "why@r1"]
+        data = [("yes", "yes", "single", "yes", ""), ("no", "yes", "multilayer", "", ""), ("yes", "yes", "multilayer", "yes", ""),
+                ("no", "unsure", "", "", "dense"), ("no", "unsure", "", "", "faint"), ("yes", "no", "single", "yes", "edge")]
+        buf = io.StringIO()
+        w = csv.writer(buf, lineterminator="\n")
+        w.writerow(cols)
+        for k, (o, a, kd, ol, wy) in enumerate(data):
+            w.writerow([f"{k:05x}", "0001", f"g{k + 1}", k, o, a, kd, ol, wy])
+        rows, revs = evh_score.read_export(buf.getvalue())
+        r = evh_score.score(rows, revs, "own", min_gold=1)[0]
+        # kind / outline_off only after yes (row 5 is "no"), why only after unsure
+        self.assertEqual((r["kind_single"], r["kind_multilayer"], r["outline_off"]), (1, 2, 2))
+        self.assertEqual((r["why_dense"], r["why_faint"], r["why_edge"]), (1, 1, 0))
+        self.assertEqual((r["n_unsure"], r["n_scored"], r["n_agree"]), (2, 4, 2))
+        self.assertIn("why_dense", evh_score.to_csv([r]).splitlines()[0])
+
+
 class SchemaV2(unittest.TestCase):
     def test_v2_keeps_v1_values(self):
         from labels import schemas as S
@@ -296,6 +316,12 @@ class SchemaV2(unittest.TestCase):
         self.assertEqual([o["v"] for o in S.attr(v2, "kind")["options"]], ["single", "ml", "mv", "inner"])
         self.assertFalse(S.attr(v2, "kind").get("required", False))
         self.assertEqual(S.attr(v2, "consent"), S.attr(v1, "consent"))
+        v3 = S.load_file(V3)
+        self.assertEqual([o["v"] for o in S.attr(v3, "match")["options"]], ["yes", "no", "unsure"])
+        self.assertEqual([o["v"] for o in S.attr(v3, "kind")["options"]], ["single", "multilayer"])
+        self.assertEqual([o["v"] for o in S.attr(v3, "why")["options"]], ["faint", "dense", "edge", "other"])
+        self.assertIn("yes", [o["v"] for o in S.attr(v3, "outline_off")["options"]])
+        self.assertEqual(S.attr(v3, "consent"), S.attr(v1, "consent"))
 
 
 if __name__ == "__main__":
