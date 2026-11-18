@@ -655,6 +655,28 @@ class GuestTool(unittest.TestCase):
         self.assertNotIn(gid, self.meta(pkg)["reviewers"])
         self.assertIs(REV.join_guest, real)
 
+    def test_evharmony_set_bare_page_still_joins(self):
+        """r17g: a guest opening an app "evharmony" set gets the bare page (no CryoEV bar, title eVHarmony) and still
+        joins as a reviewer; the same guest on a set without the app keeps the bar (control)."""
+        pkg = self._copy("pred_obj_evhapp_set_abcd", app="evharmony")
+        e = "bare@example.edu"
+        gid = G.guest_id(e)
+        st, h, body = self.g(f"/review/{pkg.name}/", e)
+        self.assertEqual(st, 200, body)
+        self.assertNotIn(b"cj-bar", body)
+        self.assertNotIn(b"header.js", body)
+        self.assertIn(b"<title>eVHarmony</title>", body)
+        self.assertIn(f'src="/review/{pkg.name}/app/"'.encode(), body)
+        self.assertIn(b"/cj/review.js", body)
+        self.assertEqual(T.hget(h, "x-content-type-options"), "nosniff")
+        self.assertIn(gid, self.meta(pkg)["reviewers"])                        # joined as a reviewer, as before
+        st, _, body = self.g(f"/review/{self.open_pkg.name}/", e)               # control: no app -> the bar
+        self.assertEqual(st, 200)
+        self.assertIn(b'id="cj-bar"', body)
+        self.assertEqual(self.g("/cj/review.js", e)[0], 200)                   # the bare page's script: guests may
+        st, _, out = self.g("/cj/me.json", e)                                   # the tool learns the role here
+        self.assertEqual((st, json.loads(out)["role"]), (200, "guest"))
+
     def test_revoked_guest_warning_rate_limited(self):
         st, me = GuestPortal.me(self, "noisy@example.edu")
         self.assertEqual(st, 200)

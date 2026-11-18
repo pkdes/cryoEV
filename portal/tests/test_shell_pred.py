@@ -168,6 +168,39 @@ class PredDummy(unittest.TestCase):
         self.assertEqual((st, hdrs(self.up.last()).get("x-review-key")), (200, self.e.key[PKG_B]))
         self.assertNotEqual(self.e.key[PKG_A], self.e.key[PKG_B])
 
+    def test_evharmony_set_is_its_own_app(self):
+        """r17g: a package whose review_package.json says app "evharmony" gets the bare page (no CryoEV bar, header.js
+        or cj.css; title eVHarmony; the same frame src and review.js; the same headers). Other packages keep the bar."""
+        rec_p = self.e.root / PKG_A / mrs.COMPLETE
+        orig = rec_p.read_bytes()
+        try:
+            rec = json.loads(orig)
+            rec["app"] = "evharmony"
+            rec_p.write_text(json.dumps(rec), encoding="utf-8")
+            st, h, body = self.e.req("basic", "GET", f"/review/{PKG_A}/?img=0002.png&k=leak-1")
+            self.assertEqual(st, 200)
+            for gone in (b"cj-bar", b"header.js", b"cj.css", b"cj-main"):
+                self.assertNotIn(gone, body)
+            self.assertIn(b"<title>eVHarmony</title>", body)
+            self.assertIn(b'<link rel="icon" href="data:image/svg+xml,', body)
+            self.assertIn(f'src="/review/{PKG_A}/app/?img=0002.png"'.encode(), body)
+            self.assertIn(b'title="eVHarmony"', body)
+            self.assertIn(b'<script src="/cj/review.js" defer></script>', body)
+            self.assertNotIn(b"leak-1", body)
+            self.assertEqual(T.hget(h, "x-frame-options"), "SAMEORIGIN")
+            self.assertEqual(T.hget(h, "x-content-type-options"), "nosniff")
+            self.assertEqual(T.hget(h, "cache-control"), "no-store")
+            st, _, body = self.e.req("adv", "GET", f"/review/{PKG_B}/")              # not evharmony: the bar
+            self.assertEqual(st, 200)
+            self.assertIn(b'id="cj-bar"', body)
+            st, _, body = self.e.req("basic2", "GET", f"/review/{PKG_A}/")           # not yours: still the 404
+            self.assertEqual(st, 404)
+            self.assertNotIn(b"eVHarmony", body)
+        finally:
+            rec_p.write_bytes(orig)
+        st, _, body = self.e.req("basic", "GET", f"/review/{PKG_A}/")
+        self.assertIn(b'id="cj-bar"', body)
+
     def test_non_owner_and_unknown_get_one_answer(self):
         n = len(self.up.seen)
         answers = set()
