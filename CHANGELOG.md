@@ -7,7 +7,7 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
-## 2026-11-18 08:50 · eVHarmony v3: three answers, follow-ups after Match and It's complicated
+## 2026-11-18 08:50 · eVHarmony v3: three answers and optional follow-ups
 
 - **Back to three answers:** Match, Nope, It's complicated. Small and dense is no longer its own answer (no swipe down); it is now one of the reasons under It's complicated, which covers anything not clearly yes or no.
 - **After a Match** (optional, one tap): Single or Multilayer (any part of a multilayer counts, its outer ring or an inner layer), and an Outline off toggle for the right object with an outline that needs correcting.
