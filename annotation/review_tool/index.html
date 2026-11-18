@@ -3398,12 +3398,18 @@ function makeObjectView() {
   // r17d: the practice cards (D.practice); pr.on while they are up (until "Start for real", or a consent answer from the
   // server). pr.ans: this pass's answers (page memory only); pr.fb: the answer whose feedback is shown (the redo pass)
   const PR_ANS = ["yes", "no", "unsure"];
+  // A card from another package (tools/evh_practice.py --from-pkg) carries its own image record `im` (images/px_*.jpg,
+  // one outline g1): never in D.images, so it is no item and nothing else on the page sees it.
+  const PX = /^images\/px_[0-9a-f]{8}(\.hi|\.c)?\.jpg$/;
+  const pxIm = m => m && typeof m === "object" && PX.test(m.src) && !/\.(hi|c)\.jpg$/.test(m.src) && (m.hi == null || PX.test(m.hi))
+    && m.w > 0 && m.h > 0 && Array.isArray(m.gt) ? {...m, file: m.src.slice(7), split: "", pr: []} : null;
   const evhPr = evh && Array.isArray(D.practice) ? D.practice.filter(p => p && typeof p.id === "string" && typeof p.obj === "string"
-    && byStem.has(String(p.image)) && PR_ANS.includes(p.answer) && !items.some(it => it.image === p.image && it.obj === p.obj)).slice(0, 10) : [];
+    && ((p._pim = p.im ? pxIm(p.im) : null), p.im ? p._pim && (p.chi == null || PX.test(p.chi)) : byStem.has(String(p.image))) && PR_ANS.includes(p.answer)
+    && !items.some(it => it.image === p.image && it.obj === p.obj)).slice(0, 10) : [];
   const pr = {on: evhPr.length > 0 && !VIEW_ONLY && !st.closed, k: 0, redo: false, ans: [], fb: null, done: false};
   const onCard = () => pr.on ? evhPr[pr.k] || null : items[st.pos];  // the card on screen
   if (st.closed) closedOn = true;  // D.closed (object_set close_set writes it): closed before any answer is tried
-  const imOf = it => byStem.get(String(it.image));
+  const imOf = it => it._pim || byStem.get(String(it.image));  // r17d: a practice card's own image record first
   const can = () => capOn("a") && server && !st.closed && !VIEW_ONLY;  // r17b: view only answers nothing
   // A decision is keyed on an object of the item's image: the item's own object, or (tree cards) one node's object.
   const okey = (obj, a) => `a:${obj}:${a.id}@${me()}`;

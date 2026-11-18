@@ -77,6 +77,13 @@ def build_evh(folder, *, blind=False, app="evharmony", schema=None, examples=Non
     if practice:                            # r17d: items 3, 5, 7 leave the queue as practice cards (tools/evh_practice.py)
         data["practice"] = [{**items[n], "answer": a, **({"kind": k} if k else {}), "note": t} for n, a, k, t in PRACTICE]
         data["items"] = [it for n, it in enumerate(items) if n not in {x[0] for x in PRACTICE}]
+        if practice == "ext":               # r17d v2: the first card from another package (its own image record)
+            import shutil
+            shutil.copyfile(Path(folder) / "images" / "imgB.png", Path(folder) / "images" / "px_0a1b2c3d.jpg")
+            imb = next(im for im in data["images"] if im["file"] == "imgB.png")
+            data["practice"][0] = {"id": "0a1b2", "image": "px_0a1b2c3d", "obj": "g1", "crop": [0, 0, 1, 1], "answer": "yes",
+                                   "note": "From elsewhere.", "im": {"file": "px_0a1b2c3d.jpg", "split": "", "w": imb["w"],
+                                   "h": imb["h"], "src": "images/px_0a1b2c3d.jpg", "gt": [{**imb["gt"][1], "id": 1}], "pr": []}}
     for im in data["images"]:
         im["split"] = SAMPLE                # a sample label that names a person: never in an eVHarmony bio
     if app:
@@ -775,6 +782,17 @@ class EvhTests(unittest.TestCase):
         self.settle(pg)
         self.assertEqual(self.match_of(srv, data["items"][0]), "no")
         self.assertFalse(pg.is_visible("#evhReveal"))
+        self.assertEqual(self.errors, [])
+
+
+    def test_practice_card_from_other_package(self):
+        data, srv, pg = self.open_v3(practice="ext")
+        p = self.obj(pg)["evh"]["practice"]
+        self.assertEqual((p["on"], p["n"], p["card"]), (True, 3, "0a1b2"))
+        pg.wait_for_function("__review.obj().drawn.length > 0", timeout=10000)   # its own image and outline are drawn
+        self.assertNotIn("0a1b2", [it["id"] for it in data["items"]])
+        self.to_reveal(pg)
+        self.assertEqual(self.attr_puts(srv), [])
         self.assertEqual(self.errors, [])
 
 

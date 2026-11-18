@@ -321,6 +321,45 @@ class R17c(unittest.TestCase):
         self.assertEqual((rec["n_items"], rec["n_practice"]), (len(its) - 2, 2))
         self.assertEqual(evh_practice.main([str(pkg), "--pick", picks[1], "--do"]), 2)   # already has practice
 
+    def test_practice_from_other_package(self):
+        """r17d v2: @ picks copy the source image as images/px_<hex>.jpg and put the card (with its own image record)
+        in D.practice only: D.items, D.images and the export unchanged; the source package byte-identical."""
+        self.items(out="x.csv")
+        pkg = O.build(self.ps, self.t / "x.csv", str(V3), self.t / "review", line_col="line", slug="evh", seed=1,
+                      owner="admin1", app="evharmony")
+        src = O.build(self.ps, self.t / "x.csv", str(V3), self.t / "other", line_col="line", slug="mlmv", seed=2,
+                      owner="admin1")
+        snap = {f.relative_to(src): f.read_bytes() for f in src.rglob("*") if f.is_file()}
+        sd = datajs(src)
+        img = sd["images"][0]["file"].rsplit(".", 1)[0]
+        obj = f"g{sd['images'][0]['gt'][0]['id']}"
+        d0, rows0 = datajs(pkg), len(O.table(pkg)["rows"])
+        picks = ["--pick", f"@{img}:{obj}=yes/multilayer:Two rings", "--pick", f"@{img}@0.5,0.5,0.05=no:Ice"]
+        self.assertEqual(evh_practice.main([str(pkg), *picks]), 2)                 # no --from-pkg
+        self.assertEqual(evh_practice.main([str(pkg), "--from-pkg", str(src), "--pick", f"@{img}:g99999=yes"]), 2)
+        self.assertEqual(evh_practice.main([str(pkg), "--from-pkg", str(src), *picks]), 0)   # dry run
+        self.assertEqual(datajs(pkg), d0)
+        self.assertEqual(sorted(f.name for f in (pkg / "images").glob("px_*")), [])
+        self.assertEqual(evh_practice.main([str(pkg), "--from-pkg", str(src), *picks, "--do"]), 0)
+        d = datajs(pkg)
+        pr = d.pop("practice")
+        self.assertEqual(d, d0)                                                    # items and images unchanged
+        self.assertEqual(len(O.table(pkg)["rows"]), rows0)
+        self.assertEqual([(x["answer"], x.get("kind"), x["note"], x["obj"]) for x in pr],
+                         [("yes", "multilayer", "Two rings", "g1"), ("no", None, "Ice", "g1")])
+        for x in pr:
+            self.assertRegex(x["im"]["src"], r"^images/px_[0-9a-f]{8}\.jpg$")
+            self.assertEqual(x["image"], x["im"]["src"][7:-4])
+            self.assertTrue((pkg / x["im"]["src"]).is_file())
+            self.assertEqual((x["im"]["split"], len(x["im"]["gt"])), ("", 1))
+            self.assertNotIn(src.name, json.dumps(x))                             # no source name in data.js
+        self.assertEqual(pr[0]["im"]["gt"][0]["p"][0], sd["images"][0]["gt"][0]["p"][0])
+        ring = pr[1]["im"]["gt"][0]["p"][0]
+        self.assertAlmostEqual(min(ring[0::2]), 0.45, places=3)
+        prov = O.read_items(pkg)["practice"]
+        self.assertEqual([(x["from"], x["image"], x["obj"]) for x in prov], [(src.name, img, obj), (src.name, img, None)])
+        self.assertEqual({f.relative_to(src): f.read_bytes() for f in src.rglob("*") if f.is_file()}, snap)
+
 
 class FollowUps(unittest.TestCase):
     def test_v3_follow_up_counts(self):
