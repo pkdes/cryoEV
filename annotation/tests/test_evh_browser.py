@@ -700,7 +700,7 @@ class EvhTests(unittest.TestCase):
         self.assertTrue(pg.is_visible("#evhRvGuide"))
         self.assertEqual(pg.eval_on_selector_all("#evhRvGuide section h3", "els => els.map(e => e.textContent)"),
                          ["Match →", "Nope ←", "It's complicated ↑"])
-        self.assertIn(GUIDE_TEXT, pg.inner_text("#evhRvGuide"))
+        self.assertNotIn(GUIDE_TEXT, pg.inner_text("#evhRvGuide"))           # the Guidelines text only in the ? sheet
         self.assertIn("Count my answers?", pg.inner_text("#evhRvQ"))
         self.assertFalse(pg.is_visible("#evhRvPr"))                # Redo / Start only after the consent answer
         pg.keyboard.press("Escape")                                # the practice reveal stays

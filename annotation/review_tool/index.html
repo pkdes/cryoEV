@@ -4095,7 +4095,7 @@ function makeObjectView() {
       }
       body.append(sec);
     }
-    if (instr) { body.append(el("h3", null, "Guidelines")); body.append(el("p", "guide", instr)); }
+    if (instr && !into) { body.append(el("h3", null, "Guidelines")); body.append(el("p", "guide", instr)); }  // r17d: not repeated on the reveal
   }
   function evhGuide(on) {
     const g = $("evhGuide");
