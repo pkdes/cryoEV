@@ -3408,6 +3408,9 @@ function makeObjectView() {
     && !items.some(it => it.image === p.image && it.obj === p.obj)).slice(0, 10) : [];
   const pr = {on: evhPr.length > 0 && !VIEW_ONLY && !st.closed, k: 0, redo: false, ans: [], fb: null, done: false};
   const onCard = () => pr.on ? evhPr[pr.k] || null : items[st.pos];  // the card on screen
+  // the practice zoom (object ~1/2 of the card, up to EVH.prZoom): a practice card with a finer image level that isn't
+  // a Nope (decoys keep the usual framing, as picked)
+  const prBig = (it, im) => pr.on && it && it.answer !== "no" && fineOf(it, im);
   if (st.closed) closedOn = true;  // D.closed (object_set close_set writes it): closed before any answer is tried
   const imOf = it => it._pim || byStem.get(String(it.image));  // r17d: a practice card's own image record first
   const can = () => capOn("a") && server && !st.closed && !VIEW_ONLY;  // r17b: view only answers nothing
@@ -3494,8 +3497,8 @@ function makeObjectView() {
     if (tree) { st.badges = []; if (st.ready) drawTree(it, im, b); return; }
     if (!st.ready) return;
     const Wi = st.img.naturalWidth, Hi = st.img.naturalHeight, rings = ringsOf(im, String(it.obj)), ring = rings && rings[0];
-    const [x0, y0, x1, y1] = evh ? evhFrame(ring, Wi, Hi, b, pr.on ? EVH.prFrac : 3) : cropOf(it, im, ring), cw = (x1 - x0) * Wi, ch = (y1 - y0) * Hi;
-    const s = Math.min(b.width / cw, b.height / ch, evh ? (pr.on && fineOf(it, im) ? EVH.prZoom : EVH.maxZoom) : Infinity), ox = (b.width - cw * s) / 2 - x0 * Wi * s + st.px, oy = (b.height - ch * s) / 2 - y0 * Hi * s + st.py;
+    const [x0, y0, x1, y1] = evh ? evhFrame(ring, Wi, Hi, b, prBig(it, im) ? EVH.prFrac : 3) : cropOf(it, im, ring), cw = (x1 - x0) * Wi, ch = (y1 - y0) * Hi;
+    const s = Math.min(b.width / cw, b.height / ch, evh ? (prBig(it, im) ? EVH.prZoom : EVH.maxZoom) : Infinity), ox = (b.width - cw * s) / 2 - x0 * Wi * s + st.px, oy = (b.height - ch * s) / 2 - y0 * Hi * s + st.py;
     if (evh) { st.zs = s; cx.imageSmoothingQuality = "high"; }  // r17: eVHarmony's zoom (css px per base px) and smooth scaling
     if (evh) { const rb = Array.isArray(ring) && ring.length >= 6 ? ringBox(ring) : null; st.of = rb ? Math.max((rb[2] - rb[0]) * Wi, (rb[3] - rb[1]) * Hi) * s / Math.max(1, b.width) : null; }  // r17d: the object's share of the card width
     cx.imageSmoothingEnabled = true; const osrc = hiOf(oHi, im, true, st.img) || st.img;

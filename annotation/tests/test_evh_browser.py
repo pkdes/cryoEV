@@ -86,6 +86,7 @@ def build_evh(folder, *, blind=False, app="evharmony", schema=None, examples=Non
                                    "note": "From elsewhere.", "im": {"file": "px_0a1b2c3d.jpg", "split": "", "w": imb["w"],
                                    "h": imb["h"], "src": "images/px_0a1b2c3d.jpg", "gt": [{**imb["gt"][1], "id": 1}], "pr": [],
                                    "hi": "images/px_0a1b2c3d.hi.jpg", "hi_w": imb["w"], "hi_h": imb["h"]}}
+            data["practice"][1] = {**data["practice"][0], "id": "0a1b3", "answer": "no", "note": "A decoy."}
     for im in data["images"]:
         im["split"] = SAMPLE                # a sample label that names a person: never in an eVHarmony bio
     if app:
@@ -796,7 +797,7 @@ class EvhTests(unittest.TestCase):
         pg.wait_for_function("__review.obj().drawn.length > 0", timeout=10000)   # its own image and outline are drawn
         pg.wait_for_function("__review.obj().evh.objFrac !== null", timeout=10000)
         self.assertAlmostEqual(self.obj(pg)["evh"]["objFrac"], 0.5, delta=0.06)  # a practice card: the object ~1/2 wide
-        self.practice_answer(pg, "y")                                # card 2: no finer image -> the usual zoom cap
+        self.practice_answer(pg, "y")                                # card 2: a Nope (decoy) -> the usual framing
         pg.wait_for_timeout(400)
         self.assertLessEqual(self.obj(pg)["evh"]["zoom"], 1.25)
         self.assertNotIn("0a1b2", [it["id"] for it in data["items"]])
