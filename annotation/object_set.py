@@ -10,7 +10,7 @@ attributes (labels/schemas.py) instead of whole images.
     python -m annotation.object_set build --ps <CryoAI-laptop>/predict/<ps> --items <items.csv> --schema <ls id | file>
         [--image-col image] (--line-col line | --particle-col particle_id) [--blind-cols c1,c2]
         [--outline-mode target|target+contained] [--slug <name>] [--seed N] [--owner <id>] [--reviewers a,b]
-        [--review-root <dir>] [--do [--register --registry <dir>]] [--app evharmony] [--first-items N]
+        [--review-root <dir>] [--do [--register --registry <dir>]] [--app evharmony] [--first-items N] [--quality Q]
     python -m annotation.object_set export --pkg <pkg> --out <file.csv> [--coco <file.json>]
     python -m annotation.object_set import --pkg <pkg> --csv <file.csv>
     python -m annotation.object_set instructions <pkg> (--text TEXT | --file PATH | --clear) [--do]
@@ -325,6 +325,8 @@ def build(ps_dir, items_csv, schema, review_root, image_col="image", line_col=No
     if not 0 <= first_items <= len(P["keys"]):
         raise ObjectSetError(f"--first-items {first_items}: must be 0..{len(P['keys'])} (the number of items)")
     P["app"], P["first_items"] = app, first_items
+    if not (isinstance(quality, int) and 1 <= quality <= 95):
+        raise ObjectSetError(f"--quality {quality!r}: must be a whole number 1-95")
     owner = owner or P["req"].get("owner")
     if not pp.OWNER_RE.match(owner or ""):
         raise ObjectSetError(f"bad owner {owner!r}")
@@ -1565,6 +1567,7 @@ def main(argv=None):
     b.add_argument("--do", action="store_true", help="build it (default: a dry run that writes nothing)")
     b.add_argument("--register", action="store_true", help="with --do: append the review_package line to --registry")
     b.add_argument("--app", choices=APPS, help="round 17: a page skin (data.js D.app); default none")
+    b.add_argument("--quality", type=int, default=72, help="r17f: the base JPEGs' quality (1-95; default 72)")
     b.add_argument("--first-items", type=int, default=0, metavar="N",
                    help="round 17: the first N items CSV rows come first in every reviewer's order (shuffled among "
                         "themselves), then the rest")
@@ -1620,7 +1623,7 @@ def main(argv=None):
                 a.review_root = config.laptop_root() / "review"
             pkg = build(a.ps, a.items, a.schema, a.review_root, a.image_col, a.line_col, a.particle_col, blind,
                         a.outline_mode, a.slug, a.seed, a.owner, revs, a.registry, title=a.title,
-                        instructions=instr, app=a.app, first_items=a.first_items)
+                        instructions=instr, app=a.app, first_items=a.first_items, quality=a.quality)
             if a.register:
                 register(pkg, a.registry)
                 print(f"[OK] registered {pkg.name} in {a.registry}")

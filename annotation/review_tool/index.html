@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-18.3";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-18.4";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const h = document.querySelector("header"), inPortal = /^\/review\//.test(location.pathname), v = document.createElement("span");
   v.id = "pageVer"; v.style.cssText = "font-size:11px;color:var(--mute);white-space:nowrap"; v.textContent = "Review page " + PAGE_VERSION;
@@ -1147,6 +1147,9 @@ function handles(rings) {  // the white vertex handles of the selection; selecte
 const vcSigma = (smooth, k, fine) => smooth > 0 ? smooth * (k || 1) / (fine ? FULL_K : 1) : 0;
 const VC_MAX_PX = 16e6, VC0 = {b: 0, c: 0, g: 1, auto: false, smooth: 0}, FULL_K = 4;
 let vc = {...VC0}, vcWho = null, vcTaint = false, vcLast = null;
+// r17f: true while eVHarmony's default (Auto + Smooth 2, nothing saved) is in use: then a card without a finer level
+// (no 2x / native crop) draws with Smooth 0 (a 1440 px image blurred by 2 px reads as soft); cleared by any change
+let vcEvhDef = false;
 const vcCache = new Map();  // image -> {w, h, f, src, lum, cv, cx, out, key, sm, rk, lohi}: the 2 most recently drawn images
 const vcFilterOk = (() => { try { return typeof document.createElement("canvas").getContext("2d").filter === "string"; } catch (e) { return false; } })();
 const vcNum = (v, lo, hi, d) => typeof v === "number" && isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d;
@@ -1155,10 +1158,10 @@ const vcIdentity = () => !vc.auto && !vc.smooth && vc.b === 0 && vc.c === 0 && v
 const vcCf = () => vc.c >= 0 ? 1 + vc.c / 50 : 1 + vc.c / 100;  // contrast -100..100 -> a slope of 0..3
 const vcSmoothOk = () => !vcTaint || vcFilterOk;  // pixels: a blur in the page; else the canvas filter; else no Smooth
 function vcLoad() {
-  vcWho = me(); vc = {...VC0};
+  vcWho = me(); vc = {...VC0}; vcEvhDef = false;
   try {
     const raw = localStorage.getItem(vcKey()), j = JSON.parse(raw || "null");
-    if (raw == null && D.kind === "objects" && D.app === "evharmony") vc = {...VC0, auto: true, smooth: 2};  // r17: eVHarmony's low-contrast cards start on Auto + Smooth 2 (no saved setting only)
+    if (raw == null && D.kind === "objects" && D.app === "evharmony") { vc = {...VC0, auto: true, smooth: 2}; vcEvhDef = true; }  // r17: eVHarmony's low-contrast cards start on Auto + Smooth 2 (no saved setting only)
     if (j && typeof j === "object") vc = {b: vcNum(j.b, -100, 100, 0), c: vcNum(j.c, -100, 100, 0), g: vcNum(j.g, 0.3, 3, 1), auto: j.auto === true, smooth: j.smooth === true ? 1 : vcNum(j.smooth, 0, 3, 0)};  // r16a's on / off: true = 1
   } catch (e) {}
 }
@@ -1231,7 +1234,7 @@ function vcStretch(e, r) {  // Auto: the 0.5 / 99.5 % levels of the image inside
 function vcDraw(c2, im, dx, dy, dw, dh, vw, vh, k, fine) {  // draw image `im` at (dx, dy, dw, dh) on a view vw x vh (css px), as this viewer set it
   // k: im's px per base image px (1 base, 2 the 2x image, ~4 a chi crop); fine: the image / item has a finer level
   // (hi / chi). Smooth's sigma in im's px: smooth x k / FULL_K with a finer level, else smooth x k (r17b, vcSigma)
-  const sig = vcSigma(vc.smooth, k, fine);
+  const sm = vcEvhDef && !fine ? 0 : vc.smooth, sig = vcSigma(sm, k, fine);  // r17f: vcEvhDef above
   if (vcIdentity()) { c2.drawImage(im, dx, dy, dw, dh); return; }
   try {
     if (!vcTaint) {
@@ -1245,7 +1248,7 @@ function vcDraw(c2, im, dx, dy, dw, dh, vw, vh, k, fine) {  // draw image `im` a
           for (let i = 0; i < s.length; i += 4) { o[i] = L[s[i]]; o[i + 1] = L[s[i + 1]]; o[i + 2] = L[s[i + 2]]; o[i + 3] = a[i + 3]; }
           e.cx.putImageData(e.out, 0, 0); e.key = key; vcBuilds++;
         }
-        vcLast = {lo, hi, w: e.w, h: e.h, smooth: vc.smooth, sigma: sig};
+        vcLast = {lo, hi, w: e.w, h: e.h, smooth: sm, sigma: sig};
         c2.drawImage(e.cv, dx, dy, dw, dh); return;
       }
     }
@@ -1294,7 +1297,7 @@ function vcSync() {  // the panel shows the settings; the ☼ buttons are lit wh
   ["vcBtn", "triVc", "oVc"].forEach(id => $(id).classList.toggle("on", !vcIdentity()));
 }
 function vcRedraw() { if (OBJ) OBJ.redraw(); else { draw(); if (!$("tri").hidden) triDraw(); } }
-function vcSet(k, v) { vc[k] = v; vcSave(); vcSync(); vcRedraw(); }
+function vcSet(k, v) { vc[k] = v; vcEvhDef = false; vcSave(); vcSync(); vcRedraw(); }
 function vcOpen(on) {
   const p = $("vcPop"); p.hidden = on === undefined ? !p.hidden : !on;
   ["vcBtn", "triVc", "oVc"].forEach(id => $(id).setAttribute("aria-expanded", String(!p.hidden)));
@@ -1305,7 +1308,7 @@ $("vcC").oninput = () => vcSet("c", vcNum(+$("vcC").value, -100, 100, 0));
 $("vcG").oninput = () => vcSet("g", vcNum(+$("vcG").value, 0.3, 3, 1));
 $("vcAuto").onclick = () => vcSet("auto", !vc.auto);
 $("vcS").oninput = () => vcSet("smooth", vcNum(+$("vcS").value, 0, 3, 0));
-$("vcReset").onclick = () => { vc = {...VC0}; vcSave(); vcSync(); vcRedraw(); };
+$("vcReset").onclick = () => { vc = {...VC0}; vcEvhDef = false; vcSave(); vcSync(); vcRedraw(); };
 $("vcClose").onclick = () => vcOpen(false);
 ["vcBtn", "triVc", "oVc"].forEach(id => { $(id).onclick = () => vcOpen(); });
 vcLoad(); vcSync();
@@ -3504,7 +3507,7 @@ function makeObjectView() {
     const s = Math.min(b.width / cw, b.height / ch, evh ? (prBig(it, im) ? EVH.prZoom : EVH.maxZoom) : Infinity), ox = (b.width - cw * s) / 2 - x0 * Wi * s + st.px, oy = (b.height - ch * s) / 2 - y0 * Hi * s + st.py;
     if (evh) { st.zs = s; cx.imageSmoothingQuality = "high"; }  // r17: eVHarmony's zoom (css px per base px) and smooth scaling
     if (evh) { const rb = Array.isArray(ring) && ring.length >= 6 ? ringBox(ring) : null; st.of = rb ? Math.max((rb[2] - rb[0]) * Wi, (rb[3] - rb[1]) * Hi) * s / Math.max(1, b.width) : null; }  // r17d: the object's share of the card width
-    cx.imageSmoothingEnabled = true; const osrc = hiOf(oHi, im, true, st.img) || st.img;
+    cx.imageSmoothingEnabled = true; cx.imageSmoothingQuality = "high"; const osrc = hiOf(oHi, im, true, st.img) || st.img;  // r17f: high on every object card
     vcDraw(cx, osrc, ox, oy, Wi * s, Hi * s, b.width, b.height, osrc.naturalWidth / Wi, fineOf(it, im));
     drawChi(it, Wi, Hi, s, ox, oy, b);
     if (!st.outlines || !rings) return;
@@ -3537,7 +3540,7 @@ function makeObjectView() {
     const root = ns.length ? ringsOf(im, ns[0].obj) : null;
     const [x0, y0, x1, y1] = cropOf(it, im, root && root[0]), cw = (x1 - x0) * Wi, ch = (y1 - y0) * Hi;
     const s = Math.min(b.width / cw, b.height / ch), ox = (b.width - cw * s) / 2 - x0 * Wi * s, oy = (b.height - ch * s) / 2 - y0 * Hi * s;
-    cx.imageSmoothingEnabled = true; const osrc = hiOf(oHi, im, true, st.img) || st.img;
+    cx.imageSmoothingEnabled = true; cx.imageSmoothingQuality = "high"; const osrc = hiOf(oHi, im, true, st.img) || st.img;  // r17f: high on every object card
     vcDraw(cx, osrc, ox, oy, Wi * s, Hi * s, b.width, b.height, osrc.naturalWidth / Wi, fineOf(it, im));
     drawChi(it, Wi, Hi, s, ox, oy, b);
     const P = (x, y) => [x * Wi * s + ox, y * Hi * s + oy];

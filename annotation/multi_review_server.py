@@ -92,6 +92,9 @@ LOCAL_CLIENTS = frozenset({"127.0.0.1", "::1", "::ffff:127.0.0.1"})  # the porta
 TOOL_PAGE = REPO / "annotation" / "review_tool" / "index.html"     # served (with the identity) to portal requests
 
 
+IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp", ".gif")  # r17f: Cache-Control no-transform on these
+
+
 def cookie_name(port: int, pkg_id: str) -> str:
     """review_key_<port>_<pkg id>: every package shares this port, so each needs its own cookie."""
     return f"{rs.cookie_name(port)}_{pkg_id}"
@@ -427,16 +430,21 @@ class Dispatch(BaseHTTPRequestHandler):
     # browser picks up keys added to it later (tools/add_hires.py "hi") on its next load, not a day later.
     # Multi server only: review_server.py itself (and the :8766 audit that runs it) is unchanged.
     _no_store = False
+    # r17f: images keep review_server's max-age and get "no-transform", so no proxy or data saver recompresses them
+    _image = False
 
     def send_header(self, keyword, value):
         if self._no_store and keyword.lower() == "cache-control":
             value = "no-store"
+        elif self._image and keyword.lower() == "cache-control" and "no-transform" not in value:
+            value = f"{value}, no-transform"
         return super().send_header(keyword, value)
 
     # ---- after dispatch (self is the package's class): with a portal identity, the page and saves carry it ----
     def do_GET(self):
         url = urlsplit(self.path)
         self._no_store = url.path == "/data.js"
+        self._image = url.path.lower().endswith(IMAGE_EXT)
         if self.reviewer and url.path in ("/", "/index.html"):
             path = TOOL_PAGE if TOOL_PAGE.is_file() else self.pkg_dir / "index.html"  # the current tool (docstring)
             if path.is_file():

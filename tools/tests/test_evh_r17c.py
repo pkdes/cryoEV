@@ -406,6 +406,23 @@ class R17c(unittest.TestCase):
         with self.assertRaises(ValueError):
             evh_carry.parse_map("kind:single=yes")
 
+    def test_r17f_build_quality(self):
+        """r17f: object_set build --quality sets the base JPEGs' quality; the default stays 72."""
+        self.items(out="q.csv")
+        a = O.build(self.ps, self.t / "q.csv", str(V3), self.t / "r1", line_col="line", slug="evh", seed=1, owner="admin1")
+        b = O.build(self.ps, self.t / "q.csv", str(V3), self.t / "r2", line_col="line", slug="evh", seed=1, owner="admin1",
+                    quality=90)
+        c = O.build(self.ps, self.t / "q.csv", str(V3), self.t / "r3", line_col="line", slug="evh", seed=1, owner="admin1",
+                    quality=72)
+        f = "images/0001.jpg"
+        self.assertEqual((a / f).read_bytes(), (c / f).read_bytes())             # default = 72
+        self.assertNotEqual((a / f).read_bytes(), (b / f).read_bytes())
+        with Image.open(b / f) as im9, Image.open(a / f) as im7:
+            self.assertLess(sum(im9.quantization[0]), sum(im7.quantization[0]))  # finer quantization at 90
+        with self.assertRaises(O.ObjectSetError):
+            O.build(self.ps, self.t / "q.csv", str(V3), self.t / "r4", line_col="line", slug="evh", owner="admin1",
+                    quality=0)
+
 
 class FollowUps(unittest.TestCase):
     def test_v3_follow_up_counts(self):

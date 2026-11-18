@@ -317,7 +317,9 @@ class DataJsNoStore(unittest.TestCase):
             self.assertEqual(body, data_bytes)
         img = self.data["images"][0]["src"]
         st, hd, _ = get_headers(self.port, f"/{self.pkg.name}/{img}", h)
-        self.assertEqual((st, hd.get("cache-control")), (200, "max-age=86400"))  # images: as before
+        self.assertEqual((st, hd.get("cache-control")), (200, "max-age=86400, no-transform"))  # r17f: images
+        st, hd, _ = get_headers(self.port, f"/{self.pkg.name}/index.html", h)
+        self.assertNotIn("no-transform", hd.get("cache-control", ""))                    # not on other files
         st, hd, _ = get_headers(self.port, f"/{self.pkg.name}/data.js/../index.html", h)
         self.assertNotEqual(st, 200)  # the query/path handling is the server's, unchanged
 

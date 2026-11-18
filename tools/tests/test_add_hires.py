@@ -92,6 +92,24 @@ class AddHires(unittest.TestCase):
                 x.pop(k, None)
         self.assertEqual(data, self.data)
 
+    def test_r17f_coarse_crop_skipped_and_cap(self):
+        """r17f: CHI_MAX is 2560; a crop no finer than the image's 2x level is skipped (the 2x image serves it)."""
+        self.assertEqual(AH.CHI_MAX, 2560)
+        self.data["items"] = [{"id": "g1", "image": "0001", "crop": [0.4, 0.4, 0.6, 0.6]}]
+        (self.pkg / "data.js").write_bytes(OS.DATAJS_PREFIX + json.dumps(self.data, separators=(",", ":")).encode()
+                                           + b";\n")
+        AH.write(AH.plan(self.pkg, ps_dir=self.ps, width=720))          # 2x level: 720 px wide
+        old = AH.CHI_MAX
+        AH.CHI_MAX = 100                                                  # the crop: 100 px over 0.3 x 720 = 216 px
+        try:
+            out = AH.write_crops(AH.plan(self.pkg, ps_dir=self.ps, width=720))
+        finally:
+            AH.CHI_MAX = old
+        self.assertEqual((out["crops"], out["skipped"]), (0, 1))
+        self.assertFalse((self.pkg / "images" / "c_g1.jpg").exists())
+        out = AH.write_crops(AH.plan(self.pkg, ps_dir=self.ps, width=720))
+        self.assertEqual((out["crops"], out["skipped"]), (1, 0))          # full res (360 px) is finer: kept
+
     def test_wrong_source_fails_alignment(self):
         """negative: image 1's package JPEG replaced by image 2's -> 0001 fails, the others pass (control)."""
         shutil.copy(self.pkg / "images" / "0002.jpg", self.pkg / "images" / "0001.jpg")

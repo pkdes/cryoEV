@@ -7,6 +7,14 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-18 21:00 · eVHarmony sharper cards
+
+- **Crisper pictures:** cards that have no finer picture behind them are no longer softened by default (Smooth starts at off there; cards with a finer picture keep Smooth 2). Your own Smooth setting still wins once you change it.
+- Pictures on object cards are always scaled with the browser's best quality.
+- Images from the multi-set review server are marked so that proxies and data savers leave them uncompressed.
+- For set makers: `object_set build --quality` (default 72 as before), `tools/add_hires.py` item crops up to 2560 px and no crop coarser than the 2x picture; `tools/evh_items.py --images-of --exclude --answered-attr` and `tools/evh_carry.py --map` build an eVHarmony set from another object set's answers.
+- **Components:** review page 2026-11-18.4 / review server (multi) / CLI (`object_set build --quality`, `tools/add_hires.py`, `tools/evh_items.py`, `tools/evh_carry.py`).
+
 ## 2026-11-18 18:30 · eVHarmony guide in short bullets
 
 - **How to judge is quicker to read:** each answer is a few short bullets instead of a paragraph, with the example images as before.

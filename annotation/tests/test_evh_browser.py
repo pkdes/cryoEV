@@ -760,6 +760,20 @@ class EvhTests(unittest.TestCase):
         self.assertFalse(pg.is_visible("#evhReveal"))
         self.assertEqual(self.errors, [])
 
+    def test_r17f_smooth_default_off_without_finer_level(self):
+        """r17f: the eVHarmony default (nothing saved) draws a card without a 2x / native crop at Smooth 0; a saved
+        Smooth still applies; object cards draw with imageSmoothingQuality high."""
+        _, _, pg = self.open()
+        pg.wait_for_function("__review.state().vc.last && __review.state().vc.last.lo != null", timeout=10000)
+        st = pg.evaluate("__review.state().vc")
+        self.assertEqual((st["auto"], st["smooth"], st["last"]["smooth"], st["last"]["sigma"]), (True, 2, 0, 0))
+        self.assertEqual(pg.evaluate("document.getElementById('ocv').getContext('2d').imageSmoothingQuality"), "high")
+        _, _, pg2 = self.open(init="try { localStorage.setItem('cryoev-review:contrast:rev1', "
+                                   "JSON.stringify({b: 0, c: 0, g: 1, auto: true, smooth: 2})); } catch (e) {}")
+        pg2.wait_for_function("__review.state().vc.last && __review.state().vc.last.lo != null", timeout=10000)
+        self.assertEqual(pg2.evaluate("__review.state().vc.last.smooth"), 2)   # chosen by the viewer: kept
+        self.assertEqual(self.errors, [])
+
     def test_practice_start_for_real(self):
         data, srv, pg = self.open_v3(practice=True)
         self.to_reveal(pg)
@@ -805,6 +819,8 @@ class EvhTests(unittest.TestCase):
         p = self.obj(pg)["evh"]["practice"]
         self.assertEqual((p["on"], p["n"], p["card"]), (True, 3, "0a1b2"))
         pg.wait_for_function("__review.obj().drawn.length > 0", timeout=10000)   # its own image and outline are drawn
+        pg.wait_for_function("__review.state().vc.last && __review.state().vc.last.lo != null", timeout=10000)
+        self.assertEqual(pg.evaluate("__review.state().vc.last.smooth"), 2)  # r17f: a finer level: the default Smooth 2
         pg.wait_for_function("__review.obj().evh.objFrac !== null", timeout=10000)
         self.assertAlmostEqual(self.obj(pg)["evh"]["objFrac"], 0.5, delta=0.06)  # a practice card: the object ~1/2 wide
         self.practice_answer(pg, "y")                                # card 2: a Nope (decoy) -> the usual framing

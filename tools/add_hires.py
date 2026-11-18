@@ -297,8 +297,21 @@ def write(P: dict, quality=90, lock_wait=5.0) -> dict:
 
 CHI_KEYS = ("chi", "chi_box", "chi_w", "chi_h")
 CHI_PAD = 1.5                # the crop covers it.crop expanded this much about its centre (card zoom / pan room)
-CHI_MAX = 1536               # px: a larger crop is shrunk to this side (big items are already large on screen; phone memory)
+CHI_MAX = 2560               # px: a larger crop is shrunk to this side (r17f: 1536 -> 2560; phone memory)
 ITEM_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _level_w(pkg: Path, data: dict, f: str, cache: dict) -> int:
+    """r17f: the width in px of the finest whole-image level the page already has for image file f: its 2x image
+    (hi_w), else the package's base JPEG."""
+    if f not in cache:
+        imr = next((x for x in data.get("images", []) if x.get("file") == f), {})
+        w = imr.get("hi_w") or 0
+        if not w and imr.get("src") and (pkg / imr["src"]).is_file():
+            with Image.open(pkg / imr["src"]) as b:
+                w = b.width
+        cache[f] = int(w or 0)
+    return cache[f]
 
 
 def chi_box(crop) -> list:
@@ -324,7 +337,7 @@ def write_crops(P: dict, quality=90, lock_wait=5.0) -> dict:
         data, kw, tail = OS._split_datajs(raw)
         orig, _, _ = OS._split_datajs(raw)
         file_of = {Path(im["file"]).stem: im["file"] for im in data["images"]}
-        src_cache = {}
+        src_cache, lvl_cache = {}, {}
         for it in data.get("items", []):
             f = file_of.get(str(it.get("image")).split(".")[0])
             iid = str(it.get("id", ""))
@@ -344,6 +357,11 @@ def write_crops(P: dict, quality=90, lock_wait=5.0) -> dict:
             if max(im.size) > CHI_MAX:
                 k = CHI_MAX / max(im.size)
                 im = im.resize((max(1, round(im.width * k)), max(1, round(im.height * k))), Image.LANCZOS)
+            # r17f: a crop no finer than the image's 2x level (or, without one, the base image) adds nothing: skipped
+            lvl_w = _level_w(pkg, data, f, lvl_cache)
+            if lvl_w and im.width / ((box[2] - box[0]) * lvl_w) <= 1.0:
+                skipped.append(iid)
+                continue
             rel = f"images/c_{iid}.jpg"
             OS._write_atomic(pkg / rel, _jpeg(im, quality))
             it.update(chi=rel, chi_box=box, chi_w=im.width, chi_h=im.height)
