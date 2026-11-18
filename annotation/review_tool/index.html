@@ -5,8 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-18.3";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-18.5";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
+  const R = window.REVIEW_DATA;  // data.js has run by now (a parser-blocking script, before DOMContentLoaded)
+  if (R && R.kind === "objects" && R.app === "evharmony" && R.mode !== "tree") return;  // r17g: eVHarmony is its own app: no CryoEV stamp
   const h = document.querySelector("header"), inPortal = /^\/review\//.test(location.pathname), v = document.createElement("span");
   v.id = "pageVer"; v.style.cssText = "font-size:11px;color:var(--mute);white-space:nowrap"; v.textContent = "Review page " + PAGE_VERSION;
   if (inPortal) { const a = document.createElement("a"); a.href = "/changes"; a.target = "_top"; a.textContent = "what's new"; a.style.color = "inherit"; v.append(" · ", a); }
@@ -335,7 +337,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #oKeys{text-align:center;font-size:11.5px;color:var(--mute);padding:0 12px 8px;background:var(--panel);flex:none}
 @media (hover:none) and (pointer:coarse){#oKeys{display:none!important}}
 /* round 17 eVHarmony (D.app "evharmony", object sets only): the joke skin; every rule is under #obj.evh or an evh id */
-#oEvh[hidden],#oBio[hidden],#oMatch[hidden],#evhSplash[hidden],#evhReveal[hidden],#evhRvAsk[hidden],#evhRvDone[hidden],#evhGuide[hidden],#evhHelp[hidden],#evhHow[hidden]{display:none}
+#oEvh[hidden],#oBio[hidden],#oMatch[hidden],#evhSplash[hidden],#evhReveal[hidden],#evhRvAsk[hidden],#evhRvDone[hidden],#evhRvApp[hidden],#evhGuide[hidden],#evhHelp[hidden],#evhHow[hidden]{display:none}
 #obj.evh{--hot:#0f766e;--hot2:#b45309}
 #obj.evh #oListBtn,#obj.evh #oItem,#obj.evh #oWho,#obj.evh #oSync,#obj.evh #oTitle{display:none}
 #obj.evh .otbar{justify-content:space-between}
@@ -414,6 +416,8 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #evhReveal #evhRvQ{margin-top:12px;font-weight:700}
 #evhRvPr{margin-top:6px}
 #evhRvRedo{color:var(--hot);border-color:var(--hot)}
+#evhRvApp{margin-top:14px;font-size:14px}
+#evhRvApp a{color:var(--hot);font-weight:700;text-decoration:none}
 #evhRvReal{color:#fff;border-color:transparent;background:linear-gradient(90deg,var(--hot),var(--hot2))}
 #oAttrs .evhFb{text-align:center}
 #oAttrs .evhFb p{margin:0 0 6px;font-size:15px;line-height:1.4}
@@ -640,7 +644,8 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
     <div id="evhRvGuide" hidden></div><p id="evhRvQ" hidden></p>
     <div class="row" id="evhRvAsk"><button id="evhRvYes" type="button">Yes</button><button id="evhRvNo" type="button">No</button></div>
     <div class="row" id="evhRvDone" hidden><button id="evhRvKeep" type="button">Keep swiping</button></div>
-    <div id="evhRvPr" hidden><p>The practice cards don't count.</p><div class="row"><button id="evhRvRedo" type="button">Redo the 3 practice cards</button><button id="evhRvReal" type="button">Start for real</button></div></div></div></div>
+    <div id="evhRvPr" hidden><p>The practice cards don't count.</p><div class="row"><button id="evhRvRedo" type="button">Redo the 3 practice cards</button><button id="evhRvReal" type="button">Start for real</button></div></div>
+    <p id="evhRvApp" hidden><a id="evhRvAppA" target="_top" href="/">Meet the real app: CryoEV →</a></p></div></div>
   <div id="evhGuide" role="dialog" aria-modal="true" aria-labelledby="evhGdH" hidden><div class="box">
     <div class="gh"><h2 id="evhGdH">How to judge</h2><button id="evhGdX" type="button" title="Close (Esc or ?)">✕</button></div>
     <div id="evhGdBody"></div></div></div>
@@ -768,6 +773,10 @@ function applyPredictionWording() {
 // "Where this goes": which package this is and what the decisions do. The name is D.source_title, else the label set's
 // folder from D.source (the lv_… or pull folder holding the COCO file; never the full local path). Text only.
 const PKG_TITLE = String(D.title || D.id || "EV Label Review");
+// r17g: an eVHarmony set (one-object cards) is its own app: the window title stays "eVHarmony" (every title below goes through setTitle)
+const EVH_APP = D.kind === "objects" && D.app === "evharmony" && D.mode !== "tree", EVH_TITLE = "eVHarmony";
+const setTitle = t => { document.title = EVH_APP ? EVH_TITLE : t; };
+if (EVH_APP) document.title = EVH_TITLE;
 function sourceName() {
   if (typeof D.source_title === "string" && D.source_title.trim()) return D.source_title.trim();
   const parts = String(D.source || "").replace(/^prediction_set:/, "").split(/[\\/]+/).filter(Boolean);
@@ -2304,7 +2313,7 @@ function applyBrand() {
   t.textContent = "";  // Fun mode off (.nofun): "Quick check" on every package
   if (isPredPkg || D.kind === "compare") t.append("Quick check", el("small", "fun", b.name));
   else t.append(el("span", "fun", b.name), el("span", "nofun", "Quick check"));
-  document.title = $("tri").hidden ? PKG_TITLE : funOn() ? b.name : "Quick check";
+  setTitle($("tri").hidden ? PKG_TITLE : funOn() ? b.name : "Quick check");
 }
 $("logo").onclick = () => { if (!funOn()) return; brandI = (brandI + 1) % BRANDS.length; try { localStorage.setItem("cryoev-review:brand", brandI); } catch (e) {} applyBrand(); triRender(); };
 function resolved(c) {  // decided, unless the decision is September's (seed): a reviewer still has to confirm it
@@ -2443,7 +2452,7 @@ function openTri() {
 function closeTri() {
   if (tri.busy) return;  // the card is flying off (#19): its decision lands first; Editor / Esc after that
   $("tri").hidden = true; hiDrop(triHi); try { localStorage.setItem("cryoev-review:mode", "editor"); } catch (e) {}
-  document.title = PKG_TITLE;
+  setTitle(PKG_TITLE);
   const c = tri.queue[tri.pos];
   if (!c) { resize(); return; }
   focusObj(c.i, c.key);
@@ -3785,7 +3794,7 @@ function makeObjectView() {
   }
   function start() {
     $("app").style.display = "none"; $("tri").hidden = true; $("obj").hidden = false;
-    document.title = PKG_TITLE;
+    setTitle(PKG_TITLE);
     $("oBlind").hidden = !blind || st.closed;   // a closed set is no longer blind to its maker; the banner would contradict it
     $("oViewOnly").hidden = !VIEW_ONLY;
     let want = null; try { want = localStorage.getItem(POS_KEY); } catch (e) {}
@@ -3829,7 +3838,7 @@ function makeObjectView() {
     $("oEvhName").textContent = b.name; $("oEvhTag").textContent = b.tag;
     o.style.setProperty("--hot", dark ? b.hotD : b.hot); o.style.setProperty("--hot2", dark ? b.hotD2 : b.hot2);
     const n = evhNick(); $("oEvhNick").textContent = n ? "💘 " + n : "";
-    document.title = b.name;
+    setTitle(b.name);
   }
   async function evhMeta() {  // nm/px per image (the base image's); never on a blind set
     if (blind || !capOn("m")) return;
@@ -4004,6 +4013,7 @@ function makeObjectView() {
     $("evhRvDone").hidden = true; r.hidden = false; r.scrollTop = 0;
   }
   function evhPrChoice(v) {  // consent answered (or nothing to ask): Redo the practice cards, or Start for real
+    if (v != null) evhAppLink(true);
     $("evhRvQ").textContent = v === "yes" ? "Thank you! Your answers will count." : v === "no" ? "No problem: your answers won't be counted." : "";
     $("evhRvQ").hidden = v == null; $("evhRvAsk").hidden = true; $("evhRvDone").hidden = true; $("evhRvPr").hidden = false;
     try { $("evhRvPr").scrollIntoView({block: "nearest"}); } catch (e) {}
@@ -4019,6 +4029,18 @@ function makeObjectView() {
     const n = items.findIndex(x => !isDone(x)); go(n >= 0 ? n : 0);
   }
   const evhConsentV = () => evhConsent && items.length && me() ? mineOf(items[0], evhConsent) : null;
+  // r17g: "Meet the real app: CryoEV →" (target _top, to /) in the reveal once consent is answered: lab people only.
+  // The role comes from the portal's /cj/me.json (guests may read it); a guest, no portal or no answer: no link
+  // (a guest's / sends them straight back here).
+  function evhLabRole() {
+    if (!/^\/review\//.test(location.pathname) || !location.protocol.startsWith("http")) return;
+    fetch("/cj/me.json", {credentials: "same-origin", cache: "no-store"}).then(r => r.ok ? r.json() : null)
+      .then(j => { eh.lab = !!(j && typeof j.role === "string" && j.role && j.role !== "guest"); evhAppLink(); }).catch(() => {});
+  }
+  function evhAppLink(answered) {
+    if (answered) eh.answered = true;
+    $("evhRvApp").hidden = !(eh.lab === true && eh.answered === true);
+  }
   function evhOffer() {  // the reveal: from the 10th answer on, while this reviewer hasn't answered it
     if (evhPr.length) return;  // r17d: a set with practice cards asks in the reveal after them instead
     if (!evhConsent || !can() || !me() || !$("evhSplash").hidden || evhConsentV() != null) return;
@@ -4036,7 +4058,7 @@ function makeObjectView() {
     if (evhPr.length) return evhPrChoice(v);
     $("evhRvTx").textContent = v === "yes" ? "Thank you! Your answers will count. Keep swiping as long as you like."
       : "No problem: your answers won't be counted. Keep swiping just for fun.";
-    $("evhRvAsk").hidden = true; $("evhRvDone").hidden = false; $("evhRvKeep").focus();
+    $("evhRvAsk").hidden = true; $("evhRvDone").hidden = false; evhAppLink(true); $("evhRvKeep").focus();
   }
   function evhSplashDone() {
     const n = $("evhNick").value.replace(/[\u0000-\u001f\u007f<>&]/g, "").trim().slice(0, 24);
@@ -4125,7 +4147,7 @@ function makeObjectView() {
     if (on) $("evhGdX").focus();
   }
   function evhStart() {
-    $("obj").classList.add("evh"); $("oEvh").hidden = false;
+    $("obj").classList.add("evh"); $("oEvh").hidden = false; evhLabRole();
     $("oKeys").textContent = "→ match · ← nope · ↑ it's complicated · Backspace = undo · i = outline" + (instr ? " · ? = instructions" : "");
     evhBrand();
     $("oEvhLogo").onclick = () => { brandI = (brandI + 1) % BRANDS.length; try { localStorage.setItem("cryoev-review:brand", brandI); } catch (e) {} evhBrand(); render(); };
@@ -4184,7 +4206,7 @@ function makeObjectView() {
     ...(tree ? {mode: "tree", tree: treeState()} : {}),
     ...(evh ? {app: "evharmony", evh: {consent: evhConsentV(), reveal: !$("evhReveal").hidden, splash: !$("evhSplash").hidden,
       size: items[st.pos] ? evhSize(items[st.pos]) : null, nick: evhNick(), pan: [st.px, st.py], zoom: st.zs || null, bio: $("oBio").textContent,
-      dense: evhDense, kindFor: eh.fu ? eh.fu.id : null, fuV: eh.fu ? eh.fuV : null, guide: !$("evhGuide").hidden, guideOn: evhGuideOn, examples: evhEx.length, objFrac: st.of == null ? null : Math.round(st.of * 100) / 100,
+      appLink: !$("evhRvApp").hidden, dense: evhDense, kindFor: eh.fu ? eh.fu.id : null, fuV: eh.fu ? eh.fuV : null, guide: !$("evhGuide").hidden, guideOn: evhGuideOn, examples: evhEx.length, objFrac: st.of == null ? null : Math.round(st.of * 100) / 100,
       practice: evhPr.length ? {on: pr.on, k: pr.k, n: evhPr.length, redo: pr.redo, fb: pr.fb, done: pr.done, answers: [...pr.ans],
         card: pr.on && evhPr[pr.k] ? evhPr[pr.k].id : null} : null}} : {})})};
 }
