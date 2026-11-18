@@ -766,6 +766,8 @@ class EvhTests(unittest.TestCase):
         pg.wait_for_function("!__review.obj().evh.practice.on", timeout=5000)
         o = self.obj(pg)
         self.assertEqual((o["pos"], o["item"]["id"], o["n"]), (0, data["items"][0]["id"], len(data["items"])))
+        pg.wait_for_timeout(300)
+        self.assertLessEqual(self.obj(pg)["evh"]["zoom"], 1.25)                 # a real card: the usual zoom cap
         self.assertFalse(pg.is_visible("#evhReveal"))
         self.assertNotIn("Practice", pg.inner_text("#oPos"))
         self.assertEqual([k for k in self.attr_puts(srv) if ":consent@" not in k], [])
@@ -790,6 +792,8 @@ class EvhTests(unittest.TestCase):
         p = self.obj(pg)["evh"]["practice"]
         self.assertEqual((p["on"], p["n"], p["card"]), (True, 3, "0a1b2"))
         pg.wait_for_function("__review.obj().drawn.length > 0", timeout=10000)   # its own image and outline are drawn
+        pg.wait_for_function("__review.obj().evh.objFrac !== null", timeout=10000)
+        self.assertAlmostEqual(self.obj(pg)["evh"]["objFrac"], 0.5, delta=0.06)  # a practice card: the object ~1/2 wide
         self.assertNotIn("0a1b2", [it["id"] for it in data["items"]])
         self.to_reveal(pg)
         self.assertEqual(self.attr_puts(srv), [])
