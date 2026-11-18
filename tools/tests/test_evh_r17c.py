@@ -30,6 +30,7 @@ sys.path.insert(0, str(REPO / "tools"))
 import evh_carry  # noqa: E402
 import evh_examples  # noqa: E402
 import evh_items  # noqa: E402
+import evh_practice  # noqa: E402
 import evh_score  # noqa: E402
 from annotation import object_set as O  # noqa: E402
 from annotation import review_server as rs  # noqa: E402
@@ -284,6 +285,41 @@ class R17c(unittest.TestCase):
         self.assertEqual(evh_examples.main([str(pkg), "--clear", "--do"]), 0)
         self.assertEqual((pkg / "data.js").read_bytes(), raw)
         self.assertEqual(evh_examples.main([str(pkg), "--from", str(src), "--pick", "Z9", "--do"]), 2)
+
+    def test_practice(self):
+        """r17d: picked items leave data.js items and items.json (so the export) for `practice`; nothing else in
+        data.js changes; the first item (consent) and bad answers / kinds are refused; a dry run writes nothing."""
+        self.items(out="x.csv")
+        pkg = O.build(self.ps, self.t / "x.csv", str(V3), self.t / "review", line_col="line", slug="evh", seed=1,
+                      owner="admin1", app="evharmony")
+        its = O.read_items(pkg)["items"]
+        a, b = its[2], its[4]
+        self.answer(pkg, "admin1", {(a["image"], int(a["line"])): "yes"}, consent="yes")
+        raw = (pkg / "data.js").read_bytes()
+        picks = [f"{a['image']}:{a['line']}=yes/single:One ring", f"{b['image']}:{b['line']}=no"]
+        self.assertEqual(evh_practice.main([str(pkg), *sum((["--pick", x] for x in picks), [])]), 0)
+        self.assertEqual((pkg / "data.js").read_bytes(), raw)                     # dry run
+        bad = (f"{its[0]['image']}:{its[0]['line']}=yes", f"{b['image']}:{b['line']}=maybe",
+               f"{b['image']}:{b['line']}=no/single", "9999:1=yes", f"{b['image']}:{b['line']}=no:<b>")
+        for x in bad:
+            self.assertEqual(evh_practice.main([str(pkg), "--pick", x, "--do"]), 2, x)
+        self.assertEqual(evh_practice.main([str(pkg), *sum((["--pick", x] for x in picks), []), "--do"]), 0)
+        d, d0 = datajs(pkg), json.loads(raw.decode("utf-8").split("=", 1)[1].strip().rstrip(";"))
+        pr = d.pop("practice")
+        self.assertEqual([(x["id"], x["answer"], x.get("kind"), x.get("note")) for x in pr],
+                         [(a["id"], "yes", "single", "One ring"), (b["id"], "no", None, None)])
+        self.assertEqual(d["items"], [x for x in d0["items"] if x["id"] not in (a["id"], b["id"])])
+        d.pop("items"), d0.pop("items")
+        self.assertEqual(d, d0)                                                    # only items / practice changed
+        ij = O.read_items(pkg)
+        self.assertEqual([x["id"] for x in ij["items"]], [x["id"] for x in its if x["id"] not in (a["id"], b["id"])])
+        self.assertEqual([x["id"] for x in ij["practice"]], [a["id"], b["id"]])
+        tab = O.table(pkg)
+        self.assertEqual(len(tab["rows"]), len(its) - 2)                           # never in the export (gold)
+        self.assertNotIn(a["id"], {r["item"] for r in tab["rows"]})
+        rec = json.loads((pkg / "review_package.json").read_text(encoding="utf-8"))
+        self.assertEqual((rec["n_items"], rec["n_practice"]), (len(its) - 2, 2))
+        self.assertEqual(evh_practice.main([str(pkg), "--pick", picks[1], "--do"]), 2)   # already has practice
 
 
 class FollowUps(unittest.TestCase):
