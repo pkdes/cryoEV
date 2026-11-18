@@ -7,6 +7,14 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-18 21:00 · eVHarmony looks like its own app
+
+- **No CryoEV bar on an eVHarmony set:** the page is just the game, with its own name (eVHarmony) in the browser tab and a heart icon. Same link as before.
+- The small Review page version stamp is gone from eVHarmony sets, and the tab title stays eVHarmony while you play.
+- **Meet the real app:** lab members see a Meet the real app: CryoEV link in the reveal once they answer Count my answers. Guests don't see it.
+- Guests still land straight on their set and join it as before. Every other review set keeps the CryoEV bar.
+- **Components:** portal / review page 2026-11-18.5.
+
 ## 2026-11-18 18:30 · eVHarmony guide in short bullets
 
 - **How to judge is quicker to read:** each answer is a few short bullets instead of a paragraph, with the example images as before.
