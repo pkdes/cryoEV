@@ -360,6 +360,52 @@ class R17c(unittest.TestCase):
         self.assertEqual([(x["from"], x["image"], x["obj"]) for x in prov], [(src.name, img, obj), (src.name, img, None)])
         self.assertEqual({f.relative_to(src): f.read_bytes() for f in src.rglob("*") if f.is_file()}, snap)
 
+    def test_r17f_images_of_exclude_and_mapped_carry(self):
+        """r17f: --images-of keeps only the images of another object set; --exclude drops listed objects;
+        --answered-attr type puts that set's type answers first; evh_carry --map turns type into match."""
+        self.items(out="src.csv")
+        src = O.build(self.ps, self.t / "src.csv", str(V3), self.t / "other", line_col="line", slug="mlmv", seed=3,
+                      owner="admin1", reviewers=["admin1"])
+        sits = O.read_items(src)["items"]
+        keep = [i for i in sits if i["image"] != "0003"]            # the "ML/MV" set: images 0001, 0002 only
+        ij = json.loads((src / "items.json").read_text(encoding="utf-8"))
+        ij["items"] = keep
+        (src / "items.json").write_text(json.dumps(ij), encoding="utf-8")
+        dj = datajs(src)
+        dj["items"] = [i for i in dj["items"] if i["image"] != "0003"]
+        (src / "data.js").write_text("window.REVIEW_DATA = " + json.dumps(dj) + ";", encoding="utf-8")
+        a, b, c = keep[0], keep[1], keep[2]
+        recs = {}
+        for it, v in ((a, "single"), (b, "unsure"), (c, "MV_vesicular")):
+            recs.setdefault(f"{it['image']}.png", {})[f"a:{it['obj']}:kind@admin1"] = {"v": v, "t": 5, "who": "admin1",
+                                                                                     "server_t": 6}
+        (src / "edits").mkdir(exist_ok=True)
+        for f, dec in recs.items():
+            (src / "edits" / f"{f}.json").write_text(json.dumps({"file": f, "pkg": src.name, "fmt": 1, "edit": {
+                "reviewed": False, "modified": False, "dec": dec, "t": 5}, "rx": {}}))
+        ex = keep[3]
+        rc = evh_items.main(["--ps", str(self.ps), "--out", str(self.t / "f.csv"), "--gold", "0", "--hi", "1.01",
+                             "--images-of", str(src), "--exclude", f"{ex['image']}:{ex['line']}", "--answered", str(src),
+                             "--who", "nobody,admin1", "--answered-attr", "kind"])
+        self.assertEqual(rc, 0)
+        rows = list(csv.DictReader(io.StringIO((self.t / "f.csv").read_text(encoding="utf-8"))))
+        self.assertEqual({r["image"] for r in rows}, {"0001", "0002"})
+        self.assertNotIn((ex["image"], str(ex["line"])), {(r["image"], r["line"]) for r in rows})
+        self.assertEqual({(r["image"], int(r["line"])) for r in rows[:3]},
+                         {(i["image"], int(i["line"])) for i in (a, b, c)})
+        self.assertEqual([r["gold"] for r in rows[:4]], ["1", "1", "1", "0"])
+        new = O.build(self.ps, self.t / "f.csv", str(V3), self.t / "review", line_col="line", slug="evh", seed=4,
+                      owner="admin1", reviewers=["admin1"], app="evharmony", first_items=3)
+        m = "kind->match:single=yes,MV_vesicular=yes,unsure=unsure"
+        self.assertEqual(evh_carry.main(["--from", str(src), "--to", str(new), "--who", "admin1", "--attrs", "match",
+                                         "--map", m, "--do"]), 0)
+        by = {(r["image"], int(r["line"])): r["match@admin1"] for r in O.table(new)["rows"]}
+        self.assertEqual([by[(i["image"], int(i["line"]))] for i in (a, b, c)], ["yes", "unsure", "yes"])
+        P = evh_carry.plan(src, new, "admin1", ("match",), evh_carry.parse_map("kind->match:single=yes"))
+        self.assertEqual((len(P["unmapped"]), len(P["exists"])), (2, 1))
+        with self.assertRaises(ValueError):
+            evh_carry.parse_map("kind:single=yes")
+
 
 class FollowUps(unittest.TestCase):
     def test_v3_follow_up_counts(self):

@@ -33,6 +33,12 @@ r17c, balanced gold (all optional; without them the output is byte-identical to 
                        known Nopes.
   --answered PKG --who RID
                        the objects RID answered (match, any value) in the old object set PKG go first.
+  --answered-attr ATTR (r17f) the attribute that counts as "answered" (default match; e.g. type for an ML/MV set);
+                       --who may list several reviewer ids, comma-separated.
+r17f (optional; without them the output is unchanged):
+  --images-of PKG      only images that hold an item of the object set PKG (e.g. the 49 images of an ML/MV set
+                       whose prediction set has more); decoys go on those images too
+  --exclude IMG:LINE,...  objects left out (practice cards, How to judge examples shown elsewhere)
   With any of these, the first block (gold=1) = answered + decoys + low (+ the --gold stratified pick from the rest),
   then the rest (gold=0). Build with --first-items <the printed count>.
 """
@@ -280,17 +286,33 @@ def main(argv=None):
     ap.add_argument("--decoys", type=int, default=0, help="r17c: N known-Nope decoys (needs --derive)")
     ap.add_argument("--derive", type=Path, help="r17c: the derived prediction set's new folder")
     ap.add_argument("--answered", type=Path, help="r17c: an old object set whose answered objects go first")
-    ap.add_argument("--who", help="r17c: with --answered, the reviewer whose answers count")
+    ap.add_argument("--who", help="r17c: with --answered, the reviewer(s) whose answers count (comma-separated)")
+    ap.add_argument("--answered-attr", default="match", help="r17f: the attribute that counts as answered")
+    ap.add_argument("--images-of", type=Path, help="r17f: only the images of this object set's items")
+    ap.add_argument("--exclude", default="", help="r17f: IMG:LINE,... objects left out")
     a = ap.parse_args(argv)
     if a.decoys and not a.derive:
         ap.error("--decoys needs --derive <new folder>")
     if a.answered and not a.who:
         ap.error("--answered needs --who")
     cands = candidates(a.ps, a.lo, a.hi)
+    only, excl = None, set()
+    if a.images_of:
+        only = {str(it["image"]) for it in O.read_items(a.images_of)["items"]}
+        n0 = len(cands)
+        cands = [c for c in cands if c[0] in only]
+        print(f"[images-of] {len(only)} images of {a.images_of.name}: {len(cands)} of {n0} candidates")
+    if a.exclude:
+        for t in a.exclude.split(","):
+            img, ln = t.strip().rsplit(":", 1)
+            excl.add((img, int(ln)))
+        n0 = len(cands)
+        cands = [c for c in cands if (c[0], c[1]) not in excl]
+        print(f"[exclude] {n0 - len(cands)} of {len(excl)} listed objects were candidates and are left out")
     if not cands:
         print(f"[evh_items] no candidates with {a.lo} <= conf < {a.hi}", file=sys.stderr)
         return 2
-    r17c = bool(a.low is not None or a.decoys or a.answered)
+    r17c = bool(a.low is not None or a.decoys or a.answered or only is not None or excl)
     if not r17c:
         text = items_csv(cands, a.gold, a.seed)
         a.out.write_text(text, encoding="utf-8", newline="")
@@ -302,7 +324,9 @@ def main(argv=None):
     first = []
     if a.answered:
         from evh_carry import answered_objects
-        done = answered_objects(a.answered, a.who)
+        done = set()
+        for who in a.who.split(","):
+            done |= answered_objects(a.answered, who.strip(), a.answered_attr)
         first += [c for c in cands if (c[0], c[1]) in done]
         print(f"[answered] {len(first)} of the candidates were answered by {a.who} in {a.answered.name} "
               f"({len(done)} answered there)")
@@ -314,7 +338,8 @@ def main(argv=None):
               + ("" if pool else " (the set was predicted at conf >= its threshold: re-predict lower for these)"))
     ps_used, drows = a.ps, []
     if a.decoys:
-        ds = make_decoys(a.ps, candidates(a.ps, a.lo, a.hi, with_cls=True), a.decoys, a.seed)
+        dc = [c for c in candidates(a.ps, a.lo, a.hi, with_cls=True) if only is None or c[0] in only]
+        ds = make_decoys(a.ps, dc, a.decoys, a.seed)
         ps_used, new_id, drows = derive(a.ps, a.derive, ds, a.seed)
         dfile = a.out.with_name(a.out.stem + "_decoys.csv")
         dfile.write_text(decoys_csv(drows), encoding="utf-8", newline="")

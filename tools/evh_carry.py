@@ -14,7 +14,10 @@ Only into a key the new set does not have yet (an answer already there wins); va
 refuses (review_server's check) are skipped and counted. Writes edits/<file>.json in review_server's record format
 ({file, pkg, fmt, edit, rx}, rx = the carry's time) and appends the carried rows to edits/_attr_log.jsonl (the
 history). Decisions have no field for provenance (review_server.ATTR_FIELDS), so it goes in <new>/carried_answers.json
-(server-only: never served). Run it before the set is served, or while nobody answers (no write lock is shared with
+(server-only: never served).
+r17f --map "SRC->DST:v=w,..." carries attribute SRC of the old set as DST with its values mapped (e.g. an ML/MV
+set's type -> match: single=yes,ML=yes,...); a value not in the map is skipped and counted; the decision's v is the
+mapped value, every other field kept; the map is recorded in the provenance. Run it before the set is served, or while nobody answers (no write lock is shared with
 a running review server). A dry run unless --do. Read-only on --from.
 """
 from __future__ import annotations
@@ -56,9 +59,30 @@ def answered_objects(pkg, who: str, attr: str = "match") -> set:
     return {(img, ln) for (img, ln, a) in answers(pkg, who, (attr,)) if a == attr}
 
 
-def plan(src, dst, who: str, attrs=("match", "consent")) -> dict:
+def parse_map(t: str) -> tuple:
+    """'type->match:single=yes,ML=yes' -> ('type', 'match', {'single': 'yes', 'ML': 'yes'})"""
+    head, _, body = (t or "").partition(":")
+    a, _, b = head.partition("->")
+    m = dict(x.split("=", 1) for x in body.split(",") if "=" in x)
+    if not a.strip() or not b.strip() or not m:
+        raise ValueError(f"--map {t!r}: expected SRC->DST:v=w,...")
+    return a.strip(), b.strip(), {k.strip(): v.strip() for k, v in m.items()}
+
+
+def plan(src, dst, who: str, attrs=("match", "consent"), vmap=None) -> dict:
     src, dst = Path(src), Path(dst)
-    old = answers(src, who, attrs)
+    unmapped = []
+    if vmap:
+        sa, da, m = vmap
+        old = {}
+        for (img, ln, a), d in answers(src, who, (sa,)).items():
+            if str(d.get("v")) in m:
+                old[(img, ln, da)] = {**d, "v": m[str(d.get("v"))]}
+            else:
+                unmapped.append((img, ln, a, d.get("v")))
+        old.update(answers(src, who, tuple(x for x in attrs if x != da)))
+    else:
+        old = answers(src, who, attrs)
     new_items = O.read_items(dst)["items"]
     schema = O.read_schema(dst)
     obj_of = {(it["image"], int(it["line"])): it["obj"] for it in new_items}
@@ -93,7 +117,7 @@ def plan(src, dst, who: str, attrs=("match", "consent")) -> dict:
         for (d, (_i, _l, a)) in f.values():
             counts[(a, d["v"])] = counts.get((a, d["v"]), 0) + 1
     return {"src": src, "dst": dst, "who": who, "old": old, "put": put, "missing": missing, "bad": bad,
-            "exists": exists, "counts": counts}
+            "exists": exists, "counts": counts, "unmapped": unmapped, "map": vmap}
 
 
 def write(P) -> int:
@@ -122,7 +146,7 @@ def write(P) -> int:
     pf = dst / PROV
     old = json.loads(pf.read_text(encoding="utf-8")) if pf.is_file() else {"schema": "evh_carry/1", "runs": []}
     old["runs"].append({"t": now, "from": Path(P["src"]).name, "who": P["who"], "n": n, "tool": "tools/evh_carry.py",
-                        "answers": prov})
+                        **({"map": [P["map"][0], P["map"][1], P["map"][2]]} if P.get("map") else {}), "answers": prov})
     pf.write_text(json.dumps(old, indent=1), encoding="utf-8")
     return n
 
@@ -133,11 +157,12 @@ def main(argv=None):
     ap.add_argument("--to", dest="dst", required=True, type=Path)
     ap.add_argument("--who", required=True)
     ap.add_argument("--attrs", default="match,consent")
+    ap.add_argument("--map", help='r17f: "SRC->DST:v=w,..." carry SRC as DST with mapped values')
     ap.add_argument("--do", action="store_true")
     a = ap.parse_args(argv)
     attrs = tuple(x for x in a.attrs.split(",") if x)
     try:
-        P = plan(a.src, a.dst, a.who, attrs)
+        P = plan(a.src, a.dst, a.who, attrs, parse_map(a.map) if a.map else None)
     except (OSError, ValueError, KeyError) as e:
         print(f"[evh_carry] {e}", file=sys.stderr)
         return 2
@@ -148,7 +173,8 @@ def main(argv=None):
     n = sum(len(k) for k in P["put"].values())
     print(f"to carry into {a.dst.name}: {n} (" + ", ".join(f"{k[0]}={k[1]}: {v}" for k, v in sorted(P['counts'].items()))
           + f"); not in the new set: {len(P['missing'])}; refused by its schema: {len(P['bad'])}; "
-            f"already answered there: {len(P['exists'])}")
+            f"already answered there: {len(P['exists'])}"
+          + (f"; not in the --map: {len(P['unmapped'])}" if P.get("map") else ""))
     if not a.do:
         print("[dry run] nothing written; add --do")
         return 0
