@@ -961,23 +961,30 @@ class EvhTests(unittest.TestCase):
     def link(self, pg):
         return self.obj(pg)["evh"]["appLink"], pg.is_visible("#evhRvApp")
 
-    def test_unlock_link_after_consent_lab_only(self):
-        for role, want in (("basic", True), ("admin", True), ("guest", False), (None, False)):
+    def test_unlock_link_after_consent_lab_only(self):  # r17h: everyone after consent; opens the teaser, never the portal
+        for role in ("basic", "admin", "guest", None):
             data, srv, pg = self.open_v3(practice=True, role=role)
             self.to_reveal(pg)
             self.assertEqual(self.link(pg), (False, False), role)                 # not before the answer
             pg.click("#evhRvYes")
             self.settle(pg)
             self.assertEqual(self.match_of(srv, data["items"][0], "consent"), "yes", role)
-            self.assertEqual(self.link(pg), (want, want), role)
-            if want:
-                a = pg.locator("#evhRvAppA")
-                self.assertEqual((a.get_attribute("href"), a.get_attribute("target"), a.inner_text()),
-                                 ("/", "_top", "Meet the real app: CryoEV →"))
+            self.assertEqual(self.link(pg), (True, True), role)
+            a = pg.locator("#evhRvAppA")
+            self.assertEqual((a.get_attribute("href"), a.get_attribute("target"), a.inner_text()),
+                             ("#", None, "What is this for? CryoEV, coming soon →"))
+            url = pg.url
+            a.click()
+            pg.wait_for_selector("#evhAbout", state="visible", timeout=5000)
+            self.assertIn("coming soon", pg.inner_text("#evhAbout").lower())
+            self.assertEqual(pg.locator("#evhAbout a").count(), 0)              # no links out
+            self.assertEqual(pg.url, url)
+            pg.keyboard.press("Escape")
+            pg.wait_for_selector("#evhAbout", state="hidden", timeout=5000)
             self.assertEqual(self.errors, [], role)
 
     def test_unlock_link_at_ten(self):
-        for role, want in (("basic", True), ("guest", False)):
+        for role, want in (("basic", True), ("guest", True)):
             _, _, pg = self.open(role=role)
             for n in range(10):
                 o = self.obj(pg)

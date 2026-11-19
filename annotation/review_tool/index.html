@@ -337,7 +337,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #oKeys{text-align:center;font-size:11.5px;color:var(--mute);padding:0 12px 8px;background:var(--panel);flex:none}
 @media (hover:none) and (pointer:coarse){#oKeys{display:none!important}}
 /* round 17 eVHarmony (D.app "evharmony", object sets only): the joke skin; every rule is under #obj.evh or an evh id */
-#oEvh[hidden],#oBio[hidden],#oMatch[hidden],#evhSplash[hidden],#evhReveal[hidden],#evhRvAsk[hidden],#evhRvDone[hidden],#evhRvApp[hidden],#evhGuide[hidden],#evhHelp[hidden],#evhHow[hidden]{display:none}
+#oEvh[hidden],#oBio[hidden],#oMatch[hidden],#evhSplash[hidden],#evhReveal[hidden],#evhRvAsk[hidden],#evhRvDone[hidden],#evhRvApp[hidden],#evhGuide[hidden],#evhAbout[hidden],#evhHelp[hidden],#evhHow[hidden]{display:none}
 #obj.evh{--hot:#0f766e;--hot2:#b45309}
 #obj.evh #oListBtn,#obj.evh #oItem,#obj.evh #oWho,#obj.evh #oSync,#obj.evh #oTitle{display:none}
 #obj.evh .otbar{justify-content:space-between}
@@ -377,11 +377,11 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #oAttrs .evhKind .chips button.tog{color:#2563eb;border-color:#2563eb}
 #oAttrs .evhKind .chips button.tog.on{color:#fff;background:#2563eb}
 #evhHelp{flex:none;min-width:34px;min-height:34px;border-radius:17px;font-weight:800;font-size:16px;padding:0;color:var(--hot);border-color:var(--hot)}
-#evhGuide{position:absolute;inset:0;z-index:45;display:flex;align-items:flex-start;justify-content:center;padding:10px;background:color-mix(in srgb,var(--bg) 70%,transparent);backdrop-filter:blur(3px)}
-#evhGuide .box{width:min(560px,100%);max-height:calc(100% - 4px);display:flex;flex-direction:column;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.35)}
-#evhGuide .gh{display:flex;align-items:center;justify-content:space-between;padding:8px 8px 8px 16px;border-bottom:1px solid var(--line);flex:none}
-#evhGuide h2{margin:0;font-size:18px}
-#evhGuide .gh button{min-width:44px;min-height:44px;border-radius:22px}
+#evhAbout,#evhGuide{position:absolute;inset:0;z-index:45;display:flex;align-items:flex-start;justify-content:center;padding:10px;background:color-mix(in srgb,var(--bg) 70%,transparent);backdrop-filter:blur(3px)}
+#evhAbout .box,#evhGuide .box{width:min(560px,100%);max-height:calc(100% - 4px);display:flex;flex-direction:column;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.35)}
+#evhAbout .gh,#evhGuide .gh{display:flex;align-items:center;justify-content:space-between;padding:8px 8px 8px 16px;border-bottom:1px solid var(--line);flex:none}
+#evhAbout h2,#evhGuide h2{margin:0;font-size:18px}
+#evhAbout .gh button,#evhGuide .gh button{min-width:44px;min-height:44px;border-radius:22px}
 #evhGdBody{overflow:auto;padding:4px 14px 14px;font-size:14px;line-height:1.45}
 #evhGdBody h3,#evhRvGuide h3{margin:14px 0 2px;font-size:16px}
 #evhGdBody h4,#evhRvGuide h4{margin:8px 0 4px;font-size:13.5px;color:var(--mute)}
@@ -418,6 +418,10 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #evhRvRedo{color:var(--hot);border-color:var(--hot)}
 #evhRvApp{margin-top:14px;font-size:14px}
 #evhRvApp a{color:var(--hot);font-weight:700;text-decoration:none}
+#evhAbBody{overflow:auto;padding:12px 16px 16px;font-size:15px;line-height:1.45}
+#evhAbBody p{margin:0 0 10px}#evhAbBody h3{margin:12px 0 4px;font-size:16px}#evhAbBody ul{margin:0 0 10px;padding-left:20px}
+#evhAbBody .row{display:flex;justify-content:center;margin-top:8px}
+#evhAbBack{color:#fff;border-color:transparent;background:linear-gradient(90deg,var(--hot),var(--hot2))}
 #evhRvReal{color:#fff;border-color:transparent;background:linear-gradient(90deg,var(--hot),var(--hot2))}
 #oAttrs .evhFb{text-align:center}
 #oAttrs .evhFb p{margin:0 0 6px;font-size:15px;line-height:1.4}
@@ -645,7 +649,19 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
     <div class="row" id="evhRvAsk"><button id="evhRvYes" type="button">Yes</button><button id="evhRvNo" type="button">No</button></div>
     <div class="row" id="evhRvDone" hidden><button id="evhRvKeep" type="button">Keep swiping</button></div>
     <div id="evhRvPr" hidden><p>The practice cards don't count.</p><div class="row"><button id="evhRvRedo" type="button">Redo the 3 practice cards</button><button id="evhRvReal" type="button">Start for real</button></div></div>
-    <p id="evhRvApp" hidden><a id="evhRvAppA" target="_top" href="/">Meet the real app: CryoEV →</a></p></div></div>
+    <p id="evhRvApp" hidden><a id="evhRvAppA" href="#">What is this for? CryoEV, coming soon →</a></p></div></div>
+  <div id="evhAbout" role="dialog" aria-modal="true" aria-labelledby="evhAbH" hidden><div class="box">
+    <div class="gh"><h2 id="evhAbH">CryoEV: coming soon</h2><button id="evhAbX" type="button" title="Close (Esc)">✕</button></div>
+    <div id="evhAbBody"><p>The cards you swiped come from CryoEV, a platform our lab is building for cryo-EM of extracellular vesicles (EVs).</p>
+      <h3>What it will do</h3><ul class="bul">
+        <li>Take raw cryo-EM sessions and turn them into clean, contrast-adjusted images</li>
+        <li>Stitch montages from their stage positions</li>
+        <li>Find and outline vesicles with an AI model trained on lab-reviewed images</li>
+        <li>Size and count vesicles, and sort them (single, multilayer, vesicles inside)</li>
+        <li>Let people review and correct the outlines; corrections train the next model</li>
+        <li>Galleries and reports to share with collaborators</li></ul>
+      <p>It is still in progress and not open yet. Your answers here help train it.</p>
+      <div class="row"><button id="evhAbBack" type="button">Back to swiping</button></div></div></div></div>
   <div id="evhGuide" role="dialog" aria-modal="true" aria-labelledby="evhGdH" hidden><div class="box">
     <div class="gh"><h2 id="evhGdH">How to judge</h2><button id="evhGdX" type="button" title="Close (Esc or ?)">✕</button></div>
     <div id="evhGdBody"></div></div></div>
@@ -4047,11 +4063,11 @@ function makeObjectView() {
   function evhLabRole() {
     if (!/^\/review\//.test(location.pathname) || !location.protocol.startsWith("http")) return;
     fetch("/cj/me.json", {credentials: "same-origin", cache: "no-store"}).then(r => r.ok ? r.json() : null)
-      .then(j => { eh.lab = !!(j && typeof j.role === "string" && j.role && j.role !== "guest"); evhAppLink(); }).catch(() => {});
+      .then(j => { eh.lab = !!(j && typeof j.role === "string" && j.role && j.role !== "guest"); }).catch(() => {});
   }
   function evhAppLink(answered) {
     if (answered) eh.answered = true;
-    $("evhRvApp").hidden = !(eh.lab === true && eh.answered === true);
+    $("evhRvApp").hidden = eh.answered !== true;  // r17h (PKD): everyone, and a teaser sheet, not the portal
   }
   function evhOffer() {  // the reveal: from the 10th answer on, while this reviewer hasn't answered it
     if (evhPr.length) return;  // r17d: a set with practice cards asks in the reveal after them instead
@@ -4078,6 +4094,7 @@ function makeObjectView() {
     $("evhSplash").hidden = true; evhBrand(); evhOffer();
   }
   function evhKey(ev) {
+    if (!$("evhAbout").hidden) { if (ev.key === "Escape") { ev.preventDefault(); evhAbout(false); } return; }
     if (!$("evhGuide").hidden) { if (ev.key === "Escape" || ev.key === "?") { ev.preventDefault(); evhGuide(false); } return; }
     if (!$("evhSplash").hidden) { if (ev.key === "Enter" || ev.key === "Escape") { ev.preventDefault(); evhSplashDone(); } return; }
     if (!$("evhReveal").hidden) { if (ev.key === "Escape" && !evhPr.length) $("evhReveal").hidden = true; return; }  // later: offered again after the next answer (r17d: a practice set's reveal stays)
@@ -4153,6 +4170,9 @@ function makeObjectView() {
       const d = el("details", "guideFull"); d.append(el("summary", null, "Full guidelines"), el("p", "guide", instr)); body.append(d);
     }
   }
+  function evhAbout(on) {  // r17h: the CryoEV teaser (static text, no links out)
+    $("evhAbout").hidden = !on; if (on) $("evhAbX").focus();
+  }
   function evhGuide(on) {
     const g = $("evhGuide");
     if (on && !g.dataset.built) { evhGuideBuild(); g.dataset.built = "1"; }
@@ -4171,6 +4191,8 @@ function makeObjectView() {
     if (evhGuideOn) {  // r17c: the "How to judge" sheet from the splash and the ? button
       $("evhHelp").hidden = false; $("evhHow").hidden = false;
       $("evhHelp").onclick = () => evhGuide(true); $("evhHow").onclick = () => evhGuide(true); $("evhGdX").onclick = () => evhGuide(false);
+      $("evhRvAppA").onclick = ev => { ev.preventDefault(); evhAbout(true); };
+      $("evhAbX").onclick = () => evhAbout(false); $("evhAbBack").onclick = () => evhAbout(false);
     }
     if (evhGuideOn && !evhDense) $("oKeys").textContent = "→ match · ← nope · ↑ it's complicated · Backspace = undo · i = outline · ? = how to judge";
     if (evhDense) {
@@ -4219,7 +4241,7 @@ function makeObjectView() {
     ...(tree ? {mode: "tree", tree: treeState()} : {}),
     ...(evh ? {app: "evharmony", evh: {consent: evhConsentV(), reveal: !$("evhReveal").hidden, splash: !$("evhSplash").hidden,
       size: items[st.pos] ? evhSize(items[st.pos]) : null, nick: evhNick(), pan: [st.px, st.py], zoom: st.zs || null, bio: $("oBio").textContent,
-      appLink: !$("evhRvApp").hidden, dense: evhDense, kindFor: eh.fu ? eh.fu.id : null, fuV: eh.fu ? eh.fuV : null, guide: !$("evhGuide").hidden, guideOn: evhGuideOn, examples: evhEx.length, objFrac: st.of == null ? null : Math.round(st.of * 100) / 100,
+      appLink: !$("evhRvApp").hidden, about: !$("evhAbout").hidden, dense: evhDense, kindFor: eh.fu ? eh.fu.id : null, fuV: eh.fu ? eh.fuV : null, guide: !$("evhGuide").hidden, guideOn: evhGuideOn, examples: evhEx.length, objFrac: st.of == null ? null : Math.round(st.of * 100) / 100,
       practice: evhPr.length ? {on: pr.on, k: pr.k, n: evhPr.length, redo: pr.redo, fb: pr.fb, done: pr.done, answers: [...pr.ans],
         card: pr.on && evhPr[pr.k] ? evhPr[pr.k].id : null} : null}} : {})})};
 }

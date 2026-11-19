@@ -12,6 +12,7 @@ near the top of annotation/review_tool/index.html.
 - **Single or Multilayer no longer jumps ahead:** after a Match, picking the kind keeps the card so Outline off can still be tapped. Tap next, press Enter or swipe to move on.
 - **How to judge:** Match now says plainly that it means a vesicle (an EV). Nope leads with ice contamination and shows an ice example.
 - **Example pictures:** the example object has a clearer outline.
+- **CryoEV teaser:** after the consent question everyone (guests too) gets a What is this for link. It opens a short coming soon page about CryoEV inside eVHarmony instead of the portal.
 - **Components:** review page
 
 ## 2026-11-18 22:00 · eVHarmony sharper cards and its own app
