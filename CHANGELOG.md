@@ -7,6 +7,13 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-19 10:30 · eVHarmony dating names saved
+
+- **Dating names are saved:** in a set with the v4 answers (`tools/evh/ls_evh_match_v4.json`), the name typed on the welcome screen is saved with your answers, so the set's owner can see it (for a lab scoreboard). The label says so; the name stays optional.
+- **Names typed before:** a name this browser remembers from an earlier visit is sent once on the next visit. An empty name never clears a saved one.
+- **Nothing else changes:** same cards, answers and buttons. Older eVHarmony sets keep the name in the browser only.
+- **Components:** review page, eVHarmony answer schema v4
+
 ## 2026-11-19 01:30 · eVHarmony reset starts fresh
 
 - **A reset account starts like a new user:** when the server has none of your eVHarmony answers but this browser remembers a card, the page starts from the first card with the welcome screen.

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-18.9";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-19.1";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const R = window.REVIEW_DATA;  // data.js has run by now (a parser-blocking script, before DOMContentLoaded)
   if (R && R.kind === "objects" && R.app === "evharmony" && R.mode !== "tree") return;  // r17g: eVHarmony is its own app: no CryoEV stamp
@@ -3423,6 +3423,9 @@ function makeObjectView() {
     maxZoom: 1.25, prZoom: 4, prFrac: 2, fineZoom: 4, baseZoom: 2};  // r17f: real cards: up to 4 with a 2x / native crop, else 2  // r17d: a practice card: the object about 1/2 of the card's width, zoom up to 4 when a finer level (2x / native crop) exists  // css px per base-image px: <= 2.5 device px per native px at DPR 2 (1440 px uploads, no 2x / crops)
   const evhMatch = evh ? attrs.find(a => a.id === "match" && a.kind === "choice") || null : null;
   const evhConsent = evh ? attrs.find(a => a.id === "consent" && a.kind === "choice") || null : null;
+  // r17o (PKD, ls_evh_match_v4): the dating name, saved as the text attribute "nick" on items[0] (as consent), so the
+  // owner can see it and make a scoreboard. A set without it (v1-v3) keeps the name in this browser only, as before.
+  const evhNickA = evh ? attrs.find(a => a.id === "nick" && a.kind === "text") || null : null;
   // r17c (tools/evh/ls_evh_match_v2.json): a 4th answer "dense" (swipe down, d), the optional "kind" chips after a
   // Match, and the "How to judge" sheet (D.examples + D.instructions). A v1 set (no dense option, no examples) is unchanged.
   const evhDense = !!(evhMatch && evhMatch.options.some(o => o.v === "dense"));
@@ -3832,7 +3835,7 @@ function makeObjectView() {
       $("evhSplash").hidden = false; $("evhNick").value = evhNick();
     }
     render();
-    if (evh && server) { if (items[st.pos] && isDone(items[st.pos])) nextOpen(); evhMeta(); evhOffer(); }  // a swipe app opens on an open card
+    if (evh && server) { if (items[st.pos] && isDone(items[st.pos])) nextOpen(); evhMeta(); evhOffer(); evhNickSync(); }  // a swipe app opens on an open card
   }
   function start() {
     $("app").style.display = "none"; $("tri").hidden = true; $("obj").hidden = false;
@@ -4110,7 +4113,13 @@ function makeObjectView() {
   function evhSplashDone() {
     const n = $("evhNick").value.replace(/[\u0000-\u001f\u007f<>&]/g, "").trim().slice(0, 24);
     try { if (n) localStorage.setItem(EVH.nick, n); localStorage.setItem(EVH.splash, "1"); } catch (e) {}
-    $("evhSplash").hidden = true; evhBrand(); evhOffer();
+    $("evhSplash").hidden = true; evhBrand(); evhOffer(); evhNickSync();
+  }
+  function evhNickSync() {  // r17o: this browser's dating name -> the set (items[0], "nick") when it differs; never clears one
+    const it = items[0], n = evhNick().replace(/[\u0000-\u001f\u007f<>&]/g, "").trim().slice(0, Math.min(24, (evhNickA && evhNickA.max) || 24));
+    if (!evhNickA || !it || !n || !can() || !me() || !$("evhSplash").hidden || mineOf(it, evhNickA) === n) return;
+    const im = imOf(it), e = ensureEdit(im);
+    setDec(e, okey(it.obj, evhNickA), n); touch(im.file);
   }
   function evhKey(ev) {
     if (!$("evhAbout").hidden) { if (ev.key === "Escape") { ev.preventDefault(); evhAbout(false); } return; }
@@ -4219,6 +4228,7 @@ function makeObjectView() {
       $("oKeys").textContent = "→ match · ← nope · ↓ small & dense · ↑ it's complicated · Backspace = undo · i = outline" + (evhGuideOn ? " · ? = how to judge" : "");
     }
     try { window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", evhBrand); } catch (e) {}
+    if (evhNickA) $("evhNick").labels[0].textContent = "Your dating name (optional; may show on a lab scoreboard)";
     let seen = null; try { seen = localStorage.getItem(EVH.splash); } catch (e) {}
     if (seen !== "1") { $("evhSplash").hidden = false; $("evhNick").value = evhNick(); }
     // gestures on the card: a touch / pen swipe answers; a mouse drag pans (r16a #25a); a tap does nothing

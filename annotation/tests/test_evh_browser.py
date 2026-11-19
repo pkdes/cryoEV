@@ -20,6 +20,9 @@ object set card (annotation/review_tool/index.html, D.app === "evharmony"), on a
     to judge, consent saved; Esc doesn't close it), Redo (feedback "Our answer: Match · Single — note", then the
     real queue) or Start for real (the real queue at once); a reviewer with consent already skips the practice; a
     set without D.practice keeps the reveal at 10.
+  - r17o (ls_evh_match_v4): the dating name saved as a:<items[0].obj>:nick@<rid> from the splash, and a name typed
+    before (this browser only) sent once on the next visit; never cleared by an empty name; the cards unchanged (no
+    text box); a v3 set sends no name. The review server takes nick only under v4, at most 24 characters.
 
   python -m unittest discover -s annotation/tests -p test_evh_browser.py -v
 """
@@ -42,6 +45,7 @@ REPO = HERE.parents[1]
 EVH_SCHEMA = json.loads((REPO / "tools" / "evh" / "ls_evh_match_v1.json").read_text(encoding="utf-8"))
 EVH_V2 = json.loads((REPO / "tools" / "evh" / "ls_evh_match_v2.json").read_text(encoding="utf-8"))
 EVH_V3 = json.loads((REPO / "tools" / "evh" / "ls_evh_match_v3.json").read_text(encoding="utf-8"))
+EVH_V4 = json.loads((REPO / "tools" / "evh" / "ls_evh_match_v4.json").read_text(encoding="utf-8"))
 GUIDE_TEXT = "What you're judging: the highlighted outline. Unsure is useful; don't guess."
 META = {"schema": "review_meta/1", "package": {}, "images": {"imgA.png": {"nm_per_px": 1.5}, "imgB.png": {"nm_per_px": 1.5}}}
 SAMPLE = "Zed Person 2023 sample"
@@ -1036,6 +1040,71 @@ class EvhTests(unittest.TestCase):
         self.assertFalse(pg2.is_visible("#evhSplash"))
         self.assertEqual(self.errors, [])
 
+
+    # ---- r17o: the dating name (schema v4)
+    def nick_puts(self, srv):
+        return [(k, rec["dec"][k].get("v")) for _f, rec in srv.puts for k in (rec.get("dec") or {})   # new values only
+                if ":nick@" in k and rec["dec"][k].get("pending") is True]
+
+    def test_v4_nick_saved_from_splash(self):
+        data, srv, pg = self.open(schema=EVH_V4, splash_seen=False, width=390, height=844)
+        self.assertIn("scoreboard", pg.inner_text("label[for=evhNick]"))
+        pg.fill("#evhNick", "Bilayer<b>Babe")
+        pg.click("#evhGo")
+        self.settle(pg)
+        it0 = data["items"][0]
+        self.assertEqual(self.match_of(srv, it0, "nick"), "BilayerbBabe")
+        self.assertEqual(len(self.nick_puts(srv)), 1)
+        pg.reload()                                               # the same name: not sent again
+        pg.wait_for_function("window.__review && __review.obj() && __review.state().server", timeout=15000)
+        pg.wait_for_timeout(800)
+        self.assertEqual(len(self.nick_puts(srv)), 1)
+        o = self.obj(pg)                                          # the cards are v3's: no text box, same chips
+        pg.keyboard.press("ArrowRight")
+        pg.wait_for_selector("#oAttrs .evhKind", state="visible", timeout=5000)
+        self.assertEqual(pg.eval_on_selector_all("#oAttrs .evhKind button", "els => els.map(e => e.textContent)"),
+                         ["Single", "Multilayer", "✎ Outline off", "skip →"])
+        self.assertEqual(pg.locator("#oAttrs input, #oAttrs textarea").count(), 0)
+        self.assertEqual(self.match_of(srv, o["item"]) if self.settle(pg) is None else None, "yes")
+        self.assertEqual(self.errors, [])
+
+    def test_v4_nick_from_before_sent_once(self):
+        init = "try { localStorage.setItem('cryoev-review:evh:nick', 'OldFlame'); } catch (e) {}"
+        data, srv, pg = self.open(schema=EVH_V4, init=init)      # splash seen before, the name only in this browser
+        self.settle(pg)
+        self.assertEqual(self.match_of(srv, data["items"][0], "nick"), "OldFlame")
+        # an empty name never clears a saved one
+        _, srv2, pg2 = self.open(schema=EVH_V4, splash_seen=False)
+        pg2.click("#evhGo")
+        pg2.wait_for_timeout(800)
+        self.assertEqual(self.nick_puts(srv2), [])
+        self.assertEqual(self.errors, [])
+
+    def test_v3_sends_no_nick(self):
+        _, srv, pg = self.open(schema=EVH_V3, splash_seen=False)
+        self.assertIn("just for show", pg.inner_text("label[for=evhNick]"))
+        pg.fill("#evhNick", "NoSaveName")
+        pg.click("#evhGo")
+        pg.keyboard.press("ArrowLeft")
+        self.settle(pg)
+        self.assertEqual(self.nick_puts(srv), [])
+        self.assertEqual(self.obj(pg)["evh"]["nick"], "NoSaveName")
+        self.assertEqual(self.errors, [])
+
+
+class NickServerCheck(unittest.TestCase):
+    """r17o: the review server's attribute check (annotation/review_server.check_attrs) on nick."""
+
+    def check(self, schema, v):
+        sys.path.insert(0, str(REPO))
+        from annotation import review_server as rs
+        edit = {"dec": {"a:g1:nick@rev1": {"v": v, "t": 1, "who": "rev1", "pending": True}}}
+        return rs.check_attrs(edit, schema)
+
+    def test_nick_only_under_v4(self):
+        self.assertIsNone(self.check(EVH_V4, "BilayerBabe"))
+        self.assertIn("bad value", self.check(EVH_V4, "x" * 25))
+        self.assertIn("unknown attribute", self.check(EVH_V3, "BilayerBabe"))
 
 if __name__ == "__main__":
     unittest.main()
