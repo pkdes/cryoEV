@@ -67,7 +67,7 @@ WORDS = """() => ({gt: document.getElementById('lblGtWrap').innerText.trim(), gt
     btn: document.getElementById('toTri').innerText, btnTip: document.getElementById('toTri').title,
     title: document.title, keys: document.getElementById('triKeys').innerText,
     keysShown: !document.getElementById('triKeys').hidden && getComputedStyle(document.getElementById('triKeys')).display !== 'none'})"""
-BRANDS = ("eVHarmony", "Gridr", "cryonder")
+BRANDS = ("eVHarmony", "Gridr", "Bubble", "Fringe", "OkCryo", "Carbon Meets Vesicle")
 
 
 def with_fields(**kw):

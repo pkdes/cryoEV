@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-18.7";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-18.8";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const R = window.REVIEW_DATA;  // data.js has run by now (a parser-blocking script, before DOMContentLoaded)
   if (R && R.kind === "objects" && R.app === "evharmony" && R.mode !== "tree") return;  // r17g: eVHarmony is its own app: no CryoEV stamp
@@ -657,7 +657,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
         <li>Take raw cryo-EM sessions and turn them into clean, contrast-adjusted images</li>
         <li>Stitch montages from their stage positions</li>
         <li>Find and outline vesicles with an AI model trained on lab-reviewed images</li>
-        <li>Size and count vesicles, and sort them (single, multilayer, vesicles inside)</li>
+        <li>Size and count vesicles, and sort them: single, multilayer, non-EV particles and more</li>
         <li>Let people review and correct the outlines; corrections train the next model</li>
         <li>Galleries and reports to share with collaborators</li></ul>
       <p>It is still in progress and not open yet. Your answers here help train it.</p>
@@ -2322,7 +2322,11 @@ function nestedCount(im, c, ring, th) {  // objects whose centre sits inside thi
 const BRANDS = [
   {name: "eVHarmony", tag: "Find your perfect membrane match", hot: "#0f766e", hot2: "#b45309", hotD: "#2dd4bf", hotD2: "#fbbf24", match: "It's Compatible! 💚", keep: "Still compatible 💞", empty: "No more compatible vesicles nearby 💔", nope: "Not my type 👋", maybe: "It's complicated 🤷"},
   {name: "Gridr", tag: "Who's on your grid tonight?", hot: "#a16207", hot2: "#c2410c", hotD: "#facc15", hotD2: "#fb923c", match: "Same grid, same vibe 😉", keep: "Still on your grid 😘", empty: "Nobody else on this grid 💔", nope: "Left on read 👋", maybe: "Situationship 🤷"},
-  {name: "cryonder", tag: "swipe right on your perfect bilayer", hot: "#be123c", hot2: "#c2410c", hotD: "#fb7185", hotD2: "#fdba74", match: "It's a Membrane Match! 💚", keep: "Still a match 💞", empty: "You've seen everyone nearby 💔", nope: "Nope 👋", maybe: "It's complicated 🤷"},
+  // r17i (PKD): cryonder -> Bubble; + Fringe, OkCryo, Carbon Meets Vesicle (text and colours only; the logo cycles them)
+  {name: "Bubble", tag: "Make the first move on a lipid bubble", hot: "#a16207", hot2: "#854d0e", hotD: "#fde047", hotD2: "#facc15", match: "Bubbles collided 💛", keep: "Still bubbling 💛", empty: "No more bubbles nearby 💔", nope: "Popped 👋", maybe: "It's complicated 🤷"},
+  {name: "Fringe", tag: "Designed to be defocused", hot: "#6d28d9", hot2: "#4c1d95", hotD: "#c4b5fd", hotD2: "#a78bfa", match: "You've got fringes 💜", keep: "Still in focus 💜", empty: "Nobody left in focus 💔", nope: "Out of focus 👋", maybe: "It's complicated 🤷"},
+  {name: "OkCryo", tag: "Chill people, cool vesicles", hot: "#1d4ed8", hot2: "#be185d", hotD: "#93c5fd", hotD2: "#f9a8d4", match: "Chemistry, at −180 °C 💙", keep: "Still chemistry 💙", empty: "Everyone nearby is frozen solid 💔", nope: "Not okay 👋", maybe: "It's complicated 🤷"},
+  {name: "Carbon Meets Vesicle", tag: "One curated vesicle at a time", hot: "#78350f", hot2: "#9a3412", hotD: "#fcd34d", hotD2: "#fdba74", match: "Perfect blend ☕", keep: "Still brewing ☕", empty: "Out of beans 💔", nope: "Burnt 👋", maybe: "It's complicated 🤷"},
 ];
 let brandI = 0; try { brandI = +(localStorage.getItem("cryoev-review:brand") || 0) % BRANDS.length; } catch (e) {}
 const brand = () => BRANDS[brandI];

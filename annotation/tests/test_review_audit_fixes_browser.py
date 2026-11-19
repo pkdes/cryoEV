@@ -301,7 +301,7 @@ class WhereBarTests(Base):
         self.assertEqual(page.title(), "fixture_review")  # D.title || D.id
         self.assertEqual(page.get_attribute("#reviewed", "title"), REVIEWED_TIP)
         page.click("#toTri")
-        self.assertIn(page.title(), ("eVHarmony", "Gridr", "cryonder"))  # the cards keep the brand
+        self.assertIn(page.title(), ("eVHarmony", "Gridr", "Bubble", "Fringe", "OkCryo", "Carbon Meets Vesicle"))  # the cards keep the brand
         page.click("#triExit")
         self.assertEqual(page.title(), "fixture_review")
 

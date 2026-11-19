@@ -7,6 +7,12 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-19 00:30 · Three new fun mode names
+
+- **Fun mode names:** cryonder is now Bubble, and Fringe, OkCryo and Carbon Meets Vesicle join eVHarmony and Gridr. Tap the logo to cycle through all six. Only the names, taglines and colours change; answers work the same.
+- **CryoEV teaser:** the sorting line now reads single, multilayer, non-EV particles and more.
+- **Components:** review page
+
 ## 2026-11-18 23:30 · eVHarmony guide and follow-up fixes
 
 - **Single or Multilayer no longer jumps ahead:** after a Match, picking the kind keeps the card so Outline off can still be tapped. Tap next, press Enter or swipe to move on.

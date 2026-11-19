@@ -39,7 +39,7 @@ PHONE = {"viewport": {"width": 400, "height": 820}, "is_mobile": True, "has_touc
 PRED = with_fields(kind="prediction", cand_conf=0.3, label_conf=0.5)
 FUN_OFF = "try { localStorage.setItem('cryoev-review:fun', '0'); } catch (e) {}"
 NO_CAPTURE = "Element.prototype.setPointerCapture = function () {};"  # synthetic pointers have nothing to capture
-BRANDS = ("eVHarmony", "Gridr", "cryonder")
+BRANDS = ("eVHarmony", "Gridr", "Bubble", "Fringe", "OkCryo", "Carbon Meets Vesicle")
 
 
 def clear_cryoev_env():
@@ -219,7 +219,7 @@ class FunModeTests(CardBase):
         page = self.open("&who=fun2&mode=editor", setup=setups(PRED, init(FUN_OFF)), **DESK)
         self.assertEqual(" ".join(page.inner_text("#toTri").split()), "Quick check")
         page = self.open("&who=fun2&mode=editor", setup=PRED, **DESK)
-        self.assertIn(page.inner_text("#toTri").split()[-1], BRANDS)
+        self.assertTrue(any(page.inner_text("#toTri").endswith(b) for b in BRANDS))
 
     def test_decisions_byte_identical_either_way(self):
         """One flow (accept, reject, low conf, a class chip + Next, Back + re-decide, an adjust with erased points)
