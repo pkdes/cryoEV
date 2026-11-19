@@ -260,7 +260,7 @@ class EvhTests(unittest.TestCase):
         self.assertTrue(pg.is_visible("#evhGuide"))
         self.assertTrue(self.obj(pg)["evh"]["guide"])
         secs = pg.eval_on_selector_all("#evhGdBody section h3", "els => els.map(e => e.textContent)")
-        self.assertEqual(secs, ["Match →", "Nope ←", "Small & dense ↓", "It's complicated ↑"])
+        self.assertEqual(secs, ["Match → (it's a vesicle)", "Nope ←", "Small & dense ↓", "It's complicated ↑"])
         figs = pg.eval_on_selector_all("#evhGdBody figure", "els => els.map(e => [e.dataset.cat, "
                                        "e.querySelector('img').getAttribute('src'), e.textContent])")
         self.assertEqual([f[0] for f in figs], ["single", "ml", "nope", "nope", "dense", "unsure"])   # bad cat / src dropped
@@ -626,7 +626,11 @@ class EvhTests(unittest.TestCase):
         self.assertEqual(pg.get_attribute("#oAttrs .evhKind button[data-attr='outline_off']", "aria-pressed"), "true")
         self.assertEqual(pg.inner_text("#oAttrs .evhKind button.skip"), "next →")
         self.assertEqual(self.obj(pg)["pos"], o["pos"])               # a toggle doesn't move on
-        pg.click("#oAttrs .evhKind button[data-v='multilayer']")
+        pg.click("#oAttrs .evhKind button[data-v='multilayer']")     # r17h: a kind pick stays (the toggle is on the row)
+        pg.wait_for_selector("#oAttrs .evhKind button.on[data-v='multilayer']", timeout=5000)
+        self.assertEqual(self.obj(pg)["pos"], o["pos"])
+        self.assertEqual(pg.inner_text("#oAttrs .evhKind button.skip"), "next →")
+        pg.click("#oAttrs .evhKind button.skip")
         self.next_card(pg, o["pos"])
         # Match, o (toggle), Enter: outline_off only
         o2 = self.obj(pg)
@@ -640,6 +644,9 @@ class EvhTests(unittest.TestCase):
         pg.keyboard.press("y")
         pg.wait_for_selector("#oAttrs .evhKind", state="visible", timeout=5000)
         pg.keyboard.press("1")
+        pg.wait_for_selector("#oAttrs .evhKind button.on[data-v='single']", timeout=5000)
+        self.assertEqual(self.obj(pg)["pos"], o3["pos"])                 # stays: o can still be pressed
+        pg.keyboard.press("Enter")
         self.next_card(pg, o3["pos"])
         # It's complicated: the why chips; pick Small and dense
         o4 = self.obj(pg)
@@ -673,9 +680,9 @@ class EvhTests(unittest.TestCase):
         self.assertNotIn("down", pg.inner_text("#evhSplash"))
         pg.click("#evhHow")
         secs = pg.eval_on_selector_all("#evhGdBody section h3", "els => els.map(e => e.textContent)")
-        self.assertEqual(secs, ["Match →", "Nope ←", "It's complicated ↑"])
+        self.assertEqual(secs, ["Match → (it's a vesicle)", "Nope ←", "It's complicated ↑"])
         txt = pg.inner_text("#evhGdBody")
-        for t in ("any part of a multilayer counts", "Outline off", "Ice contamination", "Small and dense",
+        for t in ("The outlined object is a vesicle (an EV)", "any part of a multilayer counts", "Outline off", "Ice contamination", "Small and dense",
                   "Anything not clearly yes or no", "Maybe a bilayer, hard to tell", "Tips"):
             self.assertIn(t, txt)
         self.assertEqual(pg.eval_on_selector_all("#evhGdBody h4", "els => els.map(e => e.textContent)"),
@@ -720,7 +727,7 @@ class EvhTests(unittest.TestCase):
         self.assertIn("real vesicle candidate", pg.inner_text("#evhRvTx"))
         self.assertTrue(pg.is_visible("#evhRvGuide"))
         self.assertEqual(pg.eval_on_selector_all("#evhRvGuide section h3", "els => els.map(e => e.textContent)"),
-                         ["Match →", "Nope ←", "It's complicated ↑"])
+                         ["Match → (it's a vesicle)", "Nope ←", "It's complicated ↑"])
         self.assertNotIn(GUIDE_TEXT, pg.inner_text("#evhRvGuide"))           # the Guidelines text only in the ? sheet
         self.assertIn("Count my answers?", pg.inner_text("#evhRvQ"))
         self.assertFalse(pg.is_visible("#evhRvPr"))                # Redo / Start only after the consent answer

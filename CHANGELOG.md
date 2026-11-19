@@ -7,6 +7,13 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-18 23:30 · eVHarmony guide and follow-up fixes
+
+- **Single or Multilayer no longer jumps ahead:** after a Match, picking the kind keeps the card so Outline off can still be tapped. Tap next, press Enter or swipe to move on.
+- **How to judge:** Match now says plainly that it means a vesicle (an EV). Nope leads with ice contamination and shows an ice example.
+- **Example pictures:** the example object has a clearer outline.
+- **Components:** review page
+
 ## 2026-11-18 22:00 · eVHarmony sharper cards and its own app
 
 - **Its own app:** an eVHarmony set opens without the CryoEV bar or version stamp, with its own name and a heart icon in the browser tab. Same link as before; guests still land straight on their set. Every other review set keeps the CryoEV bar.

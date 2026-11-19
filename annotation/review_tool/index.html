@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-18.6";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-18.7";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const R = window.REVIEW_DATA;  // data.js has run by now (a parser-blocking script, before DOMContentLoaded)
   if (R && R.kind === "objects" && R.app === "evharmony" && R.mode !== "tree") return;  // r17g: eVHarmony is its own app: no CryoEV stamp
@@ -3904,6 +3904,7 @@ function makeObjectView() {
     let any = false, first = true;
     for (const a of fus) {
       const chips = el("div", "chips"), cur = mineOf(it, a);
+      if (!isTog(a) && cur != null) any = true;
       if (isTog(a)) {
         const on1 = cur === "yes"; any = any || on1;
         const b = el("button", "tog" + (on1 ? " on" : ""), "✎ " + (a.options.find(o => o.v === "yes").label || a.label));
@@ -3933,10 +3934,12 @@ function makeObjectView() {
     evhFuSet(it, a, mineOf(it, a) === "yes" ? null : "yes"); render();
   }
   function evhFuPick(a, v) {  // a null = skip / next (nothing more saved)
-    const it = eh.fu; eh.fu = null;
-    if (!it || items[st.pos] !== it) return render();
+    const it = eh.fu;
+    if (!it || items[st.pos] !== it) { eh.fu = null; return render(); }
     if (a && v != null && can() && mineOf(it, a) !== v) evhFuSet(it, a, v);
-    evhNext(it);
+    // r17h (PKD): with the Outline off toggle on the row, a kind pick stays so the toggle can still be tapped
+    if (a && (EVH_FU[eh.fuV] || []).some(isTog)) return render();
+    eh.fu = null; evhNext(it);
   }
   function evhNext(it) {  // after an answer: the next open card (or stay when all are done), then the reveal check
     if (items[st.pos] !== it) return render();
@@ -4106,7 +4109,8 @@ function makeObjectView() {
   function evhGuideSecs() {  // [heading, [bullets], [[example cat, sub-heading]]]; v1 / v2 / v3 from the schema in use (r17e: bullets)
     const lbl = a => a ? a.options.map(o => o.label).join(" / ") : "";
     const tog = EVH_FU.yes.find(isTog), why = EVH_FU.unsure[0];
-    const match = ["A closed ring: a thin dark line (the membrane) all the way round",
+    const match = ["The outlined object is a vesicle (an EV)",
+      "A closed ring: a thin dark line (the membrane) all the way round",
       "Faint or partly hidden still counts",
       "Overlapping vesicles count, and so does a slightly-off outline"];
     if (evhKind) match.push(`If you can tell, tap ${lbl(evhKind)}` + (evhKind.options.some(o => o.v === "multilayer") ? " (any part of a multilayer counts)" : ""));
@@ -4115,8 +4119,8 @@ function makeObjectView() {
       : ["Anything not clearly yes or no", "e.g. a faint bilayer, small & dense (maybe a lipoprotein), cut off at the edge"]
         .concat(why ? [`If you like, tap why: ${lbl(why)}`] : [], ["Unsure is useful: don't guess"]);
     return [
-      ["Match →", match, [["single", "Single"], ["ml", "Multilayer"], ["mv", "Has vesicles inside"], ["inner", "Inside another"]]],
-      ["Nope ←", ["No membrane ring", "Ice contamination: dark, sharp blobs or crystals (the obvious one)",
+      ["Match → (it's a vesicle)", match, [["single", "Single"], ["ml", "Multilayer"], ["mv", "Has vesicles inside"], ["inner", "Inside another"]]],
+      ["Nope ←", ["Not a vesicle: no membrane ring", "Ice contamination: dark, sharp-edged blobs or crystals (the most common Nope)",
                   "Also: carbon or grid edge, grainy noise, aggregates, solid blobs, empty background"], [["nope", ""]]],
       ...(evhDense ? [["Small & dense ↓", ["Small, uniformly dark particle", "No clear two-line bilayer (maybe a lipoprotein)"], [["dense", ""]]]] : []),
       ["It's complicated ↑", comp, [["unsure", ""], ["dense", ""]]]];
