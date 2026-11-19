@@ -32,7 +32,7 @@
         try { history.replaceState(history.state, '', want); } catch (e) { /* ignore */ }
       }
     }
-    try { var t = w.document.title; document.title = t ? t + ' · ' + title : title; } catch (e) { /* ignore */ }
+    try { var t = w.document.title; document.title = t && t !== title ? t + ' · ' + title : title; } catch (e) { /* ignore */ }   // an own-app shell (eVHarmony): the same name once
   }
   function hook() {
     var w;

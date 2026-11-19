@@ -113,7 +113,10 @@ class EvhTests(unittest.TestCase):
         cls.pw.stop()
 
     def open(self, *, blind=False, app="evharmony", meta=META, splash_seen=True, width=1280, height=800,
-             scheme="light", init=None, schema=None, examples=None, instructions=None, practice=False, consent=None):
+             scheme="light", init=None, schema=None, examples=None, instructions=None, practice=False, consent=None,
+             role=None):
+        """role (r17g): open the page as the portal would, at /review/<pkg>/app/ (Playwright forwards it to the
+        stand-in server), with /cj/me.json answering that role; None: the plain stand-in URL (no portal, no me.json)."""
         d = Path(tempfile.mkdtemp(prefix="evh_")) / "pred_obj_evh_ab12"
         data = build_evh(d, blind=blind, app=app, schema=schema, examples=examples, instructions=instructions,
                          practice=practice)
@@ -133,7 +136,13 @@ class EvhTests(unittest.TestCase):
         pg = ctx.new_page()
         self.errors = []
         pg.on("pageerror", lambda e: self.errors.append(str(e)))
-        pg.goto(srv.url + "?who=rev1")
+        url = srv.url + "?who=rev1"
+        if role is not None:
+            app = srv.url + "review/pred_obj_evh_ab12/app/"
+            ctx.route(app + "**", lambda r: r.fulfill(response=r.fetch(url=srv.url + r.request.url[len(app):])))
+            ctx.route(srv.url + "cj/me.json", lambda r: r.fulfill(json={"id": "rev1", "role": role}))
+            url = app + "?who=rev1"
+        pg.goto(url)
         pg.wait_for_function("window.__review && __review.obj() && __review.state().server", timeout=15000)
         return data, srv, pg
 
@@ -929,6 +938,50 @@ class EvhTests(unittest.TestCase):
         self.to_reveal(pg, keys=("n", "y"))
         self.assertEqual(self.attr_puts(srv), [])
         self.assertEqual(self.errors, [])
+
+    # ---- r17g: eVHarmony is its own app
+    def test_own_app_no_stamp_title(self):
+        _, _, pg = self.open()
+        self.assertEqual(pg.locator("#pageVer").count(), 0)                # no "Review page <v>" stamp
+        self.assertEqual(pg.title(), "eVHarmony")
+        pg.click("#oEvhLogo")                                              # another skin: the title stays
+        self.assertEqual(pg.title(), "eVHarmony")
+        self.assertEqual(self.errors, [])
+        _, _, pg = self.open(app=None)                                     # control: the flag off keeps both
+        self.assertEqual(pg.locator("#pageVer").count(), 1)
+        self.assertEqual(pg.title(), "eVHarmony beta")
+
+    def link(self, pg):
+        return self.obj(pg)["evh"]["appLink"], pg.is_visible("#evhRvApp")
+
+    def test_unlock_link_after_consent_lab_only(self):
+        for role, want in (("basic", True), ("admin", True), ("guest", False), (None, False)):
+            data, srv, pg = self.open_v3(practice=True, role=role)
+            self.to_reveal(pg)
+            self.assertEqual(self.link(pg), (False, False), role)                 # not before the answer
+            pg.click("#evhRvYes")
+            self.settle(pg)
+            self.assertEqual(self.match_of(srv, data["items"][0], "consent"), "yes", role)
+            self.assertEqual(self.link(pg), (want, want), role)
+            if want:
+                a = pg.locator("#evhRvAppA")
+                self.assertEqual((a.get_attribute("href"), a.get_attribute("target"), a.inner_text()),
+                                 ("/", "_top", "Meet the real app: CryoEV →"))
+            self.assertEqual(self.errors, [], role)
+
+    def test_unlock_link_at_ten(self):
+        for role, want in (("basic", True), ("guest", False)):
+            _, _, pg = self.open(role=role)
+            for n in range(10):
+                o = self.obj(pg)
+                pg.keyboard.press("n")
+                self.next_card(pg, o["pos"])
+            pg.wait_for_selector("#evhReveal", state="visible", timeout=5000)
+            self.assertEqual(self.link(pg), (False, False), role)
+            pg.click("#evhRvNo")
+            self.settle(pg)
+            self.assertEqual(self.link(pg), (want, want), role)
+            self.assertEqual(self.errors, [], role)
 
 
 if __name__ == "__main__":

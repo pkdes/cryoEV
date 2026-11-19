@@ -7,14 +7,16 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
-## 2026-11-18 21:00 · eVHarmony sharper cards
+## 2026-11-18 22:00 · eVHarmony sharper cards and its own app
 
-- **Crisper pictures:** cards that have no finer picture behind them are softened less by default (Smooth 1 there instead of 2; cards with a finer picture keep Smooth 2). Your own Smooth setting still wins once you change it.
-- **No more box around the sharp crop:** on desktop, the sharper close-up of the vesicle is now shaded exactly like the picture around it, so no lighter square shows.
-- Pictures on object cards are always scaled with the browser's best quality.
-- Images from the multi-set review server are marked so that proxies and data savers leave them uncompressed.
-- For set makers: `object_set build --quality` (default 72 as before), `tools/add_hires.py` item crops up to 2560 px and no crop coarser than the 2x picture; `tools/evh_items.py --images-of --exclude --answered-attr` and `tools/evh_carry.py --map` build an eVHarmony set from another object set's answers.
-- **Components:** review page 2026-11-18.4 / review server (multi) / CLI (`object_set build --quality`, `tools/add_hires.py`, `tools/evh_items.py`, `tools/evh_carry.py`).
+- **Its own app:** an eVHarmony set opens without the CryoEV bar or version stamp, with its own name and a heart icon in the browser tab. Same link as before; guests still land straight on their set. Every other review set keeps the CryoEV bar.
+- **Meet the real app:** lab members see a Meet the real app: CryoEV link in the reveal once they answer Count my answers. Guests don't see it.
+- **Crisper pictures:** cards with no finer picture behind them are softened less by default (Smooth 1 instead of 2); cards with a finer picture keep Smooth 2. Your own Smooth setting still wins once you change it.
+- **Closer look:** a card zooms in further on its vesicle (up to 4x when a sharper picture exists, 2x otherwise).
+- **No more box around the sharp crop:** on desktop, the sharper close-up of the vesicle is shaded exactly like the picture around it, so no lighter square shows.
+- Pictures on object cards are always scaled with the browser's best quality, and the multi-set review server marks images so proxies and data savers leave them uncompressed.
+- For set makers: `object_set build --quality --export-cols --src-use --max-items`, `tools/add_hires.py` item crops up to 2560 px (none coarser than the 2x picture), `tools/evh_items.py --images-of --exclude --answered-attr --head`, `tools/evh_carry.py --map`, `tools/evh_score.py --src`.
+- **Components:** portal / review page 2026-11-18.6 / review server (multi) / CLI (`object_set`, `tools/add_hires.py`, `tools/evh_items.py`, `tools/evh_carry.py`, `tools/evh_score.py`).
 
 ## 2026-11-18 18:30 · eVHarmony guide in short bullets
 

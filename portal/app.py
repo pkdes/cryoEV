@@ -1307,6 +1307,34 @@ def shell_response(request: Request, base: str, title: str = "Review", strip: st
     return M.Ctx.page(request, title, body, active="review")
 
 
+EVH_APP = "evharmony"             # review_package.json "app" (object_set build --app evharmony): its own bare page
+EVH_TITLE = "eVHarmony"
+EVH_ICON = ("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23e11d74' "
+            "d='M16 29 3.6 16.9A7.6 7.6 0 0 1 16 7.3a7.6 7.6 0 0 1 12.4 9.6Z'/%3E%3C/svg%3E")
+
+
+def bare_shell_response(request: Request, base: str, title: str = EVH_TITLE) -> HTMLResponse:
+    """Round 17g: the shell page of a package that is its own app (eVHarmony): no CryoEV bar, no header.js / cj.css,
+    its own title and heart icon; only the full-window iframe of base/app/ (the same src as shell_response) and
+    /cj/review.js (URL sync, links out of the tool open in this window, never a bar inside the bar). Same URL, access,
+    guest join and headers (the Gate's) as the usual shell."""
+    app_prefix = base + "/app"
+    q = P.strip_k(request.scope.get("query_string", b"").decode("latin-1"))
+    src = app_prefix + "/" + (f"?{q}" if q else "")
+    t = html.escape(title)
+    out = ('<!doctype html>\n<html lang="en"><head><meta charset="utf-8">\n'
+           '<meta name="viewport" content="width=device-width,initial-scale=1">\n'
+           f'<meta name="color-scheme" content="light dark">\n<title>{t}</title>\n'
+           f'<link rel="icon" href="{EVH_ICON}">\n'
+           '<style>html,body{margin:0;height:100%;overflow:hidden;background:#f6f6f4}'
+           '@media (prefers-color-scheme:dark){html,body{background:#161615}}'
+           '.cj-review-frame{display:block;width:100%;height:100%;border:0}</style>\n</head>\n<body>\n'
+           f'<iframe id="cj-review-frame" class="cj-review-frame" title="{t}" src="{html.escape(src)}" '
+           f'data-base="{html.escape(base)}/" data-app="{html.escape(app_prefix)}/" '
+           'allow="clipboard-write; fullscreen"></iframe>\n<script src="/cj/review.js" defer></script>\n</body></html>')
+    return M.no_store(HTMLResponse(out))
+
+
 def wants_shell(request: Request, base: str) -> bool:
     """A browser opening the tool's page (base/app/) as the whole window, not in the shell's frame."""
     app_prefix = base + "/app"
@@ -1534,6 +1562,8 @@ def pred_mount(proxy: P.ReviewProxy, root: Path | None, title: str = "Review", r
         if pid is None:
             return missing()
         await guest_join(request, pkg, meta)
+        if meta.get("app") == EVH_APP:              # r17g: eVHarmony is its own app (same URL, no CryoEV chrome)
+            return bare_shell_response(request, f"{REVIEW_BASE}/{pid}")
         return shell_response(request, f"{REVIEW_BASE}/{pid}", title,
                               strip=(await strip(request, pid)) if strip else "")
 
