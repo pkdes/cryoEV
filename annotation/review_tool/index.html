@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-18.8";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-18.9";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const R = window.REVIEW_DATA;  // data.js has run by now (a parser-blocking script, before DOMContentLoaded)
   if (R && R.kind === "objects" && R.app === "evharmony" && R.mode !== "tree") return;  // r17g: eVHarmony is its own app: no CryoEV stamp
@@ -3298,6 +3298,12 @@ async function pull() {  // bring in other reviewers' decisions (and who is look
   await loadGroups();
   const r = await tfetch("api/edits", {cache: "no-store"}); if (!r.ok) throw new Error(r.status);
   const remote = await r.json();
+  // r17j (PKD): eVHarmony: an answer of mine the server already saved (server_t) but no longer has was removed there
+  // (a reset of a test account): drop it here, never re-send it. Unsaved answers (no server_t) are kept and sent.
+  if (D.app === "evharmony") for (const [file, l] of Object.entries(edits)) {
+    const sd = (remote[file] && remote[file].dec) || {};
+    for (const k of Object.keys((l && l.dec) || {})) if (k.startsWith("a:") && l.dec[k] && l.dec[k].server_t && !(k in sd)) delete l.dec[k];
+  }
   for (const [file, s] of Object.entries(remote)) {
     noteSrv(file, s);
     const l = edits[file]; edits[file] = mergeEdit(l, s);
@@ -3818,6 +3824,13 @@ function makeObjectView() {
     if (!location.protocol.startsWith("http")) return render();
     try { await pull(); await loadCaps(); server = true; syncBadge(); sync(); } catch (e) { syncBadge(); }
     if (pr.on && evhConsentV() != null) evhPrEnd(true);  // r17d: consent answered before (the owner too): no practice
+    // r17j (PKD): a card remembered in this browser but nothing of mine on the server (a reset reviewer): start like
+    // a new user, from the first card with the splash, not from the remembered card
+    if (evh && server && eh.want && evhFresh()) {
+      eh.reset = true; st.pos = Math.max(0, items.findIndex(it => !isDone(it))); st.px = st.py = 0;
+      try { localStorage.removeItem(POS_KEY); } catch (e) {}
+      $("evhSplash").hidden = false; $("evhNick").value = evhNick();
+    }
     render();
     if (evh && server) { if (items[st.pos] && isDone(items[st.pos])) nextOpen(); evhMeta(); evhOffer(); }  // a swipe app opens on an open card
   }
@@ -3827,6 +3840,7 @@ function makeObjectView() {
     $("oBlind").hidden = !blind || st.closed;   // a closed set is no longer blind to its maker; the banner would contradict it
     $("oViewOnly").hidden = !VIEW_ONLY;
     let want = null; try { want = localStorage.getItem(POS_KEY); } catch (e) {}
+    eh.want = want;  // r17j: checked again once the server's answers are in (connectObjects)
     const at = want ? items.findIndex(it => it.id === want) : -1;
     st.pos = at >= 0 ? at : Math.max(0, items.findIndex(it => !isDone(it)));
     $("oPrev").onclick = () => go(st.pos - 1); $("oNext").onclick = () => go(st.pos + 1);
@@ -4061,6 +4075,7 @@ function makeObjectView() {
     const n = items.findIndex(x => !isDone(x)); go(n >= 0 ? n : 0);
   }
   const evhConsentV = () => evhConsent && items.length && me() ? mineOf(items[0], evhConsent) : null;
+  function evhFresh() { return evh && !items.some(isDone) && evhConsentV() == null; }
   // r17g: "Meet the real app: CryoEV →" (target _top, to /) in the reveal once consent is answered: lab people only.
   // The role comes from the portal's /cj/me.json (guests may read it); a guest, no portal or no answer: no link
   // (a guest's / sends them straight back here).

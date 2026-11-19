@@ -998,5 +998,44 @@ class EvhTests(unittest.TestCase):
             self.assertEqual(self.errors, [], role)
 
 
+    # ---- r17j: a reset reviewer starts like a new user, whatever this browser remembers
+    def test_reset_reviewer_ignores_remembered_card(self):
+        data, srv, pg = self.open(consent="yes")                 # consent on the server: not a new reviewer
+        for _ in range(5):
+            pg.evaluate("document.getElementById('oNext').click()")
+        want = self.obj(pg)["item"]["id"]
+        self.assertNotEqual(self.obj(pg)["pos"], 0)
+        reload = lambda: (pg.reload(), pg.wait_for_function(
+            "window.__review && __review.obj() && __review.state().server", timeout=15000))
+        reload()                                                  # control: the remembered card, no splash
+        pg.wait_for_timeout(500)
+        self.assertEqual(self.obj(pg)["item"]["id"], want)
+        self.assertFalse(pg.is_visible("#evhSplash"))
+        self.settle(pg)
+        srv.records.clear()                                       # the reset: nothing of mine on the server
+        n_puts = len(srv.puts)
+        reload()
+        pg.wait_for_selector("#evhSplash", state="visible", timeout=5000)
+        self.assertEqual(self.obj(pg)["pos"], 0)
+        pg.wait_for_timeout(1500)                                 # the browser's cached answers are not re-sent
+        self.assertEqual([k for _f, rec in srv.puts[n_puts:] for k in (rec.get("dec") or {}) if k.startswith("a:")], [])
+        self.assertEqual(srv.records, {})
+        self.assertEqual(self.errors, [])
+        # control: an answer never saved (PUTs failing) has no server_t: kept and sent after a reload
+        pg.click("#evhGo") if pg.is_visible("#evhGo") else None
+        pg.route("**/api/edits?**", lambda r: r.abort() if r.request.method == "PUT" else r.continue_())
+        o = self.obj(pg)
+        pg.keyboard.press("ArrowLeft")
+        pg.wait_for_timeout(800)
+        self.assertIsNone(self.match_of(srv, o["item"]))           # not on the server yet
+        pg.unroute("**/api/edits?**")
+        reload()
+        pg.wait_for_function("__review.state().dirty === 0", timeout=10000)
+        self.assertEqual(self.match_of(srv, o["item"]), "no")      # the unsaved answer arrived
+        _, _, pg2 = self.open()                                   # nothing remembered, nothing answered: no splash
+        self.assertFalse(pg2.is_visible("#evhSplash"))
+        self.assertEqual(self.errors, [])
+
+
 if __name__ == "__main__":
     unittest.main()

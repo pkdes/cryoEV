@@ -7,6 +7,12 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-19 01:30 · eVHarmony reset starts fresh
+
+- **A reset account starts like a new user:** when the server has none of your eVHarmony answers but this browser remembers a card, the page starts from the first card with the welcome screen.
+- **Removed answers stay removed:** an answer the server had saved and then removed (a test account reset) is no longer sent back from the browser's copy. Answers that never reached the server are still kept and sent.
+- **Components:** review page
+
 ## 2026-11-19 00:30 · Three new fun mode names
 
 - **Fun mode names:** cryonder is now Bubble, and Fringe, OkCryo and Carbon Meets Vesicle join eVHarmony and Gridr. Tap the logo to cycle through all six. Only the names, taglines and colours change; answers work the same.
