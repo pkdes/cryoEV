@@ -474,7 +474,7 @@ class EvhTests(unittest.TestCase):
             for k in range(len(data["items"])):
                 o = self.obj(pg)
                 z = o["evh"]["zoom"]
-                self.assertLessEqual(z, 1.25 + 1e-9)        # never > 2.5 native px per screen px at DPR 2
+                self.assertLessEqual(z, 2 + 1e-9)           # r17f: a card without a finer level: zoom cap 2
                 bio = pg.inner_text("#oBio")
                 self.assertNotIn("Zed", bio)
                 self.assertNotIn("Person", bio)
@@ -482,7 +482,7 @@ class EvhTests(unittest.TestCase):
                 if o["item"]["image"] == "imgA" and o["item"]["obj"] == "g1":   # a 220 px circle
                     d = 220 * z
                     self.assertLessEqual(d, cw / 3 + 2)          # about 1/3 of the card, or less when capped
-                    self.assertTrue(z == 1.25 or abs(d - cw / 3) < 0.15 * cw, (z, d, cw))
+                    self.assertTrue(z == 2 or abs(d - cw / 3) < 0.15 * cw, (z, d, cw))
                 if k < len(data["items"]) - 1:
                     pg.click("#oNext")
                     pg.wait_for_function(f"__review.obj().pos === {k + 1}", timeout=5000)
@@ -782,7 +782,9 @@ class EvhTests(unittest.TestCase):
     def seam_page(self, folder, want_chi):
         srv = F.FakeServer(folder, caps=("i", "t", "m", "a"), meta=META).start()
         self.addCleanup(srv.close)
-        ctx = self.browser.new_context(viewport={"width": 1280, "height": 800})
+        # a narrow card: the zoom (~1.8) stays under both caps (2 without a finer level, 4 with), so the card with the
+        # crop and the one without frame the same region
+        ctx = self.browser.new_context(viewport={"width": 320, "height": 700})
         self.addCleanup(ctx.close)
         ctx.add_init_script(SPLASH_SEEN + "try { localStorage.setItem('cryoev-review:contrast:rev1', "
                             "JSON.stringify({b: 0, c: 0, g: 1, auto: true, smooth: 0})); } catch (e) {}")
@@ -838,6 +840,39 @@ class EvhTests(unittest.TestCase):
         self.assertLess(abs(sc - sb) / sb, 0.20, (sc, sb))
         self.assertEqual(self.errors, [])
 
+    def test_r17f_real_card_zoom_caps(self):
+        """r17f: a real card frames its object at ~1/3 of the card; the zoom cap is 4 when the image has a finer level
+        (2x image), 2 when it hasn't. A small object (r 28 px) hits the cap on both."""
+        import shutil
+        d = Path(tempfile.mkdtemp(prefix="evh_")) / "pred_obj_evh_ab12"
+        data = build_evh(d, schema=EVH_V3)
+        shutil.copyfile(d / "images" / "imgA.png", d / "images" / "imgA.hi.png")
+        for im in data["images"]:
+            if im["file"] == "imgA.png":
+                im.update(hi="images/imgA.hi.png", hi_w=im["w"], hi_h=im["h"])
+        a5 = next(i for i in data["items"] if i["image"] == "imgA" and i["obj"] == "g5")      # r 28, image with 2x
+        b4 = next(i for i in data["items"] if i["image"] == "imgB" and i["obj"] == "g4")      # r 40, no 2x
+        data["items"] = [a5, b4] + [i for i in data["items"] if i not in (a5, b4)]
+        (d / "data.js").write_text("window.REVIEW_DATA = " + json.dumps(data) + ";\n", encoding="utf-8")
+        srv = F.FakeServer(d, caps=("i", "t", "m", "a"), meta=META).start()
+        self.addCleanup(srv.close)
+        ctx = self.browser.new_context(viewport={"width": 1400, "height": 900})
+        self.addCleanup(ctx.close)
+        ctx.add_init_script(SPLASH_SEEN)
+        pg = ctx.new_page()
+        self.errors = []
+        pg.on("pageerror", lambda e: self.errors.append(str(e)))
+        pg.goto(srv.url + "?who=rev1")
+        pg.wait_for_function("window.__review && __review.obj() && __review.state().server && __review.obj().evh.zoom !== null",
+                             timeout=15000)
+        self.assertEqual(self.obj(pg)["item"]["id"], a5["id"])
+        self.assertAlmostEqual(self.obj(pg)["evh"]["zoom"], 4, places=6)
+        pg.click("#oNext")
+        pg.wait_for_function("__review.obj().pos === 1", timeout=5000)
+        pg.wait_for_timeout(200)
+        self.assertAlmostEqual(self.obj(pg)["evh"]["zoom"], 2, places=6)
+        self.assertEqual(self.errors, [])
+
     def test_practice_start_for_real(self):
         data, srv, pg = self.open_v3(practice=True)
         self.to_reveal(pg)
@@ -850,7 +885,7 @@ class EvhTests(unittest.TestCase):
         o = self.obj(pg)
         self.assertEqual((o["pos"], o["item"]["id"], o["n"]), (0, data["items"][0]["id"], len(data["items"])))
         pg.wait_for_timeout(300)
-        self.assertLessEqual(self.obj(pg)["evh"]["zoom"], 1.25)                 # a real card: the usual zoom cap
+        self.assertLessEqual(self.obj(pg)["evh"]["zoom"], 2)                    # r17f: a real card, no finer level: cap 2
         self.assertFalse(pg.is_visible("#evhReveal"))
         self.assertNotIn("Practice", pg.inner_text("#oPos"))
         self.assertEqual([k for k in self.attr_puts(srv) if ":consent@" not in k], [])

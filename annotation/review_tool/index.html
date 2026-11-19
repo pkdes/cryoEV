@@ -3385,7 +3385,7 @@ function makeObjectView() {
     px: 0, py: 0};  // px / py: the eVHarmony mouse pan (r17); always 0 on every other set
   const evh = D.app === "evharmony" && !tree;  // round 17 eVHarmony skin (the evh* functions below); from data.js only
   const EVH = {splash: "cryoev-review:evh:splash", nick: "cryoev-review:evh:nick", at: 10,
-    maxZoom: 1.25, prZoom: 4, prFrac: 2};  // r17d: a practice card: the object about 1/2 of the card's width, zoom up to 4 when a finer level (2x / native crop) exists  // css px per base-image px: <= 2.5 device px per native px at DPR 2 (1440 px uploads, no 2x / crops)
+    maxZoom: 1.25, prZoom: 4, prFrac: 2, fineZoom: 4, baseZoom: 2};  // r17f: real cards: up to 4 with a 2x / native crop, else 2  // r17d: a practice card: the object about 1/2 of the card's width, zoom up to 4 when a finer level (2x / native crop) exists  // css px per base-image px: <= 2.5 device px per native px at DPR 2 (1440 px uploads, no 2x / crops)
   const evhMatch = evh ? attrs.find(a => a.id === "match" && a.kind === "choice") || null : null;
   const evhConsent = evh ? attrs.find(a => a.id === "consent" && a.kind === "choice") || null : null;
   // r17c (tools/evh/ls_evh_match_v2.json): a 4th answer "dense" (swipe down, d), the optional "kind" chips after a
@@ -3419,6 +3419,9 @@ function makeObjectView() {
   // a Nope (decoys keep the usual framing, as picked)
   // r17e: phone-width only (a wide card at zoom 4 blew the object up past its ring: PKD's desktop shot 11-18)
   const prBig = (it, im) => pr.on && it && it.answer !== "no" && fineOf(it, im) && window.innerWidth <= 700;
+  // r17f: the zoom cap (css px per base px): practice cards as above (1.25 unless prBig); a real card up to
+  // EVH.fineZoom when a finer level exists (the 2x image / native crop is drawn), else EVH.baseZoom (Smooth 1 default)
+  const evhCap = (it, im) => prBig(it, im) ? EVH.prZoom : pr.on ? EVH.maxZoom : fineOf(it, im) ? EVH.fineZoom : EVH.baseZoom;
   if (st.closed) closedOn = true;  // D.closed (object_set close_set writes it): closed before any answer is tried
   const imOf = it => it._pim || byStem.get(String(it.image));  // r17d: a practice card's own image record first
   const can = () => capOn("a") && server && !st.closed && !VIEW_ONLY;  // r17b: view only answers nothing
@@ -3507,7 +3510,7 @@ function makeObjectView() {
     if (!st.ready) return;
     const Wi = st.img.naturalWidth, Hi = st.img.naturalHeight, rings = ringsOf(im, String(it.obj)), ring = rings && rings[0];
     const [x0, y0, x1, y1] = evh ? evhFrame(ring, Wi, Hi, b, prBig(it, im) ? EVH.prFrac : 3) : cropOf(it, im, ring), cw = (x1 - x0) * Wi, ch = (y1 - y0) * Hi;
-    const s = Math.min(b.width / cw, b.height / ch, evh ? (prBig(it, im) ? EVH.prZoom : EVH.maxZoom) : Infinity), ox = (b.width - cw * s) / 2 - x0 * Wi * s + st.px, oy = (b.height - ch * s) / 2 - y0 * Hi * s + st.py;
+    const s = Math.min(b.width / cw, b.height / ch, evh ? evhCap(it, im) : Infinity), ox = (b.width - cw * s) / 2 - x0 * Wi * s + st.px, oy = (b.height - ch * s) / 2 - y0 * Hi * s + st.py;
     if (evh) { st.zs = s; cx.imageSmoothingQuality = "high"; }  // r17: eVHarmony's zoom (css px per base px) and smooth scaling
     if (evh) { const rb = Array.isArray(ring) && ring.length >= 6 ? ringBox(ring) : null; st.of = rb ? Math.max((rb[2] - rb[0]) * Wi, (rb[3] - rb[1]) * Hi) * s / Math.max(1, b.width) : null; }  // r17d: the object's share of the card width
     cx.imageSmoothingEnabled = true; cx.imageSmoothingQuality = "high"; const osrc = hiOf(oHi, im, true, st.img) || st.img;  // r17f: high on every object card
