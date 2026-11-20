@@ -32,6 +32,7 @@ object set card (annotation/review_tool/index.html, D.app === "evharmony"), on a
 import json
 import os
 import sys
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -128,6 +129,7 @@ class EvhTests(unittest.TestCase):
         """role (r17g): open the page as the portal would, at /review/<pkg>/app/ (Playwright forwards it to the
         stand-in server), with /cj/me.json answering that role; None: the plain stand-in URL (no portal, no me.json)."""
         d = Path(tempfile.mkdtemp(prefix="evh_")) / "pred_obj_evh_ab12"
+        self.addCleanup(shutil.rmtree, d.parent, True)   # r17q: no temp folders left behind (LIFO: after the server closes)
         data = build_evh(d, blind=blind, app=app, schema=schema, examples=examples, instructions=instructions,
                          practice=practice, scoreboard=scoreboard)
         srv = F.FakeServer(d, caps=("i", "t", "m", "a"), meta=meta).start()
@@ -837,6 +839,7 @@ class EvhTests(unittest.TestCase):
         from PIL import Image
         self.errors = []
         d = Path(tempfile.mkdtemp(prefix="evh_")) / "pred_obj_evh_ab12"
+        self.addCleanup(shutil.rmtree, d.parent, True)   # r17q: no temp folders left behind (LIFO: after the server closes)
         data = build_evh(d, schema=EVH_V3)
         K = 4
         rng = np.random.default_rng(7)
@@ -872,6 +875,7 @@ class EvhTests(unittest.TestCase):
         (2x image), 2 when it hasn't. A small object (r 28 px) hits the cap on both."""
         import shutil
         d = Path(tempfile.mkdtemp(prefix="evh_")) / "pred_obj_evh_ab12"
+        self.addCleanup(shutil.rmtree, d.parent, True)   # r17q: no temp folders left behind (LIFO: after the server closes)
         data = build_evh(d, schema=EVH_V3)
         shutil.copyfile(d / "images" / "imgA.png", d / "images" / "imgA.hi.png")
         for im in data["images"]:
@@ -1125,6 +1129,21 @@ class EvhTests(unittest.TestCase):
         _, _, pg2 = self.open(schema=EVH_V4, scoreboard={"t": 1, "rows": [], "others": 0})
         pg2.click("#evhTop")
         self.assertIn("No one on the board yet", pg2.inner_text("#evhBdBody"))
+        self.assertEqual(self.errors, [])
+
+    # ---- r17q: a loading cover while data.js downloads (the plain review layout no longer shows first)
+    def test_loading_cover(self):
+        for app in ("evharmony", None):
+            _, srv, pg = self.open(app=app, width=390, height=844)
+            self.assertEqual(pg.locator("#boot").count(), 0)          # removed once the page has started
+        ctx = self.browser.new_context(viewport={"width": 390, "height": 844}, java_script_enabled=False)
+        self.addCleanup(ctx.close)
+        nojs = ctx.new_page()                                          # before any script ran: the cover is on top
+        nojs.goto(srv.url + "?who=rev1")
+        self.assertTrue(nojs.is_visible("#boot"))
+        self.assertIn("Loading", nojs.inner_text("#boot"))
+        self.assertEqual(nojs.locator("#boot").bounding_box(), {"x": 0, "y": 0, "width": 390, "height": 844})
+        self.assertEqual(nojs.locator("body > :first-child").get_attribute("id"), "boot")
         self.assertEqual(self.errors, [])
 
     # ---- r17p: outlines off by default (corner brackets), an obvious "Show outline"

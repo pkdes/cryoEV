@@ -283,7 +283,9 @@ python -m portal.app --auth access --port 8448 [--access-config <path>] [--state
 **Guests (round 17, `portal/guests.py`; off by default)**
 - **Enable:** add `"guest_email_domains": ["<domain>"]` to the private `cloudflare_access.json` (file only, no env
   override; never put the domain in the repo), allow that domain in the Cloudflare Access policy, restart the
-  access portal. Its start log says `[cj] guests: ON for N domain(s)`. A malformed value, or a public mail domain
+  access portal. Its start log says `[cj] guests: ON for N domain(s)`. **Any email (round 17q):** exactly `["*"]`
+  admits any verified email (gmail too) as a guest; the Cloudflare Access policy must then allow everyone (log: `ON for
+  ANY verified email (*)`). Caps: 1000 auto guests in all, 300 new a day. A malformed value, or a public mail domain
   (gmail.com, outlook.com, yahoo.com, hotmail.com, icloud.com, ...), refuses to start.
 - **Cloudflare login method for the guest domain: the email one-time PIN, or an identity provider that verifies the
   email** (Google for a Google Workspace domain). Never a method that lets someone type an unverified email: the
@@ -291,7 +293,7 @@ python -m portal.app --auth access --port 8448 [--access-config <path>] [--state
 - **Who:** a verified JWT whose email is on no roster entry and whose domain is **exactly** a configured one
   (sub-domains and look-alikes refused) gets a roster entry once: id `guest-<16 hex of sha256(email)>`, role
   `guest`, `auto: true`. `+tags` are dropped first (`ann+x@` = `ann@`: one guest per mailbox). Same id on later
-  visits. At most 200 auto guests in all and 50 new a day. Key mode never makes or admits guests.
+  visits. At most 1000 auto guests in all and 300 new a day. Key mode never makes or admits guests.
 - **What:** role `guest` is not in `auth.ROLES`: no module, nav, agent token or key link. The Gate lets a guest reach
   only home (which lists, or redirects to, the sets open to guests), the shell's `/cj/` files and
   `/review/<pkg id>/...` of a package with `"open_to": "guests"` in `review_package.json`; everything else is 403,

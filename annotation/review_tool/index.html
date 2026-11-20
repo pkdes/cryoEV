@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-19.2";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-20.1";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const R = window.REVIEW_DATA;  // data.js has run by now (a parser-blocking script, before DOMContentLoaded)
   if (R && R.kind === "objects" && R.app === "evharmony" && R.mode !== "tree") return;  // r17g: eVHarmony is its own app: no CryoEV stamp
@@ -20,6 +20,9 @@ addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review p
 @media (prefers-color-scheme:dark){:root{--bg:#161615;--panel:#20201f;--ink:#ecece8;--mute:#9a9a94;--line:#353532;--acc:#6ea0f0;--warn:#fb923c;--accOn:#1d4ed8;--accOnLine:#93c5fd;color-scheme:dark}}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:13px/1.35 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;overflow:hidden}
+#boot{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;gap:10px;background:var(--bg);color:var(--mute);font:600 15px/1.2 system-ui,sans-serif}
+#boot i{width:18px;height:18px;border:3px solid var(--line);border-top-color:var(--acc);border-radius:50%;animation:bootSpin .8s linear infinite}
+@keyframes bootSpin{to{transform:rotate(360deg)}}@media (prefers-reduced-motion:reduce){#boot i{animation:none}}
 #app{display:grid;grid-template-columns:300px minmax(0,1fr) 250px;width:100%;grid-template-rows:auto 1fr;height:100%}
 header{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--panel)}
 header .sep{width:1px;height:22px;background:var(--line);margin:0 4px}
@@ -485,6 +488,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 </style>
 </head>
 <body>
+<div id="boot" role="status"><i aria-hidden="true"></i>Loading…</div><!-- r17q: covers the page while data.js (MBs) downloads; removed below -->
 <div id="sandbox" role="status" hidden>SANDBOX — edits here don't count toward the real review</div>
 <div id="app">
 <header>
@@ -4356,5 +4360,6 @@ window.__review = {D, CATS, vcSigma, obj: () => OBJ && OBJ.state(), effGt, gtOf,
   hi: {editor: edHi.ready ? edHi.src : null, editorLoading: !!edHi.img && !edHi.ready, tri: triHi.ready ? triHi.src : null, level: edLevel}})};  // for annotation/tests
 })();
 </script>
+<script>(function () { var b = document.getElementById("boot"); if (b) b.remove(); })();  // r17q: after start-up, even if it threw</script>
 </body>
 </html>

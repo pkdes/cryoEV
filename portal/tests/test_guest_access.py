@@ -86,6 +86,18 @@ class DomainRule(unittest.TestCase):
             self.assertFalse(G.domain_ok(bad, d), repr(bad))
         self.assertFalse(G.domain_ok("ann@example.edu", ()))                 # feature off
 
+    def test_any_email(self):                                          # round 17q: ["*"] = any verified email
+        self.assertEqual(G.parse_domains(["*"]), ("*",))
+        for bad in (["*", "example.edu"], ["example.edu", "*"], ["*", "*"], ["*.*"], [" * "]):
+            with self.assertRaises(ValueError, msg=bad):
+                G.parse_domains(bad)
+        for ok in ("ann@gmail.com", "Bob+evh@Outlook.com", "c@example.edu", "d@sub.example.org"):
+            self.assertTrue(G.domain_ok(ok, ("*",)), ok)
+        for bad in ("example.edu", "@example.edu", "ann@example.edu@evil.com", "ann @x.org", "ann@examplе.edu",
+                    "annK@example.edu", None, 3, ""):
+            self.assertFalse(G.domain_ok(bad, ("*",)), repr(bad))
+        self.assertFalse(G.domain_ok("ann@gmail.com", (DOM,)))              # control: a listed domain stays exact
+
     def test_guest_id_stable(self):
         a = G.guest_id("Ann@Example.edu")
         self.assertEqual(a, G.guest_id("ann@example.edu"))
@@ -108,7 +120,9 @@ class DomainRule(unittest.TestCase):
             self.assertEqual(AX.load_config(f, env).guest_domains, ())
             f.write_text(json.dumps({**base, G.CONFIG_KEY: ["Example.edu"]}), encoding="utf-8")
             self.assertEqual(AX.load_config(f, env).guest_domains, ("example.edu",))
-            for bad in ("example.edu", ["*.example.edu"], [None]):
+            f.write_text(json.dumps({**base, G.CONFIG_KEY: ["*"]}), encoding="utf-8")
+            self.assertEqual(AX.load_config(f, env).guest_domains, ("*",))
+            for bad in ("example.edu", ["*.example.edu"], [None], ["*", "example.edu"]):
                 f.write_text(json.dumps({**base, G.CONFIG_KEY: bad}), encoding="utf-8")
                 with self.assertRaises(AX.ConfigError):
                     AX.load_config(f, env)
@@ -298,6 +312,51 @@ def build_sets(tmp: Path, review: Path):
             out.append(OS.build(ps, src, "ls_lamellarity_v1", review, line_col="line", blind_cols=("gap_nm", "secret"),
                                 slug=slug, seed=11, reviewers=("alice", "kate"), owner="adv", title=f"{slug} set"))
     return out
+
+
+class AnyEmailPortal(unittest.TestCase):
+    """Round 17q: guest_email_domains ["*"]: any verified email becomes a guest, with exactly a guest's reach."""
+    @classmethod
+    def setUpClass(cls):
+        cls.env = T.Env()
+        roster_people(cls.env)
+        cls.review = cls.env.tmp / "review"
+        cls.review.mkdir()
+        cls.open_pkg, cls.closed_pkg = build_sets(cls.env.tmp, cls.review)
+        with contextlib.redirect_stdout(io.StringIO()):
+            G.main(["open", "--package", str(cls.open_pkg)])
+        with mock.patch.dict(os.environ, {"CJ_REVIEW_EXCLUDE": "", "CJ_REVIEW_PREFIXES": ""}):
+            cls.srv = MRS.make_server(cls.review, "127.0.0.1", 0, people=[])
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls.cfg = cls.env.config(auth="access", access=replace(ACFG, guest_domains=("*",)), access_admin=False,
+                                 review_root=cls.review, pred_upstream=f"http://127.0.0.1:{cls.srv.server_address[1]}")
+        cls.p = guest_portal(cls.cfg)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.p.stop()
+        cls.srv.shutdown()
+        cls.srv.server_close()
+        cls.env.cleanup()
+
+    def g(self, path, email="visitor@gmail.com", **kw):
+        return get(self.p.port, path, sign(email), **kw)
+
+    def test_any_email_is_a_guest_with_a_guests_reach(self):
+        st, _, body = self.g("/cj/me.json")
+        self.assertEqual((st, json.loads(body)["role"]), (200, "guest"))
+        self.assertEqual(json.loads(body)["id"], G.guest_id("visitor@gmail.com"))
+        st, h, _ = self.g("/")
+        self.assertEqual((st, T.hget(h, "location")), (303, f"/review/{self.open_pkg.name}/"))
+        self.assertEqual(self.g(f"/review/{self.open_pkg.name}/app/data.js")[0], 200)
+        self.assertEqual(self.g(f"/review/{self.closed_pkg.name}/")[0], 404)
+        for path in ("/admin/", "/data/", "/reviews/", "/account/", "/review/app/"):
+            self.assertEqual(self.g(path)[0], 403, path)
+        st, _, body = self.g("/cj/me.json", "alice@example.org")              # listed people keep their role
+        self.assertEqual((st, json.loads(body)["role"]), (200, "basic"))
+        self.assertEqual(self.g("/cj/me.json", "boss@example.org")[0], 403)    # an admin is still refused here
+        self.assertEqual(self.g("/cj/me.json", "gone@example.org")[0], 403)    # revoked: never re-made as a guest
+        self.assertFalse([p for p in people(self.env.roster) if p.get("email") == "gone@example.org" and p.get("auto")])
 
 
 class GuestPortal(unittest.TestCase):

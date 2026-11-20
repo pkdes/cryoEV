@@ -1901,8 +1901,9 @@ def startup_lines(cfg: Config, host: str, port: int) -> list:
             f"once per {AX.REFETCH_S:g} s); no keys = everyone refused",
             "[cj] who: the JWT email must be the email of exactly one active roster person; admins "
             + ("ALLOWED (CJ_ACCESS_ADMIN=on)" if admin else "refused (CJ_ACCESS_ADMIN off: Admin is Tailscale only)"),
-            ("[cj] guests: ON for %d domain(s) (guest_email_domains; new emails there become role guest, open_to "
-             "\"guests\" review sets only)" % len(getattr(cfg.access, "guest_domains", ()) or ())
+            ("[cj] guests: ON for %s (guest_email_domains; new emails there become role guest, open_to "
+             "\"guests\" review sets only)" % ("ANY verified email (*)" if tuple(cfg.access.guest_domains) == ("*",)
+                                                else "%d domain(s)" % len(cfg.access.guest_domains))
              if getattr(cfg.access, "guest_domains", ()) else "[cj] guests: off (no guest_email_domains)"),
             f"[cj] gate: deny by default; open without sign-in: {', '.join(sorted(OPEN))}; Origin on "
             f"{', '.join(sorted(UNSAFE))} must be {cfg.access.origin}"

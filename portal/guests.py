@@ -8,6 +8,8 @@ a limited GUEST who can open only review sets explicitly opened to guests. Off u
 
 - Config: `guest_email_domains` (a list of bare domains) in the PRIVATE access config
   (~/.cryoev/cloudflare_access.json, portal/access.py load_config). Missing or [] = no guests. Never in the repo.
+  Round 17q: exactly ["*"] = ANY verified email (public mail domains included; the Cloudflare Access policy must then
+  allow everyone). Guests still reach only sets open to guests; the caps below bound the roster's growth.
 - Who: access mode only, verified Cf-Access-Jwt-Assertion JWT only (portal/app.py Gate.access_user). An email that
   matches no active roster person and whose domain EXACTLY equals a configured one (after auth.access_email: ASCII,
   lower-case; sub-domains and look-alikes are refused) gets a roster entry under roster_lock, once:
@@ -43,8 +45,9 @@ OPEN_KEY, OPEN_VALUE = "open_to", "guests"
 ID_PREFIX = "guest-"
 GUEST_ID_RE = re.compile(r"guest-[0-9a-f]{16}\Z")
 MAX_DOMAINS = 20
-MAX_GUESTS = 200          # auto guest entries in all (revoked ones count: a cap on what the roster can grow by)
-MAX_GUESTS_PER_DAY = 50   # auto guest entries made per local day
+ANY = "*"                 # round 17q: guest_email_domains == ["*"]: any verified email (a poster's QR code)
+MAX_GUESTS = 1000         # auto guest entries in all (revoked ones count: a cap on what the roster can grow by)
+MAX_GUESTS_PER_DAY = 300  # auto guest entries made per local day
 PUBLIC_MAIL = frozenset({"gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com",
                          "yahoo.com", "ymail.com", "icloud.com", "me.com", "mac.com", "aol.com", "proton.me",
                          "protonmail.com", "gmx.com", "mail.com", "yandex.com", "zoho.com"})
@@ -62,6 +65,8 @@ def parse_domains(value) -> tuple:
         return ()
     if not isinstance(value, list) or len(value) > MAX_DOMAINS:
         raise ValueError(f"`{CONFIG_KEY}` must be a list of at most {MAX_DOMAINS} domains")
+    if value == [ANY]:
+        return (ANY,)                                   # any verified email (round 17q); "*" only ever on its own
     out = []
     for d in value:
         if not isinstance(d, str) or not d.isascii():
@@ -80,6 +85,8 @@ def domain_ok(email, domains) -> bool:
     e = A.access_email(email)
     if not e or not domains or e.count("@") != 1:
         return False
+    if tuple(domains) == (ANY,):
+        return True                                     # round 17q: any verified email (still one plain address)
     return e.rsplit("@", 1)[1] in set(domains)
 
 
