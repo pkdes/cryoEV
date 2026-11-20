@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>EV Label Review</title>
 <script>
-const PAGE_VERSION = "2026-11-19.1";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
+const PAGE_VERSION = "2026-11-19.2";  // bump on every change to this page (YYYY-MM-DD.n); the portal shows it, CHANGELOG.md says what changed
 addEventListener("DOMContentLoaded", () => {  // small, in the header: "Review page <v> · what's new" (a link only inside the portal)
   const R = window.REVIEW_DATA;  // data.js has run by now (a parser-blocking script, before DOMContentLoaded)
   if (R && R.kind === "objects" && R.app === "evharmony" && R.mode !== "tree") return;  // r17g: eVHarmony is its own app: no CryoEV stamp
@@ -314,6 +314,8 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #oCard canvas{display:block;width:100%;height:100%}
 #oOutl{position:absolute;left:10px;top:10px;border-radius:14px;padding:4px 11px;font-size:12.5px;font-weight:600;background:rgba(0,0,0,.6);color:#fff;border:1px solid rgba(255,255,255,.35)}
 #oOutl.off{background:#fff;color:#000;border-color:#fff}
+#obj.evh #oOutl{font-size:14px;padding:7px 14px;border-radius:18px;font-weight:700}
+#obj.evh #oOutl.off{box-shadow:0 2px 10px rgba(0,0,0,.35)}
 #oAttrs{display:flex;flex-direction:column;gap:14px;min-width:0}
 #oAttrs .oRow h3{margin:0 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute);display:flex;gap:8px;align-items:baseline}
 #oAttrs .oRow h3 .req{text-transform:none;letter-spacing:0;font-weight:500;color:var(--warn)}
@@ -337,7 +339,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #oKeys{text-align:center;font-size:11.5px;color:var(--mute);padding:0 12px 8px;background:var(--panel);flex:none}
 @media (hover:none) and (pointer:coarse){#oKeys{display:none!important}}
 /* round 17 eVHarmony (D.app "evharmony", object sets only): the joke skin; every rule is under #obj.evh or an evh id */
-#oEvh[hidden],#oBio[hidden],#oMatch[hidden],#evhSplash[hidden],#evhReveal[hidden],#evhRvAsk[hidden],#evhRvDone[hidden],#evhRvApp[hidden],#evhGuide[hidden],#evhAbout[hidden],#evhHelp[hidden],#evhHow[hidden]{display:none}
+#oEvh[hidden],#oBio[hidden],#oMatch[hidden],#evhSplash[hidden],#evhReveal[hidden],#evhRvAsk[hidden],#evhRvDone[hidden],#evhRvApp[hidden],#evhGuide[hidden],#evhAbout[hidden],#evhBoard[hidden],#evhTop[hidden],#evhHelp[hidden],#evhHow[hidden]{display:none}
 #obj.evh{--hot:#0f766e;--hot2:#b45309}
 #obj.evh #oListBtn,#obj.evh #oItem,#obj.evh #oWho,#obj.evh #oSync,#obj.evh #oTitle{display:none}
 #obj.evh .otbar{justify-content:space-between}
@@ -376,12 +378,21 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
 #oAttrs .evhKind.why .chips button.on{color:#fff;background:#d97706}
 #oAttrs .evhKind .chips button.tog{color:#2563eb;border-color:#2563eb}
 #oAttrs .evhKind .chips button.tog.on{color:#fff;background:#2563eb}
+#evhTop{flex:none;min-width:34px;min-height:34px;border-radius:17px;font-size:16px;padding:0}
 #evhHelp{flex:none;min-width:34px;min-height:34px;border-radius:17px;font-weight:800;font-size:16px;padding:0;color:var(--hot);border-color:var(--hot)}
-#evhAbout,#evhGuide{position:absolute;inset:0;z-index:45;display:flex;align-items:flex-start;justify-content:center;padding:10px;background:color-mix(in srgb,var(--bg) 70%,transparent);backdrop-filter:blur(3px)}
-#evhAbout .box,#evhGuide .box{width:min(560px,100%);max-height:calc(100% - 4px);display:flex;flex-direction:column;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.35)}
-#evhAbout .gh,#evhGuide .gh{display:flex;align-items:center;justify-content:space-between;padding:8px 8px 8px 16px;border-bottom:1px solid var(--line);flex:none}
-#evhAbout h2,#evhGuide h2{margin:0;font-size:18px}
-#evhAbout .gh button,#evhGuide .gh button{min-width:44px;min-height:44px;border-radius:22px}
+#evhAbout,#evhBoard,#evhGuide{position:absolute;inset:0;z-index:45;display:flex;align-items:flex-start;justify-content:center;padding:10px;background:color-mix(in srgb,var(--bg) 70%,transparent);backdrop-filter:blur(3px)}
+#evhAbout .box,#evhBoard .box,#evhGuide .box{width:min(560px,100%);max-height:calc(100% - 4px);display:flex;flex-direction:column;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.35)}
+#evhAbout .gh,#evhBoard .gh,#evhGuide .gh{display:flex;align-items:center;justify-content:space-between;padding:8px 8px 8px 16px;border-bottom:1px solid var(--line);flex:none}
+#evhAbout h2,#evhBoard h2,#evhGuide h2{margin:0;font-size:18px}
+#evhAbout .gh button,#evhBoard .gh button,#evhGuide .gh button{min-width:44px;min-height:44px;border-radius:22px}
+#evhBdBody{overflow:auto;padding:6px 14px 14px;font-size:15px;line-height:1.45}
+#evhBdBody ol{margin:6px 0;padding:0;list-style:none;counter-reset:r}
+#evhBdBody li{display:flex;gap:10px;align-items:baseline;padding:7px 4px;border-bottom:1px solid var(--line);counter-increment:r}
+#evhBdBody li::before{content:counter(r) ".";min-width:2.2em;color:var(--mute);font-variant-numeric:tabular-nums}
+#evhBdBody li:nth-child(-n+3)::before{color:var(--hot);font-weight:800}
+#evhBdBody .nm{flex:1;min-width:0;overflow-wrap:anywhere;font-weight:600}
+#evhBdBody .sw{font-variant-numeric:tabular-nums;white-space:nowrap}
+#evhBdBody .mut{color:var(--mute);font-size:13px;margin:8px 0 0}
 #evhGdBody{overflow:auto;padding:4px 14px 14px;font-size:14px;line-height:1.45}
 #evhGdBody h3,#evhRvGuide h3{margin:14px 0 2px;font-size:16px}
 #evhGdBody h4,#evhRvGuide h4{margin:8px 0 4px;font-size:13.5px;color:var(--mute)}
@@ -625,7 +636,7 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
     <button id="oInfoBtn" class="badge" type="button" title="The set's instructions (?)" aria-controls="oInstr" aria-expanded="false" hidden>ⓘ<span class="oInfoTx"> Instructions</span></button>
     <button id="oWho" class="badge" title="Your reviewer name">👤</button>
   </div>
-  <div id="oEvh" hidden><div class="logo" id="oEvhLogo" title="Tap to switch app"><b id="oEvhName"></b><small id="oEvhTag"></small></div><span id="oEvhNick"></span><button id="evhHelp" type="button" title="How to judge (?)" aria-controls="evhGuide" hidden>?</button></div>
+  <div id="oEvh" hidden><div class="logo" id="oEvhLogo" title="Tap to switch app"><b id="oEvhName"></b><small id="oEvhTag"></small></div><span id="oEvhNick"></span><button id="evhTop" type="button" title="Scoreboard" aria-controls="evhBoard" hidden>🏆</button><button id="evhHelp" type="button" title="How to judge (?)" aria-controls="evhGuide" hidden>?</button></div>
   <div id="oInstr" role="dialog" aria-labelledby="oInstrH" hidden><div class="oih"><h2 id="oInstrH">Instructions</h2><button id="oInstrX" type="button" title="Close (Esc or ?)">✕</button></div><div id="oInstrTx"></div></div>
   <div id="oBar" role="progressbar" aria-label="items done by you" aria-valuemin="0"><i></i></div>
   <div id="oBlind" role="note" hidden>Blind set · measured sizes and gaps are hidden until it's closed</div>
@@ -662,6 +673,9 @@ body.plain #aSkip{width:auto;min-width:72px;border-radius:24px;padding:0 14px;fo
         <li>Galleries and reports to share with collaborators</li></ul>
       <p>It is still in progress and not open yet. Your answers here help train it.</p>
       <div class="row"><button id="evhAbBack" type="button">Back to swiping</button></div></div></div></div>
+  <div id="evhBoard" role="dialog" aria-modal="true" aria-labelledby="evhBdH" hidden><div class="box">
+    <div class="gh"><h2 id="evhBdH">🏆 Top swipers</h2><button id="evhBdX" type="button" title="Close (Esc)">✕</button></div>
+    <div id="evhBdBody"></div></div></div>
   <div id="evhGuide" role="dialog" aria-modal="true" aria-labelledby="evhGdH" hidden><div class="box">
     <div class="gh"><h2 id="evhGdH">How to judge</h2><button id="evhGdX" type="button" title="Close (Esc or ?)">✕</button></div>
     <div id="evhGdBody"></div></div></div>
@@ -3419,6 +3433,7 @@ function makeObjectView() {
   const st = {pos: 0, outlines: true, img: null, imgSrc: "", ready: false, undo: [], drawn: [], node: 0, badges: [], closed: D.closed === true,
     px: 0, py: 0};  // px / py: the eVHarmony mouse pan (r17); always 0 on every other set
   const evh = D.app === "evharmony" && !tree;  // round 17 eVHarmony skin (the evh* functions below); from data.js only
+  if (evh) st.outlines = false;  // r17p (PKD feedback): the plain image first, corner brackets mark the object; "Show outline" draws it
   const EVH = {splash: "cryoev-review:evh:splash", nick: "cryoev-review:evh:nick", at: 10,
     maxZoom: 1.25, prZoom: 4, prFrac: 2, fineZoom: 4, baseZoom: 2};  // r17f: real cards: up to 4 with a 2x / native crop, else 2  // r17d: a practice card: the object about 1/2 of the card's width, zoom up to 4 when a finer level (2x / native crop) exists  // css px per base-image px: <= 2.5 device px per native px at DPR 2 (1440 px uploads, no 2x / crops)
   const evhMatch = evh ? attrs.find(a => a.id === "match" && a.kind === "choice") || null : null;
@@ -3426,6 +3441,8 @@ function makeObjectView() {
   // r17o (PKD, ls_evh_match_v4): the dating name, saved as the text attribute "nick" on items[0] (as consent), so the
   // owner can see it and make a scoreboard. A set without it (v1-v3) keeps the name in this browser only, as before.
   const evhNickA = evh ? attrs.find(a => a.id === "nick" && a.kind === "text") || null : null;
+  // r17p: the scoreboard (tools/evh_scoreboard.py writes D.scoreboard {t, rows: [{name, swipes}], others}); names as text
+  const evhSB = evh && D.scoreboard && typeof D.scoreboard === "object" && Array.isArray(D.scoreboard.rows) ? D.scoreboard : null;
   // r17c (tools/evh/ls_evh_match_v2.json): a 4th answer "dense" (swipe down, d), the optional "kind" chips after a
   // Match, and the "How to judge" sheet (D.examples + D.instructions). A v1 set (no dense option, no examples) is unchanged.
   const evhDense = !!(evhMatch && evhMatch.options.some(o => o.v === "dense"));
@@ -3554,7 +3571,8 @@ function makeObjectView() {
     cx.imageSmoothingEnabled = true; cx.imageSmoothingQuality = "high"; const osrc = hiOf(oHi, im, true, st.img) || st.img;  // r17f: high on every object card
     vcDraw(cx, osrc, ox, oy, Wi * s, Hi * s, b.width, b.height, osrc.naturalWidth / Wi, fineOf(it, im));
     drawChi(it, Wi, Hi, s, ox, oy, b, vcLast && vcLast.lo != null ? [vcLast.lo, vcLast.hi] : null);
-    if (!st.outlines || !rings) return;
+    if (!rings) return;
+    if (!st.outlines) { if (evh) evhBrackets(rings, Wi, Hi, s, ox, oy, String(it.obj)); return; }
     const path = rg => { cx.beginPath(); for (let k = 0; k < rg.length; k += 2) { const X = rg[k] * Wi * s + ox, Y = rg[k + 1] * Hi * s + oy; k ? cx.lineTo(X, Y) : cx.moveTo(X, Y); } cx.closePath(); };
     if (contained && Array.isArray(it.also)) {  // the objects the builder found inside the target (it.also): thinner, green
       cx.strokeStyle = "#4ade80"; cx.lineWidth = 1.6;
@@ -3570,6 +3588,22 @@ function makeObjectView() {
     st.drawn.push(String(it.obj));
   }
 
+  function evhBrackets(rings, Wi, Hi, s, ox, oy, obj) {  // r17p: yellow corner brackets set back from the object (no outline)
+    let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+    for (const rg of rings) { const r = ringBox(rg); x0 = Math.min(x0, r[0]); y0 = Math.min(y0, r[1]); x1 = Math.max(x1, r[2]); y1 = Math.max(y1, r[3]); }
+    if (!(x1 > x0 && y1 > y0)) return;
+    const pad = 9, X0 = x0 * Wi * s + ox - pad, Y0 = y0 * Hi * s + oy - pad, X1 = x1 * Wi * s + ox + pad, Y1 = y1 * Hi * s + oy + pad;
+    const L = Math.max(8, Math.min(28, 0.24 * Math.min(X1 - X0, Y1 - Y0)));
+    cx.beginPath();
+    for (const [x, y, dx, dy] of [[X0, Y0, 1, 1], [X1, Y0, -1, 1], [X0, Y1, 1, -1], [X1, Y1, -1, -1]]) {
+      cx.moveTo(x + dx * L, y); cx.lineTo(x, y); cx.lineTo(x, y + dy * L);
+    }
+    cx.lineCap = "round"; cx.lineJoin = "round";
+    cx.strokeStyle = "rgba(0,0,0,.55)"; cx.lineWidth = 4.5; cx.stroke();
+    cx.strokeStyle = "#facc15"; cx.lineWidth = 2.4; cx.stroke();
+    cx.lineCap = "butt"; cx.lineJoin = "miter";
+    st.drawn.push(obj);
+  }
   function centroid(rg) {  // a flat normalized ring's area centroid (its vertex mean when the area is ~0)
     let A = 0, X = 0, Y = 0;
     for (let i = 0, j = rg.length - 2; i < rg.length; j = i, i += 2) {
@@ -3753,7 +3787,8 @@ function makeObjectView() {
     $("oBar").setAttribute("aria-valuemax", String(n)); $("oBar").setAttribute("aria-valuenow", String(done));
     $("oBar").title = `${done} of ${n} done by you`;
     $("oWho").textContent = "👤 " + (me() ? dispName(me()) : "set name");
-    $("oOutl").textContent = st.outlines ? "Outlines on · i" : "Outlines off · i"; $("oOutl").classList.toggle("off", !st.outlines);
+    $("oOutl").textContent = evh ? (st.outlines ? "Hide outline · i" : "◯ Show outline · i") : st.outlines ? "Outlines on · i" : "Outlines off · i";  // r17p
+    $("oOutl").classList.toggle("off", !st.outlines);
     $("oPrev").disabled = st.pos <= 0 || pr.on; $("oNext").disabled = st.pos >= n - 1 || pr.on;
     if (pr.on) $("oPos").textContent = `Practice ${pr.k + 1} / ${evhPr.length}`;
     $("oNext").classList.toggle("on", !!it && isDone(it));
@@ -4123,6 +4158,7 @@ function makeObjectView() {
   }
   function evhKey(ev) {
     if (!$("evhAbout").hidden) { if (ev.key === "Escape") { ev.preventDefault(); evhAbout(false); } return; }
+    if (!$("evhBoard").hidden) { if (ev.key === "Escape") { ev.preventDefault(); evhBoard(false); } return; }
     if (!$("evhGuide").hidden) { if (ev.key === "Escape" || ev.key === "?") { ev.preventDefault(); evhGuide(false); } return; }
     if (!$("evhSplash").hidden) { if (ev.key === "Enter" || ev.key === "Escape") { ev.preventDefault(); evhSplashDone(); } return; }
     if (!$("evhReveal").hidden) { if (ev.key === "Escape" && !evhPr.length) $("evhReveal").hidden = true; return; }  // later: offered again after the next answer (r17d: a practice set's reveal stays)
@@ -4198,6 +4234,27 @@ function makeObjectView() {
       const d = el("details", "guideFull"); d.append(el("summary", null, "Full guidelines"), el("p", "guide", instr)); body.append(d);
     }
   }
+  function evhBoard(on) {
+    if (on) {
+      const b = $("evhBdBody"), rows = evhSB.rows.filter(r => r && typeof r.name === "string" && Number.isFinite(r.swipes)).slice(0, 50);
+      b.textContent = "";
+      if (!rows.length) b.append(el("p", null, "No one on the board yet. Set a dating name, keep swiping, and you could be first!"));
+      else {
+        const ol = el("ol");
+        for (const r of rows) {
+          const li = el("li"); li.append(el("span", "nm", r.name.slice(0, 24)), el("span", "sw", r.swipes + (r.swipes === 1 ? " swipe" : " swipes")));
+          ol.append(li);
+        }
+        b.append(ol);
+      }
+      const n = Number.isFinite(evhSB.others) ? evhSB.others : 0;
+      if (n > 0) b.append(el("p", "mut", `+ ${n} other${n === 1 ? "" : "s"} swiping anonymously`));
+      const t = Number.isFinite(evhSB.t) ? new Date(evhSB.t) : null;
+      b.append(el("p", "mut", "Only people who chose to count their answers and set a dating name are listed."
+        + (t ? ` Updated ${t.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}; reopen the app for the latest.` : "")));
+    }
+    $("evhBoard").hidden = !on; if (on) $("evhBdX").focus();
+  }
   function evhAbout(on) {  // r17h: the CryoEV teaser (static text, no links out)
     $("evhAbout").hidden = !on; if (on) $("evhAbX").focus();
   }
@@ -4216,6 +4273,7 @@ function makeObjectView() {
     $("evhRvYes").onclick = () => evhConsentSet("yes"); $("evhRvNo").onclick = () => evhConsentSet("no");
     $("evhRvKeep").onclick = () => { $("evhReveal").hidden = true; };
     $("evhRvRedo").onclick = evhPrRedo; $("evhRvReal").onclick = () => evhPrEnd();
+    if (evhSB) { $("evhTop").hidden = false; $("evhTop").onclick = () => evhBoard(true); $("evhBdX").onclick = () => evhBoard(false); }  // r17p
     if (evhGuideOn) {  // r17c: the "How to judge" sheet from the splash and the ? button
       $("evhHelp").hidden = false; $("evhHow").hidden = false;
       $("evhHelp").onclick = () => evhGuide(true); $("evhHow").onclick = () => evhGuide(true); $("evhGdX").onclick = () => evhGuide(false);
@@ -4270,7 +4328,7 @@ function makeObjectView() {
     ...(tree ? {mode: "tree", tree: treeState()} : {}),
     ...(evh ? {app: "evharmony", evh: {consent: evhConsentV(), reveal: !$("evhReveal").hidden, splash: !$("evhSplash").hidden,
       size: items[st.pos] ? evhSize(items[st.pos]) : null, nick: evhNick(), pan: [st.px, st.py], zoom: st.zs || null, bio: $("oBio").textContent,
-      appLink: !$("evhRvApp").hidden, about: !$("evhAbout").hidden, dense: evhDense, kindFor: eh.fu ? eh.fu.id : null, fuV: eh.fu ? eh.fuV : null, guide: !$("evhGuide").hidden, guideOn: evhGuideOn, examples: evhEx.length, objFrac: st.of == null ? null : Math.round(st.of * 100) / 100,
+      appLink: !$("evhRvApp").hidden, about: !$("evhAbout").hidden, board: !$("evhBoard").hidden, boardRows: evhSB ? evhSB.rows.length : null, dense: evhDense, kindFor: eh.fu ? eh.fu.id : null, fuV: eh.fu ? eh.fuV : null, guide: !$("evhGuide").hidden, guideOn: evhGuideOn, examples: evhEx.length, objFrac: st.of == null ? null : Math.round(st.of * 100) / 100,
       practice: evhPr.length ? {on: pr.on, k: pr.k, n: evhPr.length, redo: pr.redo, fb: pr.fb, done: pr.done, answers: [...pr.ans],
         card: pr.on && evhPr[pr.k] ? evhPr[pr.k].id : null} : null}} : {})})};
 }

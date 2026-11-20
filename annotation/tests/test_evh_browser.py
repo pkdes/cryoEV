@@ -23,6 +23,9 @@ object set card (annotation/review_tool/index.html, D.app === "evharmony"), on a
   - r17o (ls_evh_match_v4): the dating name saved as a:<items[0].obj>:nick@<rid> from the splash, and a name typed
     before (this browser only) sent once on the next visit; never cleared by an empty name; the cards unchanged (no
     text box); a v3 set sends no name. The review server takes nick only under v4, at most 24 characters.
+  - r17p (D.scoreboard): the 🏆 button only with a board; the sheet lists rank, name (as text) and swipes, "+ N others",
+    the empty board's message; Esc closes it. Outlines off by default with corner brackets on the object, "Show outline"
+    / "Hide outline" (i or tap), kept from card to card; other sets unchanged.
 
   python -m unittest discover -s annotation/tests -p test_evh_browser.py -v
 """
@@ -56,7 +59,8 @@ PRACTICE = ((3, "yes", "single", "A round ring: one vesicle."), (5, "no", "", "N
             (7, "yes", "", "Another clear ring."))
 
 
-def build_evh(folder, *, blind=False, app="evharmony", schema=None, examples=None, instructions=None, practice=False):
+def build_evh(folder, *, blind=False, app="evharmony", schema=None, examples=None, instructions=None, practice=False,
+              scoreboard=None):
     """The fixture's two images with every outline as an item (11 items: 10 labels + 1 prediction), the eVHarmony
     schema (v1 unless given), D.app (app=None: the flag off); r17c: D.examples (copies of imgA.png as
     images/ex_<id>.jpg) and D.instructions when given."""
@@ -78,6 +82,8 @@ def build_evh(folder, *, blind=False, app="evharmony", schema=None, examples=Non
         data["examples"] = examples
     if instructions:
         data["instructions"] = instructions
+    if scoreboard is not None:              # r17p: D.scoreboard (tools/evh_scoreboard.py)
+        data["scoreboard"] = scoreboard
     if practice:                            # r17d: items 3, 5, 7 leave the queue as practice cards (tools/evh_practice.py)
         data["practice"] = [{**items[n], "answer": a, **({"kind": k} if k else {}), "note": t} for n, a, k, t in PRACTICE]
         data["items"] = [it for n, it in enumerate(items) if n not in {x[0] for x in PRACTICE}]
@@ -118,12 +124,12 @@ class EvhTests(unittest.TestCase):
 
     def open(self, *, blind=False, app="evharmony", meta=META, splash_seen=True, width=1280, height=800,
              scheme="light", init=None, schema=None, examples=None, instructions=None, practice=False, consent=None,
-             role=None):
+             role=None, scoreboard=None):
         """role (r17g): open the page as the portal would, at /review/<pkg>/app/ (Playwright forwards it to the
         stand-in server), with /cj/me.json answering that role; None: the plain stand-in URL (no portal, no me.json)."""
         d = Path(tempfile.mkdtemp(prefix="evh_")) / "pred_obj_evh_ab12"
         data = build_evh(d, blind=blind, app=app, schema=schema, examples=examples, instructions=instructions,
-                         practice=practice)
+                         practice=practice, scoreboard=scoreboard)
         srv = F.FakeServer(d, caps=("i", "t", "m", "a"), meta=meta).start()
         if consent:                         # r17d: this reviewer answered consent before (on the first item)
             it0 = data["items"][0]
@@ -812,7 +818,8 @@ class EvhTests(unittest.TestCase):
         pg.on("pageerror", lambda e: self.errors.append(str(e)))
         pg.goto(srv.url + "?who=rev1")
         pg.wait_for_function("window.__review && __review.obj() && __review.state().server", timeout=15000)
-        pg.keyboard.press("i")                                                        # outlines off
+        if pg.evaluate("__review.obj().outlines"):                                   # outlines off (r17p: the default)
+            pg.keyboard.press("i")
         pg.wait_for_function("!__review.obj().outlines && __review.state().vc.last && __review.state().vc.last.lo != null")
         if want_chi:
             pg.wait_for_function(f"__review.obj().chi === {json.dumps(want_chi)} && !!__review.obj().chiRect", timeout=10000)
@@ -1091,6 +1098,56 @@ class EvhTests(unittest.TestCase):
         self.assertEqual(self.obj(pg)["evh"]["nick"], "NoSaveName")
         self.assertEqual(self.errors, [])
 
+
+    # ---- r17p: the scoreboard (D.scoreboard)
+    def test_scoreboard_sheet(self):
+        _, _, pg0 = self.open(schema=EVH_V4)                       # no board: no button
+        self.assertFalse(pg0.is_visible("#evhTop"))
+        sb = {"t": 1795000000000, "rows": [{"name": "<b>Hot</b>Bilayer", "swipes": 12}, {"name": "Ann", "swipes": 1}],
+              "others": 2}
+        _, _, pg = self.open(schema=EVH_V4, scoreboard=sb, width=390, height=844)
+        self.assertTrue(pg.is_visible("#evhTop"))
+        pg.click("#evhTop")
+        self.assertTrue(pg.is_visible("#evhBoard"))
+        self.assertEqual(pg.eval_on_selector_all("#evhBdBody li .nm", "els => els.map(e => e.textContent)"),
+                         ["<b>Hot</b>Bilayer", "Ann"])                 # a name is text, never markup
+        self.assertEqual(pg.locator("#evhBdBody b").count(), 0)
+        self.assertEqual(pg.eval_on_selector_all("#evhBdBody li .sw", "els => els.map(e => e.textContent)"),
+                         ["12 swipes", "1 swipe"])
+        self.assertIn("+ 2 others swiping anonymously", pg.inner_text("#evhBdBody"))
+        self.assertLessEqual(pg.evaluate("document.documentElement.scrollWidth"), 390)
+        self.assertTrue(self.obj(pg)["evh"]["board"])
+        pg.keyboard.press("Escape")
+        self.assertFalse(pg.is_visible("#evhBoard"))
+        o = self.obj(pg)                                            # swiping still works after
+        pg.keyboard.press("ArrowLeft")
+        self.next_card(pg, o["pos"])
+        _, _, pg2 = self.open(schema=EVH_V4, scoreboard={"t": 1, "rows": [], "others": 0})
+        pg2.click("#evhTop")
+        self.assertIn("No one on the board yet", pg2.inner_text("#evhBdBody"))
+        self.assertEqual(self.errors, [])
+
+    # ---- r17p: outlines off by default (corner brackets), an obvious "Show outline"
+    def test_outline_off_by_default_with_brackets(self):
+        _, _, pg = self.open(schema=EVH_V4, width=390, height=844)
+        o = self.obj(pg)
+        self.assertFalse(o["outlines"])
+        self.assertIn("Show outline", pg.inner_text("#oOutl"))
+        pg.wait_for_function("__review.obj().drawn.length === 1", timeout=10000)   # the brackets mark the object
+        self.assertEqual(self.obj(pg)["drawn"], [str(o["item"]["obj"])])
+        pg.keyboard.press("i")
+        self.assertTrue(self.obj(pg)["outlines"])
+        self.assertIn("Hide outline", pg.inner_text("#oOutl"))
+        pg.click("#oOutl")
+        self.assertFalse(self.obj(pg)["outlines"])
+        p0 = self.obj(pg)["pos"]
+        pg.keyboard.press("ArrowLeft")                                # the choice stays from card to card
+        self.next_card(pg, p0)
+        self.assertFalse(self.obj(pg)["outlines"])
+        _, _, plain = self.open(app=None)                             # any other set: unchanged (on)
+        self.assertTrue(self.obj(plain)["outlines"])
+        self.assertEqual(plain.inner_text("#oOutl"), "Outlines on · i")
+        self.assertEqual(self.errors, [])
 
 class NickServerCheck(unittest.TestCase):
     """r17o: the review server's attribute check (annotation/review_server.check_attrs) on nick."""

@@ -7,6 +7,14 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-19 12:30 · eVHarmony scoreboard
+
+- **🏆 Top swipers:** a trophy button next to **?** opens the scoreboard: rank, dating name and number of swipes, plus how many others are swiping anonymously.
+- **Who is listed:** only people who chose to count their answers and set a dating name. Ids and emails are never shown; anyone who said no to counting is left out entirely.
+- **How fresh:** the board is refreshed every few minutes on the server (`tools/evh_scoreboard.py`, run as a service); reopen the app to see the latest.
+- **Outlines off by default (eVHarmony):** cards open on the plain image with yellow corner brackets around the object, so the membrane is easy to see. A **◯ Show outline · i** pill turns the outline on (and **Hide outline** turns it off again). Other review sets are unchanged.
+- **Components:** review page, CLI (tools/evh_scoreboard.py)
+
 ## 2026-11-19 10:30 · eVHarmony dating names saved
 
 - **Dating names are saved:** in a set with the v4 answers (`tools/evh/ls_evh_match_v4.json`), the name typed on the welcome screen is saved with your answers, so the set's owner can see it (for a lab scoreboard). The label says so; the name stays optional.
