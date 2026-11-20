@@ -7,6 +7,12 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-20 14:30 · A Data page for basic accounts
+
+- **Data for basic accounts:** basic accounts now have a Data page (/mydata/) with the image sets they can analyse: the shared sessions and demo sets the admin lists for Predict, and their own converted uploads. Each set shows its image count, samples and nm/px, a strip of thumbnails, "See all images" and "Analyse these".
+- **Nothing new is shown:** a set appears only when Predict's New analysis already offers it to that person; their own analyses are listed, not anyone else's. Admin and advanced keep the lab's full Data catalog.
+- **Components:** portal
+
 ## 2026-11-20 08:00 · Open eVHarmony to any email; a loading screen
 
 - **Any email can play eVHarmony:** when the private access config lists guest domains as exactly `["*"]`, anyone who signs in through Cloudflare (Google or an emailed code) becomes a guest. Guests still see only the sets opened to guests; admins stay Tailscale-only; revoked people stay out. Up to 300 new guests a day and 1,000 in all (was 50 and 200).

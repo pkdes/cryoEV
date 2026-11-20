@@ -3,6 +3,7 @@
  "modules": [
   {"id": "home", "name": "Home", "route": "/", "icon": "home", "roles": ["admin", "advanced", "basic"], "health": null, "status": "on", "nav": true, "desc": "Start here: what's running and where to go next"},
   {"id": "data", "name": "Data", "route": "/data/", "icon": "data", "roles": ["admin", "advanced"], "health": null, "status": "on", "nav": true, "desc": "Every session, grid, label set, dataset and model, and what each came from"},
+  {"id": "mydata", "name": "Data", "route": "/mydata/", "icon": "data", "roles": ["basic"], "health": null, "status": "on", "nav": true, "desc": "Your images: the sets you can analyse, and what you ran on them"},
   {"id": "jobs", "name": "Jobs", "route": "/jobs/", "icon": "jobs", "roles": ["admin", "advanced"], "health": null, "status": "on", "nav": true, "desc": "Training and conversion jobs: running, queued, blocked and done"},
   {"id": "gallery", "name": "Gallery", "route": "/gallery/", "icon": "gallery", "roles": ["admin", "advanced"], "health": null, "status": "on", "nav": true, "desc": "Look through converted montages and tiles, mark keep or reject, make a report"},
   {"id": "predict", "name": "Predict", "route": "/predict/", "icon": "predict", "roles": ["admin", "advanced", "basic"], "health": null, "status": "on", "nav": true, "desc": "Run the EV model on images: upload, pick a session, or use converted tiles"},
