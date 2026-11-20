@@ -37,7 +37,8 @@ class Manifests(unittest.TestCase):
         for i in on:                                                         # anything on has a real route
             self.assertTrue(by[i]["route"] or by[i].get("external"), i)
         self.assertEqual([by[i]["name"] for i in ids if by[i].get("nav")],     # the nav, in order
-                         ["Home", "Data", "Jobs", "Gallery", "Predict", "Results", "Reviews", "Train", "Admin"])
+                         ["Home", "Data", "Data", "Jobs", "Gallery", "Predict", "Results", "Reviews", "Train", "Admin"])
+        self.assertEqual((by["mydata"]["roles"], by["mydata"]["route"]), (["basic"], "/mydata/"))   # round 17r: basic's Data
         self.assertFalse(by["history"]["nav"])                               # History: hidden "classic" page
         # round 13: one "Reviews" entry; Label review (/review/) and Sandbox are off the nav, but still on: their
         # Gate rules and old bookmarks keep working
@@ -48,8 +49,11 @@ class Manifests(unittest.TestCase):
         self.assertEqual((by["home"]["route"], by["history"]["route"], by["review"]["route"]), ("/", "/history/", "/review/"))
         for m in mods:
             self.assertTrue(set(m["roles"]) <= {"admin", "advanced", "basic"}, m["id"])
-            self.assertIn("admin", m["roles"], m["id"])
+            if m["id"] != "mydata":      # round 17r: basic's "Data" nav entry only; admin opens /mydata/ through the
+                self.assertIn("admin", m["roles"], m["id"])     # module's own ROLES (checked below), not the nav
             self.assertIn(m["status"], ("on", "coming"), m["id"])
+        from portal.modules import mydata as MYDATA
+        self.assertIn("admin", MYDATA.ROLES)
         self.assertEqual(by["review"]["roles"], ["admin"])                   # the real review stays admin only
         self.assertEqual(by["history"]["roles"], ["admin"])
         self.assertEqual(by["admin"]["roles"], ["admin"])
@@ -179,7 +183,7 @@ class Home(unittest.TestCase):
         keys = {r: A.add_key(self.env.roster, f"user-{r}", r) for r in ("advanced", "basic")}
         try:
             want = {"advanced": ["data", "jobs", "gallery", "predict", "results", "reviews", "train"],
-                    "basic": ["predict", "results", "reviews"]}
+                    "basic": ["mydata", "predict", "results", "reviews"]}
             for role, key in keys.items():
                 tok = T.login(self.p.port, key)
                 st, _, body = T.request(self.p.port, "GET", "/", T.cookie(tok))
