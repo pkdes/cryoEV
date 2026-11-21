@@ -74,12 +74,25 @@ class Scoreboard(unittest.TestCase):
         return rc, out.getvalue()
 
     def test_board_rules(self):
-        self.assertEqual(SB.board(self.pkg), {"rows": [{"name": "Fay", "swipes": 5}, {"name": "BilayerBabe", "swipes": 3}],
-                                              "others": 3})
-        self.assertEqual(SB.board(self.pkg, hide=["fay"]),
-                         {"rows": [{"name": "BilayerBabe", "swipes": 3}], "others": 4})
-        self.assertEqual(SB.board(self.pkg, exclude=["ann"]), {"rows": [{"name": "Fay", "swipes": 5}], "others": 3})
-        self.assertEqual(SB.board(self.pkg, top=1), {"rows": [{"name": "Fay", "swipes": 5}], "others": 4})
+        cat, bob = SB.anon_name(self.pkg.name, "cat"), SB.anon_name(self.pkg.name, "bob")   # r17s: unusable name -> Anonymous
+        self.assertRegex(cat, r"^Anonymous #[0-9a-f]{4}$")
+        self.assertNotEqual(cat, bob)
+        F, A, C, B = ({"name": "Fay", "swipes": 5}, {"name": "BilayerBabe", "swipes": 3}, {"name": cat, "swipes": 4},
+                      {"name": bob, "swipes": 2})
+        self.assertEqual(SB.board(self.pkg), {"rows": [F, C, A, B], "others": 1})            # eve: no consent yet
+        self.assertEqual(SB.board(self.pkg, hide=["fay"]), {"rows": [C, A, B], "others": 2})
+        self.assertEqual(SB.board(self.pkg, exclude=["ann"]), {"rows": [F, C, B], "others": 1})
+        self.assertEqual(SB.board(self.pkg, top=1), {"rows": [F], "others": 4})
+
+    def test_unnamed_guest_listed(self):
+        p = self.pkg / "edits"
+        for f in p.glob("*.json"):                                 # ann's name gone: listed as Anonymous, same swipes
+            j = json.loads(f.read_text(encoding="utf-8"))
+            j["edit"]["dec"].pop(next((k for k in j["edit"]["dec"] if k.endswith(":nick@ann")), None), None)
+            f.write_text(json.dumps(j), encoding="utf-8")
+        rows = SB.board(self.pkg)["rows"]
+        self.assertIn({"name": SB.anon_name(self.pkg.name, "ann"), "swipes": 3}, rows)
+        self.assertNotIn("ann", json.dumps(rows))
 
     def test_writes_only_scoreboard_and_only_on_change(self):
         djs = self.pkg / "data.js"
@@ -94,7 +107,8 @@ class Scoreboard(unittest.TestCase):
         a, b = O._split_datajs(before)[0], O._split_datajs(djs.read_bytes())[0]
         sb = b.pop("scoreboard")
         self.assertEqual(a, b)                                     # nothing else changed
-        self.assertEqual((sb["rows"], sb["others"]), ([{"name": "Fay", "swipes": 5}, {"name": "BilayerBabe", "swipes": 3}], 3))
+        self.assertEqual([r["name"] for r in sb["rows"]][::2], ["Fay", "BilayerBabe"])
+        self.assertEqual(sb["others"], 1)
         text = djs.read_text(encoding="utf-8")
         for secret in ("admin1", "ann-test", '"bob"', "cat@", "Dan", "Eve", "Gus", "TheOwner", "Tester"):
             self.assertNotIn(secret, text.split('"scoreboard"', 1)[1], secret)
@@ -104,7 +118,7 @@ class Scoreboard(unittest.TestCase):
         self.assertEqual(djs.read_bytes(), mid)
         rc, out = self.run_tool("--do", "--hide", "Fay")           # a change: written again
         self.assertIn("written", out)
-        self.assertEqual(O._split_datajs(djs.read_bytes())[0]["scoreboard"]["rows"], [{"name": "BilayerBabe", "swipes": 3}])
+        self.assertNotIn("Fay", [r["name"] for r in O._split_datajs(djs.read_bytes())[0]["scoreboard"]["rows"]])
 
     def test_clean_name(self):
         self.assertEqual(SB.clean_name("  A​‮b\x07  c "), "Ab c")

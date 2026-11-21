@@ -8,12 +8,14 @@ button. The page sees only its reviewer's own answers (the server filters the re
 Board = {t, rows: [{name, swipes}], others}:
   swipes   a reviewer's `match` answers with a value of the schema's options, on the set's items (practice cards are
            never saved; follow-ups like kind / why / outline_off never count; an undone answer has no value)
-  listed   consent = yes (and none says no, on any item: evh_score's rule) AND a dating name (`nick`, schema v4)
-  others   reviewers with >= 1 swipe, consent not "no", who are not listed (no name, or not answered consent yet)
+  listed   consent = yes (and none says no, on any item: evh_score's rule); with a dating name (`nick`, schema v4)
+           when there is a usable one, else as "Anonymous #xxxx" (r17s: 4 hex of a hash of set + id; stable, no id)
+  others   reviewers with >= 1 swipe, consent not "no", who are not listed (not answered consent yet, or hidden)
   never    the set's owner (D.owner), --exclude ids, any id ending "-test", and anyone whose consent says "no" (they
            were told their answers won't count): not listed, not counted
 Names: control and format characters (bidi, zero-width) removed, trimmed, at most 24 characters; a name holding "@"
-or equal to a reviewer id, or listed in --hide (case-insensitive), is not shown: that reviewer counts in `others`.
+or equal to a reviewer id is not shown (that reviewer is listed as Anonymous); a name listed in --hide
+(case-insensitive) is not shown and that reviewer counts in `others`.
 Ids and emails never go into data.js. Rows: most swipes first, then name.
 
 Writes (only with --do) the `scoreboard` key of <pkg>/data.js and nothing else (every other byte stays; under the
@@ -25,6 +27,7 @@ with --do it never prints names. Reads the answers with annotation/object_set.ta
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -48,6 +51,11 @@ def clean_name(v) -> str:
     return " ".join(s.split())[:NAME_MAX].strip()
 
 
+def anon_name(pkg_name: str, rid: str) -> str:
+    """r17s: the board name of a consenting reviewer without a usable dating name (no id in it)."""
+    return "Anonymous #" + hashlib.sha256(f"{pkg_name}|{rid}".encode("utf-8")).hexdigest()[:4]
+
+
 def board(pkg, exclude=(), hide=(), top=20) -> dict:
     """{rows, others} from the set's answers (no time stamp)."""
     pkg = Path(pkg)
@@ -68,12 +76,12 @@ def board(pkg, exclude=(), hide=(), top=20) -> dict:
             continue
         names = [clean_name(row.get(f"nick@{r}")) for row in tab["rows"] if row.get(f"nick@{r}")]
         name = names[0] if names else ""
-        ok = (cons == {"yes"} and name and "@" not in name and name.lower() not in lower_ids
-              and name.lower() not in hide)
-        if ok:
+        if cons != {"yes"} or (name and name.lower() in hide):
+            others += 1
+        elif name and "@" not in name and name.lower() not in lower_ids:
             rows.append({"name": name, "swipes": n})
         else:
-            others += 1
+            rows.append({"name": anon_name(pkg.name, r), "swipes": n})   # r17s: unnamed guests are listed too
     rows.sort(key=lambda x: (-x["swipes"], x["name"].lower()))
     return {"rows": rows[:top], "others": others + max(0, len(rows) - top)}
 

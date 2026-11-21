@@ -7,6 +7,11 @@ How to add an entry: put it at the top as `## YYYY-MM-DD HH:MM · Short title`, 
 **Components:** line (portal / review page / registry / CLI). When the review page changes, also bump `PAGE_VERSION`
 near the top of annotation/review_tool/index.html.
 
+## 2026-11-20 16:55 · Unnamed swipers on the eVHarmony scoreboard
+
+- **Scoreboard:** players who said yes to counting their answers but set no dating name are now listed as "Anonymous #xxxx" (a short code, the same each refresh, never their id or email). Players who haven't answered the consent question still count only in "others".
+- **Components:** CLI (tools/evh_scoreboard.py)
+
 ## 2026-11-20 14:30 · A Data page for basic accounts
 
 - **Data for basic accounts:** basic accounts now have a Data page (/mydata/) with the image sets they can analyse: the shared sessions and demo sets the admin lists for Predict, and their own converted uploads. Each set shows its image count, samples and nm/px, a strip of thumbnails, "See all images" and "Analyse these".
